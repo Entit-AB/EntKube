@@ -1,0 +1,406 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject NotificationService NotificationService
+@inject NotificationProviderConfigService ProviderConfigService
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h6 class="mb-0">Notification Channels</h6>
+    <button class="btn btn-sm btn-primary" @onclick="ShowAddModal">
+        <span class="bi bi-plus-lg"></span> Add Channel
+    </button>
+</div>
+
+@if (channels.Count == 0)
+{
+    <EmptyState Icon="bi-send"
+                Title="No notification channels"
+                Message="Add a channel to get alerted via Slack, Teams, email, or webhook." />
+}
+else
+{
+    <div class="row g-3">
+        @foreach (NotificationChannel channel in channels)
+        {
+            <div class="col-12 col-md-6">
+                <div class="card border-@(channel.IsEnabled ? "success" : "secondary")">
+                    <div class="card-body">
+                        <div class="d-flex align-items-center gap-2 mb-2">
+                            <span class="@TypeIcon(channel.Type) fs-5 text-@TypeColor(channel.Type)"></span>
+                            <strong>@channel.Name</strong>
+                            <span class="badge bg-secondary ms-1">@channel.Type</span>
+                            <div class="ms-auto form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" role="switch"
+                                       checked="@channel.IsEnabled"
+                                       @onchange="() => ToggleEnabled(channel)" />
+                            </div>
+                        </div>
+                        <div class="text-muted small mb-2">
+                            Severity: <span class="badge bg-light text-dark">@FormatSeverityFilter(channel.SeverityFilter)</span>
+                        </div>
+
+                        @if (deliveries.TryGetValue(channel.Id, out List<NotificationDelivery>? recent) && recent.Count > 0)
+                        {
+                            <div class="small mb-2">
+                                <span class="text-muted">Recent deliveries: </span>
+                                @foreach (NotificationDelivery d in recent.Take(5))
+                                {
+                                    <span class="badge me-1 @(d.Success ? "bg-success" : "bg-danger")"
+                                          title="@(d.IsFiring ? "Fired" : "Resolved") · @d.SentAt.ToLocalTime():g">
+                                        @(d.Success ? "✓" : "✗")
+                                    </span>
+                                }
+                            </div>
+                        }
+
+                        <div class="d-flex gap-2">
+                            <button class="btn btn-sm btn-outline-primary" @onclick="() => TestChannel(channel)"
+                                    disabled="@(testingId == channel.Id)">
+                                @if (testingId == channel.Id)
+                                {
+                                    <span class="spinner-border spinner-border-sm me-1"></span>
+                                }
+                                Test
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger ms-auto" @onclick="() => DeleteChannel(channel)">
+                                Delete
+                            </button>
+                        </div>
+                        @if (testResults.TryGetValue(channel.Id, out string? result))
+                        {
+                            <div class="alert @(result.StartsWith("✓") ? "alert-success" : "alert-danger") alert-sm mt-2 mb-0 py-1 px-2 small">
+                                @result
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@if (showModal)
+{
+    <div class="modal fade show d-block" style="background:rgba(0,0,0,.5)">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Add Notification Channel</h5>
+                    <button type="button" class="btn-close" @onclick="CloseModal"></button>
+                </div>
+                <div class="modal-body">
+                    @if (modalStep == 1)
+                    {
+                        <p class="text-muted mb-3">Select the channel type:</p>
+                        <div class="d-grid gap-2">
+                            @foreach (NotificationChannelType t in Enum.GetValues<NotificationChannelType>())
+                            {
+                                <button class="btn btn-outline-secondary text-start" @onclick="() => SelectType(t)">
+                                    <span class="@TypeIcon(t) me-2"></span> @t
+                                </button>
+                            }
+                        </div>
+                    }
+                    else if (modalStep == 2)
+                    {
+                        <div class="mb-3">
+                            <label class="form-label">Channel Name</label>
+                            <input class="form-control" @bind="newName" placeholder="e.g. Ops Slack" />
+                        </div>
+
+                        @if (newType == NotificationChannelType.Slack)
+                        {
+                            <div class="mb-3">
+                                <label class="form-label">Webhook URL</label>
+                                <input class="form-control" @bind="newWebhookUrl" placeholder="https://hooks.slack.com/services/…" />
+                            </div>
+                        }
+                        else if (newType == NotificationChannelType.Teams)
+                        {
+                            @if (teamsGraphConfigured)
+                            {
+                                <div class="alert alert-info py-2 small mb-3">
+                                    <i class="bi bi-microsoft-teams me-1"></i>
+                                    Teams Graph API is configured. Messages will be sent via Microsoft Graph.
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Team ID</label>
+                                    <input class="form-control font-monospace" @bind="newTeamId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+                                    <div class="form-text">Found in Teams → right-click team → Get link to team</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Channel ID</label>
+                                    <input class="form-control font-monospace" @bind="newChannelId" placeholder="19:xxxxxxxxxxxxxxxx@thread.tacv2" />
+                                    <div class="form-text">Found in Teams → right-click channel → Get link to channel</div>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="alert alert-warning py-2 small mb-3">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>
+                                    Teams Graph API is not configured. Using legacy incoming webhook.
+                                    <a href="/admin/notifications" target="_blank">Configure it here</a>.
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Webhook URL</label>
+                                    <input class="form-control" @bind="newWebhookUrl" placeholder="https://…webhook.office.com/…" />
+                                </div>
+                            }
+                        }
+                        else if (newType == NotificationChannelType.Email)
+                        {
+                            <div class="mb-3">
+                                <label class="form-label">Recipient Email</label>
+                                <input class="form-control" type="email" @bind="newEmail" placeholder="ops@example.com" />
+                            </div>
+                        }
+                        else if (newType == NotificationChannelType.Webhook)
+                        {
+                            <div class="mb-3">
+                                <label class="form-label">URL</label>
+                                <input class="form-control" @bind="newWebhookUrl" placeholder="https://…" />
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Bearer Token (optional)</label>
+                                <input class="form-control" type="password" @bind="newBearerToken" />
+                            </div>
+                        }
+
+                        <div class="mb-3">
+                            <label class="form-label">Alert Severity Filter</label>
+                            <select class="form-select" @bind="newSeverityFilter">
+                                <option value="@AlertSeverityFilter.All">All severities</option>
+                                <option value="@AlertSeverityFilter.WarningAndAbove">Warning and above</option>
+                                <option value="@AlertSeverityFilter.CriticalOnly">Critical only</option>
+                            </select>
+                        </div>
+
+                        @if (!string.IsNullOrEmpty(modalError))
+                        {
+                            <div class="alert alert-danger py-2 small">@modalError</div>
+                        }
+                    }
+                </div>
+                <div class="modal-footer">
+                    @if (modalStep == 2)
+                    {
+                        <button class="btn btn-secondary" @onclick="() => modalStep = 1">Back</button>
+                        <button class="btn btn-primary" @onclick="SaveChannel">Save Channel</button>
+                    }
+                    else
+                    {
+                        <button class="btn btn-secondary" @onclick="CloseModal">Cancel</button>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<NotificationChannel> channels = [];
+    private Dictionary<Guid, List<NotificationDelivery>> deliveries = new();
+    private bool showModal;
+    private int modalStep = 1;
+    private NotificationChannelType newType;
+    private string newName = "";
+    private string newWebhookUrl = "";
+    private string newEmail = "";
+    private string newBearerToken = "";
+    private string newTeamId = "";
+    private string newChannelId = "";
+    private AlertSeverityFilter newSeverityFilter = AlertSeverityFilter.All;
+    private string? modalError;
+    private Guid? testingId;
+    private Dictionary<Guid, string> testResults = new();
+    private bool teamsGraphConfigured;
+
+    protected override async Task OnInitializedAsync()
+    {
+        NotificationProviderConfig? graphConfig = await ProviderConfigService.GetAsync(NotificationProviderType.MsTeamsGraph);
+        teamsGraphConfigured = graphConfig?.IsEnabled == true;
+        await LoadChannels();
+    }
+
+    private async Task LoadChannels()
+    {
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        channels = await db.NotificationChannels
+            .Where(c => c.TenantId == TenantId)
+            .OrderBy(c => c.Name)
+            .ToListAsync();
+
+        var ids = channels.Select(c => c.Id).ToList();
+        List<NotificationDelivery> recent = await db.NotificationDeliveries
+            .Where(d => ids.Contains(d.ChannelId))
+            .OrderByDescending(d => d.SentAt)
+            .ToListAsync();
+
+        deliveries = recent
+            .GroupBy(d => d.ChannelId)
+            .ToDictionary(g => g.Key, g => g.Take(5).ToList());
+    }
+
+    private void ShowAddModal()
+    {
+        showModal = true;
+        modalStep = 1;
+        newName = "";
+        newWebhookUrl = "";
+        newEmail = "";
+        newBearerToken = "";
+        newTeamId = "";
+        newChannelId = "";
+        newSeverityFilter = AlertSeverityFilter.All;
+        modalError = null;
+    }
+
+    private void CloseModal() => showModal = false;
+
+    private void SelectType(NotificationChannelType type)
+    {
+        newType = type;
+        modalStep = 2;
+    }
+
+    private async Task SaveChannel()
+    {
+        modalError = null;
+        if (string.IsNullOrWhiteSpace(newName))
+        {
+            modalError = "Channel name is required.";
+            return;
+        }
+
+        string configJson;
+        try
+        {
+            configJson = BuildConfigJson();
+        }
+        catch (Exception ex)
+        {
+            modalError = ex.Message;
+            return;
+        }
+
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        db.NotificationChannels.Add(new NotificationChannel
+        {
+            TenantId = TenantId,
+            Name = newName.Trim(),
+            Type = newType,
+            ConfigurationJson = configJson,
+            SeverityFilter = newSeverityFilter
+        });
+        await db.SaveChangesAsync();
+        CloseModal();
+        await LoadChannels();
+    }
+
+    private string BuildConfigJson()
+    {
+        return newType switch
+        {
+            NotificationChannelType.Slack =>
+                !string.IsNullOrWhiteSpace(newWebhookUrl)
+                    ? System.Text.Json.JsonSerializer.Serialize(new { webhookUrl = newWebhookUrl.Trim() })
+                    : throw new InvalidOperationException("Webhook URL is required."),
+
+            NotificationChannelType.Teams when teamsGraphConfigured =>
+                !string.IsNullOrWhiteSpace(newTeamId) && !string.IsNullOrWhiteSpace(newChannelId)
+                    ? System.Text.Json.JsonSerializer.Serialize(new { teamId = newTeamId.Trim(), channelId = newChannelId.Trim() })
+                    : throw new InvalidOperationException("Team ID and Channel ID are required."),
+
+            NotificationChannelType.Teams =>
+                !string.IsNullOrWhiteSpace(newWebhookUrl)
+                    ? System.Text.Json.JsonSerializer.Serialize(new { webhookUrl = newWebhookUrl.Trim() })
+                    : throw new InvalidOperationException("Webhook URL is required."),
+
+            NotificationChannelType.Email =>
+                !string.IsNullOrWhiteSpace(newEmail)
+                    ? System.Text.Json.JsonSerializer.Serialize(new { to = newEmail.Trim() })
+                    : throw new InvalidOperationException("Email address is required."),
+
+            NotificationChannelType.Webhook =>
+                !string.IsNullOrWhiteSpace(newWebhookUrl)
+                    ? System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        url = newWebhookUrl.Trim(),
+                        token = string.IsNullOrWhiteSpace(newBearerToken) ? null : newBearerToken.Trim()
+                    })
+                    : throw new InvalidOperationException("URL is required."),
+
+            _ => "{}"
+        };
+    }
+
+    private async Task ToggleEnabled(NotificationChannel channel)
+    {
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        NotificationChannel? ch = await db.NotificationChannels.FindAsync(channel.Id);
+        if (ch is null) return;
+        ch.IsEnabled = !ch.IsEnabled;
+        await db.SaveChangesAsync();
+        channel.IsEnabled = ch.IsEnabled;
+    }
+
+    private async Task DeleteChannel(NotificationChannel channel)
+    {
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        NotificationChannel? ch = await db.NotificationChannels.FindAsync(channel.Id);
+        if (ch is not null) db.NotificationChannels.Remove(ch);
+        await db.SaveChangesAsync();
+        await LoadChannels();
+    }
+
+    private async Task TestChannel(NotificationChannel channel)
+    {
+        testingId = channel.Id;
+        testResults.Remove(channel.Id);
+        StateHasChanged();
+
+        try
+        {
+            await NotificationService.SendTestAsync(channel);
+            testResults[channel.Id] = "✓ Test notification sent successfully";
+        }
+        catch (Exception ex)
+        {
+            testResults[channel.Id] = $"✗ {ex.Message}";
+        }
+        finally
+        {
+            testingId = null;
+            StateHasChanged();
+        }
+    }
+
+    private static string TypeIcon(NotificationChannelType type) => type switch
+    {
+        NotificationChannelType.Slack   => "bi bi-slack",
+        NotificationChannelType.Teams   => "bi bi-microsoft-teams",
+        NotificationChannelType.Email   => "bi bi-envelope-fill",
+        NotificationChannelType.Webhook => "bi bi-link-45deg",
+        _ => "bi bi-bell"
+    };
+
+    private static string TypeColor(NotificationChannelType type) => type switch
+    {
+        NotificationChannelType.Slack   => "success",
+        NotificationChannelType.Teams   => "primary",
+        NotificationChannelType.Email   => "warning",
+        NotificationChannelType.Webhook => "secondary",
+        _ => "secondary"
+    };
+
+    private static string FormatSeverityFilter(AlertSeverityFilter filter) => filter switch
+    {
+        AlertSeverityFilter.All             => "All",
+        AlertSeverityFilter.WarningAndAbove => "Warning+",
+        AlertSeverityFilter.CriticalOnly    => "Critical",
+        _ => filter.ToString()
+    };
+}

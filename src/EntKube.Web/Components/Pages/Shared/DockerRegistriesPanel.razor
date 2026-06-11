@@ -1,0 +1,615 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject DockerRegistryService DockerRegistryService
+@inject TenantService TenantService
+@inject VaultService VaultService
+
+@* ═══════════════════════════════════════════════════════════════════
+   Docker / OCI Registry Credentials panel.
+
+   Reused in both the tenant admin Vault tab and the customer portal
+   Secrets detail view. Pass AppId to scope credentials to one app;
+   leave it as Guid.Empty for a tenant-wide view.
+
+   Access rules (controlled by IsAdmin parameter):
+     Any user  — list credentials, reveal password on demand
+     Admin     — add / edit / delete credentials, configure K8s sync, trigger sync
+   ═══════════════════════════════════════════════════════════════════ *@
+
+@if (!vaultInitialized)
+{
+    <div class="alert alert-warning py-2 small mb-0">
+        <i class="bi bi-shield-exclamation me-1"></i>
+        No vault has been set up for this tenant — initialize it first before storing credentials.
+    </div>
+}
+else
+{
+    @* ── Add credential form (Admin only, collapsible) ── *@
+    @if (IsAdmin)
+    {
+        <div class="card shadow-sm mb-3">
+            <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between"
+                 role="button" @onclick="() => showAddForm = !showAddForm" style="cursor: pointer;">
+                <div>
+                    <i class="bi bi-plus-circle me-1 text-primary"></i>
+                    <strong>Add Registry Credential</strong>
+                </div>
+                <i class="bi @(showAddForm ? "bi-chevron-up" : "bi-chevron-down") text-muted"></i>
+            </div>
+            @if (showAddForm)
+            {
+                <div class="card-body">
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-4">
+                            <label class="form-label small">Display Name</label>
+                            <input class="form-control form-control-sm" placeholder="e.g. Production ACR"
+                                   @bind="addName" @bind:event="oninput" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Registry Type</label>
+                            <select class="form-select form-select-sm" @bind="addType" @bind:after="OnAddTypeChanged">
+                                @foreach (DockerRegistryType t in Enum.GetValues<DockerRegistryType>())
+                                {
+                                    <option value="@t">@DockerRegistryService.TypeLabel(t)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">
+                                Registry Server
+                                @if (!string.IsNullOrEmpty(DockerRegistryService.DefaultServer(addType)))
+                                {
+                                    <span class="text-muted ms-1">(auto-filled)</span>
+                                }
+                            </label>
+                            <input class="form-control form-control-sm"
+                                   placeholder="@DockerRegistryService.ServerPlaceholder(addType)"
+                                   @bind="addServer" @bind:event="oninput"
+                                   readonly="@(!string.IsNullOrEmpty(DockerRegistryService.DefaultServer(addType)))" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Username</label>
+                            <input class="form-control form-control-sm"
+                                   placeholder="@(addType == DockerRegistryType.AzureContainerRegistry ? "Service principal ID" : "username")"
+                                   @bind="addUsername" @bind:event="oninput" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">
+                                Password / Token
+                                @if (addType == DockerRegistryType.AzureContainerRegistry)
+                                {
+                                    <span class="text-muted ms-1">or service principal secret</span>
+                                }
+                            </label>
+                            <input type="password" class="form-control form-control-sm"
+                                   @bind="addPassword" @bind:event="oninput" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Email <span class="text-muted">(optional)</span></label>
+                            <input class="form-control form-control-sm" placeholder="user@example.com"
+                                   @bind="addEmail" @bind:event="oninput" />
+                        </div>
+                    </div>
+
+                    @if (addError is not null)
+                    {
+                        <div class="alert alert-danger py-1 small mb-2">
+                            <i class="bi bi-exclamation-triangle me-1"></i>@addError
+                        </div>
+                    }
+                    @if (addSuccess is not null)
+                    {
+                        <div class="alert alert-success py-1 small mb-2">
+                            <i class="bi bi-check-circle me-1"></i>@addSuccess
+                        </div>
+                    }
+
+                    <div class="d-flex gap-1">
+                        <button class="btn btn-sm btn-primary" @onclick="AddCredential"
+                                disabled="@(string.IsNullOrWhiteSpace(addName)
+                                           || string.IsNullOrWhiteSpace(addServer)
+                                           || string.IsNullOrWhiteSpace(addUsername)
+                                           || string.IsNullOrWhiteSpace(addPassword)
+                                           || saving)">
+                            @if (saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            <i class="bi bi-plus-lg me-1"></i>Add Credential
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="ResetAddForm">Cancel</button>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+
+    @* ── Credentials table ── *@
+    <div class="card shadow-sm">
+        <div class="card-header bg-white py-2 d-flex align-items-center">
+            <i class="bi bi-box-seam me-2 text-primary"></i>
+            <strong>Registry Credentials</strong>
+            @if (credentials is not null)
+            {
+                <span class="badge bg-secondary ms-1">@credentials.Count</span>
+            }
+        </div>
+        <div class="card-body p-0">
+            @if (credentials is null)
+            {
+                <div class="text-center py-4">
+                    <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                </div>
+            }
+            else if (credentials.Count == 0)
+            {
+                <div class="text-center py-5">
+                    <i class="bi bi-box-seam text-muted" style="font-size: 2rem;"></i>
+                    <p class="text-muted small mt-2 mb-0">No registry credentials stored yet.</p>
+                    @if (IsAdmin)
+                    {
+                        <p class="text-muted small mb-0">Use the form above to add one.</p>
+                    }
+                </div>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Server</th>
+                                <th>Username</th>
+                                <th>K8s Sync</th>
+                                <th>Updated</th>
+                                <th class="text-end" style="min-width: 130px;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (DockerRegistryCredential cred in credentials)
+                            {
+                                <tr>
+                                    <td class="fw-medium small">@cred.Name</td>
+                                    <td>
+                                        <span class="badge @TypeBadgeClass(cred.RegistryType)">
+                                            @DockerRegistryService.TypeLabel(cred.RegistryType)
+                                        </span>
+                                    </td>
+                                    <td><small class="text-muted font-monospace">@cred.Server</small></td>
+                                    <td><code class="small">@cred.Username</code></td>
+                                    <td>
+                                        @if (!string.IsNullOrEmpty(cred.KubernetesSecretName))
+                                        {
+                                            <span class="badge bg-success"><i class="bi bi-cloud-check me-1"></i>Configured</span>
+                                            <br />
+                                            <small class="text-muted">@cred.KubernetesCluster?.Name · @cred.KubernetesNamespace · @cred.KubernetesSecretName</small>
+                                        }
+                                        else
+                                        {
+                                            <span class="badge bg-secondary">Not configured</span>
+                                        }
+                                    </td>
+                                    <td><small class="text-muted">@cred.UpdatedAt.ToString("MMM d, HH:mm")</small></td>
+                                    <td class="text-end">
+                                        @* Reveal password — all roles *@
+                                        <button class="btn btn-sm btn-outline-secondary me-1"
+                                                title="@(revealedId == cred.Id ? "Hide password" : "Reveal password")"
+                                                @onclick="() => RevealPassword(cred)">
+                                            <i class="bi @(revealedId == cred.Id ? "bi-eye-slash" : "bi-eye")"></i>
+                                        </button>
+
+                                        @if (IsAdmin)
+                                        {
+                                            @* Edit *@
+                                            <button class="btn btn-sm btn-outline-warning me-1" title="Edit credentials"
+                                                    @onclick="() => StartEdit(cred)">
+                                                <i class="bi bi-pencil"></i>
+                                            </button>
+                                            @* Configure K8s sync *@
+                                            <button class="btn btn-sm btn-outline-info me-1" title="Configure K8s sync"
+                                                    @onclick="() => StartSyncConfig(cred)">
+                                                <i class="bi bi-cloud-arrow-up"></i>
+                                            </button>
+                                            @* Sync to K8s (only if configured) *@
+                                            @if (!string.IsNullOrEmpty(cred.KubernetesSecretName))
+                                            {
+                                                <button class="btn btn-sm btn-outline-success me-1"
+                                                        title="Apply to Kubernetes cluster"
+                                                        disabled="@(syncingId == cred.Id)"
+                                                        @onclick="() => SyncToKubernetes(cred)">
+                                                    @if (syncingId == cred.Id)
+                                                    {
+                                                        <span class="spinner-border spinner-border-sm"></span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <i class="bi bi-play-fill"></i>
+                                                    }
+                                                </button>
+                                            }
+                                            @* Delete *@
+                                            @if (confirmDeleteId == cred.Id)
+                                            {
+                                                <button class="btn btn-sm btn-danger me-1" @onclick="() => DeleteCredential(cred.Id)">
+                                                    Confirm
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDeleteId = null">
+                                                    Cancel
+                                                </button>
+                                            }
+                                            else
+                                            {
+                                                <button class="btn btn-sm btn-outline-danger" title="Delete"
+                                                        @onclick="() => confirmDeleteId = cred.Id">
+                                                    <i class="bi bi-trash"></i>
+                                                </button>
+                                            }
+                                        }
+                                    </td>
+                                </tr>
+
+                                @* ── Reveal password row ── *@
+                                @if (revealedId == cred.Id)
+                                {
+                                    <tr class="table-light">
+                                        <td colspan="7">
+                                            <div class="d-flex align-items-center px-2 py-1 gap-2">
+                                                <span class="text-muted small">Password:</span>
+                                                @if (revealLoading)
+                                                {
+                                                    <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                                                }
+                                                else
+                                                {
+                                                    <code class="user-select-all">@revealedPassword</code>
+                                                }
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+
+                                @* ── Edit row ── *@
+                                @if (editId == cred.Id)
+                                {
+                                    <tr class="table-light">
+                                        <td colspan="7">
+                                            <div class="row g-2 p-2 align-items-end">
+                                                <div class="col-md-4">
+                                                    <label class="form-label small mb-1">Username</label>
+                                                    <input class="form-control form-control-sm" @bind="editUsername" />
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <label class="form-label small mb-1">New password / token</label>
+                                                    <input type="password" class="form-control form-control-sm"
+                                                           placeholder="Leave blank to keep existing"
+                                                           @bind="editPassword" />
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <label class="form-label small mb-1">Email (optional)</label>
+                                                    <input class="form-control form-control-sm" @bind="editEmail" />
+                                                </div>
+                                                <div class="col-12 d-flex gap-1">
+                                                    <button class="btn btn-sm btn-success" @onclick="SaveEdit" disabled="@saving">
+                                                        @if (saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                        <i class="bi bi-check-lg me-1"></i>Update
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="CancelEdit">Cancel</button>
+                                                </div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+
+                                @* ── K8s sync config row ── *@
+                                @if (syncConfigId == cred.Id)
+                                {
+                                    <tr class="table-light">
+                                        <td colspan="7">
+                                            <div class="row g-2 p-2 align-items-end">
+                                                <div class="col-md-3">
+                                                    <label class="form-label small mb-1">Cluster</label>
+                                                    @if (clusters is null)
+                                                    {
+                                                        <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                                                    }
+                                                    else
+                                                    {
+                                                        <select class="form-select form-select-sm" @bind="syncClusterId">
+                                                            <option value="@Guid.Empty">Select cluster…</option>
+                                                            @foreach (KubernetesCluster cluster in clusters)
+                                                            {
+                                                                <option value="@cluster.Id">@cluster.Name</option>
+                                                            }
+                                                        </select>
+                                                    }
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <label class="form-label small mb-1">Namespace</label>
+                                                    <input class="form-control form-control-sm"
+                                                           placeholder="e.g. my-app" @bind="syncNamespace" />
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <label class="form-label small mb-1">K8s Secret name</label>
+                                                    <input class="form-control form-control-sm"
+                                                           placeholder="e.g. registry-creds" @bind="syncSecretName" />
+                                                </div>
+                                                <div class="col-md-3 d-flex gap-1 align-items-end">
+                                                    <button class="btn btn-sm btn-success" @onclick="() => SaveSyncConfig(cred.Id)"
+                                                            disabled="@(syncClusterId == Guid.Empty || string.IsNullOrWhiteSpace(syncNamespace) || string.IsNullOrWhiteSpace(syncSecretName))">
+                                                        <i class="bi bi-check-lg me-1"></i>Save
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="CancelSyncConfig">
+                                                        Cancel
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+
+                                @* ── Sync output row ── *@
+                                @if (syncOutput.TryGetValue(cred.Id, out (bool ok, string msg) syncResult))
+                                {
+                                    <tr class="table-light">
+                                        <td colspan="7">
+                                            <div class="d-flex align-items-center justify-content-between px-2 pt-1 mb-1">
+                                                <span class="small fw-medium @(syncResult.ok ? "text-success" : "text-danger")">
+                                                    <i class="bi @(syncResult.ok ? "bi-check-circle" : "bi-x-circle") me-1"></i>
+                                                    @(syncResult.ok ? "Synced to cluster successfully" : "Sync failed")
+                                                </span>
+                                                <button class="btn btn-sm btn-link text-muted py-0"
+                                                        @onclick="() => syncOutput.Remove(cred.Id)">
+                                                    <i class="bi bi-x"></i>
+                                                </button>
+                                            </div>
+                                            <pre class="bg-dark text-light p-2 rounded small mb-2 mx-2"
+                                                 style="max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;">@syncResult.msg</pre>
+                                        </td>
+                                    </tr>
+                                }
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public Guid AppId { get; set; }   // Guid.Empty = tenant-wide
+    [Parameter] public bool IsAdmin { get; set; }
+
+    private bool vaultInitialized;
+    private List<DockerRegistryCredential>? credentials;
+    private List<KubernetesCluster>? clusters;
+
+    // Add form
+    private bool showAddForm;
+    private string addName = "";
+    private DockerRegistryType addType = DockerRegistryType.Generic;
+    private string addServer = "";
+    private string addUsername = "";
+    private string addPassword = "";
+    private string addEmail = "";
+    private bool saving;
+    private string? addError;
+    private string? addSuccess;
+
+    // Reveal
+    private Guid? revealedId;
+    private string? revealedPassword;
+    private bool revealLoading;
+
+    // Edit
+    private Guid? editId;
+    private string editUsername = "";
+    private string editPassword = "";
+    private string editEmail = "";
+
+    // K8s sync config
+    private Guid? syncConfigId;
+    private Guid syncClusterId;
+    private string syncNamespace = "";
+    private string syncSecretName = "";
+
+    // Active sync operation
+    private Guid? syncingId;
+    private Dictionary<Guid, (bool Ok, string Msg)> syncOutput = new();
+
+    // Delete confirm
+    private Guid? confirmDeleteId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await CheckVaultAndLoad();
+    }
+
+    private async Task CheckVaultAndLoad()
+    {
+        SecretVault? vault = await VaultService.GetVaultAsync(TenantId);
+        vaultInitialized = vault is not null;
+
+        if (vaultInitialized)
+        {
+            await LoadCredentials();
+        }
+    }
+
+    private async Task LoadCredentials()
+    {
+        credentials = await DockerRegistryService.GetAsync(
+            TenantId,
+            AppId == Guid.Empty ? null : AppId);
+    }
+
+    // ──────── Add ────────
+
+    private void OnAddTypeChanged()
+    {
+        string def = DockerRegistryService.DefaultServer(addType);
+        addServer = def; // auto-fill or clear
+    }
+
+    private void ResetAddForm()
+    {
+        showAddForm = false;
+        addName = addServer = addUsername = addPassword = addEmail = "";
+        addType = DockerRegistryType.Generic;
+        addError = addSuccess = null;
+    }
+
+    private async Task AddCredential()
+    {
+        addError = null;
+        addSuccess = null;
+        saving = true;
+
+        try
+        {
+            await DockerRegistryService.CreateAsync(
+                TenantId,
+                AppId == Guid.Empty ? null : AppId,
+                addName.Trim(),
+                addType,
+                addServer.Trim(),
+                addUsername.Trim(),
+                addPassword,
+                string.IsNullOrWhiteSpace(addEmail) ? null : addEmail.Trim());
+
+            addSuccess = $"Credential '{addName.Trim()}' added.";
+            addName = addUsername = addPassword = addEmail = "";
+            // Keep form open so user can add another, but clear fields.
+            await LoadCredentials();
+        }
+        catch (Exception ex)
+        {
+            addError = ex.Message;
+        }
+        finally { saving = false; }
+    }
+
+    // ──────── Reveal ────────
+
+    private async Task RevealPassword(DockerRegistryCredential cred)
+    {
+        if (revealedId == cred.Id)
+        {
+            revealedId = null;
+            revealedPassword = null;
+            return;
+        }
+
+        revealLoading = true;
+        revealedId = cred.Id;
+        revealedPassword = null;
+        revealedPassword = await DockerRegistryService.GetPasswordAsync(cred.Id);
+        revealLoading = false;
+    }
+
+    // ──────── Edit ────────
+
+    private void StartEdit(DockerRegistryCredential cred)
+    {
+        editId = cred.Id;
+        editUsername = cred.Username;
+        editPassword = "";
+        editEmail = cred.Email ?? "";
+        revealedId = null;
+        syncConfigId = null;
+    }
+
+    private void CancelEdit()
+    {
+        editId = null;
+        editUsername = editPassword = editEmail = "";
+    }
+
+    private async Task SaveEdit()
+    {
+        if (editId is null) return;
+        saving = true;
+        try
+        {
+            await DockerRegistryService.UpdateAsync(
+                editId.Value,
+                string.IsNullOrWhiteSpace(editUsername) ? null : editUsername.Trim(),
+                string.IsNullOrWhiteSpace(editPassword) ? null : editPassword,
+                editEmail);
+        }
+        finally { saving = false; }
+
+        editId = null;
+        await LoadCredentials();
+    }
+
+    // ──────── K8s Sync Config ────────
+
+    private async Task StartSyncConfig(DockerRegistryCredential cred)
+    {
+        syncConfigId = cred.Id;
+        syncClusterId = cred.KubernetesClusterId ?? Guid.Empty;
+        syncNamespace = cred.KubernetesNamespace ?? "";
+        syncSecretName = cred.KubernetesSecretName ?? "";
+        editId = null;
+
+        // Load clusters lazily.
+        if (clusters is null)
+        {
+            clusters = await TenantService.GetClustersAsync(TenantId);
+        }
+    }
+
+    private void CancelSyncConfig()
+    {
+        syncConfigId = null;
+    }
+
+    private async Task SaveSyncConfig(Guid credId)
+    {
+        await DockerRegistryService.ConfigureSyncAsync(credId, syncClusterId, syncSecretName, syncNamespace);
+        syncConfigId = null;
+        await LoadCredentials();
+    }
+
+    // ──────── Sync to K8s ────────
+
+    private async Task SyncToKubernetes(DockerRegistryCredential cred)
+    {
+        syncingId = cred.Id;
+        syncOutput.Remove(cred.Id);
+
+        KubernetesOperationResult<string> result = await DockerRegistryService.SyncToKubernetesAsync(cred.Id);
+
+        syncOutput[cred.Id] = (result.IsSuccess, result.IsSuccess ? result.Data ?? "" : result.Error ?? "Unknown error");
+        syncingId = null;
+
+        await LoadCredentials();
+    }
+
+    // ──────── Delete ────────
+
+    private async Task DeleteCredential(Guid credId)
+    {
+        await DockerRegistryService.DeleteAsync(credId);
+        confirmDeleteId = null;
+        revealedId = null;
+        editId = null;
+        syncConfigId = null;
+        syncOutput.Remove(credId);
+        await LoadCredentials();
+    }
+
+    // ──────── Rendering helpers ────────
+
+    private static string TypeBadgeClass(DockerRegistryType type) => type switch
+    {
+        DockerRegistryType.DockerHub => "bg-info text-dark",
+        DockerRegistryType.AzureContainerRegistry => "bg-primary",
+        DockerRegistryType.Harbor => "bg-success",
+        DockerRegistryType.Quay => "bg-danger",
+        DockerRegistryType.GitHubContainerRegistry => "bg-dark",
+        _ => "bg-secondary"
+    };
+}

@@ -1,0 +1,327 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@implements IDisposable
+@inject DeploymentService DeploymentService
+@inject KubernetesOperationsService K8sOps
+
+@* ═══════════════════════════════════════════════════════════════════
+   AppResourcesPanel — two-level ArgoCD-style navigation.
+
+   Level 1 (grid):  All deployments as Application cards showing
+                    name, type, environment, health and sync status.
+                    Clicking a card drills into level 2.
+
+   Level 2 (graph): Single deployment — full ResourceTreePanel graph
+                    with a back button to return to the grid.
+
+   This matches ArgoCD's App List → App Detail flow.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<style>
+    .app-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+        gap: 12px;
+    }
+
+    .app-app-card {
+        border: 1px solid #dee2e6;
+        border-top: 3px solid var(--hc, #adb5bd);
+        border-radius: 8px;
+        background: white;
+        box-shadow: 0 1px 4px rgba(0,0,0,.07);
+        padding: 12px 14px 10px;
+        cursor: pointer;
+        user-select: none;
+        transition: box-shadow .14s, transform .1s;
+    }
+    .app-app-card:hover {
+        box-shadow: 0 4px 14px rgba(0,0,0,.13);
+        transform: translateY(-1px);
+    }
+
+    .app-card-name {
+        font-weight: 700;
+        font-size: .9rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-bottom: 3px;
+    }
+    .app-card-meta {
+        font-size: .71rem;
+        color: #6c757d;
+        margin-bottom: 7px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .app-card-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .app-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        font-size: .67rem;
+        font-weight: 600;
+        padding: 2px 7px;
+        border-radius: 20px;
+        border: 1px solid;
+        white-space: nowrap;
+    }
+</style>
+
+@if (selectedDeployment is null)
+{
+    @* ── Level 1: deployment card grid ── *@
+    <LoadingPanel Loading="@(deployments is null)" LoadingText="Loading deployments…">
+    @if (deployments is not null && deployments.Count == 0)
+    {
+        <EmptyState Icon="bi-rocket-takeoff" Message="No deployments yet." />
+    }
+    else if (deployments is not null)
+    {
+        <div class="app-grid">
+            @foreach (AppDeployment d in deployments)
+            {
+                string hc = HealthColor(d.HealthStatus);
+                string hlabel = HealthLabel(d.HealthStatus);
+                var (scol, sico, slabel) = SyncInfo(d.SyncStatus);
+
+                <div class="app-app-card" style="--hc:@hc;" @onclick="() => SelectDeployment(d)">
+                    <div class="d-flex align-items-start gap-1 mb-1">
+                        <div class="app-card-name" title="@d.Name">
+                            <i class="bi @TypeIcon(d.Type) text-primary me-1" style="font-size:.78rem;"></i>@d.Name
+                        </div>
+                        <i class="bi bi-chevron-right text-muted ms-auto flex-shrink-0 mt-1 small"></i>
+                    </div>
+                    <div class="app-card-meta">
+                        @TypeLabel(d.Type) · @d.Environment?.Name · <code style="font-size:.67rem;">@d.Namespace</code>
+                    </div>
+                    <div class="app-card-badges">
+                        <span class="app-badge" style="color:@hc;border-color:@hc;">● @hlabel</span>
+                        <span class="app-badge" style="color:@scol;border-color:@scol;">
+                            <i class="bi @sico"></i> @slabel
+                        </span>
+                        @if (d.GitLastSyncedCommit is not null)
+                        {
+                            <span class="badge bg-secondary" style="font-size:.62rem;">
+                                @d.GitLastSyncedCommit[..7]
+                            </span>
+                        }
+                    </div>
+                    @if (d.Cluster is not null)
+                    {
+                        <div class="mt-1" style="font-size:.69rem;color:#6c757d;">
+                            <i class="bi bi-hdd-network me-1"></i>@d.Cluster.Name
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    }
+    </LoadingPanel>
+}
+else
+{
+    @* ── Level 2: single deployment resource graph ── *@
+    <nav class="mb-3">
+        <button class="btn btn-sm btn-link text-decoration-none p-0 text-secondary"
+                @onclick="BackToGrid">
+            <i class="bi bi-arrow-left me-1"></i>All deployments
+        </button>
+    </nav>
+
+    <div class="d-flex align-items-center gap-3 mb-3 pb-2 border-bottom">
+        <div>
+            <span class="fw-semibold">@selectedDeployment.Name</span>
+            <span class="text-muted small ms-2">
+                @TypeLabel(selectedDeployment.Type) · @selectedDeployment.Environment?.Name · <code style="font-size:.75rem;">@selectedDeployment.Namespace</code>
+            </span>
+        </div>
+        @{
+            string shc = HealthColor(selectedDeployment.HealthStatus);
+            string shlabel = HealthLabel(selectedDeployment.HealthStatus);
+            var (sscol, ssico, sslabel) = SyncInfo(selectedDeployment.SyncStatus);
+        }
+        <span class="app-badge" style="color:@shc;border-color:@shc;">● @shlabel</span>
+        <span class="app-badge" style="color:@sscol;border-color:@sscol;">
+            <i class="bi @ssico"></i> @sslabel
+        </span>
+        @if (selectedDeployment.Cluster is not null)
+        {
+            <span class="text-muted small ms-auto">
+                <i class="bi bi-hdd-network me-1"></i>@selectedDeployment.Cluster.Name
+            </span>
+        }
+    </div>
+
+    <ResourceTreePanel Loading="@treeLoading"
+                       Error="@treeError"
+                       Resources="@tree"
+                       Namespace="@selectedDeployment.Namespace"
+                       DeploymentId="@selectedDeployment.Id"
+                       AccessRole="@null"
+                       OnRefresh="RefreshSelected"
+                       LastRefreshed="@_lastRefreshed" />
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid AppId { get; set; }
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
+    private List<AppDeployment>? deployments;
+
+    // Level 2 state
+    private AppDeployment? selectedDeployment;
+    private bool treeLoading;
+    private string? treeError;
+    private List<DeploymentResource>? tree;
+    private DateTime? _lastRefreshed;
+
+    // Auto-refresh
+    private PeriodicTimer? _refreshTimer;
+    private CancellationTokenSource? _timerCts;
+    private const int AutoRefreshSeconds = 15;
+
+    protected override async Task OnInitializedAsync()
+    {
+        List<AppDeployment> all = await DeploymentService.GetDeploymentsAsync(AppId);
+        deployments = EnvironmentId.HasValue
+            ? all.Where(d => d.EnvironmentId == EnvironmentId.Value).ToList()
+            : all;
+    }
+
+    private async Task SelectDeployment(AppDeployment d)
+    {
+        selectedDeployment = d;
+        await LoadTreeForSelected();
+        StartAutoRefresh();
+    }
+
+    private async Task RefreshSelected()
+    {
+        await LoadTreeForSelected();
+    }
+
+    private async Task LoadTreeForSelected()
+    {
+        if (selectedDeployment is null) return;
+
+        treeLoading = true;
+        treeError = null;
+        tree = null;
+        StateHasChanged();
+
+        KubernetesOperationResult<List<DeploymentResource>> result =
+            await K8sOps.GetLiveResourcesAsync(selectedDeployment.Id);
+
+        treeLoading = false;
+        _lastRefreshed = DateTime.UtcNow;
+
+        if (result.IsSuccess && result.Data is not null)
+        {
+            tree = result.Data;
+            (SyncStatus sync, HealthStatus health) =
+                KubernetesOperationsService.ComputeStatusFromResources(result.Data);
+            selectedDeployment.SyncStatus = sync;
+            selectedDeployment.HealthStatus = health;
+        }
+        else
+        {
+            treeError = result.Error ?? "Failed to fetch resources.";
+        }
+    }
+
+    private void StartAutoRefresh()
+    {
+        StopAutoRefresh();
+        _timerCts = new CancellationTokenSource();
+        _ = RunAutoRefreshAsync(_timerCts.Token);
+    }
+
+    private async Task RunAutoRefreshAsync(CancellationToken ct)
+    {
+        _refreshTimer = new PeriodicTimer(TimeSpan.FromSeconds(AutoRefreshSeconds));
+        try
+        {
+            while (await _refreshTimer.WaitForNextTickAsync(ct))
+            {
+                await InvokeAsync(async () =>
+                {
+                    await LoadTreeForSelected();
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private void StopAutoRefresh()
+    {
+        _timerCts?.Cancel();
+        _timerCts?.Dispose();
+        _timerCts = null;
+        _refreshTimer?.Dispose();
+        _refreshTimer = null;
+    }
+
+    private void BackToGrid()
+    {
+        StopAutoRefresh();
+        selectedDeployment = null;
+        tree = null;
+        treeError = null;
+        _lastRefreshed = null;
+    }
+
+    public void Dispose() => StopAutoRefresh();
+
+    // ── Visual helpers ────────────────────────────────────────────────────────
+
+    private static string HealthColor(HealthStatus h) => h switch
+    {
+        HealthStatus.Healthy     => "#198754",
+        HealthStatus.Progressing => "#0d6efd",
+        HealthStatus.Degraded    => "#fd7e14",
+        HealthStatus.Missing     => "#dc3545",
+        HealthStatus.Suspended   => "#6c757d",
+        _                        => "#adb5bd",
+    };
+
+    private static string HealthLabel(HealthStatus h) => h switch
+    {
+        HealthStatus.Healthy     => "Healthy",
+        HealthStatus.Progressing => "Progressing",
+        HealthStatus.Degraded    => "Degraded",
+        HealthStatus.Missing     => "Missing",
+        HealthStatus.Suspended   => "Suspended",
+        _                        => "Unknown",
+    };
+
+    private static (string color, string icon, string label) SyncInfo(SyncStatus s) => s switch
+    {
+        SyncStatus.Synced    => ("#198754", "bi-check-circle",     "Synced"),
+        SyncStatus.OutOfSync => ("#fd7e14", "bi-arrow-left-right", "OutOfSync"),
+        SyncStatus.Syncing   => ("#0d6efd", "bi-arrow-repeat",     "Syncing"),
+        SyncStatus.Failed    => ("#dc3545", "bi-x-circle",         "Failed"),
+        _                    => ("#adb5bd", "bi-question-circle",   "Unknown"),
+    };
+
+    private static string TypeIcon(DeploymentType t) => t switch
+    {
+        DeploymentType.HelmChart => "bi-box-seam",
+        DeploymentType.GitYaml or DeploymentType.GitHelm or DeploymentType.GitAppOfApps => "bi-git",
+        _ => "bi-rocket-takeoff",
+    };
+
+    private static string TypeLabel(DeploymentType t) => t switch
+    {
+        DeploymentType.Manual       => "Manual",
+        DeploymentType.Yaml         => "YAML",
+        DeploymentType.HelmChart    => "Helm",
+        DeploymentType.GitYaml      => "Git/YAML",
+        DeploymentType.GitHelm      => "Git/Helm",
+        DeploymentType.GitAppOfApps => "App of Apps",
+        _                           => t.ToString(),
+    };
+}

@@ -1,0 +1,544 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject KeycloakService KeycloakService
+
+@* Realm management for customer portal — same as IdentityTab realm detail
+   but without the ability to create realms or manage themes. *@
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+    <div class="d-flex align-items-center gap-2">
+        <i class="bi bi-shield-lock fs-4 text-primary"></i>
+        <div>
+            <h5 class="mb-0">@Realm.DisplayName</h5>
+            <small class="text-muted font-monospace">@Realm.RealmName</small>
+        </div>
+    </div>
+</div>
+
+<ul class="nav nav-tabs mb-3 flex-wrap">
+    @foreach (string tab in new[] { "users", "idp", "groups", "orgs" })
+    {
+        string label = tab switch
+        {
+            "users" => "Users",
+            "idp" => "Identity Providers",
+            "groups" => "Groups",
+            "orgs" => "Organizations",
+            _ => tab
+        };
+        <li class="nav-item">
+            <button class="nav-link @(activeTab == tab ? "active" : "")"
+                    @onclick="() => SwitchTab(tab)">@label</button>
+        </li>
+    }
+</ul>
+
+@* ── Users ── *@
+@if (activeTab == "users")
+{
+    <LoadingPanel Loading="@loadingUsers">
+    @if (!loadingUsers)
+    {
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <span class="text-muted small">@(users?.Count ?? 0) users</span>
+            <button class="btn btn-sm btn-primary" @onclick="() => showAddUser = !showAddUser">
+                <i class="bi bi-person-plus me-1"></i>Add User
+            </button>
+        </div>
+
+        @if (showAddUser)
+        {
+            <div class="card mb-3 border-primary-subtle">
+                <div class="card-body">
+                    @if (userError is not null)
+                    {
+                        <div class="alert alert-danger py-2 small">@userError</div>
+                    }
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <input class="form-control form-control-sm" placeholder="Username" @bind="newUserUsername" />
+                        </div>
+                        <div class="col-md-4">
+                            <input class="form-control form-control-sm" placeholder="Email" @bind="newUserEmail" />
+                        </div>
+                        <div class="col-md-2">
+                            <input class="form-control form-control-sm" placeholder="First name" @bind="newUserFirstName" />
+                        </div>
+                        <div class="col-md-2">
+                            <input class="form-control form-control-sm" placeholder="Last name" @bind="newUserLastName" />
+                        </div>
+                        <div class="col-md-4">
+                            <input type="password" class="form-control form-control-sm" placeholder="Password (optional)" @bind="newUserPassword" />
+                        </div>
+                    </div>
+                    <div class="mt-2 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="AddUser" disabled="@savingUser">
+                            @if (savingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Create
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddUser = false">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (users is not null)
+        {
+            <div class="list-group">
+                @foreach (KeycloakUserInfo user in users)
+                {
+                    <div class="list-group-item py-2">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <strong>@user.Username</strong>
+                                <span class="text-muted small ms-2">@user.Email</span>
+                                @if (!user.Enabled)
+                                {
+                                    <span class="badge bg-secondary-subtle text-secondary ms-1 small">Disabled</span>
+                                }
+                                @if (!user.EmailVerified)
+                                {
+                                    <span class="badge bg-warning-subtle text-warning ms-1 small">Unverified</span>
+                                }
+                                @if (user.Attributes.Count > 0)
+                                {
+                                    <div class="mt-1 d-flex flex-wrap gap-1">
+                                        @foreach (KeyValuePair<string, List<string>> attr in user.Attributes)
+                                        {
+                                            <span class="badge bg-light text-secondary border font-monospace"
+                                                  style="font-size:0.7rem">
+                                                @attr.Key: @string.Join(", ", attr.Value)
+                                            </span>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                            <button class="btn btn-sm btn-outline-danger border-0 ms-2"
+                                    @onclick="() => confirmDeleteUserId = user.Id">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                        @if (confirmDeleteUserId == user.Id)
+                        {
+                            <ConfirmDialog Visible="true"
+                                           Message="@($"Delete user '{user.Username}'? This cannot be undone.")"
+                                           ConfirmText="Delete"
+                                           IsBusy="deletingItem"
+                                           OnConfirm="() => DeleteUser(user.Id)"
+                                           OnCancel="() => confirmDeleteUserId = null" />
+                        }
+                    </div>
+                }
+            </div>
+        }
+    }
+    </LoadingPanel>
+}
+
+@* ── Identity Providers ── *@
+@if (activeTab == "idp")
+{
+    <LoadingPanel Loading="@loadingIdps">
+    @if (!loadingIdps)
+    {
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <span class="text-muted small">@(idps?.Count ?? 0) providers</span>
+            <button class="btn btn-sm btn-primary" @onclick="() => showAddIdp = !showAddIdp">
+                <i class="bi bi-plus-circle me-1"></i>Add Provider
+            </button>
+        </div>
+
+        @if (showAddIdp)
+        {
+            <div class="card mb-3 border-primary-subtle">
+                <div class="card-body">
+                    @if (idpError is not null)
+                    {
+                        <div class="alert alert-danger py-2 small">@idpError</div>
+                    }
+                    <div class="row g-2">
+                        <div class="col-md-3">
+                            <input class="form-control form-control-sm" placeholder="Alias (e.g. google)" @bind="newIdpAlias" />
+                        </div>
+                        <div class="col-md-3">
+                            <select class="form-select form-select-sm" @bind="newIdpProviderId">
+                                <option value="oidc">OpenID Connect</option>
+                                <option value="saml">SAML</option>
+                                <option value="google">Google</option>
+                                <option value="github">GitHub</option>
+                                <option value="microsoft">Microsoft</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <input class="form-control form-control-sm" placeholder="Client ID" @bind="newIdpClientId" />
+                        </div>
+                        <div class="col-md-3">
+                            <input type="password" class="form-control form-control-sm" placeholder="Client Secret" @bind="newIdpClientSecret" />
+                        </div>
+                    </div>
+                    <div class="mt-2 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="AddIdp" disabled="@savingIdp">
+                            @if (savingIdp) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Add
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddIdp = false">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (idps is not null)
+        {
+            <div class="list-group">
+                @foreach (KeycloakIdpInfo idp in idps)
+                {
+                    <div class="list-group-item py-2">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <i class="bi bi-box-arrow-in-right me-2 text-muted"></i>
+                                <strong>@idp.Alias</strong>
+                                <span class="badge bg-secondary-subtle text-secondary ms-2 small">@idp.ProviderId</span>
+                                @if (!idp.Enabled)
+                                {
+                                    <span class="badge bg-secondary-subtle text-secondary ms-1 small">Disabled</span>
+                                }
+                            </div>
+                            <button class="btn btn-sm btn-outline-danger border-0"
+                                    @onclick="() => confirmDeleteIdpAlias = idp.Alias">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                        @if (confirmDeleteIdpAlias == idp.Alias)
+                        {
+                            <ConfirmDialog Visible="true"
+                                           Message="@($"Delete identity provider '{idp.Alias}'?")"
+                                           ConfirmText="Delete"
+                                           IsBusy="deletingItem"
+                                           OnConfirm="() => DeleteIdp(idp.Alias)"
+                                           OnCancel="() => confirmDeleteIdpAlias = null" />
+                        }
+                    </div>
+                }
+            </div>
+        }
+    }
+    </LoadingPanel>
+}
+
+@* ── Groups ── *@
+@if (activeTab == "groups")
+{
+    <LoadingPanel Loading="@loadingGroups">
+    @if (!loadingGroups)
+    {
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <span class="text-muted small">@(groups?.Count ?? 0) groups</span>
+            <button class="btn btn-sm btn-primary" @onclick="() => showAddGroup = !showAddGroup">
+                <i class="bi bi-people me-1"></i>Add Group
+            </button>
+        </div>
+
+        @if (showAddGroup)
+        {
+            <div class="d-flex gap-2 mb-3">
+                <input class="form-control form-control-sm" placeholder="Group name" @bind="newGroupName" />
+                <button class="btn btn-sm btn-primary" @onclick="AddGroup" disabled="@savingGroup">
+                    @if (savingGroup) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                    Create
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddGroup = false">Cancel</button>
+            </div>
+            @if (groupError is not null)
+            {
+                <div class="alert alert-danger py-2 small mb-3">@groupError</div>
+            }
+        }
+
+        @if (groups is not null)
+        {
+            <div class="list-group">
+                @foreach (KeycloakGroupInfo g in groups)
+                {
+                    <div class="list-group-item py-2">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span><i class="bi bi-people me-2 text-muted"></i>@g.Name <span class="text-muted small">@g.Path</span></span>
+                            <button class="btn btn-sm btn-outline-danger border-0"
+                                    @onclick="() => confirmDeleteGroupId = g.Id">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                        @if (confirmDeleteGroupId == g.Id)
+                        {
+                            <ConfirmDialog Visible="true"
+                                           Message="@($"Delete group '{g.Name}'?")"
+                                           ConfirmText="Delete"
+                                           IsBusy="deletingItem"
+                                           OnConfirm="() => DeleteGroup(g.Id)"
+                                           OnCancel="() => confirmDeleteGroupId = null" />
+                        }
+                    </div>
+                }
+            </div>
+        }
+    }
+    </LoadingPanel>
+}
+
+@* ── Organizations ── *@
+@if (activeTab == "orgs")
+{
+    <LoadingPanel Loading="@loadingOrgs">
+    @if (!loadingOrgs)
+    {
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <span class="text-muted small">@(orgs?.Count ?? 0) organizations (Keycloak 26+)</span>
+            <button class="btn btn-sm btn-primary" @onclick="() => showAddOrg = !showAddOrg">
+                <i class="bi bi-building me-1"></i>Add Organization
+            </button>
+        </div>
+
+        @if (showAddOrg)
+        {
+            <div class="card mb-3 border-primary-subtle">
+                <div class="card-body">
+                    @if (orgError is not null)
+                    {
+                        <div class="alert alert-danger py-2 small">@orgError</div>
+                    }
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <input class="form-control form-control-sm" placeholder="Name" @bind="newOrgName" />
+                        </div>
+                        <div class="col-md-8">
+                            <input class="form-control form-control-sm" placeholder="Description (optional)" @bind="newOrgDescription" />
+                        </div>
+                    </div>
+                    <div class="mt-2 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="AddOrg" disabled="@savingOrg">
+                            @if (savingOrg) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Create
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddOrg = false">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (orgs is not null)
+        {
+            <div class="list-group">
+                @foreach (KeycloakOrganizationInfo org in orgs)
+                {
+                    <div class="list-group-item py-2">
+                        <strong>@org.Name</strong>
+                        @if (!string.IsNullOrWhiteSpace(org.Description))
+                        {
+                            <span class="text-muted small ms-2">@org.Description</span>
+                        }
+                        @if (!org.Enabled)
+                        {
+                            <span class="badge bg-secondary-subtle text-secondary ms-1 small">Disabled</span>
+                        }
+                    </div>
+                }
+            </div>
+        }
+    }
+    </LoadingPanel>
+}
+
+@code {
+    [Parameter] public required KeycloakRealm Realm { get; set; }
+    [Parameter] public Guid TenantId { get; set; }
+
+    private string activeTab = "users";
+
+    private List<KeycloakUserInfo>? users;
+    private List<KeycloakIdpInfo>? idps;
+    private List<KeycloakGroupInfo>? groups;
+    private List<KeycloakOrganizationInfo>? orgs;
+
+    private bool loadingUsers, loadingIdps, loadingGroups, loadingOrgs;
+
+    // Delete confirm state
+    private string? confirmDeleteUserId;
+    private string? confirmDeleteIdpAlias;
+    private string? confirmDeleteGroupId;
+    private bool deletingItem;
+
+    // User form
+    private bool showAddUser, savingUser;
+    private string? userError;
+    private string newUserUsername = "", newUserEmail = "", newUserFirstName = "", newUserLastName = "", newUserPassword = "";
+
+    // IdP form
+    private bool showAddIdp, savingIdp;
+    private string? idpError;
+    private string newIdpAlias = "", newIdpProviderId = "oidc", newIdpClientId = "", newIdpClientSecret = "";
+
+    // Group form
+    private bool showAddGroup, savingGroup;
+    private string? groupError;
+    private string newGroupName = "";
+
+    // Org form
+    private bool showAddOrg, savingOrg;
+    private string? orgError;
+    private string newOrgName = "", newOrgDescription = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadTab("users");
+    }
+
+    private async Task SwitchTab(string tab)
+    {
+        activeTab = tab;
+        await LoadTab(tab);
+    }
+
+    private async Task LoadTab(string tab)
+    {
+        switch (tab)
+        {
+            case "users" when users is null:
+                loadingUsers = true;
+                StateHasChanged();
+                try { users = await KeycloakService.GetUsersAsync(TenantId, Realm.Id); }
+                catch (Exception ex) { userError = ex.Message; }
+                finally { loadingUsers = false; }
+                break;
+
+            case "idp" when idps is null:
+                loadingIdps = true;
+                StateHasChanged();
+                try { idps = await KeycloakService.GetIdpsAsync(TenantId, Realm.Id); }
+                catch (Exception ex) { idpError = ex.Message; }
+                finally { loadingIdps = false; }
+                break;
+
+            case "groups" when groups is null:
+                loadingGroups = true;
+                StateHasChanged();
+                try { groups = await KeycloakService.GetGroupsAsync(TenantId, Realm.Id); }
+                catch (Exception ex) { groupError = ex.Message; }
+                finally { loadingGroups = false; }
+                break;
+
+            case "orgs" when orgs is null:
+                loadingOrgs = true;
+                StateHasChanged();
+                try { orgs = await KeycloakService.GetOrganizationsAsync(TenantId, Realm.Id); }
+                catch (Exception ex) { orgError = ex.Message; }
+                finally { loadingOrgs = false; }
+                break;
+        }
+    }
+
+    private async Task AddUser()
+    {
+        savingUser = true;
+        userError = null;
+        try
+        {
+            await KeycloakService.CreateUserAsync(
+                TenantId, Realm.Id,
+                newUserUsername, newUserEmail, newUserFirstName, newUserLastName,
+                string.IsNullOrWhiteSpace(newUserPassword) ? null : newUserPassword);
+            users = await KeycloakService.GetUsersAsync(TenantId, Realm.Id);
+            showAddUser = false;
+            newUserUsername = newUserEmail = newUserFirstName = newUserLastName = newUserPassword = "";
+        }
+        catch (Exception ex) { userError = ex.Message; }
+        finally { savingUser = false; }
+    }
+
+    private async Task DeleteUser(string userId)
+    {
+        deletingItem = true;
+        try
+        {
+            await KeycloakService.DeleteUserAsync(TenantId, Realm.Id, userId);
+            confirmDeleteUserId = null;
+            users = await KeycloakService.GetUsersAsync(TenantId, Realm.Id);
+        }
+        catch (Exception ex) { userError = ex.Message; }
+        finally { deletingItem = false; }
+    }
+
+    private async Task AddIdp()
+    {
+        savingIdp = true;
+        idpError = null;
+        try
+        {
+            await KeycloakService.CreateIdpAsync(
+                TenantId, Realm.Id,
+                newIdpAlias, newIdpProviderId, newIdpClientId, newIdpClientSecret);
+            idps = await KeycloakService.GetIdpsAsync(TenantId, Realm.Id);
+            showAddIdp = false;
+            newIdpAlias = newIdpClientId = newIdpClientSecret = "";
+        }
+        catch (Exception ex) { idpError = ex.Message; }
+        finally { savingIdp = false; }
+    }
+
+    private async Task DeleteIdp(string alias)
+    {
+        deletingItem = true;
+        try
+        {
+            await KeycloakService.DeleteIdpAsync(TenantId, Realm.Id, alias);
+            confirmDeleteIdpAlias = null;
+            idps = await KeycloakService.GetIdpsAsync(TenantId, Realm.Id);
+        }
+        catch (Exception ex) { idpError = ex.Message; }
+        finally { deletingItem = false; }
+    }
+
+    private async Task AddGroup()
+    {
+        savingGroup = true;
+        groupError = null;
+        try
+        {
+            await KeycloakService.CreateGroupAsync(TenantId, Realm.Id, newGroupName);
+            groups = await KeycloakService.GetGroupsAsync(TenantId, Realm.Id);
+            showAddGroup = false;
+            newGroupName = "";
+        }
+        catch (Exception ex) { groupError = ex.Message; }
+        finally { savingGroup = false; }
+    }
+
+    private async Task DeleteGroup(string groupId)
+    {
+        deletingItem = true;
+        try
+        {
+            await KeycloakService.DeleteGroupAsync(TenantId, Realm.Id, groupId);
+            confirmDeleteGroupId = null;
+            groups = await KeycloakService.GetGroupsAsync(TenantId, Realm.Id);
+        }
+        catch (Exception ex) { groupError = ex.Message; }
+        finally { deletingItem = false; }
+    }
+
+    private async Task AddOrg()
+    {
+        savingOrg = true;
+        orgError = null;
+        try
+        {
+            await KeycloakService.CreateOrganizationAsync(
+                TenantId, Realm.Id, newOrgName,
+                string.IsNullOrWhiteSpace(newOrgDescription) ? null : newOrgDescription);
+            orgs = await KeycloakService.GetOrganizationsAsync(TenantId, Realm.Id);
+            showAddOrg = false;
+            newOrgName = newOrgDescription = "";
+        }
+        catch (Exception ex) { orgError = ex.Message; }
+        finally { savingOrg = false; }
+    }
+
+}

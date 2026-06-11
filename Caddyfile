@@ -1,0 +1,7 @@
+{
+	email {env.ACME_EMAIL}
+}
+
+{env.DOMAIN} {
+	reverse_proxy entkube:8080
+}

@@ -1,0 +1,992 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject KubernetesOperationsService K8sOps
+@inject IJSRuntime JS
+
+@* ═══════════════════════════════════════════════════════════════════
+   ResourceTreePanel — proper ArgoCD-style graph.
+
+   Layout:  horizontal tree, each depth level is a column.
+            Subtrees are centred over their children using a two-pass
+            layout algorithm.
+   Lines:   SVG cubic bezier curves drawn on an absolute-positioned
+            overlay that covers the whole graph container.
+   Cards:   absolute-positioned; left-border colour = health status;
+            kind icon, name, status, health badge and action buttons.
+   Actions: floating panel positioned under (or above) the active card.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<style>
+    .rg-outer {
+        overflow-x: auto;
+        overflow-y: auto;
+        max-height: 75vh;
+        background: #f6f8fa;
+        border-radius: 8px;
+        border: 1px solid #e9ecef;
+    }
+
+    .rg-fs {
+        position: fixed;
+        inset: 0;
+        z-index: 1055;
+        background: white;
+        display: flex;
+        flex-direction: column;
+        padding: 12px 16px;
+        box-shadow: 0 0 0 100vmax rgba(0,0,0,.4);
+    }
+
+    .rg-fs .rg-outer {
+        flex: 1;
+        min-height: 0;
+        max-height: none;
+    }
+    .rg-canvas {
+        position: relative;
+        /* width/height set inline from C# layout */
+    }
+
+    /* ── Node card ── */
+    .rg-card {
+        position: absolute;
+        width: 204px;
+        background: white;
+        border: 1px solid #dee2e6;
+        border-left: 3px solid var(--hc, #adb5bd);
+        border-radius: 8px;
+        box-shadow: 0 1px 4px rgba(0,0,0,.07);
+        overflow: hidden;
+        cursor: default;
+        transition: box-shadow .12s;
+        font-size: .82rem;
+    }
+    .rg-card:hover { box-shadow: 0 3px 10px rgba(0,0,0,.13); }
+    .rg-card.rg-active { border-color: #6ea8fe; box-shadow: 0 0 0 2px rgba(13,110,253,.15); }
+
+    .rg-card-body { padding: 7px 10px 5px; }
+
+    .rg-card-top {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 3px;
+    }
+    .rg-kind-badge {
+        font-size: .62rem;
+        font-weight: 700;
+        letter-spacing: .04em;
+        text-transform: uppercase;
+        background: #f1f3f5;
+        border: 1px solid #dee2e6;
+        border-radius: 3px;
+        padding: 1px 5px;
+        color: #495057;
+        flex-shrink: 0;
+    }
+    .rg-health-dot {
+        margin-left: auto;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+    }
+
+    .rg-card-name {
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: .82rem;
+        color: #212529;
+        margin-bottom: 2px;
+    }
+    .rg-card-status {
+        font-size: .71rem;
+        color: #6c757d;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    /* ── Card action bar ── */
+    .rg-actions {
+        padding: 4px 8px;
+        border-top: 1px solid #f0f2f4;
+        background: #f8f9fa;
+        display: flex;
+        gap: 3px;
+    }
+    .rg-btn {
+        background: none;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        padding: 2px 5px;
+        font-size: .7rem;
+        color: #6c757d;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        transition: background .1s, color .1s;
+    }
+    .rg-btn:hover { background: #e9ecef; color: #212529; border-color: #dee2e6; }
+    .rg-btn.active { background: #e7f1ff; color: #0d6efd; border-color: #b6d4fe; }
+    .rg-btn.active-warn { background: #fff3cd; color: #664d03; border-color: #ffd666; }
+    .rg-btn.active-danger { background: #f8d7da; color: #842029; border-color: #f5c2c7; }
+
+    /* ── Floating action panel ── */
+    .rg-panel {
+        position: absolute;
+        z-index: 200;
+        width: 360px;
+        background: #1e1e2e;
+        border: 1px solid #3a3a4e;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    }
+    .rg-panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 5px 10px;
+        background: #2a2a3e;
+        border-bottom: 1px solid #3a3a4e;
+        color: white;
+        font-size: .8rem;
+        font-weight: 500;
+    }
+    .rg-panel-body { padding: 10px; }
+
+    /* ── Global feedback bar ── */
+    .rg-feedback {
+        margin-bottom: 8px;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: .82rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+</style>
+
+<div class="@(_fullscreen ? "rg-fs" : "")">
+<div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+    @if (!string.IsNullOrEmpty(Namespace))
+    {
+        <span class="badge bg-light border text-muted font-monospace small">
+            <i class="bi bi-box me-1"></i>@Namespace
+        </span>
+    }
+    @if (!Loading && Resources is not null)
+    {
+        <span class="text-muted small">@_nodes.Count resources</span>
+    }
+    @if (LastRefreshed.HasValue && !Loading)
+    {
+        <span class="text-muted small ms-auto">
+            <i class="bi bi-clock me-1"></i>@LastRefreshed.Value.ToLocalTime().ToString("HH:mm:ss")
+        </span>
+    }
+    @if (OnRefresh.HasDelegate)
+    {
+        <button class="btn btn-sm btn-outline-secondary @(LastRefreshed.HasValue ? "" : "ms-auto")"
+                @onclick="OnRefresh" disabled="@Loading">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+        </button>
+    }
+    <button class="btn btn-sm @(_hideCompleted ? "btn-outline-secondary" : "btn-secondary")"
+            title="@(_hideCompleted ? "Showing condensed view — click to show completed jobs & old ReplicaSets" : "Click to hide completed jobs & old ReplicaSets")"
+            @onclick="ToggleHideCompleted">
+        <i class="bi @(_hideCompleted ? "bi-funnel-fill" : "bi-funnel")"></i>
+    </button>
+    <button class="btn btn-sm btn-outline-secondary @(!LastRefreshed.HasValue && !OnRefresh.HasDelegate ? "ms-auto" : "")"
+            title="@(_fullscreen ? "Exit fullscreen" : "Fullscreen")"
+            @onclick="ToggleFullscreen">
+        <i class="bi @(_fullscreen ? "bi-fullscreen-exit" : "bi-arrows-fullscreen")"></i>
+    </button>
+</div>
+
+<LoadingPanel Loading="@Loading" LoadingText="Querying cluster…" Error="@Error">
+@if (!Loading && Error is null && (Resources is null || Resources.Count == 0))
+{
+    <EmptyState Icon="bi-diagram-3"
+                Message="@($"No resources tracked for this deployment in namespace {Namespace}.")" />
+}
+else if (!Loading && Error is null && Resources is not null && Resources.Count > 0)
+{
+    @if (_feedback is not null)
+    {
+        <div class="rg-feedback @(_feedbackOk ? "alert-success" : "alert-danger") alert">
+            <span><i class="bi @(_feedbackOk ? "bi-check-circle" : "bi-x-circle") me-1"></i>@_feedback</span>
+            <button class="btn-close btn-close-sm" @onclick="() => _feedback = null"></button>
+        </div>
+    }
+
+    <div class="rg-outer">
+        <div class="rg-canvas" style="width: @(_graphW + 24)px; min-height: @(_graphH + 24)px; padding: 12px;">
+
+            @* ── SVG bezier connectors ── *@
+            <svg style="position:absolute;inset:0;width:@(_graphW + 24)px;height:@(_graphH + 24)px;pointer-events:none;overflow:visible;">
+                @foreach (SvgLine ln in _lines)
+                {
+                    <path d="@BezierPath(ln)" stroke="#ced4da" stroke-width="1.5" fill="none" />
+                }
+            </svg>
+
+            @* ── Node cards ── *@
+            @foreach (NodeLayout nd in _nodes)
+            {
+                var cx = nd.Col * ColW + 12;
+                var cy = nd.Y + 12;
+                var hc = HealthColor(nd.Node.HealthStatus);
+                var isActive = _activePanelNodeId == nd.Node.Id;
+
+                <div class="rg-card @(isActive ? "rg-active" : "")"
+                     style="left:@(cx)px;top:@(cy)px;--hc:@hc;">
+
+                    <div class="rg-card-body">
+                        <div class="rg-card-top">
+                            <i class="bi @KindIcon(nd.Node.Kind) @KindColor(nd.Node.Kind)"
+                               style="font-size:.95rem;flex-shrink:0;"></i>
+                            <span class="rg-kind-badge">@nd.Node.Kind</span>
+                            <div class="rg-health-dot" style="background:@hc;"
+                                 title="@HealthLabel(nd.Node.HealthStatus)"></div>
+                        </div>
+
+                        <div class="rg-card-name" title="@nd.Node.Name">@nd.Node.Name</div>
+
+                        @if (!string.IsNullOrEmpty(nd.Node.StatusMessage))
+                        {
+                            <div class="rg-card-status">@nd.Node.StatusMessage</div>
+                        }
+                        else
+                        {
+                            <div class="rg-card-status" style="color:@hc;">@HealthLabel(nd.Node.HealthStatus)</div>
+                        }
+                    </div>
+
+                    @* ── Action buttons ── *@
+                    <div class="rg-actions">
+                        @if (nd.Node.Kind == "Pod" && CanLogs)
+                        {
+                            <button class="rg-btn @(IsPanel(nd.Node.Id, "logs") ? "active" : "")"
+                                    title="Logs" @onclick="() => PanelLogs(nd.Node)">
+                                <i class="bi bi-terminal"></i> Logs
+                            </button>
+                        }
+                        @if (CanEvents)
+                        {
+                            <button class="rg-btn @(IsPanel(nd.Node.Id, "events") ? "active" : "")"
+                                    title="Events" @onclick="() => PanelEvents(nd.Node)">
+                                <i class="bi bi-list-ul"></i> Events
+                            </button>
+                        }
+                        @if (CanEvents)
+                        {
+                            <button class="rg-btn @(IsPanel(nd.Node.Id, "yaml") ? "active" : "")"
+                                    title="YAML" @onclick="() => PanelYaml(nd.Node)">
+                                <i class="bi bi-file-code"></i>
+                            </button>
+                        }
+                        @if (nd.Node.Kind == "CronJob" && CanRestart)
+                        {
+                            bool cronSuspended = nd.Node.HealthStatus == HealthStatus.Suspended;
+                            <button class="rg-btn @(IsPanel(nd.Node.Id, "trigger") ? "active-warn" : "")"
+                                    title="Trigger manual run" @onclick="() => PanelTrigger(nd.Node)">
+                                <i class="bi bi-lightning"></i>
+                            </button>
+                            <button class="rg-btn" disabled="@_opBusy"
+                                    title="@(cronSuspended ? "Resume schedule" : "Suspend schedule")"
+                                    @onclick="() => _ = ToggleSuspendCronJobAsync(nd.Node)">
+                                <i class="bi @(cronSuspended ? "bi-play-fill" : "bi-pause-fill")"></i>
+                            </button>
+                        }
+                        @if ((nd.Node.Kind is "Deployment" or "StatefulSet" or "DaemonSet") && CanRestart)
+                        {
+                            <button class="rg-btn @(IsPanel(nd.Node.Id, "restart") ? "active-warn" : "")"
+                                    title="Restart" @onclick="() => PanelRestart(nd.Node)">
+                                <i class="bi bi-arrow-repeat"></i>
+                            </button>
+                        }
+                        @if ((nd.Node.Kind is "Deployment" or "StatefulSet" or "ReplicaSet") && CanScale)
+                        {
+                            <button class="rg-btn @(IsPanel(nd.Node.Id, "scale") ? "active" : "")"
+                                    title="Scale" @onclick="() => PanelScale(nd.Node)">
+                                <i class="bi bi-sliders"></i>
+                            </button>
+                        }
+                        @if (nd.Node.Kind == "ReplicaSet" && ParseDesiredReplicas(nd.Node.StatusMessage) == 0 && CanDelete)
+                        {
+                            <button class="rg-btn @(IsPanel(nd.Node.Id, "delete") ? "active-danger" : "")"
+                                    title="Delete old ReplicaSet" @onclick="() => PanelDelete(nd.Node)">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        }
+                        @if ((nd.Node.Kind == "Pod" || nd.Node.Kind == "Job") && CanDelete)
+                        {
+                            <button class="rg-btn @(IsPanel(nd.Node.Id, "delete") ? "active-danger" : "")"
+                                    title="Delete" @onclick="() => PanelDelete(nd.Node)">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        }
+                        @if (_hideCompleted && _hiddenJobCounts.TryGetValue(nd.Node.Id, out int hj) && hj > 0)
+                        {
+                            <span class="rg-btn ms-auto" style="cursor:default;opacity:.7;"
+                                  title="@hj completed job(s) hidden — click the funnel to show">
+                                <i class="bi bi-clock"></i> @hj
+                            </span>
+                        }
+                        @if (_hideCompleted && _hiddenRsCounts.TryGetValue(nd.Node.Id, out int hr) && hr > 0)
+                        {
+                            <span class="rg-btn @(_hiddenJobCounts.ContainsKey(nd.Node.Id) ? "" : "ms-auto")"
+                                  style="cursor:default;opacity:.7;"
+                                  title="@hr old ReplicaSet(s) hidden — click the funnel to show">
+                                <i class="bi bi-files"></i> @hr
+                            </span>
+                        }
+                    </div>
+                </div>
+
+                @* ── Floating action panel for this node ── *@
+                @if (isActive && _panelMode is not null)
+                {
+                    @RenderPanel(nd.Node, ClampPanelX(cx), PanelY(cy))
+                }
+            }
+        </div>
+    </div>
+}
+</LoadingPanel>
+</div>
+
+@code {
+    [Parameter] public bool Loading { get; set; }
+    [Parameter] public string? Error { get; set; }
+    [Parameter] public List<DeploymentResource>? Resources { get; set; }
+    [Parameter] public string? Namespace { get; set; }
+    [Parameter] public Guid DeploymentId { get; set; }
+    [Parameter] public CustomerAccessRole? AccessRole { get; set; }
+    [Parameter] public EventCallback OnRefresh { get; set; }
+    [Parameter] public DateTime? LastRefreshed { get; set; }
+
+    // ── Access gates ────────────────────────────────────────────────────────
+
+    private bool CanLogs    => AccessRole is null || AccessRole >= CustomerAccessRole.Viewer;
+    private bool CanEvents  => AccessRole is null || AccessRole >= CustomerAccessRole.Viewer;
+    private bool CanRestart => AccessRole is null || AccessRole >= CustomerAccessRole.Operator;
+    private bool CanDelete  => AccessRole is null || AccessRole >= CustomerAccessRole.Operator;
+    private bool CanScale   => AccessRole is null || AccessRole >= CustomerAccessRole.Admin;
+
+    // ── Layout constants ─────────────────────────────────────────────────────
+
+    private const double CardW = 204;
+    private const double CardH = 86;   // body + action bar
+    private const double ColGap = 72;  // horizontal gap between columns (lines travel here)
+    private const double RowGap = 28;
+    private const double ColW = CardW + ColGap;
+    private const double RowH = CardH + RowGap;
+
+    // ── Layout state ─────────────────────────────────────────────────────────
+
+    private record NodeLayout(DeploymentResource Node, int Col, double Y, Guid? ParentId);
+    private record SvgLine(double X1, double Y1, double X2, double Y2);
+
+    private List<NodeLayout> _nodes = [];
+    private List<SvgLine> _lines = [];
+    private double _graphW;
+    private double _graphH;
+
+    // ── Panel state ──────────────────────────────────────────────────────────
+
+    private Guid? _activePanelNodeId;
+    private DeploymentResource? _activePanelNode;
+    private string? _panelMode;
+
+    private bool _panelLoading;
+    private string? _panelText;
+    private string? _panelError;
+    private List<string> _containers = [];
+    private string? _selectedContainer;
+    private int _scaleValue = 1;
+    private bool _opBusy;
+
+    private string? _feedback;
+    private bool _feedbackOk;
+    private bool _fullscreen;
+    private bool _hideCompleted = true;
+    private Dictionary<Guid, int> _hiddenJobCounts = new();
+    private Dictionary<Guid, int> _hiddenRsCounts  = new();
+
+    // ── Lifecycle ────────────────────────────────────────────────────────────
+
+    protected override void OnParametersSet()
+    {
+        ComputeLayout();
+    }
+
+    // ── Layout engine ────────────────────────────────────────────────────────
+
+    private void ComputeLayout()
+    {
+        _nodes.Clear();
+        _lines.Clear();
+        _hiddenJobCounts.Clear();
+        _hiddenRsCounts.Clear();
+        if (Resources is null || Resources.Count == 0) return;
+
+        double y = 0;
+
+        void Layout(DeploymentResource node, int col, Guid? parentId)
+        {
+            double top = y;
+
+            List<DeploymentResource> kids = node.ChildResources is { Count: > 0 } c ? new(c) : [];
+
+            if (_hideCompleted)
+            {
+                // Completed Jobs owned by a CronJob are history — hide them, show count on parent
+                if (node.Kind == "CronJob")
+                {
+                    List<DeploymentResource> done = kids
+                        .Where(k => k.Kind == "Job" && k.HealthStatus != HealthStatus.Progressing)
+                        .ToList();
+                    if (done.Count > 0)
+                    {
+                        _hiddenJobCounts[node.Id] = done.Count;
+                        kids = kids.Except(done).ToList();
+                    }
+                }
+
+                // Completed standalone Jobs: keep the Job card but collapse its pod children
+                if (node.Kind == "Job" && node.HealthStatus != HealthStatus.Progressing)
+                    kids = [];
+
+                // Zero-replica ReplicaSets are inactive rollback history — hide them
+                List<DeploymentResource> zeroRs = kids
+                    .Where(k => k.Kind == "ReplicaSet" && ParseDesiredReplicas(k.StatusMessage) == 0)
+                    .ToList();
+                if (zeroRs.Count > 0)
+                {
+                    _hiddenRsCounts[node.Id] = zeroRs.Count;
+                    kids = kids.Except(zeroRs).ToList();
+                }
+            }
+
+            if (kids.Count > 0)
+                foreach (DeploymentResource kid in kids)
+                    Layout(kid, col + 1, node.Id);
+            else
+                y += RowH;
+
+            double centerY = (top + y) / 2 - CardH / 2;
+            _nodes.Add(new NodeLayout(node, col, centerY, parentId));
+        }
+
+        foreach (DeploymentResource root in Resources)
+            Layout(root, 0, null);
+
+        Dictionary<Guid, NodeLayout> byId = _nodes.ToDictionary(n => n.Node.Id);
+
+        foreach (NodeLayout n in _nodes.Where(n => n.ParentId.HasValue))
+        {
+            if (byId.TryGetValue(n.ParentId!.Value, out NodeLayout? p))
+            {
+                _lines.Add(new SvgLine(
+                    p.Col * ColW + CardW + 12,   // parent right edge (+ canvas padding)
+                    p.Y + CardH / 2 + 12,         // parent vertical centre
+                    n.Col * ColW + 12,             // child left edge
+                    n.Y + CardH / 2 + 12           // child vertical centre
+                ));
+            }
+        }
+
+        int maxCol = _nodes.Count > 0 ? _nodes.Max(n => n.Col) : 0;
+        _graphW = (maxCol + 1) * ColW;
+        _graphH = y;
+    }
+
+    private static string BezierPath(SvgLine l)
+    {
+        double dx = Math.Abs(l.X2 - l.X1) * 0.55;
+        return FormattableString.Invariant(
+            $"M {l.X1:F1} {l.Y1:F1} C {l.X1 + dx:F1} {l.Y1:F1} {l.X2 - dx:F1} {l.Y2:F1} {l.X2:F1} {l.Y2:F1}");
+    }
+
+    // ── Panel helpers ────────────────────────────────────────────────────────
+
+    private bool IsPanel(Guid id, string mode) =>
+        _activePanelNodeId == id && _panelMode == mode;
+
+    // String-literal-safe wrappers — avoids embedding "string" inside @onclick="..." attributes.
+    private void PanelLogs(DeploymentResource n)    => TogglePanel(n.Id, n, "logs");
+    private void PanelEvents(DeploymentResource n)  => TogglePanel(n.Id, n, "events");
+    private void PanelYaml(DeploymentResource n)    => TogglePanel(n.Id, n, "yaml");
+    private void PanelTrigger(DeploymentResource n) => TogglePanel(n.Id, n, "trigger");
+    private void PanelRestart(DeploymentResource n) => TogglePanel(n.Id, n, "restart");
+    private void PanelScale(DeploymentResource n)   => TogglePanel(n.Id, n, "scale");
+    private void PanelDelete(DeploymentResource n)  => TogglePanel(n.Id, n, "delete");
+
+    private void TogglePanel(Guid id, DeploymentResource node, string mode)
+    {
+        if (_activePanelNodeId == id && _panelMode == mode)
+        {
+            ClosePanel(); return;
+        }
+        ClosePanel();
+        _activePanelNodeId = id;
+        _activePanelNode   = node;
+        _panelMode         = mode;
+
+        if (mode == "logs")    _ = LoadLogsAsync(node);
+        if (mode == "events")  _ = LoadEventsAsync(node);
+        if (mode == "yaml")    _ = LoadYamlAsync(node);
+        if (mode == "scale")   _scaleValue = ParseDesiredReplicas(node.StatusMessage) ?? 1;
+    }
+
+    private void ClosePanel()
+    {
+        _activePanelNodeId = null;
+        _activePanelNode   = null;
+        _panelMode         = null;
+        _panelText         = null;
+        _panelError        = null;
+        _containers        = [];
+        _selectedContainer = null;
+    }
+
+    // ── Async operations (fire-and-forget from sync context) ─────────────────
+
+    private async Task LoadLogsAsync(DeploymentResource node)
+    {
+        _panelLoading = true; _panelText = null; _panelError = null;
+        StateHasChanged();
+
+        var cr = await K8sOps.GetPodContainersAsync(DeploymentId, node.Name);
+        if (!cr.IsSuccess) { _panelError = cr.Error; _panelLoading = false; StateHasChanged(); return; }
+
+        _containers = cr.Data ?? [];
+        _selectedContainer = _containers.FirstOrDefault();
+        await FetchLogsAsync(node.Name);
+    }
+
+    private int _panelTailLines = 500;
+    private ElementReference _logPreRef;
+    private bool _pendingLogScroll;
+
+    private async Task FetchLogsAsync(string podName)
+    {
+        _panelLoading = true; _panelText = null; _panelError = null;
+        StateHasChanged();
+        var r = await K8sOps.GetPodLogsAsync(DeploymentId, podName, _selectedContainer, _panelTailLines);
+        _panelLoading = false;
+        if (r.IsSuccess) { _panelText = r.Data ?? "(no output)"; _pendingLogScroll = true; }
+        else _panelError = r.Error;
+        StateHasChanged();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_pendingLogScroll)
+        {
+            _pendingLogScroll = false;
+            try { await JS.InvokeVoidAsync("scrollToBottom", _logPreRef); } catch { }
+        }
+    }
+
+    private async Task LoadYamlAsync(DeploymentResource node)
+    {
+        _panelLoading = true; _panelText = null; _panelError = null;
+        StateHasChanged();
+        var r = await K8sOps.GetResourceYamlAsync(DeploymentId, node.Kind, node.Name);
+        _panelLoading = false;
+        if (r.IsSuccess) _panelText = r.Data ?? "(empty)"; else _panelError = r.Error;
+        StateHasChanged();
+    }
+
+    private async Task LoadEventsAsync(DeploymentResource node)
+    {
+        _panelLoading = true; _panelText = null; _panelError = null;
+        StateHasChanged();
+        var r = await K8sOps.GetResourceEventsAsync(DeploymentId, node.Kind, node.Name);
+        _panelLoading = false;
+        if (r.IsSuccess)
+            _panelText = r.Data is { Count: > 0 } l ? string.Join("\n", l) : "(no events)";
+        else _panelError = r.Error;
+        StateHasChanged();
+    }
+
+    private void SwitchContainer(string podName, string container)
+    {
+        _selectedContainer = container;
+        _ = FetchLogsAsync(podName);
+    }
+
+    private async Task ApplyScaleAsync(DeploymentResource node)
+    {
+        _opBusy = true; StateHasChanged();
+        var r = await K8sOps.ScaleWorkloadAsync(DeploymentId, node.Kind, node.Name, _scaleValue);
+        _opBusy = false; ClosePanel();
+        SetFeedback(r.IsSuccess, r.IsSuccess
+            ? $"{node.Kind} {node.Name} scaled to {_scaleValue}."
+            : r.Error ?? "Scale failed.");
+    }
+
+    private async Task ApplyRestartAsync(DeploymentResource node)
+    {
+        _opBusy = true; StateHasChanged();
+        var r = await K8sOps.RestartWorkloadAsync(DeploymentId, node.Kind, node.Name);
+        _opBusy = false; ClosePanel();
+        SetFeedback(r.IsSuccess, r.IsSuccess
+            ? $"Rolling restart triggered for {node.Name}."
+            : r.Error ?? "Restart failed.");
+    }
+
+    private async Task ApplyTriggerAsync(DeploymentResource node)
+    {
+        _opBusy = true; StateHasChanged();
+        var r = await K8sOps.TriggerCronJobAsync(DeploymentId, node.Name);
+        _opBusy = false; ClosePanel();
+        SetFeedback(r.IsSuccess, r.IsSuccess
+            ? r.Data ?? "Job created."
+            : r.Error ?? "Trigger failed.");
+        if (r.IsSuccess && OnRefresh.HasDelegate)
+            await OnRefresh.InvokeAsync();
+    }
+
+    private async Task ToggleSuspendCronJobAsync(DeploymentResource node)
+    {
+        if (_opBusy) return;
+        _opBusy = true;
+        StateHasChanged();
+        bool wasSuspended = node.HealthStatus == HealthStatus.Suspended;
+        var r = await K8sOps.SetCronJobSuspendedAsync(DeploymentId, node.Name, !wasSuspended);
+        _opBusy = false;
+        SetFeedback(r.IsSuccess, r.IsSuccess
+            ? $"CronJob {node.Name} {(!wasSuspended ? "suspended" : "resumed")}."
+            : r.Error ?? "Operation failed.");
+        if (r.IsSuccess && OnRefresh.HasDelegate)
+            await OnRefresh.InvokeAsync();
+    }
+
+    private async Task ApplyDeleteAsync(DeploymentResource node)
+    {
+        _opBusy = true; StateHasChanged();
+        var r = await K8sOps.DeleteResourceAsync(DeploymentId, node.Kind, node.Name);
+        _opBusy = false; ClosePanel();
+        SetFeedback(r.IsSuccess, r.IsSuccess
+            ? $"{node.Kind} {node.Name} deleted."
+            : r.Error ?? "Delete failed.");
+        if (r.IsSuccess && OnRefresh.HasDelegate)
+            await OnRefresh.InvokeAsync();
+    }
+
+    private Task RefreshPanel(DeploymentResource node) => _panelMode switch
+    {
+        "logs"   => FetchLogsAsync(node.Name),
+        "events" => LoadEventsAsync(node),
+        "yaml"   => LoadYamlAsync(node),
+        _        => Task.CompletedTask
+    };
+
+    private void SetFeedback(bool ok, string msg)
+    {
+        _feedbackOk = ok; _feedback = msg; StateHasChanged();
+    }
+
+    private void ToggleFullscreen() => _fullscreen = !_fullscreen;
+
+    private void ToggleHideCompleted()
+    {
+        _hideCompleted = !_hideCompleted;
+        ComputeLayout();
+    }
+
+    private double ClampPanelX(double cardX)
+    {
+        const double PanelW = 360;
+        double canvasW = _graphW + 24;
+        return Math.Max(0, Math.Min(cardX, canvasW - PanelW));
+    }
+
+    private static double EstimatedPanelHeight(string? mode) => mode switch
+    {
+        "logs"    => 430,
+        "events"  => 310,
+        "yaml"    => 410,
+        "scale"   => 120,
+        "trigger" => 90,
+        _         => 70      // restart / delete
+    };
+
+    private double PanelY(double cardY)
+    {
+        double below = cardY + CardH + 6;
+        double panelH = EstimatedPanelHeight(_panelMode);
+        // Flip above the card when the panel would extend past the canvas bottom.
+        return below + panelH > _graphH ? Math.Max(0, cardY - panelH - 6) : below;
+    }
+
+    // ── Floating panel renderer ──────────────────────────────────────────────
+
+    private RenderFragment RenderPanel(DeploymentResource node, double px, double py) => __builder =>
+    {
+        <div class="rg-panel" style="left:@(px.ToString("F0", System.Globalization.CultureInfo.InvariantCulture))px;top:@(py.ToString("F0", System.Globalization.CultureInfo.InvariantCulture))px;">
+            <div class="rg-panel-header">
+                <span>
+                    @if (_panelMode == "logs")
+                    {
+                        <i class="bi bi-terminal me-1"></i><text>Logs — @node.Name</text>
+                    }
+                    else if (_panelMode == "events")
+                    {
+                        <i class="bi bi-list-ul me-1"></i><text>Events — @node.Name</text>
+                    }
+                    else if (_panelMode == "scale")
+                    {
+                        <i class="bi bi-sliders me-1"></i><text>Scale — @node.Name</text>
+                    }
+                    else if (_panelMode == "restart")
+                    {
+                        <i class="bi bi-arrow-repeat me-1"></i><text>Restart — @node.Name</text>
+                    }
+                    else if (_panelMode == "yaml")
+                    {
+                        <i class="bi bi-file-code me-1"></i><text>YAML — @node.Kind/@node.Name</text>
+                    }
+                    else if (_panelMode == "trigger")
+                    {
+                        <i class="bi bi-lightning me-1"></i><text>Trigger — @node.Name</text>
+                    }
+                    else if (_panelMode == "delete")
+                    {
+                        <i class="bi bi-trash me-1"></i><text>Delete — @node.Name</text>
+                    }
+                </span>
+                <div class="d-flex align-items-center gap-1">
+                    @if (_panelMode is "logs" or "events" or "yaml")
+                    {
+                        <button class="btn btn-sm btn-link text-white py-0 px-1" title="Refresh"
+                                disabled="@_panelLoading"
+                                @onclick="() => _ = RefreshPanel(node)">
+                            <i class="bi bi-arrow-clockwise" style="font-size:.75rem;"></i>
+                        </button>
+                    }
+                    <button class="btn btn-sm btn-link text-white py-0 px-1" @onclick="ClosePanel">
+                        <i class="bi bi-x-lg" style="font-size:.75rem;"></i>
+                    </button>
+                </div>
+            </div>
+
+            @if (_panelMode == "logs")
+            {
+                @if (_containers.Count > 1)
+                {
+                    <div class="px-2 py-1 d-flex gap-2 align-items-center" style="background:#2a2a3e;border-bottom:1px solid #3a3a4e;">
+                        <span class="text-muted small">Container:</span>
+                        @foreach (string c in _containers)
+                        {
+                            <button class="btn btn-sm py-0 px-2 @(_selectedContainer == c ? "btn-primary" : "btn-outline-secondary")"
+                                    style="font-size:.68rem;"
+                                    @onclick="() => SwitchContainer(node.Name, c)">@c</button>
+                        }
+                    </div>
+                }
+                <div class="px-2 py-1 d-flex gap-2 align-items-center" style="background:#2a2a3e;border-bottom:1px solid #3a3a4e;">
+                    <span class="text-muted small">Lines:</span>
+                    @foreach (int tl in new[] { 100, 500, 1000 })
+                    {
+                        int tlCopy = tl;
+                        <button class="btn btn-sm py-0 px-2 @(_panelTailLines == tlCopy ? "btn-primary" : "btn-outline-secondary")"
+                                style="font-size:.68rem;"
+                                @onclick="() => { _panelTailLines = tlCopy; _ = FetchLogsAsync(node.Name); }">@tlCopy</button>
+                    }
+                </div>
+                @if (_panelLoading)
+                {
+                    <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-light"></div></div>
+                }
+                else if (_panelError is not null)
+                {
+                    <div class="alert alert-warning m-2 py-1 small">@_panelError</div>
+                }
+                else
+                {
+                    <pre @ref="_logPreRef" class="m-0 p-2 text-light" style="max-height:320px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-size:.7rem;background:transparent;">@_panelText</pre>
+                }
+            }
+
+            @if (_panelMode == "events")
+            {
+                @if (_panelLoading)
+                {
+                    <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-light"></div></div>
+                }
+                else if (_panelError is not null)
+                {
+                    <div class="alert alert-warning m-2 py-1 small">@_panelError</div>
+                }
+                else
+                {
+                    <pre class="m-0 p-2 text-light" style="max-height:260px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-size:.7rem;background:transparent;">@_panelText</pre>
+                }
+            }
+
+            @if (_panelMode == "yaml")
+            {
+                @if (_panelLoading)
+                {
+                    <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-light"></div></div>
+                }
+                else if (_panelError is not null)
+                {
+                    <div class="alert alert-warning m-2 py-1 small">@_panelError</div>
+                }
+                else
+                {
+                    <pre class="m-0 p-2 text-light" style="max-height:360px;overflow-y:auto;overflow-x:auto;white-space:pre;font-size:.68rem;background:transparent;tab-size:2;">@_panelText</pre>
+                }
+            }
+
+            @if (_panelMode == "scale")
+            {
+                var current = ParseDesiredReplicas(node.StatusMessage);
+                <div class="rg-panel-body">
+                    @if (current.HasValue)
+                    {
+                        <div class="text-muted small mb-2">
+                            Current: <strong class="text-light">@current</strong> replica@(current == 1 ? "" : "s")
+                        </div>
+                    }
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                        <div class="d-flex align-items-center gap-1">
+                            <button class="btn btn-sm py-0 px-2" style="color:#ccc;border:1px solid #555;border-radius:4px;background:none;"
+                                    @onclick="() => _scaleValue = Math.Max(0, _scaleValue - 1)" disabled="@_opBusy">
+                                <i class="bi bi-dash"></i>
+                            </button>
+                            <input type="number" class="form-control form-control-sm text-center"
+                                   style="width:60px;background:#2a2a3e;border-color:#555;color:white;"
+                                   min="0" max="99" @bind="_scaleValue" />
+                            <button class="btn btn-sm py-0 px-2" style="color:#ccc;border:1px solid #555;border-radius:4px;background:none;"
+                                    @onclick="() => _scaleValue++" disabled="@_opBusy">
+                                <i class="bi bi-plus"></i>
+                            </button>
+                        </div>
+                        <button class="btn btn-sm btn-primary" disabled="@_opBusy" @onclick="() => ApplyScaleAsync(node)">
+                            @if (_opBusy) { <span class="spinner-border spinner-border-sm me-1"></span> } Apply
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="ClosePanel">Cancel</button>
+                    </div>
+                </div>
+            }
+
+            @if (_panelMode == "restart")
+            {
+                <div class="rg-panel-body d-flex align-items-center gap-2">
+                    <span class="text-light small">Rolling restart <strong>@node.Name</strong>?</span>
+                    <button class="btn btn-sm btn-warning" disabled="@_opBusy" @onclick="() => ApplyRestartAsync(node)">
+                        @if (_opBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        <i class="bi bi-arrow-repeat me-1"></i>Restart
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="ClosePanel">Cancel</button>
+                </div>
+            }
+
+            @if (_panelMode == "delete")
+            {
+                <div class="rg-panel-body d-flex align-items-center gap-2">
+                    <span class="text-light small">
+                        Delete <strong>@node.Kind @node.Name</strong>?
+                        @if (node.Kind == "Pod") { <span class="text-muted"> K8s will restart it.</span> }
+                        @if (node.Kind == "ReplicaSet") { <span class="text-muted"> Old revision, safe to remove.</span> }
+                    </span>
+                    <button class="btn btn-sm btn-danger" disabled="@_opBusy" @onclick="() => ApplyDeleteAsync(node)">
+                        @if (_opBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        <i class="bi bi-trash me-1"></i>Delete
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="ClosePanel">Cancel</button>
+                </div>
+            }
+
+            @if (_panelMode == "trigger")
+            {
+                <div class="rg-panel-body">
+                    <div class="text-light small mb-2">
+                        Create a manual Job from <strong>@node.Name</strong>?
+                        @if (!string.IsNullOrEmpty(node.StatusMessage))
+                        {
+                            <span class="text-muted ms-1">(@node.StatusMessage)</span>
+                        }
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <button class="btn btn-sm btn-warning" disabled="@_opBusy" @onclick="() => ApplyTriggerAsync(node)">
+                            @if (_opBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            <i class="bi bi-lightning me-1"></i>Run Job
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="ClosePanel">Cancel</button>
+                    </div>
+                </div>
+            }
+        </div>
+    };
+
+    // ── Visual helpers ───────────────────────────────────────────────────────
+
+    private static string HealthColor(HealthStatus h) => h switch
+    {
+        HealthStatus.Healthy     => "#198754",
+        HealthStatus.Progressing => "#0d6efd",
+        HealthStatus.Degraded    => "#fd7e14",
+        HealthStatus.Missing     => "#dc3545",
+        HealthStatus.Suspended   => "#6c757d",
+        _                        => "#adb5bd",
+    };
+
+    private static string HealthLabel(HealthStatus h) => h switch
+    {
+        HealthStatus.Healthy     => "Healthy",
+        HealthStatus.Progressing => "Progressing",
+        HealthStatus.Degraded    => "Degraded",
+        HealthStatus.Missing     => "Missing",
+        HealthStatus.Suspended   => "Suspended",
+        _                        => "Unknown",
+    };
+
+    private static string KindIcon(string kind) => kind switch
+    {
+        "Deployment"            => "bi-layers",
+        "StatefulSet"           => "bi-database",
+        "DaemonSet"             => "bi-broadcast",
+        "ReplicaSet"            => "bi-files",
+        "Pod"                   => "bi-cpu",
+        "Service"               => "bi-share",
+        "Ingress"               => "bi-globe",
+        "HTTPRoute"             => "bi-signpost-split",
+        "PersistentVolumeClaim" => "bi-hdd",
+        "ConfigMap"             => "bi-file-code",
+        "Secret"                => "bi-key",
+        "Job"                   => "bi-lightning",
+        "CronJob"               => "bi-clock",
+        _                       => "bi-box",
+    };
+
+    private static string KindColor(string kind) => kind switch
+    {
+        "Deployment" or "StatefulSet" or "DaemonSet" => "text-primary",
+        "ReplicaSet"                                  => "text-secondary",
+        "Pod"                                         => "text-success",
+        "Service" or "Ingress" or "HTTPRoute"         => "text-info",
+        "Job" or "CronJob"                            => "text-warning",
+        "PersistentVolumeClaim"                       => "text-danger",
+        _                                             => "text-muted",
+    };
+
+    private static int? ParseDesiredReplicas(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return null;
+        int slash = s.IndexOf('/');
+        if (slash < 0) return null;
+        return int.TryParse(s[(slash + 1)..].Split(' ')[0], out int n) ? n : null;
+    }
+}

@@ -1,0 +1,684 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject RedisService RedisService
+@inject TenantService TenantService
+
+@* ===========================================================================
+   Cache Tab — Redis cluster management via OT-Container-Kit Redis Operator.
+   Full lifecycle for RedisCluster CRDs (redis.redis.opstreelabs.in/v1beta2).
+   EntKube generates the auth password, creates the K8s Secret, and applies
+   the RedisCluster manifest. Credentials are surfaced from the tenant vault.
+   =========================================================================== *@
+
+<LoadingPanel Loading="@loading" LoadingText="Loading Redis clusters…">
+@if (!loading)
+{
+    @* ── Operator availability badge ── *@
+    <div class="d-flex gap-2 mb-4 flex-wrap">
+        @if (operatorStatus?.OperatorAvailable == true)
+        {
+            <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2">
+                <i class="bi bi-lightning-charge me-1"></i>Redis Operator
+                @if (operatorStatus.OperatorClusterName is not null)
+                {
+                    <small class="ms-1 opacity-75">on @operatorStatus.OperatorClusterName</small>
+                }
+            </span>
+        }
+        else
+        {
+            <span class="badge bg-secondary-subtle text-secondary border px-3 py-2">
+                <i class="bi bi-lightning-charge me-1"></i>Redis Operator — not installed
+            </span>
+        }
+    </div>
+
+    @* ── Cluster list ── *@
+    <div class="mb-4">
+        <h5 class="d-flex align-items-center gap-2 mb-3">
+            <i class="bi bi-server text-warning"></i>Redis Clusters
+            <span class="badge bg-secondary rounded-pill">@clusters.Count</span>
+            <button class="btn btn-sm btn-secondary ms-auto" @onclick="ShowCreateForm"
+                    disabled="@(showCreateForm || operatorStatus?.OperatorAvailable != true)">
+                <i class="bi bi-plus-lg me-1"></i>Create Cluster
+            </button>
+        </h5>
+
+        @if (showCreateForm)
+        {
+            <div class="card shadow-sm mb-3 border-secondary">
+                <div class="card-header bg-secondary bg-opacity-10 d-flex align-items-center justify-content-between">
+                    <h6 class="mb-0"><i class="bi bi-plus-circle me-2"></i>New Redis Cluster</h6>
+                    <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CancelCreate">
+                        <i class="bi bi-x-lg"></i>
+                    </button>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label small">Cluster Name</label>
+                            <input class="form-control form-control-sm" @bind="createName"
+                                   placeholder="redis-cache" />
+                            <div class="form-text small">DNS-safe, max 63 chars.</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">Kubernetes Cluster</label>
+                            <select class="form-select form-select-sm" @bind="createK8sClusterId">
+                                <option value="@Guid.Empty">Select cluster...</option>
+                                @foreach (KubernetesCluster k in allK8sClusters)
+                                {
+                                    <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">Namespace</label>
+                            <input class="form-control form-control-sm" @bind="createNamespace"
+                                   placeholder="ot-operators" />
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Shards</label>
+                            <input type="number" class="form-control form-control-sm" @bind="createClusterSize"
+                                   min="3" max="9" step="1" />
+                            <div class="form-text small">Min 3 for cluster mode</div>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Redis Version</label>
+                            <input class="form-control form-control-sm" @bind="createRedisVersion"
+                                   placeholder="v7.0.15" />
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Storage / Node</label>
+                            <input class="form-control form-control-sm" @bind="createStorageSize"
+                                   placeholder="1Gi" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Storage Class (optional)</label>
+                            <input class="form-control form-control-sm" @bind="createStorageClass"
+                                   placeholder="default" />
+                        </div>
+                        <div class="col-md-4 d-flex align-items-end">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" @bind="createPersistenceEnabled"
+                                       id="persistenceEnabled" />
+                                <label class="form-check-label small" for="persistenceEnabled">
+                                    Persistence (PVC)
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    @if (createError is not null)
+                    {
+                        <div class="alert alert-danger mt-3 py-2 small">@createError</div>
+                    }
+
+                    <div class="mt-3 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="CreateCluster" disabled="@creating">
+                            @if (creating)
+                            {
+                                <span class="spinner-border spinner-border-sm me-1"></span>
+                            }
+                            Create Cluster
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelCreate">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @foreach (RedisCluster cluster in clusters)
+        {
+            bool expanded = expandedId == cluster.Id;
+
+            <div class="card shadow-sm mb-3">
+                <div class="card-header d-flex align-items-center gap-2 py-2"
+                     style="cursor:pointer" @onclick="() => ToggleCluster(cluster.Id)">
+                    <i class="bi bi-lightning-charge text-warning"></i>
+                    <strong>@cluster.Name</strong>
+                    <small class="text-muted ms-1">@cluster.Namespace · @cluster.KubernetesCluster.Name</small>
+                    <span class="badge @StatusBadgeClass(cluster.Status) ms-1">@cluster.Status</span>
+                    <small class="text-muted ms-auto">@cluster.ClusterSize shards · @cluster.RedisVersion · @cluster.StorageSize/node</small>
+                    <i class="bi @(expanded ? "bi-chevron-up" : "bi-chevron-down") ms-2 text-muted"></i>
+                </div>
+
+                @if (cluster.LastError is not null && cluster.Status == RedisClusterStatus.Failed)
+                {
+                    <div class="alert alert-danger m-2 py-2 small mb-0">@cluster.LastError</div>
+                }
+
+                @if (expanded)
+                {
+                    <div class="card-body pt-2">
+                        <dl class="row small mb-3">
+                            <dt class="col-sm-3">Shards</dt>
+                            <dd class="col-sm-9">@cluster.ClusterSize leaders + @cluster.ClusterSize followers</dd>
+                            <dt class="col-sm-3">Redis Version</dt>
+                            <dd class="col-sm-9">@cluster.RedisVersion</dd>
+                            <dt class="col-sm-3">Persistence</dt>
+                            <dd class="col-sm-9">@(cluster.PersistenceEnabled ? "Enabled (PVC)" : "Disabled")</dd>
+                            <dt class="col-sm-3">Storage / Node</dt>
+                            <dd class="col-sm-9">@cluster.StorageSize</dd>
+                            @if (cluster.StorageClass is not null)
+                            {
+                                <dt class="col-sm-3">Storage Class</dt>
+                                <dd class="col-sm-9"><code>@cluster.StorageClass</code></dd>
+                            }
+                            <dt class="col-sm-3">Created</dt>
+                            <dd class="col-sm-9">@cluster.CreatedAt.ToString("yyyy-MM-dd HH:mm") UTC</dd>
+                        </dl>
+
+                        @* ── Live pod status ── *@
+                        @if (loadingDetail && expandedId == cluster.Id)
+                        {
+                            <div class="d-flex align-items-center gap-2 mb-3 text-muted small">
+                                <span class="spinner-border spinner-border-sm"></span>
+                                Querying Kubernetes...
+                            </div>
+                        }
+                        else if (expandedDetail?.Cluster.Id == cluster.Id)
+                        {
+                            <div class="mb-3">
+                                <div class="d-flex align-items-center gap-2 mb-2">
+                                    <small class="text-muted">Phase:</small>
+                                    <small>@expandedDetail.Phase</small>
+                                    <small class="text-muted ms-2">Leaders ready:</small>
+                                    <small>@expandedDetail.ReadyLeaders / @cluster.ClusterSize</small>
+                                    <small class="text-muted ms-2">Followers ready:</small>
+                                    <small>@expandedDetail.ReadyFollowers / @cluster.ClusterSize</small>
+                                </div>
+                                @if (expandedDetail.Pods.Count > 0)
+                                {
+                                    <table class="table table-sm table-borderless small mb-0">
+                                        <thead class="text-muted">
+                                            <tr>
+                                                <th>Pod</th>
+                                                <th>Role</th>
+                                                <th>Status</th>
+                                                <th>Ready</th>
+                                                <th>Restarts</th>
+                                                <th>Node</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (RedisPodInfo pod in expandedDetail.Pods)
+                                            {
+                                                <tr>
+                                                    <td><code>@pod.Name</code></td>
+                                                    <td>
+                                                        <span class="badge @(pod.Role == "leader" ? "bg-warning text-dark" : "bg-secondary")">
+                                                            @pod.Role
+                                                        </span>
+                                                    </td>
+                                                    <td>@pod.Status</td>
+                                                    <td>
+                                                        @if (pod.Ready)
+                                                        {
+                                                            <i class="bi bi-check-circle-fill text-success"></i>
+                                                        }
+                                                        else
+                                                        {
+                                                            <i class="bi bi-clock text-warning"></i>
+                                                        }
+                                                    </td>
+                                                    <td>@pod.Restarts</td>
+                                                    <td class="text-muted">@(pod.Node ?? "—")</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                                else
+                                {
+                                    <p class="text-muted small">No pods found yet.</p>
+                                }
+                            </div>
+                        }
+
+                        @* ── Credentials panel ── *@
+                        @if (credClusterId == cluster.Id)
+                        {
+                            <div class="card border-secondary mb-3">
+                                <div class="card-header bg-secondary bg-opacity-10 d-flex align-items-center justify-content-between py-2">
+                                    <span class="small fw-semibold"><i class="bi bi-key me-2"></i>Connection Details</span>
+                                    <button class="btn btn-sm btn-outline-secondary border-0"
+                                            @onclick="() => credClusterId = null">
+                                        <i class="bi bi-x-lg"></i>
+                                    </button>
+                                </div>
+                                <div class="card-body">
+                                    @if (loadingCreds)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-2"></span>
+                                        <span class="small text-muted">Loading...</span>
+                                    }
+                                    else if (credError is not null)
+                                    {
+                                        <div class="alert alert-warning py-2 small">@credError</div>
+                                    }
+                                    else
+                                    {
+                                        <div class="row g-2 small">
+                                            <div class="col-md-5">
+                                                <span class="text-muted d-block">Host (leader service)</span>
+                                                <code>@(credHost ?? "—")</code>
+                                            </div>
+                                            <div class="col-md-1">
+                                                <span class="text-muted d-block">Port</span>
+                                                <code>@(credPort ?? "—")</code>
+                                            </div>
+                                            <div class="col-md-5">
+                                                <span class="text-muted d-block">Password</span>
+                                                @if (showCredPassword)
+                                                {
+                                                    <code>@credPassword</code>
+                                                }
+                                                else
+                                                {
+                                                    <code>••••••••</code>
+                                                }
+                                                <button class="btn btn-xs btn-sm btn-link p-0 ms-2"
+                                                        @onclick="() => showCredPassword = !showCredPassword">
+                                                    <i class="bi @(showCredPassword ? "bi-eye-slash" : "bi-eye")"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    }
+                                </div>
+                            </div>
+                        }
+
+                        @* ── App bindings ── *@
+                        <div class="mb-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small">App Bindings</strong>
+                                <button class="btn btn-xs btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                        @onclick="() => ShowAddBinding(cluster.Id)">
+                                    <i class="bi bi-plus-lg me-1"></i>Add
+                                </button>
+                            </div>
+
+                            @if (addBindingClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2">
+                                    <div class="card-body py-2">
+                                        <div class="row g-2">
+                                            <div class="col-md-5">
+                                                <label class="form-label small mb-1">App Deployment</label>
+                                                <select class="form-select form-select-sm" @bind="addBindingDeploymentId">
+                                                    <option value="@Guid.Empty">Select deployment...</option>
+                                                    @foreach (AppDeployment dep in allDeployments)
+                                                    {
+                                                        <option value="@dep.Id">@dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
+                                                    }
+                                                </select>
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Secret Name</label>
+                                                <input class="form-control form-control-sm" @bind="addBindingSecretName"
+                                                       placeholder="redis-cache" />
+                                            </div>
+                                            <div class="col-md-3 d-flex align-items-end gap-1">
+                                                <button class="btn btn-sm btn-primary" @onclick="() => AddBinding(cluster.Id)"
+                                                        disabled="@(addBindingDeploymentId == Guid.Empty || string.IsNullOrWhiteSpace(addBindingSecretName))">
+                                                    Bind
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelAddBinding">Cancel</button>
+                                            </div>
+                                        </div>
+                                        @if (addBindingError is not null)
+                                        {
+                                            <div class="alert alert-danger py-1 small mt-2 mb-0">@addBindingError</div>
+                                        }
+                                    </div>
+                                </div>
+                            }
+
+                            @{
+                                List<CacheBinding> clusterBindings = allBindings.TryGetValue(cluster.Id, out List<CacheBinding>? b) ? b : [];
+                            }
+                            @if (clusterBindings.Count == 0)
+                            {
+                                <p class="text-muted small mb-0">No app bindings yet.</p>
+                            }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>App / Deployment</th><th>Secret</th><th>Last Synced</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (CacheBinding binding in clusterBindings)
+                                        {
+                                            <tr>
+                                                <td>@binding.AppDeployment.App.Name <span class="text-muted">/</span> @binding.AppDeployment.Name</td>
+                                                <td><code>@binding.KubernetesSecretName</code></td>
+                                                <td class="text-muted">@(binding.LastSyncedAt.HasValue ? binding.LastSyncedAt.Value.ToString("yyyy-MM-dd HH:mm") : "Never")</td>
+                                                <td>
+                                                    <button class="btn btn-xs btn-sm btn-outline-danger border-0 py-0"
+                                                            @onclick="() => RemoveBinding(cluster.Id, binding.Id)">
+                                                        <i class="bi bi-trash"></i>
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        <div class="d-flex gap-2 border-top pt-3">
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => ShowCredentials(cluster)">
+                                <i class="bi bi-key me-1"></i>Connection Details
+                            </button>
+
+                            @if (deleteTarget?.Id == cluster.Id)
+                            {
+                                <span class="small text-danger align-self-center ms-auto me-2">
+                                    Delete cluster and all its data?
+                                </span>
+                                <button class="btn btn-sm btn-danger" @onclick="DeleteCluster"
+                                        disabled="@deleting">
+                                    @if (deleting)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                    }
+                                    Confirm Delete
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary"
+                                        @onclick="() => deleteTarget = null">Cancel</button>
+                            }
+                            else
+                            {
+                                <button class="btn btn-sm btn-outline-danger ms-auto"
+                                        @onclick="() => ConfirmDelete(cluster)">
+                                    <i class="bi bi-trash me-1"></i>Delete
+                                </button>
+                            }
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+
+        @if (clusters.Count == 0 && !showCreateForm)
+        {
+            <p class="text-muted">No Redis clusters. Install the Redis Operator from the Components tab, then create a cluster here.</p>
+        }
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    // ── State ──
+    private bool loading = true;
+    private List<RedisCluster> clusters = [];
+    private List<KubernetesCluster> allK8sClusters = [];
+    private RedisOperatorStatus? operatorStatus;
+
+    // ── Create form ──
+    private bool showCreateForm;
+    private string createName = "";
+    private Guid createK8sClusterId;
+    private string createNamespace = "ot-operators";
+    private int createClusterSize = 3;
+    private string createRedisVersion = "v7.0.15";
+    private string createStorageSize = "1Gi";
+    private string? createStorageClass;
+    private bool createPersistenceEnabled = true;
+    private bool creating;
+    private string? createError;
+
+    // ── Expand / detail ──
+    private Guid? expandedId;
+    private RedisClusterDetail? expandedDetail;
+    private bool loadingDetail;
+
+    // ── Delete ──
+    private RedisCluster? deleteTarget;
+    private bool deleting;
+
+    // ── Bindings ──
+    private Dictionary<Guid, List<CacheBinding>> allBindings = [];
+    private List<AppDeployment> allDeployments = [];
+    private Guid? addBindingClusterId;
+    private Guid addBindingDeploymentId;
+    private string addBindingSecretName = "";
+    private string? addBindingError;
+
+    // ── Credentials ──
+    private Guid? credClusterId;
+    private bool loadingCreds;
+    private string? credHost;
+    private string? credPort;
+    private string? credPassword;
+    private bool showCredPassword;
+    private string? credError;
+
+    // ── Init ──
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+
+        Task<List<RedisCluster>> clustersTask = RedisService.GetClustersAsync(TenantId);
+        Task<List<KubernetesCluster>> k8sTask = TenantService.GetClustersAsync(TenantId);
+        Task<RedisOperatorStatus> operatorTask = RedisService.GetOperatorStatusAsync(TenantId);
+        Task<List<AppDeployment>> deploymentsTask = RedisService.GetTenantDeploymentsAsync(TenantId);
+
+        await Task.WhenAll(clustersTask, k8sTask, operatorTask, deploymentsTask);
+
+        clusters = clustersTask.Result;
+        allK8sClusters = k8sTask.Result;
+        operatorStatus = operatorTask.Result;
+        allDeployments = deploymentsTask.Result;
+
+        // Load bindings per cluster.
+        IEnumerable<Task<(Guid, List<CacheBinding>)>> bindingTasks = clusters.Select(async c =>
+            (c.Id, await RedisService.GetCacheBindingsAsync(TenantId, c.Id)));
+
+        (Guid id, List<CacheBinding> bindings)[] bindingResults = await Task.WhenAll(bindingTasks);
+        allBindings = bindingResults.ToDictionary(r => r.id, r => r.bindings);
+
+        loading = false;
+    }
+
+    // ── Create ──
+
+    private void ShowCreateForm() { showCreateForm = true; createError = null; }
+    private void CancelCreate() { showCreateForm = false; createError = null; }
+
+    private async Task CreateCluster()
+    {
+        if (string.IsNullOrWhiteSpace(createName) || createK8sClusterId == Guid.Empty)
+        {
+            createError = "Cluster name and Kubernetes cluster are required.";
+            return;
+        }
+
+        creating = true;
+        createError = null;
+
+        try
+        {
+            await RedisService.CreateClusterAsync(
+                TenantId,
+                createK8sClusterId,
+                createName.Trim(),
+                createNamespace.Trim(),
+                createClusterSize,
+                createRedisVersion.Trim(),
+                createStorageSize.Trim(),
+                string.IsNullOrWhiteSpace(createStorageClass) ? null : createStorageClass.Trim(),
+                createPersistenceEnabled);
+
+            showCreateForm = false;
+            createName = "";
+            createNamespace = "ot-operators";
+            createClusterSize = 3;
+            createRedisVersion = "v7";
+            createStorageSize = "1Gi";
+            createStorageClass = null;
+
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            createError = ex.Message;
+        }
+        finally
+        {
+            creating = false;
+        }
+    }
+
+    // ── Expand / detail ──
+
+    private async Task ToggleCluster(Guid id)
+    {
+        if (expandedId == id)
+        {
+            expandedId = null;
+            expandedDetail = null;
+            return;
+        }
+
+        expandedId = id;
+        expandedDetail = null;
+        loadingDetail = true;
+        StateHasChanged();
+
+        expandedDetail = await RedisService.GetClusterDetailAsync(TenantId, id);
+        loadingDetail = false;
+    }
+
+    // ── Delete ──
+
+    private void ConfirmDelete(RedisCluster cluster)
+    {
+        deleteTarget = cluster;
+        credClusterId = null;
+    }
+
+    private async Task DeleteCluster()
+    {
+        if (deleteTarget is null) return;
+
+        deleting = true;
+
+        try
+        {
+            await RedisService.DeleteClusterAsync(TenantId, deleteTarget.Id);
+            deleteTarget = null;
+            expandedId = null;
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            deleteTarget.LastError = ex.Message;
+        }
+        finally
+        {
+            deleting = false;
+        }
+    }
+
+    // ── Bindings ──
+
+    private void ShowAddBinding(Guid clusterId)
+    {
+        addBindingClusterId = clusterId;
+        addBindingDeploymentId = Guid.Empty;
+        addBindingSecretName = "redis-cache";
+        addBindingError = null;
+    }
+
+    private void CancelAddBinding()
+    {
+        addBindingClusterId = null;
+        addBindingError = null;
+    }
+
+    private async Task AddBinding(Guid clusterId)
+    {
+        addBindingError = null;
+
+        try
+        {
+            await RedisService.CreateCacheBindingAsync(
+                TenantId, clusterId, addBindingDeploymentId, addBindingSecretName.Trim());
+
+            addBindingClusterId = null;
+            addBindingSecretName = "";
+            allBindings[clusterId] = await RedisService.GetCacheBindingsAsync(TenantId, clusterId);
+        }
+        catch (Exception ex)
+        {
+            addBindingError = ex.Message;
+        }
+    }
+
+    private async Task RemoveBinding(Guid clusterId, Guid bindingId)
+    {
+        try
+        {
+            await RedisService.DeleteCacheBindingAsync(TenantId, bindingId);
+            allBindings[clusterId] = await RedisService.GetCacheBindingsAsync(TenantId, clusterId);
+        }
+        catch { }
+    }
+
+    // ── Credentials ──
+
+    private async Task ShowCredentials(RedisCluster cluster)
+    {
+        if (credClusterId == cluster.Id)
+        {
+            credClusterId = null;
+            return;
+        }
+
+        credClusterId = cluster.Id;
+        loadingCreds = true;
+        credError = null;
+        credHost = null;
+        credPort = null;
+        credPassword = null;
+        showCredPassword = false;
+
+        try
+        {
+            (string? password, string? host, string? port) =
+                await RedisService.GetCredentialsAsync(TenantId, cluster.Id);
+
+            credPassword = password;
+            credHost = host;
+            credPort = port;
+
+            if (credPassword is null)
+                credError = "No credentials found in vault.";
+        }
+        catch (Exception ex)
+        {
+            credError = ex.Message;
+        }
+        finally
+        {
+            loadingCreds = false;
+        }
+    }
+
+    // ── Helpers ──
+
+    private static string StatusBadgeClass(RedisClusterStatus status) => status switch
+    {
+        RedisClusterStatus.Running => "badge bg-success",
+        RedisClusterStatus.Creating => "badge bg-info text-dark",
+        RedisClusterStatus.Failed => "badge bg-danger",
+        RedisClusterStatus.Deleting => "badge bg-secondary",
+        _ => "badge bg-secondary"
+    };
+}

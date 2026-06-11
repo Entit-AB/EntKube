@@ -1,0 +1,169 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject TenantService TenantService
+@inject VaultService VaultService
+
+<h4>Kubernetes Clusters</h4>
+<p class="text-muted">Clusters registered in this tenant, each assigned to an environment.</p>
+
+@if (environments is not null && environments.Count > 0)
+{
+    <div class="row g-2 mb-3" style="max-width: 700px;">
+        <div class="col">
+            <input type="text" class="form-control" placeholder="Cluster name" @bind="newName" @bind:event="oninput" />
+        </div>
+        <div class="col">
+            <input type="text" class="form-control" placeholder="API server URL" @bind="newApiUrl" @bind:event="oninput" />
+        </div>
+        <div class="col-auto">
+            <select class="form-select" @bind="selectedEnvironmentId">
+                <option value="">Environment...</option>
+                @foreach (Data.Environment env in environments)
+                {
+                    <option value="@env.Id">@env.Name</option>
+                }
+            </select>
+        </div>
+        <div class="col-auto">
+            <button class="btn btn-primary" @onclick="Create"
+                    disabled="@(string.IsNullOrWhiteSpace(newName) || string.IsNullOrWhiteSpace(newApiUrl) || selectedEnvironmentId == Guid.Empty)">
+                Add
+            </button>
+        </div>
+    </div>
+}
+else
+{
+    <div class="alert alert-info">Create at least one environment before adding clusters.</div>
+}
+
+@if (!string.IsNullOrEmpty(errorMessage))
+{
+    <div class="text-danger mb-2">@errorMessage</div>
+}
+
+@if (clusters is null)
+{
+    <p><em>Loading...</em></p>
+}
+else if (clusters.Count == 0)
+{
+    <p class="text-muted">No clusters registered yet.</p>
+}
+else
+{
+    <table class="table table-sm table-hover">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Environment</th>
+                <th>API Server</th>
+                <th style="width: 280px;"></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (KubernetesCluster cluster in clusters)
+            {
+                <tr>
+                    <td>@cluster.Name</td>
+                    <td><span class="badge bg-secondary">@cluster.Environment.Name</span></td>
+                    <td class="text-truncate" style="max-width: 300px;">@cluster.ApiServerUrl</td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-success me-1" @onclick="() => ToggleHealth(cluster.Id)">
+                            <i class="bi bi-heart-pulse"></i> Health
+                        </button>
+                        <button class="btn btn-sm btn-outline-primary me-1" @onclick="() => ToggleComponents(cluster.Id)">
+                            Components
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" @onclick="() => Delete(cluster.Id)">Delete</button>
+                    </td>
+                </tr>
+
+                @if (expandedClusterId == cluster.Id)
+                {
+                    <tr>
+                        <td colspan="4">
+                            <ComponentPanel ClusterId="cluster.Id" TenantId="TenantId" OnClose="() => expandedClusterId = null" />
+                        </td>
+                    </tr>
+                }
+
+                @if (healthClusterId == cluster.Id)
+                {
+                    <tr>
+                        <td colspan="4">
+                            <ClusterHealthPanel ClusterId="cluster.Id" OnClose="() => healthClusterId = null" />
+                        </td>
+                    </tr>
+                }
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private List<KubernetesCluster>? clusters;
+    private List<Data.Environment>? environments;
+    private string newName = "";
+    private string newApiUrl = "";
+    private Guid selectedEnvironmentId;
+    private string? errorMessage;
+    private Guid? expandedClusterId;
+    private Guid? healthClusterId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+        environments = await TenantService.GetEnvironmentsAsync(TenantId);
+    }
+
+    private async Task Load()
+    {
+        clusters = await TenantService.GetClustersAsync(TenantId);
+    }
+
+    private async Task Create()
+    {
+        errorMessage = null;
+
+        try
+        {
+            await TenantService.CreateClusterAsync(TenantId, selectedEnvironmentId, newName.Trim(), newApiUrl.Trim());
+            newName = "";
+            newApiUrl = "";
+            selectedEnvironmentId = Guid.Empty;
+            await Load();
+        }
+        catch (DbUpdateException)
+        {
+            errorMessage = "A cluster with that name already exists in this tenant.";
+        }
+    }
+
+    private void ToggleComponents(Guid clusterId)
+    {
+        expandedClusterId = expandedClusterId == clusterId ? null : clusterId;
+        if (expandedClusterId is not null)
+        {
+            healthClusterId = null;
+        }
+    }
+
+    private void ToggleHealth(Guid clusterId)
+    {
+        healthClusterId = healthClusterId == clusterId ? null : clusterId;
+        if (healthClusterId is not null)
+        {
+            expandedClusterId = null;
+        }
+    }
+
+    private async Task Delete(Guid id)
+    {
+        await TenantService.DeleteClusterAsync(id);
+        await Load();
+    }
+}

@@ -1,0 +1,434 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.EntityFrameworkCore
+@inject TenantService TenantService
+@inject VaultService VaultService
+
+@* ===========================================================================
+   Three-level drill-down:  Environments ▸ Clusters ▸ Cluster Detail
+   The user sees ONE level at a time — no nested accordion clutter.
+   =========================================================================== *@
+
+@if (selectedCluster is not null)
+{
+    @* ───────────── Level 3: Cluster Detail ───────────── *@
+    <ClusterDetail Cluster="selectedCluster"
+                   TenantId="TenantId"
+                   OnBack="BackToClusters"
+                   OnDeleted="() => ClusterDeleted()" />
+}
+else if (selectedEnv is not null)
+{
+    @* ───────────── Level 2: Clusters in an environment ───────────── *@
+
+    @* Breadcrumb back to environments *@
+    <nav class="mb-3">
+        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="BackToEnvironments">
+            <i class="bi bi-arrow-left me-1"></i>All Environments
+        </button>
+    </nav>
+
+    <div class="d-flex align-items-center mb-3">
+        <i class="bi bi-box fs-4 me-2 text-primary"></i>
+        <div>
+            <h4 class="mb-0">@selectedEnv.Name</h4>
+            <small class="text-muted">Clusters registered in this environment</small>
+        </div>
+    </div>
+
+    @* --- Add Cluster (kubeconfig) --- *@
+    @if (showAddCluster)
+    {
+        <div class="card shadow-sm mb-4">
+            <div class="card-header bg-white d-flex align-items-center justify-content-between py-2">
+                <span><i class="bi bi-plus-circle me-2 text-success"></i><strong>Register a Cluster</strong></span>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => { showAddCluster = false; ResetClusterForm(); }">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+            <div class="card-body">
+                @if (parsedContexts is null || parsedContexts.Count == 0)
+                {
+                    <p class="text-muted small mb-2">Paste your kubeconfig YAML or upload a file to auto-detect clusters and API server URLs.</p>
+
+                    <YamlEditor @bind-Value="kubeconfigInput" />
+
+                    <div class="d-flex align-items-center gap-2">
+                        <label class="btn btn-sm btn-outline-secondary mb-0">
+                            <i class="bi bi-upload me-1"></i>Upload file
+                            <InputFile OnChange="HandleFileUpload" class="d-none" accept=".yaml,.yml,.conf,.config" />
+                        </label>
+                        <button class="btn btn-sm btn-primary"
+                                @onclick="ParseKubeconfig"
+                                disabled="@string.IsNullOrWhiteSpace(kubeconfigInput)">
+                            <i class="bi bi-search me-1"></i>Parse Contexts
+                        </button>
+                    </div>
+                }
+                else
+                {
+                    <p class="text-muted small mb-2">Found @parsedContexts.Count context(s). Select one to register:</p>
+
+                    <div class="list-group mb-3">
+                        @foreach (KubeconfigContext ctx in parsedContexts)
+                        {
+                            <label class="list-group-item list-group-item-action d-flex align-items-center gap-2 py-2 @(selectedContext == ctx.Name ? "active" : "")">
+                                <input class="form-check-input mt-0" type="radio" name="contextSelect"
+                                       checked="@(selectedContext == ctx.Name)"
+                                       @onchange="() => SelectContext(ctx)" />
+                                <div class="flex-grow-1">
+                                    <span class="fw-medium @(selectedContext == ctx.Name ? "text-white" : "")">@ctx.Name</span>
+                                    <br />
+                                    <small class="@(selectedContext == ctx.Name ? "text-white-50" : "text-muted")">@ctx.ClusterServer</small>
+                                </div>
+                                @if (ctx.IsCurrent)
+                                {
+                                    <span class="badge @(selectedContext == ctx.Name ? "bg-white text-primary" : "bg-info")">current</span>
+                                }
+                            </label>
+                        }
+                    </div>
+
+                    <div class="row g-2 align-items-end">
+                        <div class="col" style="min-width: 200px; max-width: 300px;">
+                            <label class="form-label small mb-1">Cluster display name</label>
+                            <input type="text" class="form-control form-control-sm"
+                                   placeholder="e.g. production-eu-west"
+                                   @bind="newClusterName" @bind:event="oninput" />
+                        </div>
+                        <div class="col-auto">
+                            <button class="btn btn-sm btn-success" @onclick="CreateCluster"
+                                    disabled="@(string.IsNullOrWhiteSpace(newClusterName) || string.IsNullOrWhiteSpace(selectedContext))">
+                                <i class="bi bi-check-lg me-1"></i>Register
+                            </button>
+                        </div>
+                    </div>
+                }
+
+                @if (!string.IsNullOrEmpty(clusterError))
+                {
+                    <div class="alert alert-danger mt-2 mb-0 py-1 small">
+                        <i class="bi bi-exclamation-triangle me-1"></i>@clusterError
+                    </div>
+                }
+            </div>
+        </div>
+    }
+    else
+    {
+        <button class="btn btn-primary btn-sm mb-3" @onclick="() => showAddCluster = true">
+            <i class="bi bi-plus-lg me-1"></i>Register Cluster
+        </button>
+    }
+
+    @* --- Cluster Cards --- *@
+    <LoadingPanel Loading="@(envClusters is null)">
+    @if (envClusters is not null && envClusters.Count == 0)
+    {
+        <EmptyState Icon="bi-hdd-rack"
+                    Title="No clusters yet"
+                    Message="Register a cluster above to start deploying." />
+    }
+    else if (envClusters is not null)
+    {
+        <div class="row row-cols-1 row-cols-md-2 g-3">
+            @foreach (KubernetesCluster cluster in envClusters)
+            {
+                <div class="col">
+                    <div class="card shadow-sm h-100 cluster-card" role="button" @onclick="() => OpenCluster(cluster)" style="cursor: pointer;">
+                        <div class="card-body py-3">
+                            <div class="d-flex align-items-start">
+                                <i class="bi bi-hdd-rack fs-4 me-3 text-primary"></i>
+                                <div class="flex-grow-1 min-width-0">
+                                    <h6 class="fw-semibold mb-1">@cluster.Name</h6>
+                                    @if (!string.IsNullOrEmpty(cluster.ContextName))
+                                    {
+                                        <div class="mb-1">
+                                            <small class="text-muted"><i class="bi bi-terminal me-1"></i><code>@cluster.ContextName</code></small>
+                                        </div>
+                                    }
+                                    <small class="text-muted text-truncate d-block" style="max-width: 280px;">
+                                        <i class="bi bi-globe me-1"></i>@cluster.ApiServerUrl
+                                    </small>
+                                </div>
+                                <i class="bi bi-chevron-right text-muted"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+    </LoadingPanel>
+}
+else
+{
+    @* ───────────── Level 1: Environment list ───────────── *@
+
+    <div class="d-flex align-items-center mb-2">
+        <i class="bi bi-layers fs-4 me-2 text-primary"></i>
+        <h4 class="mb-0">Environments</h4>
+    </div>
+    <p class="text-muted small mb-3">Deployment stages for this tenant. Click an environment to manage its clusters.</p>
+
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-body py-2">
+            <div class="input-group">
+                <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-plus-circle"></i></span>
+                <input type="text" class="form-control border-start-0" placeholder="New environment name (e.g. Production)"
+                       @bind="newName" @bind:event="oninput"
+                       @onkeydown="@(async (e) => { if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(newName)) await Create(); })" />
+                <button class="btn btn-primary" @onclick="Create" disabled="@string.IsNullOrWhiteSpace(newName)">
+                    <i class="bi bi-plus-lg me-1"></i>Add
+                </button>
+            </div>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(errorMessage))
+    {
+        <div class="alert alert-danger alert-dismissible fade show py-2" role="alert">
+            <i class="bi bi-exclamation-triangle me-1"></i>@errorMessage
+            <button type="button" class="btn-close btn-close-sm" @onclick="() => errorMessage = null"></button>
+        </div>
+    }
+
+    <LoadingPanel Loading="@(environments is null)">
+    @if (environments is not null && environments.Count == 0)
+    {
+        <EmptyState Icon="bi-layers"
+                    Title="No environments yet"
+                    Message="Create one above to get started." />
+    }
+    else if (environments is not null)
+    {
+        <div class="list-group shadow-sm">
+            @foreach (Data.Environment env in environments)
+            {
+                <div class="list-group-item p-0">
+                    @if (confirmDeleteEnvId == env.Id)
+                    {
+                        <div class="d-flex align-items-center justify-content-between px-3 py-2 bg-danger bg-opacity-10">
+                            <span class="text-danger small"><i class="bi bi-exclamation-triangle me-1"></i>Delete <strong>@env.Name</strong> and all its clusters?</span>
+                            <div>
+                                <button class="btn btn-sm btn-danger me-1" @onclick="() => Delete(env.Id)">Yes, delete</button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDeleteEnvId = null">Cancel</button>
+                            </div>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="d-flex align-items-center px-3 py-2">
+                            <div class="flex-grow-1 d-flex align-items-center" role="button" @onclick="() => OpenEnvironment(env)" style="cursor: pointer;">
+                                <i class="bi bi-box me-2 text-primary"></i>
+                                <div>
+                                    <span class="fw-semibold">@env.Name</span>
+                                    <br />
+                                    <small class="text-muted">@(clusterCounts.GetValueOrDefault(env.Id, 0)) cluster(s)</small>
+                                </div>
+                            </div>
+                            <div class="d-flex align-items-center gap-1">
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteEnvId = env.Id"
+                                        @onclick:stopPropagation="true" title="Delete environment">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                                <i class="bi bi-chevron-right text-muted ms-2"></i>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    }
+    </LoadingPanel>
+}
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    // --- Level 1: Environment list ---
+    private List<Data.Environment>? environments;
+    private Dictionary<Guid, int> clusterCounts = new();
+    private string newName = "";
+    private string? errorMessage;
+    private Guid? confirmDeleteEnvId;
+
+    // --- Level 2: Selected environment → clusters ---
+    private Data.Environment? selectedEnv;
+    private List<KubernetesCluster>? envClusters;
+    private bool showAddCluster;
+
+    // --- Level 3: Selected cluster → detail ---
+    private KubernetesCluster? selectedCluster;
+
+    // --- Kubeconfig parsing ---
+    private string kubeconfigInput = "";
+    private List<KubeconfigContext>? parsedContexts;
+    private string? selectedContext;
+    private string? selectedServerUrl;
+    private string newClusterName = "";
+    private string? clusterError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadEnvironments();
+    }
+
+    // ──────────────── Level 1 ────────────────
+
+    private async Task LoadEnvironments()
+    {
+        environments = await TenantService.GetEnvironmentsAsync(TenantId);
+
+        // Pre-load cluster counts so the list shows "N cluster(s)" without expanding.
+        List<KubernetesCluster> allClusters = await TenantService.GetClustersAsync(TenantId);
+        clusterCounts = allClusters.GroupBy(c => c.EnvironmentId).ToDictionary(g => g.Key, g => g.Count());
+    }
+
+    private async Task Create()
+    {
+        errorMessage = null;
+
+        try
+        {
+            await TenantService.CreateEnvironmentAsync(TenantId, newName.Trim());
+            newName = "";
+            await LoadEnvironments();
+        }
+        catch (DbUpdateException)
+        {
+            errorMessage = "An environment with that name already exists.";
+        }
+    }
+
+    private async Task Delete(Guid id)
+    {
+        confirmDeleteEnvId = null;
+        await TenantService.DeleteEnvironmentAsync(id);
+        await LoadEnvironments();
+    }
+
+    private async Task OpenEnvironment(Data.Environment env)
+    {
+        selectedEnv = env;
+        selectedCluster = null;
+        showAddCluster = false;
+        ResetClusterForm();
+        await LoadClusters();
+    }
+
+    private async Task BackToEnvironments()
+    {
+        selectedEnv = null;
+        selectedCluster = null;
+        envClusters = null;
+        await LoadEnvironments();
+    }
+
+    // ──────────────── Level 2 ────────────────
+
+    private async Task LoadClusters()
+    {
+        List<KubernetesCluster> allClusters = await TenantService.GetClustersAsync(TenantId);
+        envClusters = allClusters.Where(c => c.EnvironmentId == selectedEnv!.Id).ToList();
+    }
+
+    private void OpenCluster(KubernetesCluster cluster)
+    {
+        selectedCluster = cluster;
+    }
+
+    private async Task BackToClusters()
+    {
+        selectedCluster = null;
+        await LoadClusters();
+    }
+
+    private async Task ClusterDeleted()
+    {
+        selectedCluster = null;
+        await LoadClusters();
+    }
+
+    // --- Kubeconfig ---
+
+    private void ParseKubeconfig()
+    {
+        clusterError = null;
+        parsedContexts = KubeconfigParser.ParseContexts(kubeconfigInput);
+
+        if (parsedContexts.Count == 0)
+        {
+            clusterError = "No valid contexts found in the kubeconfig. Check the YAML format.";
+            return;
+        }
+
+        KubeconfigContext? defaultCtx = parsedContexts.FirstOrDefault(c => c.IsCurrent)
+            ?? parsedContexts.First();
+
+        SelectContext(defaultCtx);
+    }
+
+    private async Task HandleFileUpload(InputFileChangeEventArgs e)
+    {
+        IBrowserFile file = e.File;
+
+        if (file.Size > 1_048_576)
+        {
+            clusterError = "File too large. Kubeconfig files should be under 1 MB.";
+            return;
+        }
+
+        using StreamReader reader = new(file.OpenReadStream(maxAllowedSize: 1_048_576));
+        kubeconfigInput = await reader.ReadToEndAsync();
+        ParseKubeconfig();
+    }
+
+    private void SelectContext(KubeconfigContext ctx)
+    {
+        selectedContext = ctx.Name;
+        selectedServerUrl = ctx.ClusterServer;
+
+        if (string.IsNullOrWhiteSpace(newClusterName))
+        {
+            newClusterName = ctx.Name;
+        }
+    }
+
+    private void ResetClusterForm()
+    {
+        kubeconfigInput = "";
+        parsedContexts = null;
+        selectedContext = null;
+        selectedServerUrl = null;
+        newClusterName = "";
+        clusterError = null;
+    }
+
+    private async Task CreateCluster()
+    {
+        clusterError = null;
+
+        if (string.IsNullOrWhiteSpace(selectedServerUrl))
+        {
+            clusterError = "No context selected.";
+            return;
+        }
+
+        try
+        {
+            await TenantService.CreateClusterAsync(
+                TenantId, selectedEnv!.Id, newClusterName.Trim(), selectedServerUrl,
+                contextName: selectedContext, kubeconfig: kubeconfigInput);
+
+            showAddCluster = false;
+            ResetClusterForm();
+            await LoadClusters();
+        }
+        catch (DbUpdateException)
+        {
+            clusterError = "A cluster with that name already exists.";
+        }
+    }
+}

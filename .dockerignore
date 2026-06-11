@@ -1,0 +1,19 @@
+**/.dockerignore
+**/.git
+**/.gitignore
+**/.vs
+**/.vscode
+**/bin
+**/obj
+**/out
+**/node_modules
+**/Charts
+**/*.user
+**/*.dbmdl
+**/*.jfm
+**/*.db
+**/secrets.dev.yaml
+**/values.dev.yaml
+**/Tiltfile
+tests
+CMKS - Infra

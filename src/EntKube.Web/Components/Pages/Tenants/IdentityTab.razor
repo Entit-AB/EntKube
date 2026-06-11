@@ -1,0 +1,2440 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject KeycloakService KeycloakService
+@inject StorageService StorageService
+@inject ComponentLifecycleService LifecycleService
+@inject RegisteredPostgresService RegisteredPostgresService
+
+<LoadingPanel Loading="@loading" LoadingText="Scanning for Keycloak instances…">
+@if (selectedRealm is not null && selectedKeycloak is not null)
+{
+    @* ── Level 3: Realm detail ── *@
+    <nav class="mb-3">
+        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="BackToRealms">
+            <i class="bi bi-arrow-left me-1"></i>Back to Realms
+        </button>
+    </nav>
+
+    <div class="d-flex align-items-center justify-content-between mb-3">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-shield-lock fs-4 text-primary"></i>
+            <div>
+                <h5 class="mb-0">@selectedRealm.DisplayName</h5>
+                <small class="text-muted font-monospace">@selectedRealm.RealmName</small>
+            </div>
+        </div>
+        @if (selectedRealm.LinkedApp is not null)
+        {
+            <span class="badge bg-primary-subtle text-primary border border-primary-subtle small">
+                <i class="bi bi-link-45deg me-1"></i>@selectedRealm.LinkedApp.Customer.Name / @selectedRealm.LinkedApp.Name
+            </span>
+        }
+    </div>
+
+    <ul class="nav nav-tabs mb-3 flex-wrap">
+        @foreach (string tab in new[] { "users", "idp", "groups", "orgs", "themes", "backup", "portal" })
+        {
+            string label = tab switch
+            {
+                "users" => "Users",
+                "idp" => "Identity Providers",
+                "groups" => "Groups",
+                "orgs" => "Organizations",
+                "themes" => "Themes",
+                "backup" => "Backup & Restore",
+                "portal" => "Customer Portal",
+                _ => tab
+            };
+            <li class="nav-item">
+                <button class="nav-link @(realmTab == tab ? "active" : "")"
+                        @onclick="() => SwitchRealmTab(tab)">@label</button>
+            </li>
+        }
+    </ul>
+
+    @* ── Users ── *@
+    @if (realmTab == "users")
+    {
+        @if (loadingUsers)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else
+        {
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="text-muted small">@(users?.Count ?? 0) users</span>
+                <button class="btn btn-sm btn-primary" @onclick="() => showAddUser = !showAddUser">
+                    <i class="bi bi-person-plus me-1"></i>Add User
+                </button>
+            </div>
+
+            @if (showAddUser)
+            {
+                <div class="card mb-3 border-primary-subtle">
+                    <div class="card-body">
+                        @if (userError is not null)
+                        {
+                            <div class="alert alert-danger py-2 small">@userError</div>
+                        }
+                        <div class="row g-2">
+                            <div class="col-md-4">
+                                <input class="form-control form-control-sm" placeholder="Username" @bind="newUserUsername" />
+                            </div>
+                            <div class="col-md-4">
+                                <input class="form-control form-control-sm" placeholder="Email" @bind="newUserEmail" />
+                            </div>
+                            <div class="col-md-2">
+                                <input class="form-control form-control-sm" placeholder="First name" @bind="newUserFirstName" />
+                            </div>
+                            <div class="col-md-2">
+                                <input class="form-control form-control-sm" placeholder="Last name" @bind="newUserLastName" />
+                            </div>
+                            <div class="col-md-4">
+                                <input type="password" class="form-control form-control-sm" placeholder="Password (optional)" @bind="newUserPassword" />
+                            </div>
+                        </div>
+                        <div class="mt-2 d-flex gap-2">
+                            <button class="btn btn-sm btn-primary" @onclick="AddUser" disabled="@savingUser">
+                                @if (savingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddUser = false">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @if (users is not null)
+            {
+                <div class="list-group">
+                    @foreach (KeycloakUserInfo user in users)
+                    {
+                        <div class="list-group-item py-2">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <strong>@user.Username</strong>
+                                    <span class="text-muted small ms-2">@user.Email</span>
+                                    @if (!user.Enabled)
+                                    {
+                                        <span class="badge bg-secondary-subtle text-secondary ms-1 small">Disabled</span>
+                                    }
+                                    @if (!user.EmailVerified)
+                                    {
+                                        <span class="badge bg-warning-subtle text-warning ms-1 small">Unverified</span>
+                                    }
+                                    @if (user.Attributes.Count > 0)
+                                    {
+                                        <div class="mt-1 d-flex flex-wrap gap-1">
+                                            @foreach (KeyValuePair<string, List<string>> attr in user.Attributes)
+                                            {
+                                                <span class="badge bg-light text-secondary border font-monospace"
+                                                      style="font-size:0.7rem">
+                                                    @attr.Key: @string.Join(", ", attr.Value)
+                                                </span>
+                                            }
+                                        </div>
+                                    }
+                                </div>
+                                <button class="btn btn-sm btn-outline-danger border-0 ms-2"
+                                        @onclick="() => DeleteUser(user.Id)">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        }
+    }
+
+    @* ── Identity Providers ── *@
+    @if (realmTab == "idp")
+    {
+        @if (loadingIdps)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else
+        {
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="text-muted small">@(idps?.Count ?? 0) providers</span>
+                <button class="btn btn-sm btn-primary" @onclick="() => showAddIdp = !showAddIdp">
+                    <i class="bi bi-plus-circle me-1"></i>Add Provider
+                </button>
+            </div>
+
+            @if (showAddIdp)
+            {
+                <div class="card mb-3 border-primary-subtle">
+                    <div class="card-body">
+                        @if (idpError is not null)
+                        {
+                            <div class="alert alert-danger py-2 small">@idpError</div>
+                        }
+                        <div class="row g-2">
+                            <div class="col-md-3">
+                                <input class="form-control form-control-sm" placeholder="Alias (e.g. google)" @bind="newIdpAlias" />
+                            </div>
+                            <div class="col-md-3">
+                                <select class="form-select form-select-sm" @bind="newIdpProviderId">
+                                    <option value="oidc">OpenID Connect</option>
+                                    <option value="saml">SAML</option>
+                                    <option value="google">Google</option>
+                                    <option value="github">GitHub</option>
+                                    <option value="microsoft">Microsoft</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3">
+                                <input class="form-control form-control-sm" placeholder="Client ID" @bind="newIdpClientId" />
+                            </div>
+                            <div class="col-md-3">
+                                <input type="password" class="form-control form-control-sm" placeholder="Client Secret" @bind="newIdpClientSecret" />
+                            </div>
+                        </div>
+                        <div class="mt-2 d-flex gap-2">
+                            <button class="btn btn-sm btn-primary" @onclick="AddIdp" disabled="@savingIdp">
+                                @if (savingIdp) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Add
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddIdp = false">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @if (idps is not null)
+            {
+                <div class="list-group">
+                    @foreach (KeycloakIdpInfo idp in idps)
+                    {
+                        <div class="list-group-item d-flex justify-content-between align-items-center py-2">
+                            <div>
+                                <i class="bi bi-box-arrow-in-right me-2 text-muted"></i>
+                                <strong>@idp.Alias</strong>
+                                <span class="badge bg-secondary-subtle text-secondary ms-2 small">@idp.ProviderId</span>
+                                @if (!idp.Enabled)
+                                {
+                                    <span class="badge bg-secondary-subtle text-secondary ms-1 small">Disabled</span>
+                                }
+                            </div>
+                            <button class="btn btn-sm btn-outline-danger border-0"
+                                    @onclick="() => DeleteIdp(idp.Alias)">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    }
+                </div>
+            }
+        }
+    }
+
+    @* ── Groups ── *@
+    @if (realmTab == "groups")
+    {
+        @if (loadingGroups)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else
+        {
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="text-muted small">@(groups?.Count ?? 0) groups</span>
+                <button class="btn btn-sm btn-primary" @onclick="() => showAddGroup = !showAddGroup">
+                    <i class="bi bi-people me-1"></i>Add Group
+                </button>
+            </div>
+
+            @if (showAddGroup)
+            {
+                <div class="d-flex gap-2 mb-3">
+                    <input class="form-control form-control-sm" placeholder="Group name" @bind="newGroupName" />
+                    <button class="btn btn-sm btn-primary" @onclick="AddGroup" disabled="@savingGroup">
+                        @if (savingGroup) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Create
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddGroup = false">Cancel</button>
+                </div>
+                @if (groupError is not null)
+                {
+                    <div class="alert alert-danger py-2 small mb-3">@groupError</div>
+                }
+            }
+
+            @if (groups is not null)
+            {
+                <div class="list-group">
+                    @foreach (KeycloakGroupInfo g in groups)
+                    {
+                        <div class="list-group-item d-flex justify-content-between align-items-center py-2">
+                            <span><i class="bi bi-people me-2 text-muted"></i>@g.Name <span class="text-muted small">@g.Path</span></span>
+                            <button class="btn btn-sm btn-outline-danger border-0"
+                                    @onclick="() => DeleteGroup(g.Id)">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    }
+                </div>
+            }
+        }
+    }
+
+    @* ── Organizations ── *@
+    @if (realmTab == "orgs")
+    {
+        @if (loadingOrgs)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else
+        {
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="text-muted small">@(orgs?.Count ?? 0) organizations (Keycloak 26+)</span>
+                <button class="btn btn-sm btn-primary" @onclick="() => showAddOrg = !showAddOrg">
+                    <i class="bi bi-building me-1"></i>Add Organization
+                </button>
+            </div>
+
+            @if (showAddOrg)
+            {
+                <div class="card mb-3 border-primary-subtle">
+                    <div class="card-body">
+                        @if (orgError is not null)
+                        {
+                            <div class="alert alert-danger py-2 small">@orgError</div>
+                        }
+                        <div class="row g-2">
+                            <div class="col-md-4">
+                                <input class="form-control form-control-sm" placeholder="Name" @bind="newOrgName" />
+                            </div>
+                            <div class="col-md-8">
+                                <input class="form-control form-control-sm" placeholder="Description (optional)" @bind="newOrgDescription" />
+                            </div>
+                        </div>
+                        <div class="mt-2 d-flex gap-2">
+                            <button class="btn btn-sm btn-primary" @onclick="AddOrg" disabled="@savingOrg">
+                                @if (savingOrg) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddOrg = false">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @if (orgs is not null)
+            {
+                <div class="list-group">
+                    @foreach (KeycloakOrganizationInfo org in orgs)
+                    {
+                        <div class="list-group-item py-2">
+                            <strong>@org.Name</strong>
+                            @if (!string.IsNullOrWhiteSpace(org.Description))
+                            {
+                                <span class="text-muted small ms-2">@org.Description</span>
+                            }
+                            @if (!org.Enabled)
+                            {
+                                <span class="badge bg-secondary-subtle text-secondary ms-1 small">Disabled</span>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+        }
+    }
+
+    @* ── Themes ── *@
+    @if (realmTab == "themes")
+    {
+        @if (realmDetails is null)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else
+        {
+            @if (realmThemeError is not null)
+            {
+                <div class="alert alert-danger py-2 small mb-3">@realmThemeError</div>
+            }
+
+            @* ── Named theme section ── *@
+            @if (namedThemes.Count > 0)
+            {
+                <div class="mb-4" style="max-width:480px">
+                    <label class="form-label small fw-semibold">EntKube Theme</label>
+                    <div class="form-text mb-2">
+                        Applies a named theme bundle — sets the Keycloak login/account provider automatically.
+                    </div>
+                    <div class="d-flex gap-2 align-items-center">
+                        <select class="form-select form-select-sm"
+                                @bind="editRealmNamedThemeId">
+                            <option value="">— none —</option>
+                            @foreach (KeycloakTheme nt in namedThemes)
+                            {
+                                <option value="@nt.Id">@nt.Name
+                                    @if (!string.IsNullOrEmpty(nt.LoginTheme) || !string.IsNullOrEmpty(nt.AccountTheme))
+                                    {
+                                        <text> (@(nt.LoginTheme ?? "default") / @(nt.AccountTheme ?? "default"))</text>
+                                    }
+                                </option>
+                            }
+                        </select>
+                        <button class="btn btn-sm btn-primary" @onclick="ApplyNamedThemeToRealm"
+                                disabled="@applyingNamedTheme">
+                            @if (applyingNamedTheme) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Apply
+                        </button>
+                    </div>
+                    @if (selectedRealm?.KeycloakThemeId is not null)
+                    {
+                        KeycloakTheme? applied = namedThemes.FirstOrDefault(t => t.Id == selectedRealm.KeycloakThemeId);
+                        @if (applied is not null)
+                        {
+                            <div class="form-text mt-1">
+                                <i class="bi bi-check-circle text-success me-1"></i>Applied: <strong>@applied.Name</strong>
+                                @if (!string.IsNullOrEmpty(applied.LoginTheme))
+                                {
+                                    <span class="ms-1 badge bg-secondary-subtle text-secondary border small">login: @applied.LoginTheme</span>
+                                }
+                                @if (!string.IsNullOrEmpty(applied.AccountTheme))
+                                {
+                                    <span class="ms-1 badge bg-secondary-subtle text-secondary border small">account: @applied.AccountTheme</span>
+                                }
+                            </div>
+                        }
+                    }
+                </div>
+                <hr class="my-3" />
+            }
+
+            @* ── Manual Keycloak theme overrides ── *@
+            <div class="row g-3" style="max-width:480px">
+                <div class="col-12">
+                    <label class="form-label small fw-semibold">Login Theme</label>
+                    <select class="form-select form-select-sm" @bind="editLoginTheme">
+                        <option value="">(default)</option>
+                        @foreach (string t in realmDetails.Themes)
+                        {
+                            <option value="@t">@t</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-12">
+                    <label class="form-label small fw-semibold">Account Console Theme</label>
+                    <select class="form-select form-select-sm" @bind="editAccountTheme">
+                        <option value="">(default)</option>
+                        @foreach (string t in realmDetails.Themes)
+                        {
+                            <option value="@t">@t</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-12">
+                    <button class="btn btn-sm btn-primary" @onclick="SaveThemes" disabled="@savingThemes">
+                        @if (savingThemes) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Save
+                    </button>
+                </div>
+            </div>
+        }
+    }
+
+    @* ── Backup & Restore ── *@
+    @if (realmTab == "backup")
+    {
+        @if (loadingBackups)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else
+        {
+            @if (backupError is not null)
+            {
+                <div class="alert alert-danger py-2 small mb-3">@backupError</div>
+            }
+
+            <div class="card mb-4">
+                <div class="card-body">
+                    <h6 class="card-title">Create Backup</h6>
+                    <div class="row g-2 align-items-end" style="max-width:400px">
+                        <div class="col">
+                            <label class="form-label small">Storage Bucket</label>
+                            <select class="form-select form-select-sm" @bind="backupStorageLinkId">
+                                <option value="@Guid.Empty">Select bucket...</option>
+                                @if (storageLinks is not null)
+                                {
+                                    @foreach (StorageLink link in storageLinks)
+                                    {
+                                        <option value="@link.Id">@link.Name</option>
+                                    }
+                                }
+                            </select>
+                        </div>
+                        <div class="col-auto">
+                            <button class="btn btn-sm btn-primary" @onclick="CreateBackup"
+                                    disabled="@(creatingBackup || backupStorageLinkId == Guid.Empty)">
+                                @if (creatingBackup) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Backup Now
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            @if (backups is not null && backups.Count > 0)
+            {
+                <h6>Backups</h6>
+                <div class="list-group">
+                    @foreach (KeycloakBackup b in backups)
+                    {
+                        <div class="list-group-item py-2">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <span class="font-monospace small">@b.RealmName</span>
+                                    <span class="text-muted small ms-2">@b.CreatedAt.ToString("yyyy-MM-dd HH:mm")</span>
+                                    @if (b.Status == KeycloakBackupStatus.Ready)
+                                    {
+                                        <span class="badge bg-success-subtle text-success ms-1 small">Ready</span>
+                                        <span class="text-muted small ms-1">@FormatSize(b.SizeBytes)</span>
+                                    }
+                                    else if (b.Status == KeycloakBackupStatus.Failed)
+                                    {
+                                        <span class="badge bg-danger-subtle text-danger ms-1 small">Failed</span>
+                                        <span class="text-muted small ms-1">@b.LastError</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-secondary-subtle text-secondary ms-1 small">Creating</span>
+                                    }
+                                </div>
+                                @if (b.Status == KeycloakBackupStatus.Ready)
+                                {
+                                    <div class="d-flex gap-1">
+                                        <button class="btn btn-sm btn-outline-primary border-0"
+                                                @onclick="() => RestoreBackup(b.Id)">
+                                            <i class="bi bi-arrow-counterclockwise me-1"></i>Restore
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-danger border-0"
+                                                @onclick="() => DeleteBackup(b.Id)">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        }
+    }
+
+    @* ── Customer Portal ── *@
+    @if (realmTab == "portal")
+    {
+        @if (portalError is not null)
+        {
+            <div class="alert alert-danger py-2 small mb-3">@portalError</div>
+        }
+        @if (selectedRealm?.LinkedApp is not null)
+        {
+            <div class="alert alert-success d-flex align-items-center gap-2 py-2 mb-3">
+                <i class="bi bi-link-45deg"></i>
+                <span>Linked to <strong>@selectedRealm.LinkedApp.Customer.Name / @selectedRealm.LinkedApp.Name</strong></span>
+                <button class="btn btn-sm btn-outline-secondary ms-auto" @onclick="UnlinkApp">Unlink</button>
+            </div>
+        }
+        else
+        {
+            <p class="text-muted small mb-3">Link this realm to a customer app so the customer can manage users, groups, and IdPs through their portal.</p>
+            <div class="row g-2 align-items-end" style="max-width:400px">
+                <div class="col">
+                    <label class="form-label small">App</label>
+                    <select class="form-select form-select-sm" @bind="linkAppId">
+                        <option value="@Guid.Empty">Select app...</option>
+                        @if (apps is not null)
+                        {
+                            @foreach (Data.App app in apps)
+                            {
+                                <option value="@app.Id">@app.Customer.Name / @app.Name</option>
+                            }
+                        }
+                    </select>
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-sm btn-primary" @onclick="LinkApp"
+                            disabled="@(linkAppId == Guid.Empty)">
+                        Link
+                    </button>
+                </div>
+            </div>
+        }
+    }
+}
+else if (selectedKeycloak is not null)
+{
+    @* ── Level 2: Realm list for a specific Keycloak ── *@
+    <nav class="mb-3">
+        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="BackToList">
+            <i class="bi bi-arrow-left me-1"></i>All Keycloak Instances
+        </button>
+    </nav>
+
+    <div class="d-flex align-items-center gap-2 mb-4">
+        <i class="bi bi-person-badge fs-4 text-primary"></i>
+        <div>
+            <h5 class="mb-0">@selectedKeycloak.DisplayName
+                @if (selectedKeycloak.ClusterDisplayName is not null)
+                {
+                    <span class="badge bg-secondary-subtle text-secondary ms-2 small">@selectedKeycloak.ClusterDisplayName</span>
+                }
+                @if (selectedKeycloak.IsExternal)
+                {
+                    <span class="badge bg-info-subtle text-info ms-2 small"><i class="bi bi-box-arrow-up-right me-1"></i>External</span>
+                }
+            </h5>
+            @if (selectedKeycloak.Config?.AdminUrl is not null)
+            {
+                <small class="text-muted font-monospace">@selectedKeycloak.Config.AdminUrl</small>
+            }
+        </div>
+        <button class="btn btn-sm btn-outline-secondary ms-auto" @onclick="() => showEditConfig = !showEditConfig">
+            <i class="bi bi-gear me-1"></i>Settings
+        </button>
+    </div>
+
+    @if (showEditConfig && selectedKeycloak.Config is not null)
+    {
+        <div class="card mb-4 border-secondary-subtle">
+            <div class="card-header small fw-semibold bg-secondary-subtle">Keycloak Settings</div>
+            <div class="card-body">
+                @if (configError is not null)
+                {
+                    <div class="alert alert-danger py-2 small">@configError</div>
+                }
+                <div class="row g-2" style="max-width:560px">
+                    <div class="col-md-8">
+                        <label class="form-label small">Admin URL</label>
+                        <input class="form-control form-control-sm" placeholder="https://auth.example.com"
+                               @bind="editAdminUrl" />
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small">Admin Username</label>
+                        <input class="form-control form-control-sm" @bind="editAdminUsername" />
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">New Admin Password <span class="text-muted">(leave blank to keep)</span></label>
+                        <input type="password" class="form-control form-control-sm" @bind="editAdminPassword" />
+                    </div>
+                </div>
+                <div class="mt-2 d-flex gap-2">
+                    <button class="btn btn-sm btn-primary" @onclick="SaveConfig" disabled="@savingConfig">
+                        @if (savingConfig) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Save
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showEditConfig = false">Cancel</button>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (!selectedKeycloak.IsConfigured)
+    {
+        @* Setup form for unconfigured keycloak *@
+        <div class="card border-warning-subtle">
+            <div class="card-header small fw-semibold bg-warning-subtle text-warning-emphasis">
+                <i class="bi bi-exclamation-triangle me-1"></i>Not Configured
+            </div>
+            <div class="card-body">
+                @if (selectedKeycloak.Component?.Status == ComponentStatus.Failed)
+                {
+                    <div class="alert alert-danger py-2 small mb-3">
+                        <i class="bi bi-x-circle me-1"></i>
+                        The install failed — likely because the database credentials weren't available before
+                        the pod started. Configure the database here, then retry the install from the
+                        <strong>Cluster</strong> tab.
+                    </div>
+                }
+                <p class="text-muted small mb-3">
+                    Enter the admin credentials for this Keycloak instance. Optionally link a database
+                    (CNPG-managed or registered Postgres) — if the instance already runs against its
+                    own Postgres, leave unselected. Credentials are synced to a Kubernetes Secret in
+                    the <code>@(selectedKeycloak.Component?.Namespace ?? "keycloak")</code> namespace.
+                </p>
+                @if (setupError is not null)
+                {
+                    <div class="alert alert-danger py-2 small">@setupError</div>
+                }
+                <div class="row g-2" style="max-width:560px">
+                    <div class="col-12">
+                        <label class="form-label small fw-semibold">Database</label>
+                        <select class="form-select form-select-sm" @bind="setupDatabaseSelection">
+                            <option value="">No database (leave unselected)</option>
+                            @if (availableDatabases is not null && availableDatabases.Count > 0)
+                            {
+                                <optgroup label="Managed CNPG">
+                                    @foreach (CnpgDatabase db in availableDatabases)
+                                    {
+                                        <option value="cnpg:@db.Id">@db.CnpgCluster.Name / @db.Name (@db.Owner)</option>
+                                    }
+                                </optgroup>
+                            }
+                            @if (availableRegPgDatabases is not null && availableRegPgDatabases.Count > 0)
+                            {
+                                <optgroup label="Registered PostgreSQL">
+                                    @foreach (RegisteredPostgresDatabase db in availableRegPgDatabases)
+                                    {
+                                        <option value="regpg:@db.Id">@db.RegisteredPostgresInstance.Name / @db.Name (@db.Owner)</option>
+                                    }
+                                </optgroup>
+                            }
+                        </select>
+                        @if ((availableDatabases is not null && availableDatabases.Count == 0) &&
+                             (availableRegPgDatabases is null || availableRegPgDatabases.Count == 0))
+                        {
+                            <div class="form-text text-muted">
+                                No ready databases found on this cluster. Create one in the Databases tab.
+                            </div>
+                        }
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label small fw-semibold">Admin URL</label>
+                        <input class="form-control form-control-sm"
+                               placeholder="https://auth.example.com"
+                               @bind="setupAdminUrl" />
+                        @if (!string.IsNullOrWhiteSpace(selectedKeycloak.SuggestedAdminUrl))
+                        {
+                            <div class="form-text">
+                                Suggested: <a href="#" @onclick:preventDefault
+                                              @onclick="UseSuggestedUrl">
+                                    @selectedKeycloak.SuggestedAdminUrl
+                                </a>
+                            </div>
+                        }
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small fw-semibold">Admin Username</label>
+                        <input class="form-control form-control-sm" @bind="setupUsername" />
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small fw-semibold">Admin Password</label>
+                        <input type="password" class="form-control form-control-sm" @bind="setupPassword" />
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <button class="btn btn-sm btn-primary" @onclick="ConfigureKeycloak"
+                            disabled="@(configuringKeycloak || string.IsNullOrWhiteSpace(setupAdminUrl) || string.IsNullOrWhiteSpace(setupPassword))">
+                        @if (configuringKeycloak) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        <i class="bi bi-check-circle me-1"></i>Configure
+                    </button>
+                </div>
+            </div>
+        </div>
+    }
+    else
+    {
+        @* Instance-level tabs: Realms | Themes *@
+        <ul class="nav nav-tabs mb-4">
+            <li class="nav-item">
+                <button class="nav-link @(instanceTab == "realms" ? "active" : "")"
+                        @onclick='() => SwitchInstanceTab("realms")'>
+                    <i class="bi bi-shield-lock me-1"></i>Realms
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(instanceTab == "themes" ? "active" : "")"
+                        @onclick='() => SwitchInstanceTab("themes")'>
+                    <i class="bi bi-palette me-1"></i>Themes
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(instanceTab == "migrate" ? "active" : "")"
+                        @onclick='() => SwitchInstanceTab("migrate")'>
+                    <i class="bi bi-arrow-left-right me-1"></i>Migrate
+                </button>
+            </li>
+        </ul>
+
+        @if (instanceTab == "themes")
+        {
+            @* ── Themes tab ── *@
+            @if (loadingThemes)
+            {
+                <div class="spinner-border spinner-border-sm text-primary me-2"></div>
+                <span class="text-muted small">Loading themes...</span>
+            }
+            else
+            {
+                @* ── Named theme list ── *@
+                <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+                    @foreach (KeycloakTheme nt in namedThemes)
+                    {
+                        <button class="btn btn-sm @(selectedNamedTheme?.Id == nt.Id ? "btn-primary" : "btn-outline-secondary")"
+                                @onclick="() => SelectNamedTheme(nt)">
+                            <i class="bi bi-palette me-1"></i>@nt.Name
+                        </button>
+                    }
+                    <button class="btn btn-sm btn-outline-success" @onclick="() => { showCreateTheme = !showCreateTheme; createThemeError = null; }">
+                        <i class="bi bi-plus-lg me-1"></i>New Theme
+                    </button>
+                </div>
+
+                @* ── Create theme form ── *@
+                @if (showCreateTheme)
+                {
+                    <div class="card mb-3" style="max-width:480px">
+                        <div class="card-body">
+                            <h6 class="card-title mb-3">New Named Theme</h6>
+                            @if (createThemeError is not null)
+                            {
+                                <div class="alert alert-danger py-2 small mb-2">@createThemeError</div>
+                            }
+                            <div class="mb-2">
+                                <label class="form-label small fw-semibold">Name</label>
+                                <input class="form-control form-control-sm" placeholder="e.g. Capio Blue"
+                                       @bind="newThemeName" />
+                            </div>
+                            @if (availableThemes is not null)
+                            {
+                                <div class="row g-2 mb-2">
+                                    <div class="col-6">
+                                        <label class="form-label small fw-semibold">Login Theme</label>
+                                        <select class="form-select form-select-sm" @bind="newThemeLoginTheme">
+                                            <option value="">(default)</option>
+                                            @foreach (string t in availableThemes.GetValueOrDefault("login") ?? [])
+                                            {
+                                                <option value="@t">@t</option>
+                                            }
+                                        </select>
+                                    </div>
+                                    <div class="col-6">
+                                        <label class="form-label small fw-semibold">Account Theme</label>
+                                        <select class="form-select form-select-sm" @bind="newThemeAccountTheme">
+                                            <option value="">(default)</option>
+                                            @foreach (string t in availableThemes.GetValueOrDefault("account") ?? [])
+                                            {
+                                                <option value="@t">@t</option>
+                                            }
+                                        </select>
+                                    </div>
+                                </div>
+                            }
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-sm btn-primary" @onclick="CreateNamedTheme"
+                                        disabled="@(creatingTheme || string.IsNullOrWhiteSpace(newThemeName))">
+                                    @if (creatingTheme) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Create
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showCreateTheme = false">Cancel</button>
+                            </div>
+                        </div>
+                    </div>
+                }
+
+                @* ── Named theme editor ── *@
+                @if (selectedNamedTheme is not null)
+                {
+                    <div class="card">
+                        <div class="card-body">
+                            <h6 class="card-title mb-3">
+                                <i class="bi bi-pencil-square me-1"></i>Editing: @selectedNamedTheme.Name
+                            </h6>
+
+                            @* Meta: name + native themes *@
+                            <div class="row g-2 mb-3" style="max-width:560px">
+                                <div class="col-12 col-sm-4">
+                                    <label class="form-label small fw-semibold">Theme Name</label>
+                                    <input class="form-control form-control-sm" @bind="editThemeName" />
+                                </div>
+                                @if (availableThemes is not null)
+                                {
+                                    <div class="col-6 col-sm-4">
+                                        <label class="form-label small fw-semibold">Login Theme</label>
+                                        <select class="form-select form-select-sm" @bind="editThemeLoginTheme">
+                                            <option value="">(default)</option>
+                                            @foreach (string t in availableThemes.GetValueOrDefault("login") ?? [])
+                                            {
+                                                <option value="@t">@t</option>
+                                            }
+                                        </select>
+                                    </div>
+                                    <div class="col-6 col-sm-4">
+                                        <label class="form-label small fw-semibold">Account Theme</label>
+                                        <select class="form-select form-select-sm" @bind="editThemeAccountTheme">
+                                            <option value="">(default)</option>
+                                            @foreach (string t in availableThemes.GetValueOrDefault("account") ?? [])
+                                            {
+                                                <option value="@t">@t</option>
+                                            }
+                                        </select>
+                                    </div>
+                                }
+                            </div>
+                            <div class="d-flex gap-2 align-items-center mb-4">
+                                <button class="btn btn-sm btn-primary" @onclick="SaveNamedThemeMeta"
+                                        disabled="@(savingThemeMeta || string.IsNullOrWhiteSpace(editThemeName))">
+                                    @if (savingThemeMeta) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    <i class="bi bi-floppy me-1"></i>Save
+                                </button>
+                                @if (themeMetaSaved)
+                                {
+                                    <span class="text-success small"><i class="bi bi-check-circle me-1"></i>Saved</span>
+                                }
+                                @if (themeMetaError is not null)
+                                {
+                                    <span class="text-danger small">@themeMetaError</span>
+                                }
+                                <button class="btn btn-sm btn-outline-danger ms-auto" @onclick="DeleteNamedTheme"
+                                        disabled="@deletingTheme">
+                                    @if (deletingTheme) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    <i class="bi bi-trash me-1"></i>Delete Theme
+                                </button>
+                            </div>
+
+                            @* CSS overrides per type *@
+                            <label class="form-label small fw-semibold">CSS Overrides</label>
+                            <div class="d-flex gap-2 mb-2 flex-wrap">
+                                @foreach (string type in new[] { "login", "account", "admin", "email" })
+                                {
+                                    <button class="btn btn-sm @(themeType == type ? "btn-primary" : "btn-outline-secondary")"
+                                            @onclick="() => SwitchThemeType(type)">
+                                        @(char.ToUpper(type[0]) + type[1..])
+                                    </button>
+                                }
+                            </div>
+                            <textarea class="form-control font-monospace mb-2"
+                                      rows="14"
+                                      style="font-size:0.78rem; resize:vertical"
+                                      placeholder="/* Custom CSS for @themeType theme */"
+                                      @bind="themeCss"
+                                      @bind:event="oninput"></textarea>
+                            <div class="d-flex gap-2 align-items-center">
+                                <button class="btn btn-sm btn-primary" @onclick="SaveThemeCss" disabled="@savingTheme">
+                                    @if (savingTheme) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    <i class="bi bi-floppy me-1"></i>Save CSS
+                                </button>
+                                @if (themeSaved)
+                                {
+                                    <span class="text-success small"><i class="bi bi-check-circle me-1"></i>Saved</span>
+                                }
+                                @if (themeError is not null)
+                                {
+                                    <span class="text-danger small">@themeError</span>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                }
+                else if (namedThemes.Count == 0 && !showCreateTheme)
+                {
+                    <div class="text-muted small">
+                        No themes yet. Create a named theme to save CSS overrides and native theme settings in one bundle.
+                    </div>
+                }
+            }
+        }
+        else if (instanceTab == "migrate")
+        {
+            @* ── Migrate tab ── *@
+            <div class="card">
+                <div class="card-body">
+                    @if (migrateError is not null)
+                    {
+                        <div class="alert alert-danger py-2 small mb-3">@migrateError</div>
+                    }
+                    @if (migrateResult is not null)
+                    {
+                        bool anyErrors = migrateResult.Errors.Count > 0;
+                        bool nothingCopied = migrateCopyUsers
+                            ? migrateResult.Copied == 0 && migrateResult.Skipped == 0 && !anyErrors
+                            : false;
+                        string alertClass = anyErrors ? "alert-warning"
+                            : nothingCopied ? "alert-warning"
+                            : "alert-success";
+
+                        <div class="alert @alertClass py-2 small mb-3">
+                            @if (migrateCopyUsers)
+                            {
+                                @if (migrateResult.Copied > 0)
+                                {
+                                    <div><i class="bi bi-check-circle me-1"></i>
+                                        Users: <strong>@migrateResult.Copied copied</strong>@(migrateResult.Skipped > 0 ? $", {migrateResult.Skipped} skipped (already exist)." : ".")</div>
+                                }
+                                else if (migrateResult.Skipped > 0)
+                                {
+                                    <div><i class="bi bi-info-circle me-1"></i>
+                                        Users: 0 copied — all @migrateResult.Skipped already exist in target.</div>
+                                }
+                                else if (!anyErrors)
+                                {
+                                    <div><i class="bi bi-exclamation-triangle me-1"></i>
+                                        No users found in the source realm.</div>
+                                }
+                            }
+                            @if (migrateCopyThemeCss)
+                            {
+                                @if (migrateCssCopied > 0)
+                                {
+                                    <div><i class="bi bi-check-circle me-1"></i>
+                                        Theme CSS: <strong>@migrateCssCopied / 4 types</strong> copied to target. Edit them in the Themes tab.</div>
+                                }
+                                else
+                                {
+                                    <div><i class="bi bi-exclamation-triangle me-1"></i>
+                                        Theme CSS: nothing to copy — the source instance has no CSS saved in EntKube yet.
+                                        EntKube stores CSS overrides separately from the themes installed in Keycloak itself.
+                                        Open the Themes tab on the source instance to add CSS, then copy again.</div>
+                                }
+                            }
+                            @if (anyErrors)
+                            {
+                                <ul class="mb-0 mt-1">
+                                    @foreach (string err in migrateResult.Errors)
+                                    {
+                                        <li>@err</li>
+                                    }
+                                </ul>
+                            }
+                        </div>
+                    }
+
+                    <div class="row g-3" style="max-width:520px">
+                        <div class="col-12">
+                            <label class="form-label small fw-semibold">Source Keycloak</label>
+                            <select class="form-select form-select-sm"
+                                    @bind="migrateSourceKcId" @bind:after="OnMigrateSourceKcChanged">
+                                <option value="@Guid.Empty">Select instance...</option>
+                                @if (detectedKeycloaks is not null)
+                                {
+                                    @foreach (DetectedKeycloak kc in detectedKeycloaks.Where(k => k.IsConfigured))
+                                    {
+                                        <option value="@kc.ComponentId">@kc.DisplayName@(kc.ClusterDisplayName is not null ? $" ({kc.ClusterDisplayName})" : "")</option>
+                                    }
+                                }
+                            </select>
+                        </div>
+
+                        <div class="col-12">
+                            <div class="form-check mb-1">
+                                <input class="form-check-input" type="checkbox" id="migrateCopyUsers" @bind="migrateCopyUsers" />
+                                <label class="form-check-label small" for="migrateCopyUsers">Copy users <span class="text-muted">(without passwords)</span></label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="migrateCopyThemeCss" @bind="migrateCopyThemeCss" />
+                                <label class="form-check-label small" for="migrateCopyThemeCss">Copy theme CSS overrides <span class="text-muted">(EntKube-stored CSS, not Keycloak theme providers)</span></label>
+                            </div>
+                        </div>
+
+                        @if (migrateCopyUsers)
+                        {
+                            <div class="col-12">
+                                <label class="form-label small fw-semibold">Source Realm</label>
+                                @if (loadingMigrateSourceRealms)
+                                {
+                                    <div class="spinner-border spinner-border-sm text-primary"></div>
+                                }
+                                else
+                                {
+                                    <select class="form-select form-select-sm" @bind="migrateSourceRealmId">
+                                        <option value="@Guid.Empty">Select realm...</option>
+                                        @if (migrateSourceRealms is not null)
+                                        {
+                                            @foreach (KeycloakRealm r in migrateSourceRealms)
+                                            {
+                                                <option value="@r.Id">@r.DisplayName (@r.RealmName)</option>
+                                            }
+                                        }
+                                    </select>
+                                }
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label small fw-semibold">Target Realm</label>
+                                <select class="form-select form-select-sm" @bind="migrateTargetRealmId">
+                                    <option value="@Guid.Empty">Select realm...</option>
+                                    @if (realms is not null)
+                                    {
+                                        @foreach (KeycloakRealm r in realms)
+                                        {
+                                            <option value="@r.Id">@r.DisplayName (@r.RealmName)</option>
+                                        }
+                                    }
+                                </select>
+                            </div>
+                        }
+
+                        <div class="col-12">
+                            <button class="btn btn-sm btn-primary" @onclick="ExecuteMigrate"
+                                    disabled="@(migrating
+                                        || migrateSourceKcId == Guid.Empty
+                                        || (!migrateCopyUsers && !migrateCopyThemeCss)
+                                        || (migrateCopyUsers && (migrateSourceRealmId == Guid.Empty || migrateTargetRealmId == Guid.Empty)))">
+                                @if (migrating) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                <i class="bi bi-arrow-left-right me-1"></i>Migrate
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+        @* Realms list *@
+        @if (realmSyncError is not null)
+        {
+            <div class="alert alert-warning py-2 small d-flex align-items-start gap-2 mb-3">
+                <i class="bi bi-exclamation-triangle-fill mt-1 flex-shrink-0"></i>
+                <div>
+                    <strong>Could not reach Keycloak</strong> — showing cached realms.<br />
+                    <span class="text-muted">@realmSyncError</span>
+                </div>
+            </div>
+        }
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <span class="text-muted small">@(realms?.Count ?? 0) realms</span>
+            <button class="btn btn-sm btn-primary" @onclick="() => showCreateRealm = !showCreateRealm">
+                <i class="bi bi-plus-circle me-1"></i>New Realm
+            </button>
+        </div>
+
+        @if (showCreateRealm)
+        {
+            <div class="card mb-3 border-primary-subtle">
+                <div class="card-body">
+                    @if (realmError is not null)
+                    {
+                        <div class="alert alert-danger py-2 small">@realmError</div>
+                    }
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <label class="form-label small">Realm ID</label>
+                            <input class="form-control form-control-sm" placeholder="e.g. acme-prod" @bind="newRealmName" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Display Name</label>
+                            <input class="form-control form-control-sm" placeholder="e.g. Acme Production" @bind="newRealmDisplayName" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Login Theme <span class="text-muted">(optional)</span></label>
+                            <input class="form-control form-control-sm" placeholder="keycloak" @bind="newRealmTheme" />
+                        </div>
+                    </div>
+                    <div class="mt-2 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="CreateRealm" disabled="@creatingRealm">
+                            @if (creatingRealm) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Create
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => showCreateRealm = false">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (realms is not null)
+        {
+            @if (realms.Count == 0)
+            {
+                <div class="text-center py-4 text-muted">
+                    <i class="bi bi-shield-lock display-6 d-block mb-2"></i>
+                    No realms yet. Create one above.
+                </div>
+            }
+            else
+            {
+                <div class="list-group">
+                    @foreach (KeycloakRealm realm in realms)
+                    {
+                        <div class="list-group-item d-flex align-items-center py-2">
+                            <div class="flex-grow-1 d-flex align-items-center gap-2 cursor-pointer"
+                                 @onclick="() => OpenRealm(realm)" style="cursor:pointer">
+                                <i class="bi bi-shield-lock text-primary fs-5"></i>
+                                <div>
+                                    <strong>@realm.DisplayName</strong>
+                                    <span class="text-muted small ms-2 font-monospace">@realm.RealmName</span>
+                                    @if (!realm.Enabled)
+                                    {
+                                        <span class="badge bg-secondary-subtle text-secondary ms-1 small">Disabled</span>
+                                    }
+                                    @if (realm.LinkedApp is not null)
+                                    {
+                                        <span class="badge bg-primary-subtle text-primary border border-primary-subtle ms-1 small">
+                                            <i class="bi bi-link-45deg me-1"></i>@realm.LinkedApp.Customer.Name / @realm.LinkedApp.Name
+                                        </span>
+                                    }
+                                </div>
+                            </div>
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm btn-outline-primary border-0"
+                                        @onclick="() => OpenRealm(realm)">
+                                    <i class="bi bi-gear"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger border-0"
+                                        @onclick="() => DeleteRealm(realm.Id)"
+                                        disabled="@(deletingRealmId == realm.Id)">
+                                    @if (deletingRealmId == realm.Id)
+                                    {
+                                        <span class="spinner-border spinner-border-sm"></span>
+                                    }
+                                    else
+                                    {
+                                        <i class="bi bi-trash"></i>
+                                    }
+                                </button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        }
+        } @* end realms tab else *@
+    }
+}
+else
+{
+    @* ── Level 1: Keycloak instance list ── *@
+    <div class="d-flex justify-content-end mb-3">
+        <button class="btn btn-sm btn-outline-primary" @onclick="() => showRegisterExternal = !showRegisterExternal">
+            <i class="bi bi-plus-circle me-1"></i>Register External Keycloak
+        </button>
+    </div>
+
+    @if (showRegisterExternal)
+    {
+        <div class="card mb-4 border-primary-subtle">
+            <div class="card-header small fw-semibold bg-primary-subtle">Register Externally Deployed Keycloak</div>
+            <div class="card-body">
+                @if (registerExternalError is not null)
+                {
+                    <div class="alert alert-danger py-2 small">@registerExternalError</div>
+                }
+                <p class="text-muted small mb-3">
+                    Connect a Keycloak instance that was deployed outside of EntKube.
+                    Admin credentials are stored in EntKube's vault and are only used to call the Keycloak Admin API.
+                </p>
+                <div class="row g-2" style="max-width:560px">
+                    <div class="col-12">
+                        <label class="form-label small fw-semibold">Display Name</label>
+                        <input class="form-control form-control-sm" placeholder="e.g. Production Keycloak" @bind="registerExternalDisplayName" />
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label small fw-semibold">Admin URL</label>
+                        <input class="form-control form-control-sm" placeholder="https://auth.example.com/auth" @bind="registerExternalAdminUrl" />
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small fw-semibold">Admin Username</label>
+                        <input class="form-control form-control-sm" @bind="registerExternalUsername" />
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small fw-semibold">Admin Password</label>
+                        <input type="password" class="form-control form-control-sm" @bind="registerExternalPassword" />
+                    </div>
+                </div>
+                <div class="mt-3 d-flex gap-2">
+                    <button class="btn btn-sm btn-primary" @onclick="RegisterExternal"
+                            disabled="@(registeringExternal
+                                || string.IsNullOrWhiteSpace(registerExternalDisplayName)
+                                || string.IsNullOrWhiteSpace(registerExternalAdminUrl)
+                                || string.IsNullOrWhiteSpace(registerExternalPassword))">
+                        @if (registeringExternal) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Register
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showRegisterExternal = false">Cancel</button>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (detectedKeycloaks is null || detectedKeycloaks.Count == 0)
+    {
+        <div class="text-center py-5 text-muted">
+            <i class="bi bi-person-badge display-4 d-block mb-3"></i>
+            <p class="mb-1">No Keycloak instances found on this tenant's clusters.</p>
+            <small>Install the Keycloak component from the Components tab, or register an external instance above.</small>
+        </div>
+    }
+    else
+    {
+        <p class="text-muted small mb-3">
+            @detectedKeycloaks.Count Keycloak @(detectedKeycloaks.Count == 1 ? "instance" : "instances").
+            Select one to manage realms, users, identity providers, and backups.
+        </p>
+
+        <div class="row g-3">
+            @foreach (DetectedKeycloak kc in detectedKeycloaks)
+            {
+                <div class="col-md-6 col-lg-4">
+                    <div class="card h-100 @(kc.IsConfigured ? "" : "border-warning-subtle")">
+                        <div class="card-body">
+                            <div class="d-flex align-items-start justify-content-between mb-2">
+                                <div>
+                                    <h6 class="mb-0">@kc.DisplayName</h6>
+                                    <small class="text-muted">@(kc.ClusterDisplayName ?? "")</small>
+                                </div>
+                                <div class="d-flex flex-column align-items-end gap-1">
+                                    @if (kc.IsExternal)
+                                    {
+                                        <span class="badge bg-info-subtle text-info border border-info-subtle small">
+                                            <i class="bi bi-box-arrow-up-right me-1"></i>External
+                                        </span>
+                                    }
+                                    @if (kc.Component?.Status == ComponentStatus.Failed)
+                                    {
+                                        <span class="badge bg-danger-subtle text-danger border border-danger-subtle small">
+                                            <i class="bi bi-x-circle me-1"></i>Install failed
+                                        </span>
+                                    }
+                                    @if (kc.IsConfigured)
+                                    {
+                                        <span class="badge bg-success-subtle text-success border border-success-subtle small">
+                                            <i class="bi bi-check-circle me-1"></i>Configured
+                                        </span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-warning-subtle text-warning border border-warning-subtle small">
+                                            <i class="bi bi-exclamation-triangle me-1"></i>Setup needed
+                                        </span>
+                                    }
+                                </div>
+                            </div>
+                            @if (kc.Config?.AdminUrl is not null)
+                            {
+                                <div class="text-muted small font-monospace text-truncate mb-1">@kc.Config.AdminUrl</div>
+                            }
+                            @if (kc.Config?.CnpgDatabase is not null)
+                            {
+                                <div class="small mb-2">
+                                    <i class="bi bi-database me-1 text-muted"></i>
+                                    @kc.Config.CnpgDatabase.CnpgCluster.Name / @kc.Config.CnpgDatabase.Name
+                                </div>
+                            }
+                            else if (kc.Config?.RegisteredPostgresDatabase is not null)
+                            {
+                                <div class="small mb-2">
+                                    <i class="bi bi-database-gear me-1 text-muted"></i>
+                                    @kc.Config.RegisteredPostgresDatabase.RegisteredPostgresInstance.Name / @kc.Config.RegisteredPostgresDatabase.Name
+                                </div>
+                            }
+                        </div>
+                        <div class="card-footer bg-transparent border-0 pt-0">
+                            <button class="btn btn-sm btn-primary w-100" @onclick="() => SelectKeycloak(kc)">
+                                @if (kc.IsConfigured)
+                                {
+                                    <i class="bi bi-shield-lock me-1"></i>
+                                    <span>Manage Realms</span>
+                                }
+                                else
+                                {
+                                    <i class="bi bi-gear me-1"></i>
+                                    <span>Configure</span>
+                                }
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    // ── Load state ────────────────────────────────────────────────────────────
+    private bool loading = true;
+    private List<DetectedKeycloak>? detectedKeycloaks;
+    private List<KeycloakRealm>? realms;
+    private List<CnpgDatabase>? availableDatabases;
+    private List<RegisteredPostgresDatabase>? availableRegPgDatabases;
+    private List<StorageLink>? storageLinks;
+    private List<Data.App>? apps;
+
+    // ── Navigation ────────────────────────────────────────────────────────────
+    private DetectedKeycloak? selectedKeycloak;
+    private KeycloakRealm? selectedRealm;
+    private string realmTab = "users";
+    private string instanceTab = "realms";
+
+    // ── Themes tab ───────────────────────────────────────────────────────────
+    private string themeType = "login";
+    private Dictionary<string, List<string>>? availableThemes;
+    private List<KeycloakTheme> namedThemes = [];
+    private KeycloakTheme? selectedNamedTheme;
+    private bool loadingThemes;
+    private string? themeCss;
+    private bool savingTheme;
+    private bool themeSaved;
+    private string? themeError;
+
+    // ── Named theme create form ───────────────────────────────────────────────
+    private bool showCreateTheme;
+    private bool creatingTheme;
+    private string? createThemeError;
+    private string newThemeName = "";
+    private string newThemeLoginTheme = "";
+    private string newThemeAccountTheme = "";
+
+    // ── Named theme edit form ─────────────────────────────────────────────────
+    private bool savingThemeMeta;
+    private bool themeMetaSaved;
+    private string? themeMetaError;
+    private string editThemeName = "";
+    private string editThemeLoginTheme = "";
+    private string editThemeAccountTheme = "";
+    private bool deletingTheme;
+
+    // ── Per-tab lazy data ─────────────────────────────────────────────────────
+    private List<KeycloakUserInfo>? users;
+    private List<KeycloakIdpInfo>? idps;
+    private List<KeycloakGroupInfo>? groups;
+    private List<KeycloakOrganizationInfo>? orgs;
+    private List<KeycloakBackup>? backups;
+    private KeycloakRealmDetails? realmDetails;
+
+    private bool loadingUsers, loadingIdps, loadingGroups, loadingOrgs, loadingBackups;
+
+    // ── Setup form ────────────────────────────────────────────────────────────
+    private bool configuringKeycloak;
+    private string? setupError;
+    private Guid setupDatabaseId;
+    private string setupDatabaseSelection = ""; // "cnpg:{id}" or "regpg:{id}" or ""
+    private string setupAdminUrl = "";
+    private string setupUsername = "admin";
+    private string setupPassword = "";
+
+    // ── Edit config form ──────────────────────────────────────────────────────
+    private bool showEditConfig;
+    private bool savingConfig;
+    private string? configError;
+    private string editAdminUrl = "";
+    private string editAdminUsername = "admin";
+    private string editAdminPassword = "";
+
+    // ── Realm form ────────────────────────────────────────────────────────────
+    private bool showCreateRealm;
+    private bool creatingRealm;
+    private string? realmError;
+    private string? realmSyncError;
+    private string newRealmName = "";
+    private string newRealmDisplayName = "";
+    private string newRealmTheme = "";
+    private Guid? deletingRealmId;
+
+    // ── User form ─────────────────────────────────────────────────────────────
+    private bool showAddUser;
+    private bool savingUser;
+    private string? userError;
+    private string newUserUsername = "";
+    private string newUserEmail = "";
+    private string newUserFirstName = "";
+    private string newUserLastName = "";
+    private string newUserPassword = "";
+
+    // ── IdP form ──────────────────────────────────────────────────────────────
+    private bool showAddIdp;
+    private bool savingIdp;
+    private string? idpError;
+    private string newIdpAlias = "";
+    private string newIdpProviderId = "oidc";
+    private string newIdpClientId = "";
+    private string newIdpClientSecret = "";
+
+    // ── Group form ────────────────────────────────────────────────────────────
+    private bool showAddGroup;
+    private bool savingGroup;
+    private string? groupError;
+    private string newGroupName = "";
+
+    // ── Org form ─────────────────────────────────────────────────────────────
+    private bool showAddOrg;
+    private bool savingOrg;
+    private string? orgError;
+    private string newOrgName = "";
+    private string newOrgDescription = "";
+
+    // ── Realm theme form ──────────────────────────────────────────────────────
+    private bool savingThemes;
+    private bool applyingNamedTheme;
+    private string? realmThemeError;
+    private string editLoginTheme = "";
+    private string editAccountTheme = "";
+    private Guid? editRealmNamedThemeId;
+
+    // ── Backup form ───────────────────────────────────────────────────────────
+    private bool creatingBackup;
+    private string? backupError;
+    private Guid backupStorageLinkId;
+
+    // ── Portal form ───────────────────────────────────────────────────────────
+    private string? portalError;
+    private Guid linkAppId;
+
+    // ── Register external Keycloak form ───────────────────────────────────────
+    private bool showRegisterExternal;
+    private bool registeringExternal;
+    private string? registerExternalError;
+    private string registerExternalDisplayName = "";
+    private string registerExternalAdminUrl = "";
+    private string registerExternalUsername = "admin";
+    private string registerExternalPassword = "";
+
+    // ── Migrate tab ───────────────────────────────────────────────────────────
+    private Guid migrateSourceKcId;
+    private List<KeycloakRealm>? migrateSourceRealms;
+    private bool loadingMigrateSourceRealms;
+    private Guid migrateSourceRealmId;
+    private Guid migrateTargetRealmId;
+    private bool migrateCopyUsers = true;
+    private bool migrateCopyThemeCss;
+    private bool migrating;
+    private CopyResult? migrateResult;
+    private int migrateCssCopied;
+    private string? migrateError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        detectedKeycloaks = await KeycloakService.GetDetectedKeycloaksAsync(TenantId);
+        loading = false;
+    }
+
+    private async Task SelectKeycloak(DetectedKeycloak kc)
+    {
+        selectedKeycloak = kc;
+        realms = null;
+        availableDatabases = null;
+        availableRegPgDatabases = null;
+        setupError = null;
+        setupDatabaseId = Guid.Empty;
+        setupDatabaseSelection = "";
+        setupAdminUrl = kc.SuggestedAdminUrl ?? "";
+        setupPassword = "";
+        instanceTab = "realms";
+        availableThemes = null;
+        namedThemes = [];
+        selectedNamedTheme = null;
+        showCreateTheme = false;
+        themeCss = null;
+        themeSaved = false;
+        themeError = null;
+        realmSyncError = null;
+
+        if (kc.IsConfigured)
+        {
+            try
+            {
+                realms = await KeycloakService.SyncRealmsFromKeycloakAsync(TenantId, kc.Config!.Id);
+            }
+            catch (Exception ex)
+            {
+                realmSyncError = ex.Message;
+                realms = await KeycloakService.GetRealmsForConfigAsync(TenantId, kc.Config!.Id);
+            }
+            storageLinks ??= await StorageService.GetStorageLinksAsync(TenantId);
+            apps ??= await KeycloakService.GetAppsAsync(TenantId);
+        }
+        else
+        {
+            if (kc.Component is not null)
+            {
+                var dbTask = KeycloakService.GetDatabasesForComponentAsync(TenantId, kc.Component.Id);
+                var regPgTask = KeycloakService.GetRegisteredPostgresDatabasesForComponentAsync(TenantId, kc.Component.Id);
+                await Task.WhenAll(dbTask, regPgTask);
+                availableDatabases = dbTask.Result;
+                availableRegPgDatabases = regPgTask.Result;
+            }
+            else
+            {
+                availableDatabases = [];
+                availableRegPgDatabases = await KeycloakService.GetAllRegisteredPostgresDatabasesAsync(TenantId);
+            }
+        }
+
+        if (kc.Config is not null)
+        {
+            editAdminUrl = kc.Config.AdminUrl ?? "";
+            editAdminUsername = kc.Config.AdminUsername;
+        }
+    }
+
+    private async Task SwitchInstanceTab(string tab)
+    {
+        instanceTab = tab;
+        themeSaved = false;
+        themeError = null;
+
+        if (tab == "themes" && selectedKeycloak?.Config is not null)
+        {
+            await LoadThemesTab();
+        }
+        else if (tab == "migrate")
+        {
+            migrateResult = null;
+            migrateError = null;
+            migrateSourceKcId = Guid.Empty;
+            migrateSourceRealms = null;
+            migrateSourceRealmId = Guid.Empty;
+            migrateTargetRealmId = Guid.Empty;
+        }
+    }
+
+    private async Task SwitchThemeType(string type)
+    {
+        themeType = type;
+        themeSaved = false;
+        themeError = null;
+        await LoadThemeCss();
+    }
+
+    private async Task LoadThemesTab()
+    {
+        if (selectedKeycloak?.Config is null) return;
+
+        loadingThemes = true;
+        StateHasChanged();
+
+        try
+        {
+            availableThemes = await KeycloakService.GetAvailableThemesAsync(TenantId, selectedKeycloak.Config.Id);
+            namedThemes = await KeycloakService.GetNamedThemesAsync(TenantId, selectedKeycloak.Config.Id);
+
+            // Re-select the same named theme if it still exists after a reload.
+            if (selectedNamedTheme is not null)
+            {
+                selectedNamedTheme = namedThemes.FirstOrDefault(t => t.Id == selectedNamedTheme.Id);
+                if (selectedNamedTheme is not null)
+                    await LoadThemeCss();
+                else
+                    themeCss = null;
+            }
+        }
+        catch
+        {
+            availableThemes = [];
+            namedThemes = [];
+        }
+        finally
+        {
+            loadingThemes = false;
+        }
+    }
+
+    private async Task LoadThemeCss()
+    {
+        if (selectedKeycloak is null || selectedNamedTheme is null) { themeCss = null; return; }
+        themeCss = await KeycloakService.GetNamedThemeCssAsync(
+            TenantId, selectedKeycloak.ComponentId, selectedNamedTheme.Id, themeType);
+    }
+
+    private async Task SelectNamedTheme(KeycloakTheme theme)
+    {
+        selectedNamedTheme = theme;
+        editThemeName = theme.Name;
+        editThemeLoginTheme = theme.LoginTheme ?? "";
+        editThemeAccountTheme = theme.AccountTheme ?? "";
+        themeType = "login";
+        themeSaved = false;
+        themeError = null;
+        themeMetaSaved = false;
+        themeMetaError = null;
+        showCreateTheme = false;
+        await LoadThemeCss();
+    }
+
+    private async Task CreateNamedTheme()
+    {
+        if (selectedKeycloak?.Config is null || string.IsNullOrWhiteSpace(newThemeName)) return;
+
+        creatingTheme = true;
+        createThemeError = null;
+
+        try
+        {
+            KeycloakTheme created = await KeycloakService.CreateNamedThemeAsync(
+                TenantId, selectedKeycloak.Config.Id,
+                newThemeName,
+                string.IsNullOrWhiteSpace(newThemeLoginTheme) ? null : newThemeLoginTheme,
+                string.IsNullOrWhiteSpace(newThemeAccountTheme) ? null : newThemeAccountTheme);
+
+            namedThemes = await KeycloakService.GetNamedThemesAsync(TenantId, selectedKeycloak.Config.Id);
+            showCreateTheme = false;
+            newThemeName = "";
+            newThemeLoginTheme = "";
+            newThemeAccountTheme = "";
+            await SelectNamedTheme(created);
+        }
+        catch (Exception ex)
+        {
+            createThemeError = ex.Message;
+        }
+        finally
+        {
+            creatingTheme = false;
+        }
+    }
+
+    private async Task SaveNamedThemeMeta()
+    {
+        if (selectedNamedTheme is null || string.IsNullOrWhiteSpace(editThemeName)) return;
+
+        savingThemeMeta = true;
+        themeMetaSaved = false;
+        themeMetaError = null;
+
+        try
+        {
+            await KeycloakService.UpdateNamedThemeAsync(
+                TenantId, selectedNamedTheme.Id, editThemeName,
+                string.IsNullOrWhiteSpace(editThemeLoginTheme) ? null : editThemeLoginTheme,
+                string.IsNullOrWhiteSpace(editThemeAccountTheme) ? null : editThemeAccountTheme);
+
+            namedThemes = await KeycloakService.GetNamedThemesAsync(TenantId, selectedKeycloak!.Config!.Id);
+            selectedNamedTheme = namedThemes.FirstOrDefault(t => t.Id == selectedNamedTheme.Id) ?? selectedNamedTheme;
+            themeMetaSaved = true;
+        }
+        catch (Exception ex)
+        {
+            themeMetaError = ex.Message;
+        }
+        finally
+        {
+            savingThemeMeta = false;
+        }
+    }
+
+    private async Task SaveNamedThemeCss()
+    {
+        if (selectedKeycloak is null || selectedNamedTheme is null) return;
+
+        savingTheme = true;
+        themeSaved = false;
+        themeError = null;
+
+        try
+        {
+            await KeycloakService.SaveNamedThemeCssAsync(
+                TenantId, selectedKeycloak.ComponentId, selectedNamedTheme.Id, themeType, themeCss ?? "");
+            themeSaved = true;
+        }
+        catch (Exception ex)
+        {
+            themeError = ex.Message;
+        }
+        finally
+        {
+            savingTheme = false;
+        }
+    }
+
+    private async Task DeleteNamedTheme()
+    {
+        if (selectedKeycloak is null || selectedNamedTheme is null) return;
+
+        deletingTheme = true;
+        themeMetaError = null;
+
+        try
+        {
+            await KeycloakService.DeleteNamedThemeAsync(
+                TenantId, selectedNamedTheme.Id, selectedKeycloak.ComponentId);
+
+            namedThemes = await KeycloakService.GetNamedThemesAsync(TenantId, selectedKeycloak.Config!.Id);
+            selectedNamedTheme = null;
+            themeCss = null;
+        }
+        catch (Exception ex)
+        {
+            themeMetaError = ex.Message;
+        }
+        finally
+        {
+            deletingTheme = false;
+        }
+    }
+
+    private Task SaveThemeCss() => SaveNamedThemeCss();
+
+    // ── Register external ─────────────────────────────────────────────────────
+
+    private async Task RegisterExternal()
+    {
+        registeringExternal = true;
+        registerExternalError = null;
+
+        try
+        {
+            KeycloakComponentConfig config = await KeycloakService.RegisterExternalAsync(
+                TenantId,
+                registerExternalDisplayName,
+                registerExternalAdminUrl,
+                registerExternalUsername,
+                registerExternalPassword);
+
+            await KeycloakService.SyncRealmsFromKeycloakAsync(TenantId, config.Id);
+
+            detectedKeycloaks = await KeycloakService.GetDetectedKeycloaksAsync(TenantId);
+            showRegisterExternal = false;
+            registerExternalDisplayName = "";
+            registerExternalAdminUrl = "";
+            registerExternalPassword = "";
+        }
+        catch (Exception ex)
+        {
+            registerExternalError = ex.Message;
+        }
+        finally
+        {
+            registeringExternal = false;
+        }
+    }
+
+    // ── Migrate ───────────────────────────────────────────────────────────────
+
+    private async Task OnMigrateSourceKcChanged()
+    {
+        migrateSourceRealms = null;
+        migrateSourceRealmId = Guid.Empty;
+        migrateError = null;
+
+        if (migrateSourceKcId == Guid.Empty) return;
+
+        DetectedKeycloak? sourceKc = detectedKeycloaks?.FirstOrDefault(k => k.ComponentId == migrateSourceKcId);
+        if (sourceKc?.Config is null) return;
+
+        loadingMigrateSourceRealms = true;
+        StateHasChanged();
+
+        try
+        {
+            migrateSourceRealms = await KeycloakService.GetRealmsForConfigAsync(TenantId, sourceKc.Config.Id);
+        }
+        catch (Exception ex)
+        {
+            migrateError = ex.Message;
+        }
+        finally
+        {
+            loadingMigrateSourceRealms = false;
+        }
+    }
+
+    private async Task ExecuteMigrate()
+    {
+        if (selectedKeycloak is null || migrateSourceKcId == Guid.Empty) return;
+
+        migrating = true;
+        migrateResult = null;
+        migrateCssCopied = 0;
+        migrateError = null;
+
+        try
+        {
+            CopyResult combined = new();
+
+            if (migrateCopyUsers && migrateSourceRealmId != Guid.Empty && migrateTargetRealmId != Guid.Empty)
+            {
+                CopyResult r = await KeycloakService.CopyUsersAsync(
+                    TenantId, migrateSourceRealmId, migrateTargetRealmId);
+                combined.Copied += r.Copied;
+                combined.Skipped += r.Skipped;
+                combined.Errors.AddRange(r.Errors);
+            }
+
+            if (migrateCopyThemeCss)
+            {
+                migrateCssCopied = await KeycloakService.CopyThemeCssAsync(
+                    TenantId, migrateSourceKcId, selectedKeycloak.ComponentId);
+            }
+
+            migrateResult = combined;
+        }
+        catch (Exception ex)
+        {
+            migrateError = ex.Message;
+        }
+        finally
+        {
+            migrating = false;
+        }
+    }
+
+    private void BackToList()
+    {
+        selectedKeycloak = null;
+        selectedRealm = null;
+        realms = null;
+    }
+
+    private async Task OpenRealm(KeycloakRealm realm)
+    {
+        selectedRealm = realm;
+        realmTab = "users";
+        users = null;
+        idps = null;
+        groups = null;
+        orgs = null;
+        backups = null;
+        realmDetails = null;
+        await SwitchRealmTab("users");
+    }
+
+    private void BackToRealms()
+    {
+        selectedRealm = null;
+        users = null;
+        idps = null;
+        groups = null;
+        orgs = null;
+        backups = null;
+        realmDetails = null;
+    }
+
+    private async Task SwitchRealmTab(string tab)
+    {
+        realmTab = tab;
+
+        if (selectedRealm is null) return;
+
+        switch (tab)
+        {
+            case "users" when users is null:
+                loadingUsers = true;
+                StateHasChanged();
+                try { users = await KeycloakService.GetUsersAsync(TenantId, selectedRealm.Id); }
+                catch (Exception ex) { userError = ex.Message; }
+                finally { loadingUsers = false; }
+                break;
+
+            case "idp" when idps is null:
+                loadingIdps = true;
+                StateHasChanged();
+                try { idps = await KeycloakService.GetIdpsAsync(TenantId, selectedRealm.Id); }
+                catch (Exception ex) { idpError = ex.Message; }
+                finally { loadingIdps = false; }
+                break;
+
+            case "groups" when groups is null:
+                loadingGroups = true;
+                StateHasChanged();
+                try { groups = await KeycloakService.GetGroupsAsync(TenantId, selectedRealm.Id); }
+                catch (Exception ex) { groupError = ex.Message; }
+                finally { loadingGroups = false; }
+                break;
+
+            case "orgs" when orgs is null:
+                loadingOrgs = true;
+                StateHasChanged();
+                try { orgs = await KeycloakService.GetOrganizationsAsync(TenantId, selectedRealm.Id); }
+                catch (Exception ex) { orgError = ex.Message; }
+                finally { loadingOrgs = false; }
+                break;
+
+            case "themes" when realmDetails is null:
+                StateHasChanged();
+                try
+                {
+                    realmDetails = await KeycloakService.GetRealmDetailsAsync(TenantId, selectedRealm.Id);
+                    editLoginTheme = realmDetails.LoginTheme ?? "";
+                    editAccountTheme = realmDetails.AccountTheme ?? "";
+                    editRealmNamedThemeId = selectedRealm.KeycloakThemeId;
+
+                    if (namedThemes.Count == 0 && selectedKeycloak?.Config is not null)
+                        namedThemes = await KeycloakService.GetNamedThemesAsync(TenantId, selectedKeycloak.Config.Id);
+                }
+                catch (Exception ex) { realmThemeError = ex.Message; }
+                break;
+
+            case "backup" when backups is null:
+                loadingBackups = true;
+                storageLinks ??= await StorageService.GetStorageLinksAsync(TenantId);
+                StateHasChanged();
+                try { backups = await KeycloakService.GetBackupsAsync(TenantId, selectedRealm.Id); }
+                catch (Exception ex) { backupError = ex.Message; }
+                finally { loadingBackups = false; }
+                break;
+
+            case "portal":
+                apps ??= await KeycloakService.GetAppsAsync(TenantId);
+                break;
+        }
+    }
+
+    // ── Setup ─────────────────────────────────────────────────────────────────
+
+    private void UseSuggestedUrl()
+    {
+        setupAdminUrl = selectedKeycloak?.SuggestedAdminUrl ?? "";
+    }
+
+    private async Task ConfigureKeycloak()
+    {
+        if (selectedKeycloak is null) return;
+
+        configuringKeycloak = true;
+        setupError = null;
+
+        try
+        {
+            Guid? cnpgDbId = null;
+            Guid? regPgDbId = null;
+
+            if (setupDatabaseSelection.StartsWith("cnpg:") && Guid.TryParse(setupDatabaseSelection[5..], out Guid parsedCnpg))
+                cnpgDbId = parsedCnpg;
+            else if (setupDatabaseSelection.StartsWith("regpg:") && Guid.TryParse(setupDatabaseSelection[6..], out Guid parsedRegPg))
+                regPgDbId = parsedRegPg;
+
+            KeycloakComponentConfig config = await KeycloakService.ConfigureAsync(
+                TenantId,
+                selectedKeycloak.Component!.Id,
+                cnpgDbId,
+                setupUsername,
+                setupPassword,
+                setupAdminUrl,
+                registeredPostgresDatabaseId: regPgDbId);
+
+            // Sync the credentials to the K8s secret immediately so the pod can start.
+            await LifecycleService.SyncComponentSecretsAsync(selectedKeycloak.Component!.Id);
+
+            // Import any realms that already exist in this Keycloak instance.
+            await KeycloakService.SyncRealmsFromKeycloakAsync(TenantId, config.Id);
+
+            // Refresh detection list and re-select the now-configured keycloak.
+            detectedKeycloaks = await KeycloakService.GetDetectedKeycloaksAsync(TenantId);
+            Guid originalId = selectedKeycloak.ComponentId;
+            DetectedKeycloak? updated = detectedKeycloaks.FirstOrDefault(
+                k => k.ComponentId == originalId);
+
+            if (updated is not null)
+            {
+                await SelectKeycloak(updated);
+            }
+        }
+        catch (Exception ex)
+        {
+            setupError = ex.Message;
+        }
+        finally
+        {
+            configuringKeycloak = false;
+        }
+    }
+
+    private async Task SaveConfig()
+    {
+        if (selectedKeycloak?.Config is null) return;
+
+        savingConfig = true;
+        configError = null;
+
+        try
+        {
+            await KeycloakService.UpdateConfigAsync(
+                TenantId, selectedKeycloak.Config.Id,
+                editAdminUrl, editAdminUsername,
+                string.IsNullOrWhiteSpace(editAdminPassword) ? null : editAdminPassword);
+
+            showEditConfig = false;
+            detectedKeycloaks = await KeycloakService.GetDetectedKeycloaksAsync(TenantId);
+            Guid originalId = selectedKeycloak.ComponentId;
+            DetectedKeycloak? updated = detectedKeycloaks.FirstOrDefault(k => k.ComponentId == originalId);
+            if (updated is not null) selectedKeycloak = updated;
+        }
+        catch (Exception ex)
+        {
+            configError = ex.Message;
+        }
+        finally
+        {
+            savingConfig = false;
+        }
+    }
+
+    // ── Realm CRUD ────────────────────────────────────────────────────────────
+
+    private async Task CreateRealm()
+    {
+        if (selectedKeycloak?.Config is null) return;
+
+        creatingRealm = true;
+        realmError = null;
+
+        try
+        {
+            await KeycloakService.CreateRealmAsync(
+                TenantId, selectedKeycloak.Config.Id,
+                newRealmName, newRealmDisplayName,
+                string.IsNullOrWhiteSpace(newRealmTheme) ? null : newRealmTheme);
+
+            realms = await KeycloakService.GetRealmsForConfigAsync(TenantId, selectedKeycloak.Config.Id);
+            showCreateRealm = false;
+            newRealmName = "";
+            newRealmDisplayName = "";
+            newRealmTheme = "";
+        }
+        catch (Exception ex)
+        {
+            realmError = ex.Message;
+        }
+        finally
+        {
+            creatingRealm = false;
+        }
+    }
+
+    private async Task DeleteRealm(Guid realmId)
+    {
+        if (selectedKeycloak?.Config is null) return;
+
+        deletingRealmId = realmId;
+
+        try
+        {
+            await KeycloakService.DeleteRealmAsync(TenantId, realmId);
+            realms = await KeycloakService.GetRealmsForConfigAsync(TenantId, selectedKeycloak.Config.Id);
+        }
+        catch (Exception ex)
+        {
+            realmError = ex.Message;
+        }
+        finally
+        {
+            deletingRealmId = null;
+        }
+    }
+
+    // ── User CRUD ─────────────────────────────────────────────────────────────
+
+    private async Task AddUser()
+    {
+        if (selectedRealm is null) return;
+
+        savingUser = true;
+        userError = null;
+
+        try
+        {
+            await KeycloakService.CreateUserAsync(
+                TenantId, selectedRealm.Id,
+                newUserUsername, newUserEmail, newUserFirstName, newUserLastName,
+                string.IsNullOrWhiteSpace(newUserPassword) ? null : newUserPassword);
+
+            users = await KeycloakService.GetUsersAsync(TenantId, selectedRealm.Id);
+            showAddUser = false;
+            newUserUsername = "";
+            newUserEmail = "";
+            newUserFirstName = "";
+            newUserLastName = "";
+            newUserPassword = "";
+        }
+        catch (Exception ex)
+        {
+            userError = ex.Message;
+        }
+        finally
+        {
+            savingUser = false;
+        }
+    }
+
+    private async Task DeleteUser(string userId)
+    {
+        if (selectedRealm is null) return;
+
+        try
+        {
+            await KeycloakService.DeleteUserAsync(TenantId, selectedRealm.Id, userId);
+            users = await KeycloakService.GetUsersAsync(TenantId, selectedRealm.Id);
+        }
+        catch (Exception ex)
+        {
+            userError = ex.Message;
+        }
+    }
+
+    // ── IdP CRUD ──────────────────────────────────────────────────────────────
+
+    private async Task AddIdp()
+    {
+        if (selectedRealm is null) return;
+
+        savingIdp = true;
+        idpError = null;
+
+        try
+        {
+            await KeycloakService.CreateIdpAsync(
+                TenantId, selectedRealm.Id,
+                newIdpAlias, newIdpProviderId, newIdpClientId, newIdpClientSecret);
+
+            idps = await KeycloakService.GetIdpsAsync(TenantId, selectedRealm.Id);
+            showAddIdp = false;
+            newIdpAlias = "";
+            newIdpClientId = "";
+            newIdpClientSecret = "";
+        }
+        catch (Exception ex)
+        {
+            idpError = ex.Message;
+        }
+        finally
+        {
+            savingIdp = false;
+        }
+    }
+
+    private async Task DeleteIdp(string alias)
+    {
+        if (selectedRealm is null) return;
+
+        try
+        {
+            await KeycloakService.DeleteIdpAsync(TenantId, selectedRealm.Id, alias);
+            idps = await KeycloakService.GetIdpsAsync(TenantId, selectedRealm.Id);
+        }
+        catch (Exception ex)
+        {
+            idpError = ex.Message;
+        }
+    }
+
+    // ── Group CRUD ────────────────────────────────────────────────────────────
+
+    private async Task AddGroup()
+    {
+        if (selectedRealm is null) return;
+
+        savingGroup = true;
+        groupError = null;
+
+        try
+        {
+            await KeycloakService.CreateGroupAsync(TenantId, selectedRealm.Id, newGroupName);
+            groups = await KeycloakService.GetGroupsAsync(TenantId, selectedRealm.Id);
+            showAddGroup = false;
+            newGroupName = "";
+        }
+        catch (Exception ex)
+        {
+            groupError = ex.Message;
+        }
+        finally
+        {
+            savingGroup = false;
+        }
+    }
+
+    private async Task DeleteGroup(string groupId)
+    {
+        if (selectedRealm is null) return;
+
+        try
+        {
+            await KeycloakService.DeleteGroupAsync(TenantId, selectedRealm.Id, groupId);
+            groups = await KeycloakService.GetGroupsAsync(TenantId, selectedRealm.Id);
+        }
+        catch (Exception ex)
+        {
+            groupError = ex.Message;
+        }
+    }
+
+    // ── Org CRUD ──────────────────────────────────────────────────────────────
+
+    private async Task AddOrg()
+    {
+        if (selectedRealm is null) return;
+
+        savingOrg = true;
+        orgError = null;
+
+        try
+        {
+            await KeycloakService.CreateOrganizationAsync(
+                TenantId, selectedRealm.Id, newOrgName,
+                string.IsNullOrWhiteSpace(newOrgDescription) ? null : newOrgDescription);
+
+            orgs = await KeycloakService.GetOrganizationsAsync(TenantId, selectedRealm.Id);
+            showAddOrg = false;
+            newOrgName = "";
+            newOrgDescription = "";
+        }
+        catch (Exception ex)
+        {
+            orgError = ex.Message;
+        }
+        finally
+        {
+            savingOrg = false;
+        }
+    }
+
+    // ── Themes ────────────────────────────────────────────────────────────────
+
+    private async Task ApplyNamedThemeToRealm()
+    {
+        if (selectedRealm is null) return;
+
+        applyingNamedTheme = true;
+        realmThemeError = null;
+
+        try
+        {
+            await KeycloakService.AssignNamedThemeToRealmAsync(
+                TenantId, selectedRealm.Id, editRealmNamedThemeId == Guid.Empty ? null : editRealmNamedThemeId);
+
+            // Refresh the realm list so the FK and theme labels are up-to-date.
+            realms = await KeycloakService.GetRealmsForConfigAsync(TenantId, selectedKeycloak!.Config!.Id);
+            selectedRealm = realms.FirstOrDefault(r => r.Id == selectedRealm.Id) ?? selectedRealm;
+
+            if (realmDetails is not null)
+            {
+                KeycloakTheme? applied = editRealmNamedThemeId is not null
+                    ? namedThemes.FirstOrDefault(t => t.Id == editRealmNamedThemeId)
+                    : null;
+                editLoginTheme = applied?.LoginTheme ?? realmDetails.LoginTheme ?? "";
+                editAccountTheme = applied?.AccountTheme ?? realmDetails.AccountTheme ?? "";
+            }
+        }
+        catch (Exception ex)
+        {
+            realmThemeError = ex.Message;
+        }
+        finally
+        {
+            applyingNamedTheme = false;
+        }
+    }
+
+    private async Task SaveThemes()
+    {
+        if (selectedRealm is null) return;
+
+        savingThemes = true;
+        realmThemeError = null;
+
+        try
+        {
+            await KeycloakService.UpdateRealmThemesAsync(
+                TenantId, selectedRealm.Id,
+                string.IsNullOrWhiteSpace(editLoginTheme) ? null : editLoginTheme,
+                string.IsNullOrWhiteSpace(editAccountTheme) ? null : editAccountTheme);
+        }
+        catch (Exception ex)
+        {
+            realmThemeError = ex.Message;
+        }
+        finally
+        {
+            savingThemes = false;
+        }
+    }
+
+    // ── Backup ────────────────────────────────────────────────────────────────
+
+    private async Task CreateBackup()
+    {
+        if (selectedRealm is null || backupStorageLinkId == Guid.Empty) return;
+
+        creatingBackup = true;
+        backupError = null;
+
+        try
+        {
+            await KeycloakService.CreateBackupAsync(TenantId, selectedRealm.Id, backupStorageLinkId);
+            backups = await KeycloakService.GetBackupsAsync(TenantId, selectedRealm.Id);
+        }
+        catch (Exception ex)
+        {
+            backupError = ex.Message;
+        }
+        finally
+        {
+            creatingBackup = false;
+        }
+    }
+
+    private async Task RestoreBackup(Guid backupId)
+    {
+        backupError = null;
+
+        try
+        {
+            await KeycloakService.RestoreBackupAsync(TenantId, backupId, null);
+        }
+        catch (Exception ex)
+        {
+            backupError = ex.Message;
+        }
+    }
+
+    private async Task DeleteBackup(Guid backupId)
+    {
+        backupError = null;
+
+        try
+        {
+            await KeycloakService.DeleteBackupAsync(TenantId, backupId);
+            if (selectedRealm is not null)
+            {
+                backups = await KeycloakService.GetBackupsAsync(TenantId, selectedRealm.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            backupError = ex.Message;
+        }
+    }
+
+    // ── Portal ────────────────────────────────────────────────────────────────
+
+    private async Task LinkApp()
+    {
+        if (selectedRealm is null || linkAppId == Guid.Empty) return;
+
+        portalError = null;
+
+        try
+        {
+            await KeycloakService.LinkRealmToAppAsync(TenantId, selectedRealm.Id, linkAppId);
+
+            if (selectedKeycloak?.Config is not null)
+            {
+                realms = await KeycloakService.GetRealmsForConfigAsync(TenantId, selectedKeycloak.Config.Id);
+                selectedRealm = realms.FirstOrDefault(r => r.Id == selectedRealm.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            portalError = ex.Message;
+        }
+    }
+
+    private async Task UnlinkApp()
+    {
+        if (selectedRealm is null) return;
+
+        portalError = null;
+
+        try
+        {
+            await KeycloakService.UnlinkRealmFromAppAsync(TenantId, selectedRealm.Id);
+
+            if (selectedKeycloak?.Config is not null)
+            {
+                realms = await KeycloakService.GetRealmsForConfigAsync(TenantId, selectedKeycloak.Config.Id);
+                selectedRealm = realms.FirstOrDefault(r => r.Id == selectedRealm.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            portalError = ex.Message;
+        }
+    }
+
+    // ── Utilities ─────────────────────────────────────────────────────────────
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        return $"{bytes / (1024.0 * 1024):F1} MB";
+    }
+}

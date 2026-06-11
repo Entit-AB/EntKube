@@ -1,0 +1,107 @@
+@page "/admin/backup"
+@using Microsoft.AspNetCore.Authorization
+@using EntKube.Web.Services
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = "Admin")]
+
+@inject NavigationManager Nav
+
+<PageTitle>Backup & Restore</PageTitle>
+
+<div class="d-flex align-items-center justify-content-between mb-4">
+    <div>
+        <h1 class="mb-0"><i class="bi bi-arrow-repeat me-2 text-primary"></i>Backup & Restore</h1>
+        <p class="text-muted small mb-0 mt-1">Export the full app state or restore from a previous backup.</p>
+    </div>
+</div>
+
+<div class="row g-4">
+
+    @* ── Export ── *@
+    <div class="col-md-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <h5 class="card-title mb-1"><i class="bi bi-download me-2 text-success"></i>Export Backup</h5>
+                <p class="text-muted small mb-3">
+                    Downloads a <code>.json.gz</code> archive containing all tenants, apps,
+                    clusters, deployments, and decrypted secrets. Store it securely — it
+                    contains plaintext credentials.
+                </p>
+                <a href="/api/admin/backup" class="btn btn-success" target="_blank">
+                    <i class="bi bi-download me-1"></i>Download Backup
+                </a>
+            </div>
+        </div>
+    </div>
+
+    @* ── Restore ── *@
+    <div class="col-md-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <h5 class="card-title mb-1"><i class="bi bi-upload me-2 text-warning"></i>Restore from Backup</h5>
+                <p class="text-muted small mb-3">
+                    Upload a <code>.json.gz</code> or <code>.json</code> backup file produced by this application.
+                    Secrets are re-encrypted with the current server's root key on restore.
+                </p>
+
+                <form action="/api/admin/restore" method="post" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <input type="file" name="bundle" class="form-control" required />
+                    </div>
+
+                    <div class="form-check mb-3">
+                        @* name+value on the checkbox so the browser submits "wipe=true" when it is checked *@
+                        <input class="form-check-input" type="checkbox" name="wipe" value="true" id="wipeCheck"
+                               @onchange="e => wipeExisting = (bool)(e.Value ?? false)" />
+                        <label class="form-check-label" for="wipeCheck">
+                            Wipe all existing data before restoring
+                        </label>
+                    </div>
+
+                    @if (wipeExisting)
+                    {
+                        <div class="alert alert-danger py-2 small mb-3">
+                            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                            <strong>All current data will be permanently deleted</strong> before the
+                            backup is loaded. This cannot be undone. Only proceed on a fresh
+                            installation or when you intend a full replacement.
+                        </div>
+                    }
+
+                    <button type="submit" class="btn btn-warning">
+                        <i class="bi bi-upload me-1"></i>Restore
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+@if (!string.IsNullOrEmpty(successMessage))
+{
+    <div class="alert alert-success mt-4">
+        <i class="bi bi-check-circle-fill me-2"></i>@successMessage
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(errorMessage))
+{
+    <div class="alert alert-danger mt-4">
+        <i class="bi bi-exclamation-triangle-fill me-2"></i>@errorMessage
+    </div>
+}
+
+@code {
+    private bool wipeExisting;
+    private string? successMessage;
+    private string? errorMessage;
+
+    protected override void OnInitialized()
+    {
+        var uri = new Uri(Nav.Uri);
+        var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(uri.Query);
+        if (query.TryGetValue("success", out var s)) successMessage = s;
+        if (query.TryGetValue("error", out var e)) errorMessage = e;
+    }
+}

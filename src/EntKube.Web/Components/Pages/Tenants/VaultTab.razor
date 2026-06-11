@@ -1,0 +1,952 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@using EntKube.Web.Components.Pages.Shared
+@inject VaultService VaultService
+@inject TenantService TenantService
+@inject StorageService StorageService
+@inject CnpgService CnpgService
+@inject MongoService MongoService
+@inject RegisteredPostgresService RegisteredPostgresService
+
+<div class="d-flex align-items-center mb-2">
+    <i class="bi bi-shield-lock fs-4 me-2 text-primary"></i>
+    <h4 class="mb-0">Secrets Vault</h4>
+</div>
+<p class="text-muted small mb-3">Encrypted secrets for apps and cluster components. Per-tenant AES-256-GCM envelope encryption with auto-unseal.</p>
+
+@if (!vaultInitialized)
+{
+    <div class="card border-warning shadow-sm">
+        <div class="card-body text-center py-5">
+            <i class="bi bi-shield-exclamation text-warning" style="font-size: 3rem;"></i>
+            <h5 class="mt-3">Vault Not Initialized</h5>
+            <p class="text-muted mb-3">A per-tenant encryption key will be generated and sealed with the platform root key.</p>
+            <button class="btn btn-primary" @onclick="InitializeVault">
+                <i class="bi bi-key me-1"></i>Initialize Vault
+            </button>
+        </div>
+    </div>
+}
+else
+{
+    @* --- Scope Toggle --- *@
+    <div class="d-flex align-items-center gap-3 mb-3">
+        <span class="text-muted small fw-medium">Scope:</span>
+        <div class="btn-group" role="group">
+            <button class="btn btn-sm @(scope == "app" ? "btn-primary" : "btn-outline-primary")" @onclick='() => SwitchScope("app")'>
+                <i class="bi bi-app-indicator me-1"></i>App Secrets
+            </button>
+            <button class="btn btn-sm @(scope == "component" ? "btn-primary" : "btn-outline-primary")" @onclick='() => SwitchScope("component")'>
+                <i class="bi bi-puzzle me-1"></i>Component Secrets
+            </button>
+            <button class="btn btn-sm @(scope == "storage" ? "btn-primary" : "btn-outline-primary")" @onclick='() => SwitchScope("storage")'>
+                <i class="bi bi-hdd me-1"></i>Storage Secrets
+            </button>
+            <button class="btn btn-sm @(scope == "cnpg" ? "btn-primary" : "btn-outline-primary")" @onclick='() => SwitchScope("cnpg")'>
+                <i class="bi bi-database me-1"></i>PostgreSQL
+            </button>
+            <button class="btn btn-sm @(scope == "mongodb" ? "btn-primary" : "btn-outline-primary")" @onclick='() => SwitchScope("mongodb")'>
+                <i class="bi bi-database me-1"></i>MongoDB
+            </button>
+            <button class="btn btn-sm @(scope == "regpostgres" ? "btn-primary" : "btn-outline-primary")" @onclick='() => SwitchScope("regpostgres")'>
+                <i class="bi bi-database me-1"></i>Registered DB
+            </button>
+            <button class="btn btn-sm @(scope == "docker" ? "btn-primary" : "btn-outline-primary")" @onclick='() => SwitchScope("docker")'>
+                <i class="bi bi-box-seam me-1"></i>Docker Registries
+            </button>
+        </div>
+    </div>
+
+    @* --- Selector Dropdown --- *@
+    @if (scope == "app")
+    {
+        @if (appOptions is not null && appOptions.Count > 0)
+        {
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body py-2">
+                    <div class="input-group">
+                        <span class="input-group-text bg-transparent"><i class="bi bi-app"></i></span>
+                        <select class="form-select" @bind="selectedAppId" @bind:after="LoadSecrets">
+                            <option value="@Guid.Empty">Select an app...</option>
+                            @foreach ((string label, Guid id) in appOptions)
+                            {
+                                <option value="@id">@label</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <EmptyState Icon="bi-app"
+                        Message="Create a customer and app first to store app secrets." />
+        }
+    }
+    else if (scope == "component")
+    {
+        @if (componentOptions is not null && componentOptions.Count > 0)
+        {
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body py-2">
+                    <div class="input-group">
+                        <span class="input-group-text bg-transparent"><i class="bi bi-puzzle"></i></span>
+                        <select class="form-select" @bind="selectedComponentId" @bind:after="LoadSecrets">
+                            <option value="@Guid.Empty">Select a component...</option>
+                            @foreach ((string label, Guid id) in componentOptions)
+                            {
+                                <option value="@id">@label</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <EmptyState Icon="bi-puzzle"
+                        Message="Create an environment, cluster, and component first to store component secrets." />
+        }
+    }
+    else if (scope == "storage")
+    {
+        @if (storageLinkOptions is not null && storageLinkOptions.Count > 0)
+        {
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body py-2">
+                    <div class="input-group">
+                        <span class="input-group-text bg-transparent"><i class="bi bi-hdd"></i></span>
+                        <select class="form-select" @bind="selectedStorageLinkId" @bind:after="LoadSecrets">
+                            <option value="@Guid.Empty">Select a storage link...</option>
+                            @foreach ((string label, Guid id) in storageLinkOptions)
+                            {
+                                <option value="@id">@label</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <EmptyState Icon="bi-hdd"
+                        Message="Create a storage link first to view its secrets." />
+        }
+    }
+
+    else if (scope == "cnpg")
+    {
+        @if (cnpgClusterOptions is not null && cnpgClusterOptions.Count > 0)
+        {
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body py-2">
+                    <div class="input-group">
+                        <span class="input-group-text bg-transparent"><i class="bi bi-database"></i></span>
+                        <select class="form-select" @bind="selectedCnpgClusterId" @bind:after="LoadSecrets">
+                            <option value="@Guid.Empty">Select a CNPG cluster...</option>
+                            @foreach ((string label, Guid id) in cnpgClusterOptions)
+                            {
+                                <option value="@id">@label</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <EmptyState Icon="bi-database"
+                        Message="No CNPG clusters found for this tenant." />
+        }
+    }
+
+    else if (scope == "mongodb")
+    {
+        @if (mongoClusterOptions is not null && mongoClusterOptions.Count > 0)
+        {
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body py-2">
+                    <div class="input-group">
+                        <span class="input-group-text bg-transparent"><i class="bi bi-database"></i></span>
+                        <select class="form-select" @bind="selectedMongoClusterId" @bind:after="LoadSecrets">
+                            <option value="@Guid.Empty">Select a MongoDB cluster...</option>
+                            @foreach ((string label, Guid id) in mongoClusterOptions)
+                            {
+                                <option value="@id">@label</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <EmptyState Icon="bi-database"
+                        Message="No MongoDB clusters found for this tenant." />
+        }
+    }
+
+    else if (scope == "regpostgres")
+    {
+        @if (regPostgresOptions is not null && regPostgresOptions.Count > 0)
+        {
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body py-2">
+                    <div class="input-group">
+                        <span class="input-group-text bg-transparent"><i class="bi bi-database"></i></span>
+                        <select class="form-select" @bind="selectedRegPostgresInstanceId" @bind:after="LoadSecrets">
+                            <option value="@Guid.Empty">Select a registered Postgres instance...</option>
+                            @foreach ((string label, Guid id) in regPostgresOptions)
+                            {
+                                <option value="@id">@label</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <EmptyState Icon="bi-database"
+                        Message="No registered Postgres instances found for this tenant." />
+        }
+    }
+
+    @* --- Docker Registries Panel --- *@
+    @if (scope == "docker")
+    {
+        <DockerRegistriesPanel
+            TenantId="TenantId"
+            AppId="Guid.Empty"
+            IsAdmin="true" />
+    }
+
+    @* --- Secrets Panel --- *@
+    @if (HasSelection())
+    {
+        <div class="card shadow-sm">
+            <div class="card-header bg-white d-flex align-items-center py-2">
+                <i class="bi bi-lock me-2 text-primary"></i>
+                <strong>Secrets</strong>
+                @if (scope == "app" && secrets?.Any(s => s.SyncToKubernetes) == true)
+                {
+                    <button class="btn btn-sm btn-outline-success ms-auto" @onclick="SyncAllAppSecrets" disabled="@syncingSecrets">
+                        @if (syncingSecrets) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        else { <i class="bi bi-cloud-arrow-up me-1"></i> }
+                        Sync All to K8s
+                    </button>
+                }
+            </div>
+            <div class="card-body">
+                @* Add secret form — hidden for read-only DB scopes *@
+                @if (scope is not "mongodb" and not "regpostgres")
+                {
+                <div class="row g-2 mb-3">
+                    <div class="col-md-4">
+                        <div class="input-group input-group-sm">
+                            <span class="input-group-text"><i class="bi bi-tag"></i></span>
+                            <input type="text" class="form-control" placeholder="SECRET_NAME"
+                                   @bind="newSecretName" @bind:event="oninput" />
+                        </div>
+                    </div>
+                    <div class="col-md-5">
+                        <div class="input-group input-group-sm">
+                            <span class="input-group-text"><i class="bi bi-key"></i></span>
+                            <input type="password" class="form-control" placeholder="Secret value"
+                                   @bind="newSecretValue" @bind:event="oninput" />
+                        </div>
+                    </div>
+                    <div class="col-md-auto">
+                        <button class="btn btn-sm btn-primary" @onclick="AddSecret"
+                                disabled="@(string.IsNullOrWhiteSpace(newSecretName) || string.IsNullOrWhiteSpace(newSecretValue))">
+                            <i class="bi bi-plus-lg me-1"></i>Set Secret
+                        </button>
+                    </div>
+                </div>
+                }
+
+                @if (!string.IsNullOrEmpty(errorMessage))
+                {
+                    <div class="alert alert-danger py-1 small mb-2">
+                        <i class="bi bi-exclamation-triangle me-1"></i>@errorMessage
+                    </div>
+                }
+
+                @if (!string.IsNullOrEmpty(successMessage))
+                {
+                    <div class="alert alert-success py-1 small mb-2">
+                        <i class="bi bi-check-circle me-1"></i>@successMessage
+                    </div>
+                }
+
+                @* Secrets table *@
+                <LoadingPanel Loading="@(secrets is null)">
+                @if (secrets is not null && secrets.Count == 0)
+                {
+                    <EmptyState Icon="bi-lock"
+                                Message="No secrets stored yet. Add one above." />
+                }
+                else if (secrets is not null)
+                {
+                    <div class="table-responsive">
+                        <table class="table table-hover align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Name</th>
+                                    @if (scope is "cnpg" or "mongodb" or "regpostgres")
+                                    {
+                                        <th>Database</th>
+                                    }
+                                    <th>K8s Sync</th>
+                                    <th>K8s Secret</th>
+                                    <th>Namespace</th>
+                                    <th>Updated</th>
+                                    <th class="text-end" style="width: 150px;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (VaultSecret secret in secrets)
+                                {
+                                    <tr>
+                                        <td><code>@secret.Name</code></td>
+                                        @if (scope is "cnpg" or "mongodb" or "regpostgres")
+                                        {
+                                            <td>
+                                                @if (secret.CnpgDatabase is not null)
+                                                {
+                                                    <span class="badge bg-info-subtle text-info border border-info-subtle">@secret.CnpgDatabase.Name</span>
+                                                }
+                                                else if (secret.MongoDatabase is not null)
+                                                {
+                                                    <span class="badge bg-success-subtle text-success border border-success-subtle">@secret.MongoDatabase.Name</span>
+                                                }
+                                                else if (secret.RegisteredPostgresDatabase is not null)
+                                                {
+                                                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle">@secret.RegisteredPostgresDatabase.Name</span>
+                                                }
+                                                else
+                                                {
+                                                    <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">cluster</span>
+                                                }
+                                            </td>
+                                        }
+                                        <td>
+                                            @if (secret.SyncToKubernetes)
+                                            {
+                                                <span class="badge bg-success"><i class="bi bi-cloud-check me-1"></i>Synced</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-secondary">Off</span>
+                                            }
+                                        </td>
+                                        <td><small class="text-muted">@(secret.KubernetesSecretName ?? "—")</small></td>
+                                        <td><small class="text-muted">@(secret.KubernetesNamespace ?? "—")</small></td>
+                                        <td><small class="text-muted">@secret.UpdatedAt.ToString("MMM d, HH:mm")</small></td>
+                                        <td class="text-end">
+                                            <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => RevealSecret(secret)"
+                                                    title="@(revealedSecretId == secret.Id ? "Hide value" : "Reveal value")">
+                                                <i class="bi @(revealedSecretId == secret.Id ? "bi-eye-slash" : "bi-eye")"></i>
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-warning me-1" @onclick="() => StartEdit(secret)" title="Edit value">
+                                                <i class="bi bi-pencil"></i>
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => ToggleHistory(secret.Id)" title="Version history">
+                                                <i class="bi bi-clock-history"></i>
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-info me-1" @onclick="() => ToggleSync(secret)"
+                                                    title="@(secret.SyncToKubernetes ? "Disable K8s sync" : "Enable K8s sync")">
+                                                <i class="bi @(secret.SyncToKubernetes ? "bi-cloud-slash" : "bi-cloud-arrow-up")"></i>
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteSecret(secret.Id)" title="Delete secret">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+
+                                    @* Reveal value row *@
+                                    @if (revealedSecretId == secret.Id)
+                                    {
+                                        <tr>
+                                            <td colspan="6" class="bg-light">
+                                                <div class="p-2">
+                                                    <span class="text-muted small me-2">Value:</span>
+                                                    <code class="user-select-all">@revealedValue</code>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    }
+
+                                    @* Edit value row *@
+                                    @if (editSecretId == secret.Id)
+                                    {
+                                        <tr>
+                                            <td colspan="6" class="bg-light">
+                                                <div class="row g-2 p-2 align-items-center">
+                                                    <div class="col-md-6">
+                                                        <input type="password" class="form-control form-control-sm"
+                                                               placeholder="New secret value" @bind="editSecretValue" />
+                                                    </div>
+                                                    <div class="col-auto">
+                                                        <button class="btn btn-sm btn-success" @onclick="SaveEdit"
+                                                                disabled="@string.IsNullOrWhiteSpace(editSecretValue)">
+                                                            <i class="bi bi-check-lg me-1"></i>Update
+                                                        </button>
+                                                        <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="CancelEdit">
+                                                            Cancel
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    }
+
+                                    @* Version history row *@
+                                    @if (historySecretId == secret.Id)
+                                    {
+                                        <tr>
+                                            <td colspan="7" class="bg-light p-0">
+                                                <div class="p-3">
+                                                    <div class="d-flex align-items-center mb-2">
+                                                        <i class="bi bi-clock-history me-2 text-secondary"></i>
+                                                        <strong class="small">Version History</strong>
+                                                        <span class="badge bg-secondary ms-2">@(secretVersions?.Count ?? 0)</span>
+                                                    </div>
+                                                    @if (secretVersions is null)
+                                                    {
+                                                        <div class="spinner-border spinner-border-sm text-secondary" role="status"></div>
+                                                    }
+                                                    else if (secretVersions.Count == 0)
+                                                    {
+                                                        <p class="text-muted small mb-0">No previous versions recorded.</p>
+                                                    }
+                                                    else
+                                                    {
+                                                        <table class="table table-sm table-bordered mb-0">
+                                                            <thead class="table-secondary">
+                                                                <tr>
+                                                                    <th style="width: 60px;">#</th>
+                                                                    <th>Set by</th>
+                                                                    <th>Date</th>
+                                                                    <th class="text-end" style="width: 160px;">Actions</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                @foreach (VaultSecretVersion ver in secretVersions)
+                                                                {
+                                                                    <tr>
+                                                                        <td><span class="badge bg-secondary">v@ver.VersionNumber</span></td>
+                                                                        <td><small class="text-muted">@(ver.CreatedBy ?? "—")</small></td>
+                                                                        <td><small class="text-muted">@ver.CreatedAt.ToString("MMM d, HH:mm")</small></td>
+                                                                        <td class="text-end">
+                                                                            <button class="btn btn-xs btn-outline-secondary me-1"
+                                                                                    @onclick="() => RevealVersion(secret.Id, ver)"
+                                                                                    title="@(revealedVersionId == ver.Id ? "Hide" : "Reveal value")">
+                                                                                <i class="bi @(revealedVersionId == ver.Id ? "bi-eye-slash" : "bi-eye")"></i>
+                                                                            </button>
+                                                                            <button class="btn btn-xs btn-outline-warning"
+                                                                                    @onclick="() => RollbackToVersion(secret.Id, ver.Id)"
+                                                                                    title="Restore this value">
+                                                                                <i class="bi bi-arrow-counterclockwise me-1"></i>Restore
+                                                                            </button>
+                                                                        </td>
+                                                                    </tr>
+                                                                    @if (revealedVersionId == ver.Id)
+                                                                    {
+                                                                        <tr class="table-light">
+                                                                            <td colspan="4" class="px-2 py-1">
+                                                                                <span class="text-muted small me-2">Value:</span>
+                                                                                @if (versionRevealLoading)
+                                                                                {
+                                                                                    <span class="spinner-border spinner-border-sm"></span>
+                                                                                }
+                                                                                else
+                                                                                {
+                                                                                    <code class="user-select-all">@revealedVersionValue</code>
+                                                                                }
+                                                                            </td>
+                                                                        </tr>
+                                                                    }
+                                                                }
+                                                            </tbody>
+                                                        </table>
+                                                    }
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    }
+
+                                    @if (syncConfigSecretId == secret.Id)
+                                    {
+                                        <tr>
+                                            <td colspan="6" class="bg-light">
+                                                <div class="row g-2 p-2 align-items-center">
+                                                    @if (scope == "app" && clusterOptions is not null)
+                                                    {
+                                                        <div class="col-md-3">
+                                                            <select class="form-select form-select-sm" @bind="syncClusterId">
+                                                                <option value="@Guid.Empty">Target cluster…</option>
+                                                                @foreach ((string label, Guid id) in clusterOptions)
+                                                                {
+                                                                    <option value="@id">@label</option>
+                                                                }
+                                                            </select>
+                                                        </div>
+                                                    }
+                                                    <div class="col-md-3">
+                                                        <input type="text" class="form-control form-control-sm"
+                                                               placeholder="K8s Secret name (e.g. my-app-secrets)" @bind="syncSecretName" />
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <input type="text" class="form-control form-control-sm"
+                                                               placeholder="Namespace (e.g. default)" @bind="syncNamespace" />
+                                                    </div>
+                                                    <div class="col-auto">
+                                                        <button class="btn btn-sm btn-success" @onclick="SaveSync">
+                                                            <i class="bi bi-check-lg me-1"></i>Save
+                                                        </button>
+                                                        <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="() => syncConfigSecretId = null">
+                                                            Cancel
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    }
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+                </LoadingPanel>
+                @if (syncOutput is not null)
+                {
+                    <div class="mt-3 p-2 bg-dark text-white rounded font-monospace small" style="white-space: pre-wrap; max-height: 200px; overflow-y: auto;">@syncOutput</div>
+                }
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private bool vaultInitialized;
+    private string scope = "app";
+
+    // App scope
+    private List<(string Label, Guid Id)>? appOptions;
+    private Guid selectedAppId;
+
+    // Component scope
+    private List<(string Label, Guid Id)>? componentOptions;
+    private Guid selectedComponentId;
+
+    // Storage scope
+    private List<(string Label, Guid Id)>? storageLinkOptions;
+    private Guid selectedStorageLinkId;
+
+    // CNPG cluster scope
+    private List<(string Label, Guid Id)>? cnpgClusterOptions;
+    private Guid selectedCnpgClusterId;
+
+    // MongoDB cluster scope
+    private List<(string Label, Guid Id)>? mongoClusterOptions;
+    private Guid selectedMongoClusterId;
+
+    // Registered Postgres scope
+    private List<(string Label, Guid Id)>? regPostgresOptions;
+    private Guid selectedRegPostgresInstanceId;
+
+    // Cluster options (used in app-scope sync config)
+    private List<(string Label, Guid Id)>? clusterOptions;
+
+    // Secrets
+    private List<VaultSecret>? secrets;
+    private string newSecretName = "";
+    private string newSecretValue = "";
+    private string? errorMessage;
+    private string? successMessage;
+    private Guid? syncConfigSecretId;
+    private string syncSecretName = "";
+    private string syncNamespace = "";
+    private Guid syncClusterId;
+
+    // Sync-to-K8s state (app scope)
+    private bool syncingSecrets;
+    private string? syncOutput;
+
+    // Reveal/Edit state
+    private Guid? revealedSecretId;
+    private string? revealedValue;
+    private Guid? editSecretId;
+    private string editSecretValue = "";
+
+    // Version history state
+    private Guid? historySecretId;
+    private List<VaultSecretVersion>? secretVersions;
+    private Guid? revealedVersionId;
+    private string? revealedVersionValue;
+    private bool versionRevealLoading;
+
+    protected override async Task OnInitializedAsync()
+    {
+        SecretVault? vault = await VaultService.GetVaultAsync(TenantId);
+        vaultInitialized = vault is not null;
+
+        if (vaultInitialized)
+        {
+            await LoadOptions();
+        }
+    }
+
+    private async Task InitializeVault()
+    {
+        await VaultService.InitializeVaultAsync(TenantId);
+        vaultInitialized = true;
+        await LoadOptions();
+    }
+
+    private async Task LoadOptions()
+    {
+        List<Customer> customers = await TenantService.GetCustomersAsync(TenantId);
+        appOptions = [];
+
+        foreach (Customer customer in customers)
+        {
+            List<Data.App> apps = await TenantService.GetAppsAsync(customer.Id);
+
+            foreach (Data.App app in apps)
+            {
+                appOptions.Add(($"{customer.Name} / {app.Name}", app.Id));
+            }
+        }
+
+        List<KubernetesCluster> clusters = await TenantService.GetClustersAsync(TenantId);
+        clusterOptions = clusters.Select(c => (c.Name, c.Id)).ToList();
+        componentOptions = [];
+
+        foreach (KubernetesCluster cluster in clusters)
+        {
+            List<ClusterComponent> components = await VaultService.GetComponentsAsync(cluster.Id);
+
+            foreach (ClusterComponent comp in components)
+            {
+                componentOptions.Add(($"{cluster.Name} / {comp.Name}", comp.Id));
+            }
+        }
+
+        // Load storage links for the storage secrets scope.
+
+        List<StorageLink> links = await StorageService.GetStorageLinksAsync(TenantId);
+        storageLinkOptions = links
+            .Select(l => ($"{l.Environment.Name} / {l.Name} ({l.Provider})", l.Id))
+            .ToList();
+
+        // Load CNPG clusters for the database secrets scope.
+
+        List<CnpgCluster> cnpgClusters = await CnpgService.GetClustersAsync(TenantId);
+        cnpgClusterOptions = cnpgClusters
+            .Select(c => ($"{c.KubernetesCluster.Name} / {c.Name}", c.Id))
+            .ToList();
+
+        // MongoDB clusters
+        List<MongoCluster> mongoClusters = await MongoService.GetClustersAsync(TenantId);
+        mongoClusterOptions = mongoClusters
+            .Select(c => ($"{c.KubernetesCluster.Name} / {c.Name}", c.Id))
+            .ToList();
+
+        // Registered Postgres instances
+        List<RegisteredPostgresInstance> regInstances = await RegisteredPostgresService.GetInstancesAsync(TenantId);
+        regPostgresOptions = regInstances
+            .Select(i => (i.Name, i.Id))
+            .ToList();
+    }
+
+    private void SwitchScope(string newScope)
+    {
+        scope = newScope;
+        secrets = null;
+        selectedAppId = Guid.Empty;
+        selectedComponentId = Guid.Empty;
+        selectedStorageLinkId = Guid.Empty;
+        selectedCnpgClusterId = Guid.Empty;
+        selectedMongoClusterId = Guid.Empty;
+        selectedRegPostgresInstanceId = Guid.Empty;
+        errorMessage = null;
+        successMessage = null;
+        syncClusterId = Guid.Empty;
+        syncOutput = null;
+        // Docker registries panel manages its own state; no reset needed here.
+    }
+
+    private bool HasSelection()
+    {
+        return (scope == "app" && selectedAppId != Guid.Empty)
+            || (scope == "component" && selectedComponentId != Guid.Empty)
+            || (scope == "storage" && selectedStorageLinkId != Guid.Empty)
+            || (scope == "cnpg" && selectedCnpgClusterId != Guid.Empty)
+            || (scope == "mongodb" && selectedMongoClusterId != Guid.Empty)
+            || (scope == "regpostgres" && selectedRegPostgresInstanceId != Guid.Empty);
+    }
+
+    private async Task LoadSecrets()
+    {
+        errorMessage = null;
+        successMessage = null;
+
+        if (scope == "app" && selectedAppId != Guid.Empty)
+        {
+            secrets = await VaultService.GetAppSecretsAsync(TenantId, selectedAppId);
+        }
+        else if (scope == "component" && selectedComponentId != Guid.Empty)
+        {
+            secrets = await VaultService.GetComponentSecretsAsync(TenantId, selectedComponentId);
+        }
+        else if (scope == "storage" && selectedStorageLinkId != Guid.Empty)
+        {
+            secrets = await VaultService.GetStorageLinkSecretsAsync(TenantId, selectedStorageLinkId);
+        }
+        else if (scope == "cnpg" && selectedCnpgClusterId != Guid.Empty)
+        {
+            secrets = await VaultService.GetAllCnpgSecretsForClusterAsync(TenantId, selectedCnpgClusterId);
+        }
+        else if (scope == "mongodb" && selectedMongoClusterId != Guid.Empty)
+        {
+            secrets = await VaultService.GetAllMongoSecretsForClusterAsync(TenantId, selectedMongoClusterId);
+        }
+        else if (scope == "regpostgres" && selectedRegPostgresInstanceId != Guid.Empty)
+        {
+            secrets = await VaultService.GetAllRegisteredPostgresSecretsForInstanceAsync(TenantId, selectedRegPostgresInstanceId);
+        }
+        else
+        {
+            secrets = null;
+        }
+    }
+
+    private async Task AddSecret()
+    {
+        errorMessage = null;
+        successMessage = null;
+
+        try
+        {
+            if (scope == "app")
+            {
+                await VaultService.SetAppSecretAsync(TenantId, selectedAppId, newSecretName.Trim(), newSecretValue.Trim());
+            }
+            else if (scope == "component")
+            {
+                await VaultService.SetComponentSecretAsync(TenantId, selectedComponentId, newSecretName.Trim(), newSecretValue.Trim());
+            }
+            else if (scope == "storage")
+            {
+                await VaultService.SetStorageLinkSecretAsync(TenantId, selectedStorageLinkId, newSecretName.Trim(), newSecretValue.Trim());
+            }
+            else if (scope == "cnpg")
+            {
+                await VaultService.SetCnpgClusterSecretAsync(TenantId, selectedCnpgClusterId, newSecretName.Trim(), newSecretValue.Trim());
+            }
+
+            successMessage = $"Secret '{newSecretName.Trim()}' saved.";
+            newSecretName = "";
+            newSecretValue = "";
+            await LoadSecrets();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+        }
+    }
+
+    private async Task DeleteSecret(Guid secretId)
+    {
+        errorMessage = null;
+
+        // Check if deletion is blocked by active storage bindings.
+
+        (bool canDelete, string? reason) = await VaultService.CanDeleteSecretAsync(secretId);
+
+        if (!canDelete)
+        {
+            errorMessage = reason;
+            return;
+        }
+
+        await VaultService.DeleteSecretAsync(secretId);
+        revealedSecretId = null;
+        editSecretId = null;
+        await LoadSecrets();
+    }
+
+    private async Task RevealSecret(VaultSecret secret)
+    {
+        // Toggle off if already revealed.
+
+        if (revealedSecretId == secret.Id)
+        {
+            revealedSecretId = null;
+            revealedValue = null;
+            return;
+        }
+
+        // Decrypt and reveal the value.
+
+        revealedValue = await VaultService.GetSecretValueByIdAsync(secret.Id);
+        revealedSecretId = secret.Id;
+    }
+
+    private void StartEdit(VaultSecret secret)
+    {
+        editSecretId = secret.Id;
+        editSecretValue = "";
+        revealedSecretId = null;
+        revealedValue = null;
+    }
+
+    private void CancelEdit()
+    {
+        editSecretId = null;
+        editSecretValue = "";
+    }
+
+    private async Task SaveEdit()
+    {
+        if (editSecretId is null || string.IsNullOrWhiteSpace(editSecretValue))
+        {
+            return;
+        }
+
+        errorMessage = null;
+
+        bool updated = await VaultService.UpdateSecretValueAsync(editSecretId.Value, editSecretValue.Trim());
+
+        if (updated)
+        {
+            successMessage = "Secret value updated.";
+        }
+        else
+        {
+            errorMessage = "Failed to update secret.";
+        }
+
+        editSecretId = null;
+        editSecretValue = "";
+        await LoadSecrets();
+    }
+
+    private void ToggleSync(VaultSecret secret)
+    {
+        if (secret.SyncToKubernetes)
+        {
+            _ = DisableSync(secret.Id);
+        }
+        else
+        {
+            syncConfigSecretId = secret.Id;
+            syncSecretName = secret.KubernetesSecretName ?? "";
+            syncNamespace = secret.KubernetesNamespace ?? "";
+            syncClusterId = secret.KubernetesClusterId ?? Guid.Empty;
+        }
+    }
+
+    private async Task DisableSync(Guid secretId)
+    {
+        await VaultService.ConfigureKubernetesSyncAsync(secretId, syncEnabled: false, secretName: null, ns: null);
+        await LoadSecrets();
+    }
+
+    private async Task SaveSync()
+    {
+        if (syncConfigSecretId is null)
+        {
+            return;
+        }
+
+        Guid? clusterId = (scope == "app" && syncClusterId != Guid.Empty) ? syncClusterId : (Guid?)null;
+
+        await VaultService.ConfigureKubernetesSyncAsync(
+            syncConfigSecretId.Value,
+            syncEnabled: true,
+            secretName: syncSecretName.Trim(),
+            ns: syncNamespace.Trim(),
+            clusterId: clusterId);
+
+        syncConfigSecretId = null;
+        await LoadSecrets();
+    }
+
+    private async Task SyncAllAppSecrets()
+    {
+        if (selectedAppId == Guid.Empty) return;
+
+        syncingSecrets = true;
+        syncOutput = null;
+
+        try
+        {
+            HelmExecutionResult result = await VaultService.SyncAppSecretsToKubernetesAsync(TenantId, selectedAppId);
+            syncOutput = result.Output;
+        }
+        finally
+        {
+            syncingSecrets = false;
+        }
+    }
+
+    private async Task ToggleHistory(Guid secretId)
+    {
+        if (historySecretId == secretId)
+        {
+            historySecretId = null;
+            secretVersions = null;
+            revealedVersionId = null;
+            revealedVersionValue = null;
+            return;
+        }
+
+        historySecretId = secretId;
+        revealedVersionId = null;
+        revealedVersionValue = null;
+        secretVersions = null;
+        secretVersions = await VaultService.GetSecretVersionsAsync(secretId);
+    }
+
+    private async Task RevealVersion(Guid secretId, VaultSecretVersion version)
+    {
+        if (revealedVersionId == version.Id)
+        {
+            revealedVersionId = null;
+            revealedVersionValue = null;
+            return;
+        }
+
+        versionRevealLoading = true;
+        revealedVersionId = version.Id;
+        revealedVersionValue = null;
+        revealedVersionValue = await VaultService.GetSecretVersionValueAsync(secretId, version.Id);
+        versionRevealLoading = false;
+    }
+
+    private async Task RollbackToVersion(Guid secretId, Guid versionId)
+    {
+        errorMessage = null;
+        bool ok = await VaultService.RollbackToVersionAsync(secretId, versionId);
+
+        if (ok)
+        {
+            successMessage = "Secret restored to selected version.";
+            historySecretId = null;
+            secretVersions = null;
+            revealedVersionId = null;
+            revealedVersionValue = null;
+            await LoadSecrets();
+        }
+        else
+        {
+            errorMessage = "Failed to restore version.";
+        }
+    }
+}

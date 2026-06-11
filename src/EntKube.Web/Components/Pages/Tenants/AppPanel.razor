@@ -1,0 +1,148 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject TenantService TenantService
+
+<div class="card mt-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>Apps for @Customer.Name</strong>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="OnClose">Close</button>
+    </div>
+    <div class="card-body">
+        <div class="input-group mb-3" style="max-width: 400px;">
+            <input type="text" class="form-control" placeholder="App name" @bind="newAppName" @bind:event="oninput" />
+            <button class="btn btn-primary" @onclick="CreateApp" disabled="@string.IsNullOrWhiteSpace(newAppName)">Add App</button>
+        </div>
+
+        @if (!string.IsNullOrEmpty(errorMessage))
+        {
+            <div class="text-danger mb-2">@errorMessage</div>
+        }
+
+        @if (apps is null)
+        {
+            <p><em>Loading...</em></p>
+        }
+        else if (apps.Count == 0)
+        {
+            <p class="text-muted">No apps yet for this customer.</p>
+        }
+        else
+        {
+            <table class="table table-sm">
+                <thead>
+                    <tr>
+                        <th>App Name</th>
+                        <th>Environments</th>
+                        <th style="width: 80px;"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (Data.App app in apps)
+                    {
+                        <tr>
+                            <td>@app.Name</td>
+                            <td>
+                                @if (app.AppEnvironments.Any())
+                                {
+                                    @string.Join(", ", app.AppEnvironments.Select(ae => ae.Environment.Name))
+                                }
+                                else
+                                {
+                                    <span class="text-muted">None</span>
+                                }
+
+                                <button class="btn btn-sm btn-link p-0 ms-2" @onclick="() => ToggleEnvPicker(app.Id)">Edit</button>
+                            </td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteApp(app.Id)">Delete</button>
+                            </td>
+                        </tr>
+
+                        @if (envPickerAppId == app.Id && environments is not null)
+                        {
+                            <tr>
+                                <td colspan="3">
+                                    <div class="d-flex flex-wrap gap-2 p-2 bg-light rounded">
+                                        @foreach (Data.Environment env in environments)
+                                        {
+                                            bool isLinked = app.AppEnvironments.Any(ae => ae.EnvironmentId == env.Id);
+                                            <button class="btn btn-sm @(isLinked ? "btn-success" : "btn-outline-secondary")"
+                                                    @onclick="() => ToggleEnvironment(app.Id, env.Id, isLinked)">
+                                                @env.Name
+                                            </button>
+                                        }
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Customer Customer { get; set; } = null!;
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private List<Data.App>? apps;
+    private List<Data.Environment>? environments;
+    private string newAppName = "";
+    private string? errorMessage;
+    private Guid? envPickerAppId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+        environments = await TenantService.GetEnvironmentsAsync(TenantId);
+    }
+
+    private async Task Load()
+    {
+        apps = await TenantService.GetAppsAsync(Customer.Id);
+    }
+
+    private async Task CreateApp()
+    {
+        errorMessage = null;
+
+        try
+        {
+            await TenantService.CreateAppAsync(Customer.Id, newAppName.Trim());
+            newAppName = "";
+            await Load();
+        }
+        catch (DbUpdateException)
+        {
+            errorMessage = "An app with that name already exists for this customer.";
+        }
+    }
+
+    private async Task DeleteApp(Guid id)
+    {
+        await TenantService.DeleteAppAsync(id);
+        await Load();
+    }
+
+    private void ToggleEnvPicker(Guid appId)
+    {
+        envPickerAppId = envPickerAppId == appId ? null : appId;
+    }
+
+    private async Task ToggleEnvironment(Guid appId, Guid envId, bool currentlyLinked)
+    {
+        if (currentlyLinked)
+        {
+            await TenantService.UnlinkAppFromEnvironmentAsync(appId, envId);
+        }
+        else
+        {
+            await TenantService.LinkAppToEnvironmentAsync(appId, envId);
+        }
+
+        await Load();
+    }
+}

@@ -1,0 +1,293 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject VaultService VaultService
+
+<div class="card mt-2 mb-2">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>Components</strong>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="OnClose">Close</button>
+    </div>
+    <div class="card-body">
+        <div class="row g-2 mb-3" style="max-width: 500px;">
+            <div class="col">
+                <input type="text" class="form-control form-control-sm" placeholder="Component name"
+                       @bind="newComponentName" @bind:event="oninput" />
+            </div>
+            <div class="col-auto">
+                <select class="form-select form-select-sm" @bind="newComponentType">
+                    <option value="HelmChart">Helm Chart</option>
+                    <option value="Deployment">Deployment</option>
+                    <option value="StatefulSet">StatefulSet</option>
+                    <option value="Operator">Operator</option>
+                </select>
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-sm btn-primary" @onclick="AddComponent"
+                        disabled="@string.IsNullOrWhiteSpace(newComponentName)">
+                    Add
+                </button>
+            </div>
+        </div>
+
+        @if (!string.IsNullOrEmpty(errorMessage))
+        {
+            <div class="text-danger mb-2">@errorMessage</div>
+        }
+
+        @if (components is null)
+        {
+            <p><em>Loading...</em></p>
+        }
+        else if (components.Count == 0)
+        {
+            <p class="text-muted">No components deployed to this cluster yet.</p>
+        }
+        else
+        {
+            <table class="table table-sm">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th style="width: 200px;"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (ClusterComponent component in components)
+                    {
+                        <tr>
+                            <td><strong>@component.Name</strong></td>
+                            <td><span class="badge bg-info text-dark">@component.ComponentType</span></td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-warning me-1" @onclick="() => ToggleSecrets(component.Id)">
+                                    Secrets
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteComponent(component.Id)">
+                                    Delete
+                                </button>
+                            </td>
+                        </tr>
+
+                        @if (expandedComponentId == component.Id)
+                        {
+                            <tr>
+                                <td colspan="3">
+                                    <div class="p-2 bg-light rounded">
+                                        <div class="row g-2 mb-2" style="max-width: 600px;">
+                                            <div class="col-4">
+                                                <input type="text" class="form-control form-control-sm"
+                                                       placeholder="Secret name" @bind="newSecretName" @bind:event="oninput" />
+                                            </div>
+                                            <div class="col-5">
+                                                <input type="password" class="form-control form-control-sm"
+                                                       placeholder="Secret value" @bind="newSecretValue" @bind:event="oninput" />
+                                            </div>
+                                            <div class="col-auto">
+                                                <button class="btn btn-sm btn-primary" @onclick="() => AddSecret(component.Id)"
+                                                        disabled="@(string.IsNullOrWhiteSpace(newSecretName) || string.IsNullOrWhiteSpace(newSecretValue))">
+                                                    Set
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        @if (componentSecrets is not null && componentSecrets.Count > 0)
+                                        {
+                                            <table class="table table-sm table-bordered mb-0">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Name</th>
+                                                        <th>K8s Sync</th>
+                                                        <th>Target Secret</th>
+                                                        <th style="width: 180px;"></th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    @foreach (VaultSecret secret in componentSecrets)
+                                                    {
+                                                        <tr>
+                                                            <td><code>@secret.Name</code></td>
+                                                            <td>
+                                                                @if (secret.SyncToKubernetes)
+                                                                {
+                                                                    <span class="badge bg-success">Synced</span>
+                                                                }
+                                                                else
+                                                                {
+                                                                    <span class="badge bg-secondary">Off</span>
+                                                                }
+                                                            </td>
+                                                            <td>@(secret.KubernetesSecretName ?? "—")</td>
+                                                            <td>
+                                                                <button class="btn btn-sm btn-outline-info me-1"
+                                                                        @onclick="() => ToggleSecretSync(secret)">
+                                                                    @(secret.SyncToKubernetes ? "Unsync" : "Sync")
+                                                                </button>
+                                                                <button class="btn btn-sm btn-outline-danger"
+                                                                        @onclick="() => DeleteSecret(secret.Id, component.Id)">
+                                                                    Del
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+
+                                                        @if (syncConfigSecretId == secret.Id)
+                                                        {
+                                                            <tr>
+                                                                <td colspan="4">
+                                                                    <div class="row g-2 p-1">
+                                                                        <div class="col-4">
+                                                                            <input type="text" class="form-control form-control-sm"
+                                                                                   placeholder="K8s Secret name" @bind="syncSecretName" />
+                                                                        </div>
+                                                                        <div class="col-4">
+                                                                            <input type="text" class="form-control form-control-sm"
+                                                                                   placeholder="Namespace" @bind="syncNamespace" />
+                                                                        </div>
+                                                                        <div class="col-auto">
+                                                                            <button class="btn btn-sm btn-success" @onclick="() => SaveSync(component.Id)">Save</button>
+                                                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => syncConfigSecretId = null">X</button>
+                                                                        </div>
+                                                                    </div>
+                                                                </td>
+                                                            </tr>
+                                                        }
+                                                    }
+                                                </tbody>
+                                            </table>
+                                        }
+                                        else
+                                        {
+                                            <p class="text-muted mb-0">No secrets for this component.</p>
+                                        }
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Guid ClusterId { get; set; }
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private List<ClusterComponent>? components;
+    private List<VaultSecret>? componentSecrets;
+    private string newComponentName = "";
+    private string newComponentType = "HelmChart";
+    private string? errorMessage;
+    private Guid? expandedComponentId;
+    private string newSecretName = "";
+    private string newSecretValue = "";
+    private Guid? syncConfigSecretId;
+    private string syncSecretName = "";
+    private string syncNamespace = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadComponents();
+    }
+
+    private async Task LoadComponents()
+    {
+        components = await VaultService.GetComponentsAsync(ClusterId);
+    }
+
+    private async Task AddComponent()
+    {
+        errorMessage = null;
+
+        try
+        {
+            await VaultService.CreateComponentAsync(ClusterId, newComponentName.Trim(), newComponentType);
+            newComponentName = "";
+            await LoadComponents();
+        }
+        catch (DbUpdateException)
+        {
+            errorMessage = "A component with that name already exists on this cluster.";
+        }
+    }
+
+    private async Task DeleteComponent(Guid componentId)
+    {
+        await VaultService.DeleteComponentAsync(componentId);
+
+        if (expandedComponentId == componentId)
+        {
+            expandedComponentId = null;
+        }
+
+        await LoadComponents();
+    }
+
+    private async Task ToggleSecrets(Guid componentId)
+    {
+        if (expandedComponentId == componentId)
+        {
+            expandedComponentId = null;
+            componentSecrets = null;
+            return;
+        }
+
+        expandedComponentId = componentId;
+        newSecretName = "";
+        newSecretValue = "";
+
+        // Ensure vault is initialized for this tenant.
+        await VaultService.InitializeVaultAsync(TenantId);
+        componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, componentId);
+    }
+
+    private async Task AddSecret(Guid componentId)
+    {
+        await VaultService.SetComponentSecretAsync(TenantId, componentId, newSecretName.Trim(), newSecretValue.Trim());
+        newSecretName = "";
+        newSecretValue = "";
+        componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, componentId);
+    }
+
+    private async Task DeleteSecret(Guid secretId, Guid componentId)
+    {
+        await VaultService.DeleteSecretAsync(secretId);
+        componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, componentId);
+    }
+
+    private void ToggleSecretSync(VaultSecret secret)
+    {
+        if (secret.SyncToKubernetes)
+        {
+            _ = DisableSync(secret);
+        }
+        else
+        {
+            syncConfigSecretId = secret.Id;
+            syncSecretName = secret.KubernetesSecretName ?? "";
+            syncNamespace = secret.KubernetesNamespace ?? "";
+        }
+    }
+
+    private async Task DisableSync(VaultSecret secret)
+    {
+        await VaultService.ConfigureKubernetesSyncAsync(secret.Id, syncEnabled: false, secretName: null, ns: null);
+        componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, expandedComponentId!.Value);
+    }
+
+    private async Task SaveSync(Guid componentId)
+    {
+        if (syncConfigSecretId is null)
+        {
+            return;
+        }
+
+        await VaultService.ConfigureKubernetesSyncAsync(
+            syncConfigSecretId.Value, syncEnabled: true, secretName: syncSecretName.Trim(), ns: syncNamespace.Trim());
+
+        syncConfigSecretId = null;
+        componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, componentId);
+    }
+}

@@ -1,0 +1,102 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject PrometheusService PrometheusService
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+@if (isLoading)
+{
+    <div class="text-muted small text-center py-2">
+        <span class="bi bi-hourglass-split me-1"></span> Loading RabbitMQ metrics…
+    </div>
+}
+else if (summaries.Count == 0)
+{
+    <div class="text-muted small text-center py-3">
+        <span class="bi bi-bar-chart me-1"></span>
+        No RabbitMQ clusters found, or Prometheus metrics are unavailable for this cluster.
+    </div>
+}
+else
+{
+    @foreach (RabbitMQMetricsSummary summary in summaries)
+    {
+        bool hasBacklog = summary.UnackedMessages > 0 || summary.ReadyMessages > 100;
+        <div class="card mb-3 border-@(hasBacklog ? "warning" : "success")">
+            <div class="card-header py-2 d-flex align-items-center gap-2">
+                <span class="bi bi-collection-fill text-success"></span>
+                <strong>@summary.ClusterName</strong>
+                @if (hasBacklog)
+                {
+                    <span class="badge bg-warning text-dark ms-1">Backlog</span>
+                }
+                <span class="ms-auto text-muted small">@summary.QueriedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+            </div>
+            <div class="card-body py-2">
+                <div class="row g-3 mb-2">
+                    <div class="col-auto">
+                        <div class="small text-muted">Connections</div>
+                        <div class="fw-semibold">@summary.Connections</div>
+                    </div>
+                    <div class="col-auto">
+                        <div class="small text-muted">Channels</div>
+                        <div class="fw-semibold">@summary.Channels</div>
+                    </div>
+                    <div class="col-auto">
+                        <div class="small text-muted">Ready Messages</div>
+                        <div class="fw-semibold @(summary.ReadyMessages > 1000 ? "text-warning" : "")">@summary.ReadyMessages.ToString("N0")</div>
+                    </div>
+                    <div class="col-auto">
+                        <div class="small text-muted">Unacknowledged</div>
+                        <div class="fw-semibold @(summary.UnackedMessages > 0 ? "text-warning" : "text-success")">@summary.UnackedMessages.ToString("N0")</div>
+                    </div>
+                    <div class="col-auto">
+                        <div class="small text-muted">Publish rate</div>
+                        <div class="fw-semibold">@summary.PublishRatePerSec.ToString("F1")/s</div>
+                    </div>
+                    <div class="col-auto">
+                        <div class="small text-muted">Deliver rate</div>
+                        <div class="fw-semibold">@summary.DeliverRatePerSec.ToString("F1")/s</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public required Guid ClusterId { get; set; }
+
+    private List<RabbitMQMetricsSummary> summaries = [];
+    private bool isLoading = true;
+
+    protected override async Task OnParametersSetAsync() => await LoadMetrics();
+
+    private async Task LoadMetrics()
+    {
+        isLoading = true;
+        StateHasChanged();
+
+        List<string> rabbitNames;
+        using (ApplicationDbContext db = DbFactory.CreateDbContext())
+        {
+            rabbitNames = await db.RabbitMQClusters
+                .Where(c => c.KubernetesClusterId == ClusterId)
+                .Select(c => c.Name)
+                .ToListAsync();
+        }
+
+        List<RabbitMQMetricsSummary> results = [];
+        foreach (string name in rabbitNames)
+        {
+            KubernetesOperationResult<RabbitMQMetricsSummary> result =
+                await PrometheusService.GetRabbitMQMetricsAsync(ClusterId, name);
+
+            if (result.IsSuccess && result.Data is not null)
+                results.Add(result.Data);
+        }
+
+        summaries = results;
+        isLoading = false;
+    }
+}

@@ -1,0 +1,381 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject PrometheusService PrometheusService
+@inject IncidentService IncidentService
+@inject OnCallService OnCallService
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@implements IAsyncDisposable
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        @if (lastRefreshed.HasValue)
+        {
+            <span class="text-muted small">Last refreshed: @lastRefreshed.Value.ToLocalTime().ToString("HH:mm:ss")</span>
+        }
+    </div>
+    <button class="btn btn-sm btn-outline-secondary" @onclick="Refresh" disabled="@isLoading">
+        <span class="bi bi-arrow-clockwise @(isLoading ? "spin" : "")"></span> Refresh
+    </button>
+</div>
+
+@* ── Tenant-level summary strip ── *@
+@if (clusterSummaries.Count > 0)
+{
+    <div class="d-flex flex-wrap gap-2 mb-4">
+        <div class="card border-0 bg-light text-center px-3 py-2">
+            <div class="fw-bold fs-4">@clusterSummaries.Count</div>
+            <div class="text-muted small">Clusters</div>
+        </div>
+        <div class="card border-0 bg-light text-center px-3 py-2">
+            <div class="fw-bold fs-4">@clusterSummaries.Sum(s => s.Health?.TotalNodes ?? 0)</div>
+            <div class="text-muted small">Nodes</div>
+        </div>
+        <div class="card border-0 bg-light text-center px-3 py-2">
+            <div class="fw-bold fs-4">@clusterSummaries.Sum(s => s.Health?.RunningPods ?? 0)</div>
+            <div class="text-muted small">Running Pods</div>
+        </div>
+        <div class="card border-0 text-center px-3 py-2 @(tenantActiveAlerts > 0 ? "bg-danger-subtle" : "bg-light")"
+             style="cursor:@(OnNavigateTab.HasDelegate ? "pointer" : "default")"
+             @onclick='() => NavigateTo("alerts")'>
+            <div class="fw-bold fs-4 @(tenantActiveAlerts > 0 ? "text-danger" : "text-success")">@tenantActiveAlerts</div>
+            <div class="text-muted small d-flex align-items-center gap-1">
+                Active Alerts
+                @if (OnNavigateTab.HasDelegate)
+                {
+                    <span class="bi bi-arrow-right" style="font-size:.7rem"></span>
+                }
+            </div>
+        </div>
+        @if (criticalIncidents > 0)
+        {
+            <div class="card border-danger text-center px-3 py-2"
+                 style="cursor:@(OnNavigateTab.HasDelegate ? "pointer" : "default")"
+                 @onclick='() => NavigateTo("incidents")'>
+                <div class="fw-bold fs-4 text-danger">@criticalIncidents</div>
+                <div class="text-muted small d-flex align-items-center gap-1">
+                    Critical
+                    @if (OnNavigateTab.HasDelegate)
+                    {
+                        <span class="bi bi-arrow-right" style="font-size:.7rem"></span>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@* ── Cluster cards ── *@
+<div class="row g-3 mb-4">
+    @foreach (ClusterSummaryVm vm in clusterSummaries)
+    {
+        <div class="col-12 col-md-6 col-xl-4">
+            <div class="card h-100 border-@ClusterBorderColor(vm)">
+                <div class="card-header d-flex align-items-center gap-2 py-2">
+                    <span class="bi bi-hdd-rack-fill text-@ClusterBorderColor(vm)"></span>
+                    <strong class="me-auto">@vm.Cluster.Name</strong>
+                    @if (vm.ActiveAlerts > 0)
+                    {
+                        <span class="badge bg-danger">@vm.ActiveAlerts alert@(vm.ActiveAlerts == 1 ? "" : "s")</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-success">Healthy</span>
+                    }
+                </div>
+                <div class="card-body py-2">
+                    @if (vm.Health is null)
+                    {
+                        <div class="text-muted small text-center py-2">
+                            <span class="bi bi-exclamation-triangle me-1"></span>
+                            @(vm.Error ?? "Prometheus not available")
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="row g-2 mb-2">
+                            <div class="col-6">
+                                <div class="small text-muted">CPU</div>
+                                <div class="progress" style="height:8px">
+                                    <div class="progress-bar bg-@UtilColor(vm.Health.CpuUsagePercent)"
+                                         style="width:@((int)Math.Min(vm.Health.CpuUsagePercent,100))%"></div>
+                                </div>
+                                <div class="small fw-semibold">@vm.Health.CpuUsagePercent.ToString("F1")%</div>
+                            </div>
+                            <div class="col-6">
+                                <div class="small text-muted">Memory</div>
+                                <div class="progress" style="height:8px">
+                                    <div class="progress-bar bg-@UtilColor(vm.Health.MemoryUsagePercent)"
+                                         style="width:@((int)Math.Min(vm.Health.MemoryUsagePercent,100))%"></div>
+                                </div>
+                                <div class="small fw-semibold">@vm.Health.MemoryUsagePercent.ToString("F1")%</div>
+                            </div>
+                        </div>
+                        <div class="small text-muted">
+                            <span class="bi bi-server me-1"></span>@vm.Health.ReadyNodes/@vm.Health.TotalNodes nodes ready
+                            &nbsp;·&nbsp;
+                            <span class="bi bi-box me-1"></span>@vm.Health.RunningPods pods running
+                            @if (vm.Health.FailedPods > 0)
+                            {
+                                <span class="text-danger">&nbsp;·&nbsp;<span class="bi bi-exclamation-circle me-1"></span>@vm.Health.FailedPods failed</span>
+                            }
+                            @if (vm.Health.PendingPods > 0)
+                            {
+                                <span class="text-warning">&nbsp;·&nbsp;<span class="bi bi-hourglass me-1"></span>@vm.Health.PendingPods pending</span>
+                            }
+                        </div>
+                    }
+                </div>
+                <div class="card-footer py-1 bg-transparent border-0 d-flex gap-3">
+                    <a href="tenants/@TenantSlug/clusters/@vm.Cluster.Id/monitoring"
+                       class="btn btn-sm btn-link p-0 text-decoration-none">
+                        <span class="bi bi-graph-up me-1"></span>Monitoring
+                    </a>
+                    @if (vm.ActiveAlerts > 0 && OnNavigateTab.HasDelegate)
+                    {
+                        <button class="btn btn-sm btn-link p-0 text-decoration-none text-danger"
+                                @onclick='() => NavigateTo("alerts")'>
+                            <span class="bi bi-bell me-1"></span>View alerts
+                        </button>
+                    }
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@* ── On-call banner ── *@
+@if (currentOnCall is not null)
+{
+    <div class="alert alert-success d-flex align-items-center gap-2 py-2 mb-3">
+        <span class="bi bi-person-check-fill"></span>
+        <span class="small">
+            On call: <strong>@currentOnCall.AssigneeName</strong>
+            @if (!string.IsNullOrEmpty(currentOnCall.AssigneeEmail))
+            {
+                <a href="mailto:@currentOnCall.AssigneeEmail" class="ms-1">@currentOnCall.AssigneeEmail</a>
+            }
+            — until @currentOnCall.EndsAt.ToLocalTime().ToString("MMM d HH:mm")
+        </span>
+        @if (OnNavigateTab.HasDelegate)
+        {
+            <button class="btn btn-sm btn-link p-0 ms-auto text-decoration-none small"
+                    @onclick='() => NavigateTo("on-call")'>
+                Schedule <span class="bi bi-arrow-right ms-1"></span>
+            </button>
+        }
+    </div>
+}
+
+@* ── Active incidents ── *@
+@if (activeIncidents.Count > 0)
+{
+    <div class="mb-4">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="mb-0"><span class="bi bi-bell-fill text-danger me-1"></span>Active Incidents</h6>
+            @if (OnNavigateTab.HasDelegate)
+            {
+                <button class="btn btn-sm btn-link p-0 text-decoration-none"
+                        @onclick='() => NavigateTo("incidents")'>
+                    View all <span class="bi bi-arrow-right ms-1"></span>
+                </button>
+            }
+        </div>
+        <div class="list-group">
+            @foreach (AlertIncident incident in activeIncidents.Take(5))
+            {
+                <div class="list-group-item list-group-item-action py-2 px-3 d-flex align-items-center gap-2">
+                    @SeverityDot(incident.Severity)
+                    <div class="flex-grow-1">
+                        <div class="fw-semibold small">@incident.AlertName</div>
+                        @if (!string.IsNullOrEmpty(incident.Summary))
+                        {
+                            <div class="text-muted" style="font-size:.77rem">@incident.Summary</div>
+                        }
+                    </div>
+                    <div class="text-end">
+                        <div class="small text-muted">@incident.Cluster?.Name</div>
+                        <div class="text-muted" style="font-size:.72rem">@FormatAge(incident.StartsAt)</div>
+                    </div>
+                    @if (incident.Status == IncidentStatus.Acknowledged)
+                    {
+                        <span class="badge bg-warning text-dark ms-1">Acked</span>
+                    }
+                </div>
+            }
+        </div>
+        @if (activeIncidents.Count > 5)
+        {
+            <div class="text-center mt-1">
+                <button class="btn btn-sm btn-link text-decoration-none"
+                        @onclick='() => NavigateTo("incidents")'>
+                    +@(activeIncidents.Count - 5) more
+                </button>
+            </div>
+        }
+    </div>
+}
+
+@* ── Upcoming maintenance ── *@
+@if (upcomingMaintenance.Count > 0)
+{
+    <div class="alert alert-warning d-flex align-items-start gap-2 py-2 mb-3">
+        <span class="bi bi-tools fs-5 mt-1"></span>
+        <div>
+            <strong class="small">Upcoming maintenance</strong>
+            <div class="d-flex flex-column gap-1 mt-1">
+                @foreach (MaintenanceWindow w in upcomingMaintenance)
+                {
+                    bool active = w.StartsAt <= DateTime.UtcNow && w.EndsAt >= DateTime.UtcNow;
+                    <div class="small">
+                        @if (active)
+                        {
+                            <span class="badge bg-warning text-dark me-1">Active now</span>
+                        }
+                        <strong>@w.Title</strong>
+                        — @(w.Cluster?.Name ?? "All clusters")
+                        <span class="text-muted ms-1">
+                            @w.StartsAt.ToLocalTime().ToString("MMM d HH:mm") – @w.EndsAt.ToLocalTime().ToString("HH:mm")
+                        </span>
+                    </div>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+    [Parameter] public required string TenantSlug { get; set; }
+    [Parameter] public EventCallback<string> OnNavigateTab { get; set; }
+
+    private List<ClusterSummaryVm> clusterSummaries = [];
+    private List<AlertIncident> activeIncidents = [];
+    private List<MaintenanceWindow> upcomingMaintenance = [];
+    private OnCallShift? currentOnCall;
+    private int tenantActiveAlerts;
+    private int criticalIncidents;
+    private DateTime? lastRefreshed;
+    private bool isLoading;
+    private Timer? refreshTimer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Refresh();
+        refreshTimer = new Timer(_ => InvokeAsync(async () =>
+        {
+            await Refresh();
+            StateHasChanged();
+        }), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
+    }
+
+    private async Task Refresh()
+    {
+        isLoading = true;
+        StateHasChanged();
+
+        List<KubernetesCluster> clusters;
+        using (ApplicationDbContext db = DbFactory.CreateDbContext())
+        {
+            clusters = await db.KubernetesClusters
+                .Include(c => c.Components)
+                .Where(c => c.TenantId == TenantId)
+                .OrderBy(c => c.Name)
+                .ToListAsync();
+        }
+
+        // Load per-cluster active alert counts and tenant-level stats in parallel
+        Dictionary<Guid, int> perClusterCounts = await IncidentService
+            .GetActiveCountsPerClusterAsync(clusters.Select(c => c.Id));
+
+        tenantActiveAlerts = perClusterCounts.Values.Sum();
+
+        Task<List<AlertIncident>> incidentTask =
+            IncidentService.GetActiveIncidentsForTenantAsync(TenantId);
+        Task<List<MaintenanceWindow>> maintenanceTask =
+            IncidentService.GetUpcomingMaintenanceAsync(TenantId);
+        Task<OnCallShift?> onCallTask =
+            OnCallService.GetCurrentOnCallAsync(TenantId);
+
+        await Task.WhenAll(incidentTask, maintenanceTask, onCallTask);
+
+        activeIncidents = incidentTask.Result;
+        criticalIncidents = activeIncidents.Count(i => i.Severity == "critical");
+        upcomingMaintenance = maintenanceTask.Result;
+        currentOnCall = onCallTask.Result;
+
+        List<Task<ClusterSummaryVm>> tasks = clusters
+            .Select(c => LoadClusterSummaryAsync(c, perClusterCounts.GetValueOrDefault(c.Id)))
+            .ToList();
+
+        clusterSummaries = [.. await Task.WhenAll(tasks)];
+
+        lastRefreshed = DateTime.UtcNow;
+        isLoading = false;
+    }
+
+    private async Task<ClusterSummaryVm> LoadClusterSummaryAsync(KubernetesCluster cluster, int activeAlerts)
+    {
+        bool hasPrometheus = cluster.Components.Any(c =>
+            c.HelmChartName == "kube-prometheus-stack" && c.Status == ComponentStatus.Installed);
+
+        if (!hasPrometheus)
+            return new ClusterSummaryVm(cluster, null, null, activeAlerts);
+
+        KubernetesOperationResult<ClusterHealthSummary> result =
+            await PrometheusService.GetClusterHealthAsync(cluster.Id);
+
+        return new ClusterSummaryVm(
+            cluster,
+            result.IsSuccess ? result.Data : null,
+            result.IsSuccess ? null : result.Error,
+            activeAlerts);
+    }
+
+    private async Task NavigateTo(string tab)
+    {
+        if (OnNavigateTab.HasDelegate)
+            await OnNavigateTab.InvokeAsync(tab);
+    }
+
+    private static string UtilColor(double pct) =>
+        pct >= 90 ? "danger" : pct >= 70 ? "warning" : "success";
+
+    private static string ClusterBorderColor(ClusterSummaryVm vm)
+    {
+        if (vm.ActiveAlerts > 0) return "danger";
+        if (vm.Health is null) return "secondary";
+        if (vm.Health.CpuUsagePercent >= 90 || vm.Health.MemoryUsagePercent >= 90) return "warning";
+        return "success";
+    }
+
+    private static string FormatAge(DateTime t)
+    {
+        TimeSpan ago = DateTime.UtcNow - t;
+        return ago switch
+        {
+            { TotalMinutes: < 60 } => $"{(int)ago.TotalMinutes}m",
+            { TotalHours: < 24 }   => $"{(int)ago.TotalHours}h",
+            _                      => $"{(int)ago.TotalDays}d"
+        };
+    }
+
+    private static RenderFragment SeverityDot(string severity) => severity switch
+    {
+        "critical" => @<span class="bi bi-circle-fill text-danger" style="font-size:.55rem"></span>,
+        "warning"  => @<span class="bi bi-circle-fill text-warning" style="font-size:.55rem"></span>,
+        _          => @<span class="bi bi-circle-fill text-info" style="font-size:.55rem"></span>
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        if (refreshTimer is not null)
+            await refreshTimer.DisposeAsync();
+    }
+
+    private record ClusterSummaryVm(
+        KubernetesCluster Cluster,
+        ClusterHealthSummary? Health,
+        string? Error,
+        int ActiveAlerts);
+}

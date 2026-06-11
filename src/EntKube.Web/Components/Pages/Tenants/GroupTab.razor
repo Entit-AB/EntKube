@@ -1,0 +1,128 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject TenantService TenantService
+
+<div class="d-flex align-items-center mb-2">
+    <i class="bi bi-diagram-3 fs-4 me-2 text-primary"></i>
+    <h4 class="mb-0">Groups</h4>
+</div>
+<p class="text-muted small mb-3">Organize users within this tenant into logical groups for access control and team management.</p>
+
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body py-2">
+        <div class="input-group">
+            <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-plus-circle"></i></span>
+            <input type="text" class="form-control border-start-0" placeholder="New group name (e.g. Developers)"
+                   @bind="newName" @bind:event="oninput"
+                   @onkeydown="@(async (e) => { if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(newName)) await Create(); })" />
+            <button class="btn btn-primary" @onclick="Create" disabled="@string.IsNullOrWhiteSpace(newName)">
+                <i class="bi bi-plus-lg me-1"></i>Add
+            </button>
+        </div>
+    </div>
+</div>
+
+@if (!string.IsNullOrEmpty(errorMessage))
+{
+    <div class="alert alert-danger alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-exclamation-triangle me-1"></i>@errorMessage
+        <button type="button" class="btn-close btn-close-sm" @onclick="() => errorMessage = null"></button>
+    </div>
+}
+
+<LoadingPanel Loading="@(groups is null)" LoadingText="Loading groups…">
+@if (groups is not null && groups.Count == 0)
+{
+    <EmptyState Icon="bi-diagram-3"
+                Title="No groups yet"
+                Message="Create one above to get started." />
+}
+else if (groups is not null)
+{
+    <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-3">
+        @foreach (Group group in groups)
+        {
+            <div class="col">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body py-3">
+                        <div class="d-flex align-items-start justify-content-between">
+                            <div>
+                                <h6 class="fw-semibold mb-1">
+                                    <i class="bi bi-people-fill me-1 text-primary"></i>@group.Name
+                                </h6>
+                                <div class="d-flex align-items-center gap-3">
+                                    <small class="text-muted">
+                                        <i class="bi bi-person me-1"></i>@group.Memberships.Count member(s)
+                                    </small>
+                                    <small class="text-muted">
+                                        <i class="bi bi-calendar me-1"></i>@group.CreatedAt.ToString("MMM d, yyyy")
+                                    </small>
+                                </div>
+                            </div>
+                            <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteId = group.Id" title="Delete group">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    @if (confirmDeleteId == group.Id)
+                    {
+                        <div class="card-footer py-2 bg-danger bg-opacity-10">
+                            <div class="d-flex align-items-center justify-content-between">
+                                <small class="text-danger"><i class="bi bi-exclamation-triangle me-1"></i>Delete <strong>@group.Name</strong>?</small>
+                                <div>
+                                    <button class="btn btn-sm btn-danger me-1" @onclick="() => Delete(group.Id)">Delete</button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDeleteId = null">Cancel</button>
+                                </div>
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private List<Group>? groups;
+    private string newName = "";
+    private string? errorMessage;
+    private Guid? confirmDeleteId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+    }
+
+    private async Task Load()
+    {
+        groups = await TenantService.GetGroupsAsync(TenantId);
+    }
+
+    private async Task Create()
+    {
+        errorMessage = null;
+
+        try
+        {
+            await TenantService.CreateGroupAsync(TenantId, newName.Trim());
+            newName = "";
+            await Load();
+        }
+        catch (DbUpdateException)
+        {
+            errorMessage = "A group with that name already exists.";
+        }
+    }
+
+    private async Task Delete(Guid id)
+    {
+        confirmDeleteId = null;
+        await TenantService.DeleteGroupAsync(id);
+        await Load();
+    }
+}

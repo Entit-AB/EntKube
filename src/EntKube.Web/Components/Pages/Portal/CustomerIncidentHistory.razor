@@ -1,0 +1,165 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject IncidentService IncidentService
+
+@if (isLoading)
+{
+    <div class="text-center py-3 text-muted small">
+        <span class="bi bi-hourglass-split me-1"></span> Loading incident history…
+    </div>
+}
+else if (incidents.Count == 0)
+{
+    <div class="text-center py-4 text-muted">
+        <span class="bi bi-check-circle-fill text-success d-block mb-1" style="font-size:1.5rem"></span>
+        No incidents in the last @WindowDays days.
+    </div>
+}
+else
+{
+    <div class="d-flex gap-2 mb-2 flex-wrap align-items-center">
+        <select class="form-select form-select-sm" style="width:auto" @bind="filterSeverity" @bind:after="ApplyFilter">
+            <option value="">All severities</option>
+            <option value="critical">Critical</option>
+            <option value="warning">Warning</option>
+            <option value="info">Info</option>
+        </select>
+        <select class="form-select form-select-sm" style="width:auto" @bind="filterStatus" @bind:after="ApplyFilter">
+            <option value="">All statuses</option>
+            <option value="Active">Active</option>
+            <option value="Acknowledged">Acknowledged</option>
+            <option value="Resolved">Resolved</option>
+        </select>
+        <span class="ms-auto text-muted small">@filtered.Count of @incidents.Count incident@(incidents.Count == 1 ? "" : "s")</span>
+    </div>
+
+    <div class="list-group list-group-flush">
+        @foreach (AlertIncident incident in filtered.Take(50))
+        {
+            bool expanded = expandedId == incident.Id;
+            <div class="list-group-item list-group-item-action px-0 py-2"
+                 style="cursor:pointer" @onclick="() => Toggle(incident.Id)">
+                <div class="d-flex align-items-center gap-2">
+                    @SeverityDot(incident.Severity)
+                    <div class="flex-grow-1 min-width-0">
+                        <div class="fw-semibold small text-truncate">@incident.AlertName</div>
+                        @if (!string.IsNullOrEmpty(incident.Summary))
+                        {
+                            <div class="text-muted" style="font-size:0.78rem">@incident.Summary</div>
+                        }
+                    </div>
+                    <div class="text-end text-nowrap ms-2">
+                        @StatusBadge(incident.Status)
+                        <div class="text-muted mt-1" style="font-size:0.75rem">
+                            @incident.StartsAt.ToLocalTime().ToString("MMM d HH:mm")
+                        </div>
+                    </div>
+                    <span class="bi bi-chevron-@(expanded ? "up" : "down") text-muted small"></span>
+                </div>
+
+                @if (expanded)
+                {
+                    <div class="mt-2 ps-3 border-start border-2" @onclick:stopPropagation="true">
+                        @if (!string.IsNullOrEmpty(incident.Description))
+                        {
+                            <p class="small text-muted mb-1">@incident.Description</p>
+                        }
+                        <div class="small text-muted">
+                            <span class="me-3">
+                                <span class="bi bi-hdd-rack me-1"></span>@incident.Cluster?.Name
+                            </span>
+                            <span class="me-3">
+                                <span class="bi bi-clock me-1"></span>Started @incident.StartsAt.ToLocalTime().ToString("MMM d yyyy HH:mm")
+                            </span>
+                            @if (incident.EndsAt.HasValue || incident.ResolvedAt.HasValue)
+                            {
+                                DateTime resolved = incident.ResolvedAt ?? incident.EndsAt!.Value;
+                                TimeSpan dur = resolved - incident.StartsAt;
+                                <span>Duration: @FormatDuration(dur)</span>
+                            }
+                        </div>
+                        @if (incident.AcknowledgedBy is not null)
+                        {
+                            <div class="small text-muted mt-1">
+                                Acknowledged by <strong>@incident.AcknowledgedBy</strong>
+                                @if (incident.AcknowledgedAt.HasValue)
+                                {
+                                    <span> at @incident.AcknowledgedAt.Value.ToLocalTime().ToString("HH:mm")</span>
+                                }
+                            </div>
+                        }
+                        @if (incident.Notes.Count > 0)
+                        {
+                            <div class="mt-2">
+                                @foreach (IncidentNote note in incident.Notes)
+                                {
+                                    <div class="small border-start border-2 ps-2 mb-1">
+                                        <span class="text-muted">@note.Author · @note.CreatedAt.ToLocalTime().ToString("MMM d HH:mm")</span>
+                                        <div>@note.Content</div>
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        }
+    </div>
+    @if (incidents.Count > 50)
+    {
+        <div class="text-muted small text-center mt-2">Showing 50 of @incidents.Count incidents</div>
+    }
+}
+
+@code {
+    [Parameter] public required List<AppDeployment> Deployments { get; set; }
+    [Parameter] public int WindowDays { get; set; } = 30;
+
+    private List<AlertIncident> incidents = [];
+    private List<AlertIncident> filtered = [];
+    private Guid? expandedId;
+    private string filterSeverity = "";
+    private string filterStatus = "";
+    private bool isLoading = true;
+
+    protected override async Task OnParametersSetAsync() => await Load();
+
+    private async Task Load()
+    {
+        if (Deployments.Count == 0) { isLoading = false; return; }
+        isLoading = true;
+        incidents = await IncidentService.GetIncidentsForDeploymentsAsync(Deployments, WindowDays);
+        ApplyFilter();
+        isLoading = false;
+    }
+
+    private void ApplyFilter()
+    {
+        filtered = incidents.Where(i =>
+            (string.IsNullOrEmpty(filterSeverity) || i.Severity == filterSeverity) &&
+            (string.IsNullOrEmpty(filterStatus) || i.Status.ToString() == filterStatus)
+        ).ToList();
+    }
+
+    private void Toggle(Guid id) => expandedId = expandedId == id ? null : id;
+
+    private static string FormatDuration(TimeSpan d) =>
+        d.TotalDays >= 1 ? $"{(int)d.TotalDays}d {d.Hours}h"
+        : d.TotalHours >= 1 ? $"{(int)d.TotalHours}h {d.Minutes}m"
+        : $"{(int)d.TotalMinutes}m";
+
+    private static RenderFragment SeverityDot(string severity) => severity switch
+    {
+        "critical" => @<span style="width:10px;height:10px;border-radius:50%;background:#dc3545;flex-shrink:0;display:inline-block"></span>,
+        "warning"  => @<span style="width:10px;height:10px;border-radius:50%;background:#ffc107;flex-shrink:0;display:inline-block"></span>,
+        _          => @<span style="width:10px;height:10px;border-radius:50%;background:#0dcaf0;flex-shrink:0;display:inline-block"></span>
+    };
+
+    private static RenderFragment StatusBadge(IncidentStatus status) => status switch
+    {
+        IncidentStatus.Active       => @<span class="badge bg-danger">Active</span>,
+        IncidentStatus.Acknowledged => @<span class="badge bg-warning text-dark">Acked</span>,
+        IncidentStatus.Resolved     => @<span class="badge bg-success">Resolved</span>,
+        _                           => @<span class="badge bg-secondary">@status</span>
+    };
+}

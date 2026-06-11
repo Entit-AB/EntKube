@@ -1,0 +1,27 @@
+@if (Visible)
+{
+    <div class="mt-2 p-2 bg-@Variant bg-opacity-10 rounded border border-@Variant border-opacity-25 d-flex align-items-center justify-content-between flex-wrap gap-2">
+        <span class="text-@Variant small">
+            <i class="bi bi-exclamation-triangle me-1"></i>
+            @Message
+        </span>
+        <div class="d-flex gap-1">
+            <button class="btn btn-sm btn-@Variant" @onclick="OnConfirm" disabled="@IsBusy">
+                @if (IsBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                @ConfirmText
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="OnCancel" disabled="@IsBusy">@CancelText</button>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool Visible { get; set; }
+    [Parameter] public string Message { get; set; } = "Are you sure?";
+    [Parameter] public string ConfirmText { get; set; } = "Confirm";
+    [Parameter] public string CancelText { get; set; } = "Cancel";
+    [Parameter] public string Variant { get; set; } = "danger";
+    [Parameter] public bool IsBusy { get; set; }
+    [Parameter] public EventCallback OnConfirm { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+}

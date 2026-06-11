@@ -1,0 +1,1559 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject StorageService StorageService
+@inject StorageBrowserService BrowserService
+
+@* ===========================================================================
+   Storage Tab — shows MinIO instances discovered on clusters, plus external
+   storage links (AWS S3, Azure Storage, Cleura S3) registered by the tenant.
+   MinIO requires the minio component to be installed on at least one cluster.
+   External providers are managed as vault-backed links.
+   =========================================================================== *@
+
+<LoadingPanel Loading="@loading" LoadingText="Discovering storage resources…">
+@if (!loading)
+{
+    @* ── MinIO Section ── *@
+    <div class="mb-5">
+        <h5 class="d-flex align-items-center gap-2 mb-3">
+            <i class="bi bi-bucket text-warning"></i>MinIO (Cluster Object Storage)
+            @if (minioAvailable)
+            {
+                <span class="badge bg-success-subtle text-success border border-success-subtle px-2 py-1 small">Installed</span>
+            }
+            else
+            {
+                <span class="badge bg-secondary-subtle text-secondary border px-2 py-1 small">Not Installed</span>
+            }
+        </h5>
+
+        @if (!minioAvailable)
+        {
+            <div class="alert alert-light border d-flex align-items-start gap-3">
+                <i class="bi bi-info-circle text-muted fs-5 mt-1"></i>
+                <div>
+                    <p class="mb-1">MinIO is not installed on any cluster.</p>
+                    <p class="mb-0 text-muted small">
+                        Go to <strong>Environments → Cluster → Components</strong> to install MinIO.
+                    </p>
+                </div>
+            </div>
+        }
+        else if (minioInstances.Count == 0)
+        {
+            <div class="alert alert-light border">
+                <i class="bi bi-inbox me-2"></i>
+                MinIO is installed but no Tenant resources were found. Create a MinIO Tenant CR in your cluster.
+            </div>
+        }
+        else
+        {
+            <div class="row g-3">
+                @foreach (MinioBucketInfo instance in minioInstances)
+                {
+                    <div class="col-md-6 col-lg-4">
+                        <div class="card h-100 shadow-sm">
+                            <div class="card-header bg-white d-flex align-items-center justify-content-between py-2">
+                                <div class="d-flex align-items-center gap-2">
+                                    <i class="bi bi-bucket text-warning"></i>
+                                    <strong class="small">@instance.Name</strong>
+                                </div>
+                                @(GetMinioStatusBadge(instance))
+                            </div>
+                            <div class="card-body py-2">
+                                <div class="row small text-muted">
+                                    <div class="col-6 mb-1">
+                                        <i class="bi bi-layers me-1"></i>@instance.EnvironmentName
+                                    </div>
+                                    <div class="col-6 mb-1">
+                                        <i class="bi bi-server me-1"></i>@instance.ClusterName
+                                    </div>
+                                    <div class="col-6 mb-1">
+                                        <i class="bi bi-box me-1"></i>@instance.Namespace
+                                    </div>
+                                    @if (instance.Storage is not null)
+                                    {
+                                        <div class="col-6 mb-1">
+                                            <i class="bi bi-device-hdd me-1"></i>@instance.Storage
+                                        </div>
+                                    }
+                                    @if (instance.Endpoint is not null)
+                                    {
+                                        <div class="col-12 mb-1">
+                                            <i class="bi bi-link-45deg me-1"></i><code class="small">@instance.Endpoint</code>
+                                        </div>
+                                    }
+                                </div>
+
+                                @* ── Pod status ── *@
+                                @if (instance.Pods.Count > 0)
+                                {
+                                    <div class="mt-2 pt-2 border-top">
+                                        <div class="small text-muted mb-1"><i class="bi bi-cpu me-1"></i>Pods</div>
+                                        <div class="d-flex flex-wrap gap-1">
+                                            @foreach (PodInfo pod in instance.Pods)
+                                            {
+                                                bool allReady = pod.ReadyContainers == pod.TotalContainers && pod.TotalContainers > 0;
+                                                string podBadgeClass = pod.Status == "Running" && allReady
+                                                    ? "bg-success-subtle text-success border border-success-subtle"
+                                                    : pod.Status is "Pending" or "ContainerCreating"
+                                                        ? "bg-warning-subtle text-warning border border-warning-subtle"
+                                                        : "bg-danger-subtle text-danger border border-danger-subtle";
+                                                <span class="badge @podBadgeClass px-2 py-1 small font-monospace"
+                                                      title="@pod.Status — @pod.ReadyContainers/@pod.TotalContainers ready, @pod.Restarts restarts">
+                                                    @pod.Name
+                                                    <span class="ms-1 opacity-75">@pod.ReadyContainers/@pod.TotalContainers</span>
+                                                </span>
+                                            }
+                                        </div>
+                                    </div>
+                                }
+                                else if (instance.HealthStatus is not null)
+                                {
+                                    <div class="mt-2 pt-2 border-top small text-muted">
+                                        <i class="bi bi-cpu me-1"></i>No pods found (label <code>v1.min.io/tenant=@instance.Name</code>)
+                                    </div>
+                                }
+
+                                @* ── Register as Storage Link ── *@
+                                @if (registeringInstance == instance)
+                                {
+                                    <div class="mt-2 pt-2 border-top">
+                                        <div class="small fw-semibold mb-2"><i class="bi bi-plug me-1"></i>Register as Storage Link</div>
+                                        <div class="mb-2">
+                                            <input type="text" class="form-control form-control-sm"
+                                                   placeholder="Display name (e.g. Production MinIO)"
+                                                   @bind="regFormName" />
+                                        </div>
+                                        <div class="mb-2">
+                                            <label class="form-label small text-muted mb-1">
+                                                S3 Endpoint URL
+                                                <span class="text-danger">*</span>
+                                            </label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                   placeholder="https://s3.minio.example.com"
+                                                   @bind="regFormEndpoint" />
+                                            <div class="form-text small text-muted">
+                                                Use an externally accessible URL — the internal cluster address
+                                                (<code>@instance.Endpoint</code>) is blocked by network policy.
+                                            </div>
+                                        </div>
+                                        <div class="mb-2">
+                                            <input type="text" class="form-control form-control-sm"
+                                                   placeholder="Root User / Access Key"
+                                                   @bind="regFormAccessKey" />
+                                        </div>
+                                        <div class="mb-2">
+                                            <input type="password" class="form-control form-control-sm"
+                                                   placeholder="Root Password / Secret Key"
+                                                   @bind="regFormSecretKey" />
+                                        </div>
+                                        @if (!string.IsNullOrEmpty(regFormError))
+                                        {
+                                            <div class="alert alert-danger small py-1 mb-2">
+                                                <i class="bi bi-exclamation-triangle me-1"></i>@regFormError
+                                            </div>
+                                        }
+                                        <div class="d-flex gap-1">
+                                            <button class="btn btn-sm btn-primary py-0" @onclick="() => RegisterMinioTenant(instance)"
+                                                    disabled="@registering">
+                                                @if (registering) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Register
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary py-0" @onclick="CancelRegisterForm">Cancel</button>
+                                        </div>
+                                    </div>
+                                }
+                            </div>
+                            <div class="card-footer bg-white py-1 d-flex align-items-center justify-content-between">
+                                <small class="text-muted">
+                                    @if (instance.CreatedAt.HasValue)
+                                    {
+                                        <text>Created @instance.CreatedAt.Value.ToString("yyyy-MM-dd HH:mm")</text>
+                                    }
+                                </small>
+                                @if (IsMinioRegistered(instance))
+                                {
+                                    <span class="badge bg-info-subtle text-info border border-info-subtle small">
+                                        <i class="bi bi-plug-fill me-1"></i>Registered
+                                    </span>
+                                }
+                                else if (registeringInstance != instance)
+                                {
+                                    <button class="btn btn-sm btn-outline-primary border-0 py-0 small"
+                                            @onclick="() => ShowRegisterForm(instance)">
+                                        <i class="bi bi-plug me-1"></i>Register
+                                    </button>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+
+    @* ── External Storage Links ── *@
+    <div class="mb-4">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+            <h5 class="d-flex align-items-center gap-2 mb-0">
+                <i class="bi bi-cloud text-info"></i>External Storage Links
+                @if (storageLinks.Count > 0)
+                {
+                    <span class="badge bg-info rounded-pill">@storageLinks.Count</span>
+                }
+            </h5>
+            <button class="btn btn-sm btn-primary" @onclick="ShowAddForm">
+                <i class="bi bi-plus-lg me-1"></i>Add Storage Link
+            </button>
+        </div>
+
+        @if (!string.IsNullOrEmpty(deleteError))
+        {
+            <div class="alert alert-danger small py-2 mb-3 d-flex align-items-center justify-content-between">
+                <span><i class="bi bi-exclamation-triangle me-1"></i>@deleteError</span>
+                <button class="btn-close btn-close-sm" @onclick="() => deleteError = null"></button>
+            </div>
+        }
+
+        @if (storageLinks.Count == 0 && !showForm)
+        {
+            <div class="alert alert-light border">
+                <i class="bi bi-inbox me-2"></i>
+                No external storage links configured. Add an AWS S3 bucket, Azure Storage Account, or Cleura S3 bucket.
+            </div>
+        }
+        else
+        {
+            @* Group by provider *@
+            @foreach (IGrouping<StorageProvider, StorageLink> group in storageLinks.GroupBy(s => s.Provider))
+            {
+                <h6 class="text-muted mt-3 mb-2">
+                    <i class="@GetProviderIcon(group.Key) me-1"></i>@GetProviderLabel(group.Key)
+                </h6>
+                <div class="row g-3 mb-3">
+                    @foreach (StorageLink link in group)
+                    {
+                        <div class="col-md-6 col-lg-4">
+                            <div class="card h-100 shadow-sm">
+                                <div class="card-header bg-white d-flex align-items-center justify-content-between py-2">
+                                    <div class="d-flex align-items-center gap-2">
+                                        <i class="@GetProviderIcon(link.Provider) @GetProviderColor(link.Provider)"></i>
+                                        <strong class="small">@link.Name</strong>
+                                    </div>
+                                    <div class="d-flex gap-1">
+                                        @if (link.Provider == StorageProvider.CleuraS3)
+                                        {
+                                            <button class="btn btn-sm btn-outline-warning border-0 py-0"
+                                                    @onclick="() => RotateCredentials(link.Id)"
+                                                    disabled="@rotatingLinkId.HasValue"
+                                                    title="Rotate EC2 credentials">
+                                                @if (rotatingLinkId == link.Id)
+                                                {
+                                                    <span class="spinner-border spinner-border-sm"></span>
+                                                }
+                                                else
+                                                {
+                                                    <i class="bi bi-arrow-repeat"></i>
+                                                }
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary border-0 py-0"
+                                                    @onclick="() => ShowManageBucket(link)"
+                                                    title="Manage bucket (CORS, Policy)">
+                                                <i class="bi bi-gear"></i>
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-info border-0 py-0"
+                                                    @onclick="() => BrowseBuckets(link)"
+                                                    disabled="@(browsingLinkId.HasValue)"
+                                                    title="Browse all buckets accessible with these credentials">
+                                                @if (browsingLinkId == link.Id)
+                                                {
+                                                    <span class="spinner-border spinner-border-sm"></span>
+                                                }
+                                                else
+                                                {
+                                                    <i class="bi bi-list-ul"></i>
+                                                }
+                                            </button>
+                                            @if (link.BucketName is not null)
+                                            {
+                                                <button class="btn btn-sm btn-outline-primary border-0 py-0"
+                                                        @onclick="() => OpenFileBrowser(link)"
+                                                        title="Browse files in bucket">
+                                                    <i class="bi bi-folder2-open"></i>
+                                                </button>
+                                            }
+                                            <button class="btn btn-sm btn-outline-danger border-0 py-0"
+                                                    @onclick="() => DeleteCleuraS3Bucket(link.Id)"
+                                                    disabled="@deletingLinkId.HasValue"
+                                                    title="Delete bucket and storage link">
+                                                @if (deletingLinkId == link.Id)
+                                                {
+                                                    <span class="spinner-border spinner-border-sm"></span>
+                                                }
+                                                else
+                                                {
+                                                    <i class="bi bi-trash"></i>
+                                                }
+                                            </button>
+                                        }
+                                        else if (link.Provider == StorageProvider.MinIO)
+                                        {
+                                            <button class="btn btn-sm btn-outline-secondary border-0 py-0"
+                                                    @onclick="() => ShowManageBucket(link)"
+                                                    title="Manage bucket (CORS, Policy)"
+                                                    disabled="@(link.BucketName is null)">
+                                                <i class="bi bi-gear"></i>
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-info border-0 py-0"
+                                                    @onclick="() => BrowseBuckets(link)"
+                                                    disabled="@(browsingLinkId.HasValue)"
+                                                    title="Browse all buckets">
+                                                @if (browsingLinkId == link.Id)
+                                                {
+                                                    <span class="spinner-border spinner-border-sm"></span>
+                                                }
+                                                else
+                                                {
+                                                    <i class="bi bi-list-ul"></i>
+                                                }
+                                            </button>
+                                            @if (link.BucketName is not null)
+                                            {
+                                                <button class="btn btn-sm btn-outline-primary border-0 py-0"
+                                                        @onclick="() => OpenFileBrowser(link)"
+                                                        title="Browse files in bucket">
+                                                    <i class="bi bi-folder2-open"></i>
+                                                </button>
+                                            }
+                                            <button class="btn btn-sm btn-outline-danger border-0 py-0" @onclick="() => DeleteLink(link.Id)" title="Remove registration">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        }
+                                        else
+                                        {
+                                            @if (link.BucketName is not null)
+                                            {
+                                                <button class="btn btn-sm btn-outline-primary border-0 py-0"
+                                                        @onclick="() => OpenFileBrowser(link)"
+                                                        title="Browse files in bucket">
+                                                    <i class="bi bi-folder2-open"></i>
+                                                </button>
+                                            }
+                                            <button class="btn btn-sm btn-outline-danger border-0 py-0" @onclick="() => DeleteLink(link.Id)" title="Delete">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        }
+                                    </div>
+                                </div>
+                                <div class="card-body py-2">
+                                    <div class="row small text-muted">
+                                        <div class="col-12 mb-1">
+                                            <i class="bi bi-layers me-1"></i>@link.Environment.Name
+                                        </div>
+                                        @if (link.BucketName is not null)
+                                        {
+                                            <div class="col-12 mb-1">
+                                                <i class="bi bi-archive me-1"></i>@link.BucketName
+                                            </div>
+                                        }
+                                        @if (link.Region is not null)
+                                        {
+                                            <div class="col-6 mb-1">
+                                                <i class="bi bi-geo-alt me-1"></i>@link.Region
+                                            </div>
+                                        }
+                                        @if (link.Endpoint is not null)
+                                        {
+                                            <div class="col-12 mb-1">
+                                                <i class="bi bi-link-45deg me-1"></i><code class="small text-break">@link.Endpoint</code>
+                                            </div>
+                                        }
+                                        @if (link.Notes is not null)
+                                        {
+                                            <div class="col-12 mt-1">
+                                                <i class="bi bi-sticky me-1"></i>@link.Notes
+                                            </div>
+                                        }
+                                    </div>
+                                </div>
+                                <div class="card-footer bg-white py-1">
+                                    <small class="text-muted">Added @link.CreatedAt.ToString("yyyy-MM-dd")</small>
+                                </div>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        }
+    </div>
+
+    @* ── Bucket Management Panel ── *@
+    @if (managedLink is not null)
+    {
+        <div class="card shadow-sm mb-4 border-info">
+            <div class="card-header bg-info bg-opacity-10 d-flex align-items-center justify-content-between">
+                <h6 class="mb-0">
+                    <i class="bi bi-gear me-2"></i>Manage Bucket: <strong>@managedLink.BucketName</strong>
+                </h6>
+                <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CloseManageBucket">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+            <div class="card-body">
+                @if (!string.IsNullOrEmpty(manageError))
+                {
+                    <div class="alert alert-danger small py-2 mb-3">
+                        <i class="bi bi-exclamation-triangle me-1"></i>@manageError
+                    </div>
+                }
+
+                @if (!string.IsNullOrEmpty(manageSuccess))
+                {
+                    <div class="alert alert-success small py-2 mb-3">
+                        <i class="bi bi-check-circle me-1"></i>@manageSuccess
+                    </div>
+                }
+
+                @* CORS Configuration *@
+                <div class="mb-4">
+                    <h6 class="text-muted"><i class="bi bi-globe me-1"></i>CORS Configuration</h6>
+                    <div class="mb-2">
+                        <label class="form-label small">Allowed Origins (one per line)</label>
+                        <textarea class="form-control form-control-sm" rows="3" @bind="corsOrigins"
+                                  placeholder="https://example.com&#10;https://app.example.com"></textarea>
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small">Allowed Methods (comma-separated)</label>
+                        <input type="text" class="form-control form-control-sm" @bind="corsMethods" placeholder="GET, PUT, POST, DELETE" />
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small">Allowed Headers (comma-separated)</label>
+                        <input type="text" class="form-control form-control-sm" @bind="corsHeaders" placeholder="*" />
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small">Max Age (seconds)</label>
+                        <input type="number" class="form-control form-control-sm" @bind="corsMaxAge" placeholder="3600" />
+                    </div>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="SaveCors" disabled="@manageSaving">
+                            @if (manageSaving)
+                            {
+                                <span class="spinner-border spinner-border-sm me-1"></span>
+                            }
+                            Save CORS
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadCors" disabled="@manageSaving">
+                            Reload
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" @onclick="RemoveCors" disabled="@manageSaving">
+                            Remove CORS
+                        </button>
+                    </div>
+                </div>
+
+                @* Bucket Policy *@
+                <div>
+                    <h6 class="text-muted"><i class="bi bi-shield-lock me-1"></i>Bucket Policy (JSON)</h6>
+                    <div class="mb-2">
+                        <YamlEditor @bind-Value="bucketPolicyJson" Language="json" />
+                    </div>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="SavePolicy" disabled="@manageSaving">
+                            @if (manageSaving)
+                            {
+                                <span class="spinner-border spinner-border-sm me-1"></span>
+                            }
+                            Save Policy
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadPolicy" disabled="@manageSaving">
+                            Reload
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" @onclick="RemovePolicy" disabled="@manageSaving">
+                            Remove Policy
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* ── Browse Buckets Panel ── *@
+    @if (browsedLink is not null)
+    {
+        <div class="card shadow-sm mb-4 border-secondary">
+            <div class="card-header bg-secondary bg-opacity-10 d-flex align-items-center justify-content-between">
+                <h6 class="mb-0">
+                    <i class="bi bi-list-ul me-2"></i>Buckets accessible via <strong>@browsedLink.Name</strong>
+                </h6>
+                <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CloseBrowseBuckets">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+            <div class="card-body">
+                @if (!string.IsNullOrEmpty(browseError))
+                {
+                    <div class="alert alert-danger small py-2">
+                        <i class="bi bi-exclamation-triangle me-1"></i>@browseError
+                    </div>
+                }
+                else if (browsedBuckets is null)
+                {
+                    <div class="text-center py-3">
+                        <div class="spinner-border spinner-border-sm text-secondary"></div>
+                        <span class="ms-2 text-muted small">Loading buckets...</span>
+                    </div>
+                }
+                else if (browsedBuckets.Count == 0)
+                {
+                    <p class="text-muted small mb-0">No buckets found under this project.</p>
+                }
+                else
+                {
+                    <div class="table-responsive">
+                        <table class="table table-sm table-hover mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th class="small">Bucket Name</th>
+                                    <th class="small">Created</th>
+                                    <th class="small">Registered in EntKube</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (S3BucketInfo bucket in browsedBuckets)
+                                {
+                                    bool registered = storageLinks.Any(l =>
+                                        l.Provider == StorageProvider.CleuraS3 &&
+                                        l.BucketName == bucket.Name);
+                                    <tr>
+                                        <td class="small font-monospace">@bucket.Name</td>
+                                        <td class="small text-muted">
+                                            @(bucket.CreatedAt == default ? "—" : bucket.CreatedAt.ToString("yyyy-MM-dd"))
+                                        </td>
+                                        <td class="small">
+                                            @if (registered)
+                                            {
+                                                <span class="badge bg-success-subtle text-success border border-success-subtle">Yes</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-secondary-subtle text-secondary border">No</span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                    <p class="text-muted small mt-2 mb-0">
+                        <i class="bi bi-info-circle me-1"></i>
+                        @browsedBuckets.Count bucket(s) accessible. Buckets not registered in EntKube were created outside the platform.
+                    </p>
+                }
+            </div>
+        </div>
+    }
+
+    @* ── File Browser ── *@
+    @if (fileBrowserLink is not null)
+    {
+        <StorageBrowser TenantId="TenantId"
+                        Link="fileBrowserLink"
+                        OnClose="CloseFileBrowser" />
+    }
+
+    @* ── Add Storage Link Form ── *@
+    @if (showForm)
+    {
+        <div class="card shadow-sm mb-4">
+            <div class="card-header bg-white">
+                <h6 class="mb-0"><i class="bi bi-plus-circle me-2"></i>Add External Storage Link</h6>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label small fw-semibold">Provider</label>
+                        <select class="form-select form-select-sm" @bind="formProvider">
+                            <option value="@StorageProvider.AwsS3">AWS S3</option>
+                            <option value="@StorageProvider.AzureStorage">Azure Storage</option>
+                            <option value="@StorageProvider.CleuraS3">Cleura S3</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small fw-semibold">Environment</label>
+                        <select class="form-select form-select-sm" @bind="formEnvironmentId">
+                            @foreach (Data.Environment env in environments)
+                            {
+                                <option value="@env.Id">@env.Name</option>
+                            }
+                        </select>
+                    </div>
+                    @if (formProvider == StorageProvider.CleuraS3)
+                    {
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">OpenStack Connection</label>
+                            @if (openStackConnections.Count == 0)
+                            {
+                                <div class="text-danger small">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>No OpenStack connections configured. Add one below first.
+                                </div>
+                            }
+                            else
+                            {
+                                <select class="form-select form-select-sm" @bind="formOpenStackConnectionId">
+                                    <option value="@Guid.Empty">— Select connection —</option>
+                                    @foreach (OpenStackConnection conn in openStackConnections)
+                                    {
+                                        <option value="@conn.Id">@conn.Name (@conn.Region)</option>
+                                    }
+                                </select>
+                            }
+                        </div>
+                    }
+                    <div class="col-md-6">
+                        <label class="form-label small fw-semibold">Name</label>
+                        <input type="text" class="form-control form-control-sm" @bind="formName" placeholder="e.g. Production Backups" />
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small fw-semibold">Bucket / Container Name</label>
+                        <input type="text" class="form-control form-control-sm" @bind="formBucket" placeholder="e.g. my-app-backups" />
+                    </div>
+                    @if (formProvider != StorageProvider.CleuraS3)
+                    {
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">Endpoint URL</label>
+                            <input type="text" class="form-control form-control-sm" @bind="formEndpoint" placeholder="@GetEndpointPlaceholder()" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">Region</label>
+                            <input type="text" class="form-control form-control-sm" @bind="formRegion" placeholder="e.g. eu-west-1" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">Access Key</label>
+                            <input type="password" class="form-control form-control-sm" @bind="formAccessKey" placeholder="Stored in vault" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">Secret Key</label>
+                            <input type="password" class="form-control form-control-sm" @bind="formSecretKey" placeholder="Stored in vault" />
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="col-12">
+                            <div class="alert alert-info small mb-0 py-2">
+                                <i class="bi bi-info-circle me-1"></i>
+                                S3 endpoint and credentials will be auto-generated via the OpenStack connection.
+                                The bucket will be created on save.
+                            </div>
+                        </div>
+                    }
+                    <div class="col-12">
+                        <label class="form-label small fw-semibold">Notes</label>
+                        <input type="text" class="form-control form-control-sm" @bind="formNotes" placeholder="Optional description" />
+                    </div>
+                </div>
+                <div class="mt-3 d-flex gap-2">
+                    <button class="btn btn-sm btn-primary" @onclick="SaveLink" disabled="@saving">
+                        @if (saving)
+                        {
+                            <span class="spinner-border spinner-border-sm me-1"></span>
+                            <text>Creating bucket...</text>
+                        }
+                        else
+                        {
+                            <text>@(formProvider == StorageProvider.CleuraS3 ? "Create Bucket" : "Save")</text>
+                        }
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="CancelForm">Cancel</button>
+                </div>
+                @if (!string.IsNullOrEmpty(formError))
+                {
+                    <div class="alert alert-danger small mt-2 mb-0 py-2">
+                        <i class="bi bi-exclamation-triangle me-1"></i>@formError
+                    </div>
+                }
+            </div>
+        </div>
+    }
+
+    @* ── OpenStack Connections (required for Cleura S3) ── *@
+    <div class="mb-4">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+            <h5 class="d-flex align-items-center gap-2 mb-0">
+                <i class="bi bi-cloud-haze2 text-info"></i>OpenStack Connections
+                @if (openStackConnections.Count > 0)
+                {
+                    <span class="badge bg-info rounded-pill">@openStackConnections.Count</span>
+                }
+            </h5>
+            <button class="btn btn-sm btn-outline-info" @onclick="ShowOpenStackForm">
+                <i class="bi bi-plus-lg me-1"></i>Add Connection
+            </button>
+        </div>
+
+        <p class="text-muted small mb-3">
+            OpenStack connections are required for managing Cleura S3 buckets and credentials.
+        </p>
+
+        @if (openStackConnections.Count == 0 && !showOsForm)
+        {
+            <div class="alert alert-light border">
+                <i class="bi bi-inbox me-2"></i>
+                No OpenStack connections configured. Add one to enable Cleura S3 storage management.
+            </div>
+        }
+        else
+        {
+            <div class="row g-3 mb-3">
+                @foreach (OpenStackConnection conn in openStackConnections)
+                {
+                    <div class="col-md-6 col-lg-4">
+                        <div class="card h-100 shadow-sm">
+                            <div class="card-header bg-white d-flex align-items-center justify-content-between py-2">
+                                <div class="d-flex align-items-center gap-2">
+                                    <i class="bi bi-cloud-haze2 text-info"></i>
+                                    <strong class="small">@conn.Name</strong>
+                                </div>
+                                <button class="btn btn-sm btn-outline-danger border-0 py-0" @onclick="() => DeleteOpenStackConnection(conn.Id)" title="Delete">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
+                            <div class="card-body py-2">
+                                <div class="row small text-muted">
+                                    @if (conn.Region is not null)
+                                    {
+                                        <div class="col-6 mb-1">
+                                            <i class="bi bi-geo-alt me-1"></i>@conn.Region
+                                        </div>
+                                    }
+                                    @if (conn.ProjectName is not null)
+                                    {
+                                        <div class="col-6 mb-1">
+                                            <i class="bi bi-folder me-1"></i>@conn.ProjectName
+                                        </div>
+                                    }
+                                    @if (conn.Username is not null)
+                                    {
+                                        <div class="col-6 mb-1">
+                                            <i class="bi bi-person me-1"></i>@conn.Username
+                                        </div>
+                                    }
+                                    <div class="col-12 mb-1">
+                                        <i class="bi bi-link-45deg me-1"></i><code class="small text-break">@conn.AuthUrl</code>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="card-footer bg-white py-1">
+                                <small class="text-muted">Added @conn.CreatedAt.ToString("yyyy-MM-dd")</small>
+                            </div>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+
+        @if (showOsForm)
+        {
+            <div class="card shadow-sm border-info mb-3">
+                <div class="card-header bg-white">
+                    <h6 class="mb-0"><i class="bi bi-plus-circle me-2 text-info"></i>Add OpenStack Connection</h6>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">Connection Name</label>
+                            <input type="text" class="form-control form-control-sm" @bind="osFormName" placeholder="e.g. Cleura Production" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">Auth URL (Keystone)</label>
+                            <input type="text" class="form-control form-control-sm" @bind="osFormAuthUrl" placeholder="https://identity.c2.citycloud.com:5000/v3" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small fw-semibold">Region</label>
+                            <input type="text" class="form-control form-control-sm" @bind="osFormRegion" placeholder="e.g. Kna1" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small fw-semibold">Project Name</label>
+                            <input type="text" class="form-control form-control-sm" @bind="osFormProjectName" placeholder="Project/tenant name" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small fw-semibold">Project ID</label>
+                            <input type="text" class="form-control form-control-sm" @bind="osFormProjectId" placeholder="Optional project ID" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">User Domain Name</label>
+                            <input type="text" class="form-control form-control-sm" @bind="osFormUserDomain" placeholder="Default" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">Project Domain Name</label>
+                            <input type="text" class="form-control form-control-sm" @bind="osFormProjectDomain" placeholder="Default" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">Username</label>
+                            <input type="text" class="form-control form-control-sm" @bind="osFormUsername" placeholder="OpenStack username" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">Password</label>
+                            <input type="password" class="form-control form-control-sm" @bind="osFormPassword" placeholder="Stored in vault" />
+                        </div>
+                    </div>
+                    <div class="mt-3 d-flex gap-2">
+                        <button class="btn btn-sm btn-info text-white" @onclick="SaveOpenStackConnection" disabled="@savingOs">
+                            @if (savingOs)
+                            {
+                                <span class="spinner-border spinner-border-sm me-1"></span>
+                            }
+                            Save Connection
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelOpenStackForm">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+
+    @* ── Refresh button ── *@
+    <div class="mt-3">
+        <button class="btn btn-sm btn-outline-secondary" @onclick="RefreshAll" disabled="@refreshing">
+            @if (refreshing)
+            {
+                <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+            }
+            else
+            {
+                <i class="bi bi-arrow-clockwise me-1"></i>
+            }
+            Refresh
+        </button>
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private bool refreshing;
+    private bool showForm;
+    private bool saving;
+    private bool showOsForm;
+    private bool savingOs;
+    private string? formError;
+
+    // MinIO discovery
+    private bool minioAvailable;
+    private List<MinioBucketInfo> minioInstances = [];
+
+    // MinIO registration form
+    private MinioBucketInfo? registeringInstance;
+    private string regFormName = "";
+    private string regFormEndpoint = "";
+    private string regFormAccessKey = "";
+    private string regFormSecretKey = "";
+    private bool registering;
+    private string? regFormError;
+
+    // External storage links
+    private List<StorageLink> storageLinks = [];
+    private List<Data.Environment> environments = [];
+
+    // OpenStack connections
+    private List<OpenStackConnection> openStackConnections = [];
+
+    // Storage link form fields
+    private StorageProvider formProvider = StorageProvider.AwsS3;
+    private Guid formEnvironmentId;
+    private Guid formOpenStackConnectionId;
+    private string formName = "";
+    private string formBucket = "";
+    private string formEndpoint = "";
+    private string formRegion = "";
+    private string formAccessKey = "";
+    private string formSecretKey = "";
+    private string formNotes = "";
+
+    // OpenStack form fields
+    private string osFormName = "";
+    private string osFormAuthUrl = "";
+    private string osFormRegion = "";
+    private string osFormProjectName = "";
+    private string osFormProjectId = "";
+    private string osFormUserDomain = "";
+    private string osFormProjectDomain = "";
+    private string osFormUsername = "";
+    private string osFormPassword = "";
+
+    // Bucket management state
+    private StorageLink? managedLink;
+    private Guid? rotatingLinkId;
+    private Guid? deletingLinkId;
+    private string? deleteError;
+    private bool manageSaving;
+    private string? manageError;
+    private string? manageSuccess;
+    private string corsOrigins = "";
+    private string corsMethods = "GET, PUT, POST, DELETE";
+    private string corsHeaders = "*";
+    private int corsMaxAge = 3600;
+    private string bucketPolicyJson = "";
+
+    // File browser state
+    private StorageLink? fileBrowserLink;
+
+    // Browse buckets state
+    private StorageLink? browsedLink;
+    private Guid? browsingLinkId;
+    private List<S3BucketInfo>? browsedBuckets;
+    private string? browseError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        loading = true;
+        StateHasChanged();
+
+        // Load environments and OpenStack connections for form dropdowns.
+
+        environments = await StorageService.GetEnvironmentsAsync(TenantId);
+        openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+
+        if (environments.Count > 0 && formEnvironmentId == Guid.Empty)
+        {
+            formEnvironmentId = environments[0].Id;
+        }
+
+        // Check MinIO availability and discover instances in parallel with loading links.
+
+        Task<bool> minioTask = StorageService.IsMinioAvailableAsync(TenantId);
+        Task<List<StorageLink>> linksTask = StorageService.GetStorageLinksAsync(TenantId);
+
+        await Task.WhenAll(minioTask, linksTask);
+
+        minioAvailable = minioTask.Result;
+        storageLinks = linksTask.Result;
+
+        if (minioAvailable)
+        {
+            minioInstances = await StorageService.GetMinioInstancesAsync(TenantId);
+        }
+
+        loading = false;
+    }
+
+    // ── Storage Link Form ──
+
+    private void ShowAddForm()
+    {
+        showForm = true;
+    }
+
+    private void CancelForm()
+    {
+        showForm = false;
+        ResetForm();
+    }
+
+    private async Task SaveLink()
+    {
+        if (string.IsNullOrWhiteSpace(formName))
+        {
+            return;
+        }
+
+        // Cleura S3 requires an OpenStack connection and bucket name.
+        if (formProvider == StorageProvider.CleuraS3 && formOpenStackConnectionId == Guid.Empty)
+        {
+            return;
+        }
+
+        if (formProvider == StorageProvider.CleuraS3 && string.IsNullOrWhiteSpace(formBucket))
+        {
+            formError = "Bucket name is required.";
+            return;
+        }
+
+        saving = true;
+        formError = null;
+        StateHasChanged();
+
+        try
+        {
+            if (formProvider == StorageProvider.CleuraS3)
+            {
+                // Provision the bucket via OpenStack (Keystone auth → EC2 creds → S3 create).
+
+                await StorageService.ProvisionCleuraS3BucketAsync(
+                    TenantId,
+                    formEnvironmentId,
+                    formOpenStackConnectionId,
+                    formBucket.Trim(),
+                    formName.Trim(),
+                    string.IsNullOrWhiteSpace(formNotes) ? null : formNotes.Trim());
+            }
+            else
+            {
+                // Manual registration for AWS/Azure.
+
+                await StorageService.CreateStorageLinkAsync(
+                    TenantId,
+                    formEnvironmentId,
+                    formProvider,
+                    formName.Trim(),
+                    string.IsNullOrWhiteSpace(formEndpoint) ? null : formEndpoint.Trim(),
+                    string.IsNullOrWhiteSpace(formBucket) ? null : formBucket.Trim(),
+                    string.IsNullOrWhiteSpace(formRegion) ? null : formRegion.Trim(),
+                    string.IsNullOrWhiteSpace(formAccessKey) ? null : formAccessKey.Trim(),
+                    string.IsNullOrWhiteSpace(formSecretKey) ? null : formSecretKey.Trim(),
+                    string.IsNullOrWhiteSpace(formNotes) ? null : formNotes.Trim());
+            }
+
+            showForm = false;
+            ResetForm();
+            storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+        }
+        catch (Exception ex)
+        {
+            formError = ex.Message;
+        }
+        finally
+        {
+            saving = false;
+        }
+    }
+
+    private async Task DeleteLink(Guid linkId)
+    {
+        await StorageService.DeleteStorageLinkAsync(TenantId, linkId);
+        storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+    }
+
+    // ── Cleura S3 Bucket Management ──
+
+    private async Task RotateCredentials(Guid linkId)
+    {
+        rotatingLinkId = linkId;
+        StateHasChanged();
+
+        try
+        {
+            await StorageService.RotateCleuraS3CredentialsAsync(TenantId, linkId);
+            manageSuccess = "EC2 credentials rotated successfully.";
+            manageError = null;
+        }
+        catch (Exception ex)
+        {
+            manageError = $"Credential rotation failed: {ex.Message}";
+            manageSuccess = null;
+        }
+        finally
+        {
+            rotatingLinkId = null;
+        }
+    }
+
+    private async Task DeleteCleuraS3Bucket(Guid linkId)
+    {
+        deletingLinkId = linkId;
+        deleteError = null;
+        StateHasChanged();
+
+        try
+        {
+            await StorageService.DeleteCleuraS3BucketAsync(TenantId, linkId);
+            storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+            CloseManageBucket();
+        }
+        catch (Exception ex)
+        {
+            deleteError = $"Bucket deletion failed: {ex.Message}";
+        }
+        finally
+        {
+            deletingLinkId = null;
+        }
+    }
+
+    private async Task ShowManageBucket(StorageLink link)
+    {
+        managedLink = link;
+        manageError = null;
+        manageSuccess = null;
+        corsOrigins = "";
+        corsMethods = "GET, PUT, POST, DELETE";
+        corsHeaders = "*";
+        corsMaxAge = 3600;
+        bucketPolicyJson = "";
+
+        // Load existing CORS and policy in parallel.
+
+        await Task.WhenAll(LoadCors(), LoadPolicy());
+    }
+
+    private void CloseManageBucket()
+    {
+        managedLink = null;
+        manageError = null;
+        manageSuccess = null;
+    }
+
+    private async Task BrowseBuckets(StorageLink link)
+    {
+        browsingLinkId = link.Id;
+        browsedLink = link;
+        browsedBuckets = null;
+        browseError = null;
+        StateHasChanged();
+
+        try
+        {
+            browsedBuckets = link.Provider == StorageProvider.MinIO
+                ? await StorageService.ListS3BucketsAsync(TenantId, link.Id)
+                : await StorageService.ListCleuraS3BucketsAsync(TenantId, link.Id);
+        }
+        catch (Exception ex)
+        {
+            browseError = $"Failed to list buckets: {ex.Message}";
+        }
+        finally
+        {
+            browsingLinkId = null;
+        }
+    }
+
+    private void CloseBrowseBuckets()
+    {
+        browsedLink = null;
+        browsedBuckets = null;
+        browseError = null;
+    }
+
+    // ── File Browser ──
+
+    private void OpenFileBrowser(StorageLink link)
+    {
+        fileBrowserLink = link;
+    }
+
+    private void CloseFileBrowser()
+    {
+        fileBrowserLink = null;
+    }
+
+    private async Task LoadCors()
+    {
+        if (managedLink is null)
+        {
+            return;
+        }
+
+        try
+        {
+            List<S3CorsRule>? rules = await StorageService.GetBucketCorsAsync(TenantId, managedLink.Id);
+
+            if (rules is not null && rules.Count > 0)
+            {
+                S3CorsRule firstRule = rules[0];
+                corsOrigins = string.Join("\n", firstRule.AllowedOrigins);
+                corsMethods = string.Join(", ", firstRule.AllowedMethods);
+                corsHeaders = string.Join(", ", firstRule.AllowedHeaders);
+                corsMaxAge = firstRule.MaxAgeSeconds;
+            }
+            else
+            {
+                corsOrigins = "";
+                corsMethods = "GET, PUT, POST, DELETE";
+                corsHeaders = "*";
+                corsMaxAge = 3600;
+            }
+        }
+        catch (Exception ex)
+        {
+            manageError = $"Failed to load CORS: {ex.Message}";
+        }
+    }
+
+    private async Task SaveCors()
+    {
+        if (managedLink is null)
+        {
+            return;
+        }
+
+        manageSaving = true;
+        manageError = null;
+        manageSuccess = null;
+        StateHasChanged();
+
+        try
+        {
+            List<string> origins = corsOrigins
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToList();
+
+            List<string> methods = corsMethods
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToList();
+
+            List<string> headers = corsHeaders
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToList();
+
+            List<S3CorsRule> rules =
+            [
+                new()
+                {
+                    AllowedOrigins = origins,
+                    AllowedMethods = methods,
+                    AllowedHeaders = headers,
+                    MaxAgeSeconds = corsMaxAge
+                }
+            ];
+
+            await StorageService.SetBucketCorsAsync(TenantId, managedLink.Id, rules);
+            manageSuccess = "CORS configuration saved.";
+        }
+        catch (Exception ex)
+        {
+            manageError = $"Failed to save CORS: {ex.Message}";
+        }
+        finally
+        {
+            manageSaving = false;
+        }
+    }
+
+    private async Task RemoveCors()
+    {
+        if (managedLink is null)
+        {
+            return;
+        }
+
+        manageSaving = true;
+        manageError = null;
+        manageSuccess = null;
+        StateHasChanged();
+
+        try
+        {
+            await StorageService.SetBucketCorsAsync(TenantId, managedLink.Id, []);
+            corsOrigins = "";
+            corsMethods = "GET, PUT, POST, DELETE";
+            corsHeaders = "*";
+            corsMaxAge = 3600;
+            manageSuccess = "CORS configuration removed.";
+        }
+        catch (Exception ex)
+        {
+            manageError = $"Failed to remove CORS: {ex.Message}";
+        }
+        finally
+        {
+            manageSaving = false;
+        }
+    }
+
+    private async Task LoadPolicy()
+    {
+        if (managedLink is null)
+        {
+            return;
+        }
+
+        try
+        {
+            string? policy = await StorageService.GetBucketPolicyAsync(TenantId, managedLink.Id);
+            bucketPolicyJson = policy ?? "";
+        }
+        catch (Exception ex)
+        {
+            manageError = $"Failed to load policy: {ex.Message}";
+        }
+    }
+
+    private async Task SavePolicy()
+    {
+        if (managedLink is null)
+        {
+            return;
+        }
+
+        manageSaving = true;
+        manageError = null;
+        manageSuccess = null;
+        StateHasChanged();
+
+        try
+        {
+            string? policy = string.IsNullOrWhiteSpace(bucketPolicyJson) ? null : bucketPolicyJson.Trim();
+            await StorageService.SetBucketPolicyAsync(TenantId, managedLink.Id, policy);
+            manageSuccess = "Bucket policy saved.";
+        }
+        catch (Exception ex)
+        {
+            manageError = $"Failed to save policy: {ex.Message}";
+        }
+        finally
+        {
+            manageSaving = false;
+        }
+    }
+
+    private async Task RemovePolicy()
+    {
+        if (managedLink is null)
+        {
+            return;
+        }
+
+        manageSaving = true;
+        manageError = null;
+        manageSuccess = null;
+        StateHasChanged();
+
+        try
+        {
+            await StorageService.SetBucketPolicyAsync(TenantId, managedLink.Id, null);
+            bucketPolicyJson = "";
+            manageSuccess = "Bucket policy removed.";
+        }
+        catch (Exception ex)
+        {
+            manageError = $"Failed to remove policy: {ex.Message}";
+        }
+        finally
+        {
+            manageSaving = false;
+        }
+    }
+
+    // ── OpenStack Connection Form ──
+
+    private void ShowOpenStackForm()
+    {
+        showOsForm = true;
+    }
+
+    private void CancelOpenStackForm()
+    {
+        showOsForm = false;
+        ResetOsForm();
+    }
+
+    private async Task SaveOpenStackConnection()
+    {
+        if (string.IsNullOrWhiteSpace(osFormName) || string.IsNullOrWhiteSpace(osFormAuthUrl))
+        {
+            return;
+        }
+
+        savingOs = true;
+        StateHasChanged();
+
+        try
+        {
+            await StorageService.CreateOpenStackConnectionAsync(
+                TenantId,
+                osFormName.Trim(),
+                osFormAuthUrl.Trim(),
+                string.IsNullOrWhiteSpace(osFormRegion) ? null : osFormRegion.Trim(),
+                string.IsNullOrWhiteSpace(osFormProjectName) ? null : osFormProjectName.Trim(),
+                string.IsNullOrWhiteSpace(osFormProjectId) ? null : osFormProjectId.Trim(),
+                string.IsNullOrWhiteSpace(osFormUserDomain) ? null : osFormUserDomain.Trim(),
+                string.IsNullOrWhiteSpace(osFormProjectDomain) ? null : osFormProjectDomain.Trim(),
+                string.IsNullOrWhiteSpace(osFormUsername) ? null : osFormUsername.Trim(),
+                string.IsNullOrWhiteSpace(osFormPassword) ? null : osFormPassword.Trim());
+
+            showOsForm = false;
+            ResetOsForm();
+            openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+        }
+        finally
+        {
+            savingOs = false;
+        }
+    }
+
+    private async Task DeleteOpenStackConnection(Guid connectionId)
+    {
+        bool deleted = await StorageService.DeleteOpenStackConnectionAsync(TenantId, connectionId);
+
+        if (deleted)
+        {
+            openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+        }
+    }
+
+    // ── MinIO Registration ──
+
+    private void ShowRegisterForm(MinioBucketInfo instance)
+    {
+        registeringInstance = instance;
+        regFormName = instance.Name;
+        regFormEndpoint = "";   // leave blank so the user provides an externally accessible URL
+        regFormAccessKey = "";
+        regFormSecretKey = "";
+        regFormError = null;
+    }
+
+    private void CancelRegisterForm()
+    {
+        registeringInstance = null;
+        regFormError = null;
+    }
+
+    private async Task RegisterMinioTenant(MinioBucketInfo instance)
+    {
+        if (string.IsNullOrWhiteSpace(regFormName) || string.IsNullOrWhiteSpace(regFormEndpoint)
+            || string.IsNullOrWhiteSpace(regFormAccessKey) || string.IsNullOrWhiteSpace(regFormSecretKey))
+        {
+            regFormError = "Name, endpoint URL, access key and secret key are all required.";
+            return;
+        }
+
+        registering = true;
+        regFormError = null;
+        StateHasChanged();
+
+        try
+        {
+            // Use the environment from the cluster if we can match it; fall back to the first environment.
+            Guid envId = environments.FirstOrDefault(e => e.Name == instance.EnvironmentName)?.Id
+                ?? (environments.Count > 0 ? environments[0].Id : Guid.Empty);
+
+            await StorageService.RegisterMinioTenantAsync(
+                TenantId,
+                envId,
+                instance.ClusterId,
+                regFormName.Trim(),
+                regFormEndpoint.Trim(),
+                regFormAccessKey.Trim(),
+                regFormSecretKey.Trim(),
+                notes: null);
+
+            registeringInstance = null;
+            storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+        }
+        catch (Exception ex)
+        {
+            regFormError = ex.Message;
+        }
+        finally
+        {
+            registering = false;
+        }
+    }
+
+    private bool IsMinioRegistered(MinioBucketInfo instance) =>
+        storageLinks.Any(l =>
+            l.Provider == StorageProvider.MinIO &&
+            l.Component?.ClusterId == instance.ClusterId &&
+            string.Equals(l.Endpoint, instance.Endpoint, StringComparison.OrdinalIgnoreCase));
+
+    // ── Refresh + Helpers ──
+
+    private async Task RefreshAll()
+    {
+        refreshing = true;
+        StateHasChanged();
+
+        try
+        {
+            await LoadData();
+        }
+        finally
+        {
+            refreshing = false;
+        }
+    }
+
+    private void ResetForm()
+    {
+        formName = "";
+        formBucket = "";
+        formEndpoint = "";
+        formRegion = "";
+        formAccessKey = "";
+        formSecretKey = "";
+        formNotes = "";
+        formOpenStackConnectionId = Guid.Empty;
+        formError = null;
+    }
+
+    private void ResetOsForm()
+    {
+        osFormName = "";
+        osFormAuthUrl = "";
+        osFormRegion = "";
+        osFormProjectName = "";
+        osFormProjectId = "";
+        osFormUserDomain = "";
+        osFormProjectDomain = "";
+        osFormUsername = "";
+        osFormPassword = "";
+    }
+
+    private string GetEndpointPlaceholder() => formProvider switch
+    {
+        StorageProvider.AwsS3 => "https://s3.eu-west-1.amazonaws.com",
+        StorageProvider.AzureStorage => "https://<account>.blob.core.windows.net",
+        StorageProvider.CleuraS3 => "https://s3-<region>.cloudferro.com",
+        _ => "https://..."
+    };
+
+    private static string GetProviderIcon(StorageProvider provider) => provider switch
+    {
+        StorageProvider.AwsS3 => "bi bi-cloud",
+        StorageProvider.AzureStorage => "bi bi-microsoft",
+        StorageProvider.CleuraS3 => "bi bi-cloud-haze2",
+        StorageProvider.MinIO => "bi bi-bucket",
+        _ => "bi bi-cloud"
+    };
+
+    private static string GetProviderColor(StorageProvider provider) => provider switch
+    {
+        StorageProvider.AwsS3 => "text-warning",
+        StorageProvider.AzureStorage => "text-primary",
+        StorageProvider.CleuraS3 => "text-info",
+        StorageProvider.MinIO => "text-warning",
+        _ => ""
+    };
+
+    private static string GetProviderLabel(StorageProvider provider) => provider switch
+    {
+        StorageProvider.AwsS3 => "AWS S3",
+        StorageProvider.AzureStorage => "Azure Storage",
+        StorageProvider.CleuraS3 => "Cleura S3",
+        StorageProvider.MinIO => "MinIO",
+        _ => provider.ToString()
+    };
+
+    private static RenderFragment GetMinioStatusBadge(MinioBucketInfo instance)
+    {
+        // healthStatus ("green"/"yellow"/"red") is the operator's authoritative health signal.
+        // Fall back to Contains matching on currentState for operators that don't set it.
+        string h = (instance.HealthStatus ?? "").ToLowerInvariant();
+        string s = (instance.Status ?? "").ToLowerInvariant();
+
+        bool isReady = h == "green"
+            || (h == "" && (s.Contains("initialized") || s.Contains("ready") || s.Contains("running")));
+
+        bool isFailed = h == "red"
+            || (h == "" && (s.Contains("error") || s.Contains("failed")));
+
+        if (isReady)
+            return __builder => { <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Ready</span> };
+
+        if (isFailed)
+            return __builder => { <span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span> };
+
+        if (h == "yellow" || s.Contains("provisioning") || s.Contains("waiting") || s.Contains("certification"))
+            return __builder => { <span class="badge bg-warning text-dark"><i class="bi bi-hourglass me-1"></i>Provisioning</span> };
+
+        return __builder => { <span class="badge bg-secondary">@instance.Status</span> };
+    }
+}

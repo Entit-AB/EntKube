@@ -1,0 +1,342 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject OnCallService OnCallService
+@inject AuthenticationStateProvider AuthStateProvider
+
+@* ── Current on-call banner ── *@
+@if (currentShift is not null)
+{
+    <div class="alert alert-success d-flex align-items-center gap-2 py-2 mb-3">
+        <span class="bi bi-person-check-fill fs-5"></span>
+        <div>
+            <strong>@currentShift.AssigneeName</strong> is currently on call
+            @if (!string.IsNullOrEmpty(currentShift.AssigneeEmail))
+            {
+                <span class="text-muted ms-1">— <a href="mailto:@currentShift.AssigneeEmail">@currentShift.AssigneeEmail</a></span>
+            }
+            <span class="text-muted ms-2 small">until @currentShift.EndsAt.ToLocalTime().ToString("MMM d HH:mm")</span>
+            <span class="badge bg-success ms-2 small">@currentShift.Schedule.Name</span>
+        </div>
+    </div>
+}
+else
+{
+    <div class="alert alert-warning d-flex align-items-center gap-2 py-2 mb-3">
+        <span class="bi bi-person-exclamation fs-5"></span>
+        <span>No one is currently on call. Add a shift to cover now.</span>
+    </div>
+}
+
+@* ── Schedules + Create ── *@
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h6 class="mb-0">Schedules</h6>
+    <button class="btn btn-sm btn-primary" @onclick="() => showCreateSchedule = !showCreateSchedule">
+        <span class="bi bi-plus-circle me-1"></span>New Schedule
+    </button>
+</div>
+
+@if (showCreateSchedule)
+{
+    <div class="card border-primary mb-3">
+        <div class="card-body">
+            <div class="row g-2 mb-2">
+                <div class="col-md-5">
+                    <label class="form-label small">Name</label>
+                    <input class="form-control form-control-sm" @bind="newScheduleName" placeholder="Primary On-Call" />
+                </div>
+                <div class="col-md-7">
+                    <label class="form-label small">Description</label>
+                    <input class="form-control form-control-sm" @bind="newScheduleDescription" placeholder="Optional description" />
+                </div>
+            </div>
+            @if (!string.IsNullOrEmpty(scheduleError))
+            {
+                <div class="alert alert-danger py-1 small mb-2">@scheduleError</div>
+            }
+            <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-primary" @onclick="CreateSchedule"
+                        disabled="@(string.IsNullOrWhiteSpace(newScheduleName))">
+                    Create
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showCreateSchedule = false">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (schedules.Count == 0 && !isLoading)
+{
+    <EmptyState Icon="bi-calendar2-week"
+                Title="No schedules"
+                Message="Create a schedule to track who is on call." />
+}
+else
+{
+    @foreach (OnCallSchedule schedule in schedules)
+    {
+        bool isExpanded = expandedScheduleId == schedule.Id;
+        <div class="card mb-3 @(isExpanded ? "border-primary" : "")">
+            <div class="card-header d-flex align-items-center py-2 gap-2" style="cursor:pointer"
+                 @onclick="() => ToggleSchedule(schedule.Id)">
+                <span class="bi bi-calendar2-week text-primary"></span>
+                <strong class="me-auto">@schedule.Name</strong>
+                @if (!string.IsNullOrEmpty(schedule.Description))
+                {
+                    <span class="text-muted small me-2">@schedule.Description</span>
+                }
+                @if (!schedule.IsEnabled)
+                {
+                    <span class="badge bg-secondary">Disabled</span>
+                }
+                else
+                {
+                    int activeCount = schedule.Shifts.Count(sh => sh.StartsAt <= DateTime.UtcNow && sh.EndsAt >= DateTime.UtcNow);
+                    int upcomingCount = schedule.Shifts.Count(sh => sh.StartsAt > DateTime.UtcNow);
+                    @if (activeCount > 0)
+                    {
+                        <span class="badge bg-success">Active now</span>
+                    }
+                    <span class="text-muted small">@schedule.Shifts.Count shift@(schedule.Shifts.Count == 1 ? "" : "s")</span>
+                }
+                <button class="btn btn-sm btn-outline-danger ms-2"
+                        @onclick:stopPropagation="true"
+                        @onclick="() => DeleteSchedule(schedule)">
+                    <span class="bi bi-trash"></span>
+                </button>
+                <span class="bi bi-chevron-@(isExpanded ? "up" : "down") text-muted"></span>
+            </div>
+
+            @if (isExpanded)
+            {
+                <div class="card-body">
+                    @* ── Shifts list ── *@
+                    @if (schedule.Shifts.Count == 0)
+                    {
+                        <p class="text-muted small mb-3">No shifts yet. Add the first shift below.</p>
+                    }
+                    else
+                    {
+                        <div class="table-responsive mb-3">
+                            <table class="table table-sm align-middle">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Assignee</th>
+                                        <th>Start</th>
+                                        <th>End</th>
+                                        <th>Status</th>
+                                        <th style="width:60px"></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (OnCallShift shift in schedule.Shifts.OrderBy(sh => sh.StartsAt))
+                                    {
+                                        bool active = shift.StartsAt <= DateTime.UtcNow && shift.EndsAt >= DateTime.UtcNow;
+                                        bool past = shift.EndsAt < DateTime.UtcNow;
+                                        <tr class="@(active ? "table-success" : past ? "text-muted" : "")">
+                                            <td>
+                                                <div class="fw-semibold small">@shift.AssigneeName</div>
+                                                @if (!string.IsNullOrEmpty(shift.AssigneeEmail))
+                                                {
+                                                    <div class="text-muted" style="font-size:.77rem">@shift.AssigneeEmail</div>
+                                                }
+                                            </td>
+                                            <td class="small">@shift.StartsAt.ToLocalTime().ToString("MMM d HH:mm")</td>
+                                            <td class="small">@shift.EndsAt.ToLocalTime().ToString("MMM d HH:mm")</td>
+                                            <td>
+                                                @if (active)
+                                                {
+                                                    <span class="badge bg-success">Active</span>
+                                                }
+                                                else if (past)
+                                                {
+                                                    <span class="badge bg-secondary">Past</span>
+                                                }
+                                                else
+                                                {
+                                                    <span class="badge bg-info text-dark">Upcoming</span>
+                                                }
+                                            </td>
+                                            <td>
+                                                <button class="btn btn-sm btn-outline-danger"
+                                                        @onclick="() => DeleteShift(shift)">
+                                                    <span class="bi bi-trash"></span>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+
+                    @* ── Add shift form ── *@
+                    @if (addShiftScheduleId == schedule.Id)
+                    {
+                        <div class="border rounded p-3 bg-light">
+                            <h6 class="mb-2 small fw-semibold">Add Shift</h6>
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-4">
+                                    <label class="form-label small">Assignee name</label>
+                                    <input class="form-control form-control-sm" @bind="newShiftName" placeholder="Alice Smith" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Email (optional)</label>
+                                    <input class="form-control form-control-sm" @bind="newShiftEmail" placeholder="alice@example.com" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Notes</label>
+                                    <input class="form-control form-control-sm" @bind="newShiftNotes" placeholder="Optional notes" />
+                                </div>
+                            </div>
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-4">
+                                    <label class="form-label small">Starts at (local time)</label>
+                                    <input type="datetime-local" class="form-control form-control-sm" @bind="newShiftStartsAt" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Ends at (local time)</label>
+                                    <input type="datetime-local" class="form-control form-control-sm" @bind="newShiftEndsAt" />
+                                </div>
+                            </div>
+                            @if (!string.IsNullOrEmpty(shiftError))
+                            {
+                                <div class="alert alert-danger py-1 small mb-2">@shiftError</div>
+                            }
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-sm btn-primary" @onclick="() => AddShift(schedule.Id)"
+                                        disabled="@(string.IsNullOrWhiteSpace(newShiftName))">
+                                    Add Shift
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelAddShift">Cancel</button>
+                            </div>
+                        </div>
+                    }
+                    else
+                    {
+                        <button class="btn btn-sm btn-outline-primary" @onclick="() => StartAddShift(schedule.Id)">
+                            <span class="bi bi-plus-circle me-1"></span>Add Shift
+                        </button>
+                    }
+                </div>
+            }
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<OnCallSchedule> schedules = [];
+    private OnCallShift? currentShift;
+    private bool isLoading = true;
+    private Guid? expandedScheduleId;
+
+    // Create schedule form
+    private bool showCreateSchedule;
+    private string newScheduleName = "";
+    private string? newScheduleDescription;
+    private string? scheduleError;
+
+    // Add shift form
+    private Guid? addShiftScheduleId;
+    private string newShiftName = "";
+    private string? newShiftEmail;
+    private string? newShiftNotes;
+    private DateTime newShiftStartsAt = DateTime.Now.Date.AddHours(DateTime.Now.Hour + 1);
+    private DateTime newShiftEndsAt = DateTime.Now.Date.AddHours(DateTime.Now.Hour + 9);
+    private string? shiftError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+    }
+
+    private async Task Load()
+    {
+        isLoading = true;
+        Task<List<OnCallSchedule>> schedulesTask = OnCallService.GetSchedulesAsync(TenantId);
+        Task<OnCallShift?> currentTask = OnCallService.GetCurrentOnCallAsync(TenantId);
+        await Task.WhenAll(schedulesTask, currentTask);
+        schedules = schedulesTask.Result;
+        currentShift = currentTask.Result;
+        isLoading = false;
+    }
+
+    private void ToggleSchedule(Guid id)
+    {
+        expandedScheduleId = expandedScheduleId == id ? null : id;
+        addShiftScheduleId = null;
+    }
+
+    private async Task CreateSchedule()
+    {
+        scheduleError = null;
+        if (string.IsNullOrWhiteSpace(newScheduleName)) return;
+
+        try
+        {
+            await OnCallService.CreateScheduleAsync(TenantId, newScheduleName.Trim(), newScheduleDescription?.Trim());
+            newScheduleName = "";
+            newScheduleDescription = null;
+            showCreateSchedule = false;
+            await Load();
+        }
+        catch (Exception ex)
+        {
+            scheduleError = ex.Message;
+        }
+    }
+
+    private async Task DeleteSchedule(OnCallSchedule schedule)
+    {
+        await OnCallService.DeleteScheduleAsync(schedule.Id);
+        await Load();
+    }
+
+    private void StartAddShift(Guid scheduleId)
+    {
+        addShiftScheduleId = scheduleId;
+        newShiftName = "";
+        newShiftEmail = null;
+        newShiftNotes = null;
+        newShiftStartsAt = DateTime.Now.Date.AddHours(DateTime.Now.Hour + 1);
+        newShiftEndsAt = DateTime.Now.Date.AddHours(DateTime.Now.Hour + 9);
+        shiftError = null;
+    }
+
+    private void CancelAddShift()
+    {
+        addShiftScheduleId = null;
+        shiftError = null;
+    }
+
+    private async Task AddShift(Guid scheduleId)
+    {
+        shiftError = null;
+        if (string.IsNullOrWhiteSpace(newShiftName)) return;
+        if (newShiftEndsAt <= newShiftStartsAt)
+        {
+            shiftError = "End time must be after start time.";
+            return;
+        }
+
+        await OnCallService.AddShiftAsync(
+            scheduleId,
+            newShiftName.Trim(),
+            string.IsNullOrWhiteSpace(newShiftEmail) ? null : newShiftEmail.Trim(),
+            newShiftStartsAt.ToUniversalTime(),
+            newShiftEndsAt.ToUniversalTime(),
+            string.IsNullOrWhiteSpace(newShiftNotes) ? null : newShiftNotes.Trim());
+
+        addShiftScheduleId = null;
+        await Load();
+        expandedScheduleId = scheduleId;
+    }
+
+    private async Task DeleteShift(OnCallShift shift)
+    {
+        await OnCallService.DeleteShiftAsync(shift.Id);
+        await Load();
+        expandedScheduleId = shift.ScheduleId;
+    }
+}

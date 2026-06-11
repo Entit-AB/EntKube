@@ -1,0 +1,195 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject PrometheusService PrometheusService
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div class="d-flex gap-2 align-items-center flex-wrap">
+        <select class="form-select form-select-sm" style="width:auto" @bind="filterState" @bind:after="ApplyFilter">
+            <option value="">All states</option>
+            <option value="firing">Firing</option>
+            <option value="pending">Pending</option>
+            <option value="inactive">Inactive</option>
+        </select>
+        <select class="form-select form-select-sm" style="width:auto" @bind="filterSeverity" @bind:after="ApplyFilter">
+            <option value="">All severities</option>
+            <option value="critical">Critical</option>
+            <option value="warning">Warning</option>
+            <option value="info">Info</option>
+            <option value="none">None</option>
+        </select>
+        <input class="form-control form-control-sm" style="width:200px" placeholder="Search rules…"
+               value="@filterSearch" @oninput="OnSearchInput" />
+    </div>
+    <div class="d-flex gap-2 align-items-center">
+        <span class="text-muted small">@filtered.Count of @rules.Count rules</span>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="Load" disabled="@isLoading">
+            <span class="bi bi-arrow-clockwise @(isLoading ? "spin" : "")"></span>
+        </button>
+    </div>
+</div>
+
+@if (isLoading)
+{
+    <div class="text-center py-4 text-muted">
+        <span class="bi bi-hourglass-split me-1"></span> Loading rules…
+    </div>
+}
+else if (errorMessage is not null)
+{
+    <div class="alert alert-warning small py-2">
+        <span class="bi bi-exclamation-triangle me-1"></span>@errorMessage
+    </div>
+}
+else if (filtered.Count == 0)
+{
+    <div class="text-center py-4 text-muted">No rules match the filter.</div>
+}
+else
+{
+    @* Summary counts *@
+    <div class="d-flex gap-3 mb-3 flex-wrap">
+        @{
+            int firingCount  = rules.Count(r => r.State == "firing");
+            int pendingCount = rules.Count(r => r.State == "pending");
+        }
+        @if (firingCount > 0)
+        {
+            <span class="badge bg-danger px-2 py-1">@firingCount firing</span>
+        }
+        @if (pendingCount > 0)
+        {
+            <span class="badge bg-warning text-dark px-2 py-1">@pendingCount pending</span>
+        }
+        <span class="badge bg-success px-2 py-1">@rules.Count(r => r.State == "inactive") inactive</span>
+    </div>
+
+    @foreach (IGrouping<string, AlertRule> group in filtered.GroupBy(r => r.GroupName).OrderBy(g => g.Key))
+    {
+        <div class="mb-3">
+            <div class="text-muted small fw-semibold mb-1 text-uppercase" style="letter-spacing:.05em">
+                <span class="bi bi-collection me-1"></span>@group.Key
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <tbody>
+                        @foreach (AlertRule rule in group.OrderBy(r => r.Name))
+                        {
+                            <tr>
+                                <td style="width:90px">
+                                    @StateIndicator(rule.State)
+                                </td>
+                                <td>
+                                    <div class="fw-semibold small">@rule.Name</div>
+                                    @if (!string.IsNullOrEmpty(rule.Summary))
+                                    {
+                                        <div class="text-muted" style="font-size:0.77rem">@rule.Summary</div>
+                                    }
+                                </td>
+                                <td style="width:80px">
+                                    @if (!string.IsNullOrEmpty(rule.Severity))
+                                    {
+                                        @SeverityBadge(rule.Severity)
+                                    }
+                                </td>
+                                <td style="width:90px" class="text-muted small text-end">
+                                    @if (rule.DurationSeconds > 0)
+                                    {
+                                        <span title="Fires after this duration">@FormatDuration(rule.DurationSeconds)</span>
+                                    }
+                                </td>
+                                <td style="width:36px" class="text-end">
+                                    @if (!string.IsNullOrEmpty(rule.RunbookUrl))
+                                    {
+                                        <a href="@rule.RunbookUrl" target="_blank" class="btn btn-sm btn-link p-0" title="Runbook">
+                                            <span class="bi bi-book"></span>
+                                        </a>
+                                    }
+                                </td>
+                            </tr>
+                            @if (expandedRule == rule.Name + rule.GroupName)
+                            {
+                                <tr>
+                                    <td colspan="5" class="bg-light py-2 px-3">
+                                        <div class="font-monospace small text-muted">@rule.Query</div>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public required Guid ClusterId { get; set; }
+
+    private List<AlertRule> rules = [];
+    private List<AlertRule> filtered = [];
+    private string filterState = "";
+    private string filterSeverity = "";
+    private string filterSearch = "";
+    private string? expandedRule;
+    private bool isLoading = true;
+    private string? errorMessage;
+
+    protected override async Task OnParametersSetAsync() => await Load();
+
+    private async Task Load()
+    {
+        isLoading = true;
+        errorMessage = null;
+        StateHasChanged();
+
+        KubernetesOperationResult<List<AlertRule>> result = await PrometheusService.GetAlertRulesAsync(ClusterId);
+        if (result.IsSuccess)
+        {
+            rules = result.Data ?? [];
+            ApplyFilter();
+        }
+        else
+        {
+            errorMessage = result.Error;
+            rules = [];
+            filtered = [];
+        }
+        isLoading = false;
+    }
+
+    private void OnSearchInput(ChangeEventArgs e)
+    {
+        filterSearch = e.Value?.ToString() ?? string.Empty;
+        ApplyFilter();
+    }
+
+    private void ApplyFilter()
+    {
+        filtered = rules.Where(r =>
+            (string.IsNullOrEmpty(filterState)    || r.State == filterState) &&
+            (string.IsNullOrEmpty(filterSeverity) || r.Severity == filterSeverity || (filterSeverity == "none" && string.IsNullOrEmpty(r.Severity))) &&
+            (string.IsNullOrEmpty(filterSearch)   || r.Name.Contains(filterSearch, StringComparison.OrdinalIgnoreCase)
+                                                  || r.Summary.Contains(filterSearch, StringComparison.OrdinalIgnoreCase))
+        ).ToList();
+    }
+
+    private static string FormatDuration(double seconds) =>
+        seconds >= 3600 ? $"{(int)(seconds / 3600)}h"
+        : seconds >= 60 ? $"{(int)(seconds / 60)}m"
+        : $"{(int)seconds}s";
+
+    private static RenderFragment StateIndicator(string state) => state switch
+    {
+        "firing"   => @<span class="badge bg-danger"><span class="bi bi-fire me-1"></span>Firing</span>,
+        "pending"  => @<span class="badge bg-warning text-dark"><span class="bi bi-hourglass me-1"></span>Pending</span>,
+        _          => @<span class="badge bg-success-subtle text-success border"><span class="bi bi-check me-1"></span>OK</span>
+    };
+
+    private static RenderFragment SeverityBadge(string sev) => sev switch
+    {
+        "critical" => @<span class="badge bg-danger-subtle text-danger border">critical</span>,
+        "warning"  => @<span class="badge bg-warning-subtle text-warning border">warning</span>,
+        "info"     => @<span class="badge bg-info-subtle text-info border">info</span>,
+        _          => @<span class="badge bg-secondary-subtle text-secondary border">@sev</span>
+    };
+}

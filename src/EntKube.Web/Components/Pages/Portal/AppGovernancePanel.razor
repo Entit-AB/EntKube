@@ -1,0 +1,325 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject AppGovernanceService GovernanceService
+@inject CustomerGitService CustomerGitService
+
+@* ═══════════════════════════════════════════════════════════════════
+   AppGovernancePanel — read-only portal view of an app's governance
+   settings (namespace, quota, network policies, RBAC).
+   Customers can see what limits apply to their app but cannot change them.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+@if (loading)
+{
+    <div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+}
+else
+{
+    <div class="d-flex align-items-center mb-3">
+        <i class="bi bi-shield-check fs-5 me-2 text-primary"></i>
+        <div>
+            <strong>@AppName — Resource Policy</strong>
+            <div class="text-muted small">Set by your platform administrator. Contact them to request changes.</div>
+        </div>
+    </div>
+
+    @* Namespace *@
+    @if (!string.IsNullOrWhiteSpace(data?.Namespace))
+    {
+        <div class="card shadow-sm mb-3">
+            <div class="card-header bg-white py-2">
+                <i class="bi bi-box me-2 text-primary"></i>
+                <strong class="small">Namespace</strong>
+            </div>
+            <div class="card-body py-2">
+                <div class="d-flex align-items-center gap-2">
+                    <i class="bi bi-lock-fill text-warning small"></i>
+                    <span class="small">Your app runs in namespace <code>@data.Namespace</code>.</span>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* Quota *@
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-white py-2">
+            <i class="bi bi-speedometer me-2 text-warning"></i>
+            <strong class="small">Resource Quota</strong>
+        </div>
+        <div class="card-body">
+            @if (data?.Quota is not { } q)
+            {
+                <p class="text-muted small mb-0">No quota restrictions configured.</p>
+            }
+            else
+            {
+                <table class="table table-sm mb-0">
+                    <tbody>
+                        @if (!string.IsNullOrWhiteSpace(q.CpuRequest) || !string.IsNullOrWhiteSpace(q.CpuLimit))
+                        {
+                            <tr>
+                                <td class="small text-muted w-50">CPU</td>
+                                <td class="small font-monospace">
+                                    request @(q.CpuRequest ?? "—") / limit @(q.CpuLimit ?? "—")
+                                </td>
+                            </tr>
+                        }
+                        @if (!string.IsNullOrWhiteSpace(q.MemoryRequest) || !string.IsNullOrWhiteSpace(q.MemoryLimit))
+                        {
+                            <tr>
+                                <td class="small text-muted">Memory</td>
+                                <td class="small font-monospace">
+                                    request @(q.MemoryRequest ?? "—") / limit @(q.MemoryLimit ?? "—")
+                                </td>
+                            </tr>
+                        }
+                        @if (q.MaxPods.HasValue)
+                        {
+                            <tr>
+                                <td class="small text-muted">Max pods</td>
+                                <td class="small font-monospace">@q.MaxPods</td>
+                            </tr>
+                        }
+                        @if (q.MaxPvcs.HasValue)
+                        {
+                            <tr>
+                                <td class="small text-muted">Max PVCs</td>
+                                <td class="small font-monospace">@q.MaxPvcs</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+    </div>
+
+    @* Network policies *@
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-white py-2">
+            <i class="bi bi-diagram-2 me-2 text-info"></i>
+            <strong class="small">Network Policies</strong>
+        </div>
+        <div class="card-body">
+            @if (data?.NetworkPolicies is not { Count: > 0 } policies)
+            {
+                <p class="text-muted small mb-0">No network policies — namespace inherits cluster defaults.</p>
+            }
+            else
+            {
+                <div class="d-flex flex-wrap gap-2">
+                    @foreach (AppNetworkPolicy np in policies)
+                    {
+                        <span class="badge border text-secondary d-flex align-items-center gap-1"
+                              style="background:white;font-size:.72rem;">
+                            <i class="bi @NpIcon(np.PolicyType)"></i>
+                            <span>@NpTypeLabel(np.PolicyType)</span>
+                            @if (np.PolicyType == AppNetworkPolicyType.AllowFromNamespace
+                                 && !string.IsNullOrWhiteSpace(np.AllowFromNamespace))
+                            {
+                                <code class="ms-1">@np.AllowFromNamespace</code>
+                            }
+                        </span>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+
+    @* RBAC *@
+    <div class="card shadow-sm">
+        <div class="card-header bg-white py-2">
+            <i class="bi bi-person-badge me-2 text-success"></i>
+            <strong class="small">RBAC</strong>
+        </div>
+        <div class="card-body">
+            @if (data?.RbacPolicy is not { } rbac)
+            {
+                <p class="text-muted small mb-0">No service account or RBAC configured.</p>
+            }
+            else
+            {
+                <div class="mb-2">
+                    <label class="form-label small fw-medium">Service account</label>
+                    <input class="form-control form-control-sm font-monospace" value="@rbac.ServiceAccountName" disabled />
+                </div>
+                @if (rbac.Rules.Count > 0)
+                {
+                    <table class="table table-sm mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th class="small">API groups</th>
+                                <th class="small">Resources</th>
+                                <th class="small">Verbs</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (AppRbacRule rule in rbac.Rules)
+                            {
+                                <tr>
+                                    <td class="small align-middle"><code>@(string.IsNullOrEmpty(rule.ApiGroups) ? "core" : rule.ApiGroups)</code></td>
+                                    <td class="small align-middle"><code>@rule.Resources</code></td>
+                                    <td class="small align-middle"><code>@rule.Verbs</code></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+                else
+                {
+                    <p class="text-muted small mb-0">Service account exists with no permissions (no-op role).</p>
+                }
+            }
+        </div>
+    </div>
+
+    @* Git URL Policies *@
+    <div class="card shadow-sm mt-3">
+        <div class="card-header bg-white py-2">
+            <i class="bi bi-git me-2 text-secondary"></i>
+            <strong class="small">Git URL Policies</strong>
+        </div>
+        <div class="card-body">
+            @if (gitPolicies.Count == 0)
+            {
+                <p class="text-muted small mb-0">No git URL policies — all repositories are allowed.</p>
+            }
+            else
+            {
+                <ul class="list-group list-group-flush mb-0">
+                    @foreach (CustomerGitRepoPolicy p in gitPolicies)
+                    {
+                        <li class="list-group-item d-flex align-items-center gap-2 px-0 py-1">
+                            <i class="bi bi-check-circle text-success small"></i>
+                            <code class="small">@p.UrlPattern</code>
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+    </div>
+
+    @* Allowed Databases *@
+    @if (data?.AllowedDatabases is { Count: > 0 } allowedDbs)
+    {
+        <div class="card shadow-sm mt-3">
+            <div class="card-header bg-white py-2">
+                <i class="bi bi-database me-2 text-primary"></i>
+                <strong class="small">Allowed Databases</strong>
+            </div>
+            <div class="card-body">
+                <ul class="list-group list-group-flush mb-0">
+                    @foreach (AppAllowedDatabase db in allowedDbs)
+                    {
+                        <li class="list-group-item d-flex align-items-center gap-2 px-0 py-1">
+                            <i class="bi bi-check-circle text-success small"></i>
+                            <span class="badge bg-primary-subtle text-primary border border-primary-subtle small">@AllowedDbTypeLabel(db)</span>
+                            <span class="small">@AllowedDbName(db)</span>
+                        </li>
+                    }
+                </ul>
+            </div>
+        </div>
+    }
+
+    @* Allowed Cache Services *@
+    @if (data?.AllowedCaches is { Count: > 0 } allowedCaches)
+    {
+        <div class="card shadow-sm mt-3">
+            <div class="card-header bg-white py-2">
+                <i class="bi bi-lightning me-2 text-warning"></i>
+                <strong class="small">Allowed Cache Services</strong>
+            </div>
+            <div class="card-body">
+                <ul class="list-group list-group-flush mb-0">
+                    @foreach (AppAllowedCache cache in allowedCaches)
+                    {
+                        <li class="list-group-item d-flex align-items-center gap-2 px-0 py-1">
+                            <i class="bi bi-check-circle text-success small"></i>
+                            <span class="small fw-medium">@cache.RedisCluster.Name</span>
+                        </li>
+                    }
+                </ul>
+            </div>
+        </div>
+    }
+
+    @* Allowed S3 Storage *@
+    @if (data?.AllowedStorages is { Count: > 0 } allowedStorages)
+    {
+        <div class="card shadow-sm mt-3">
+            <div class="card-header bg-white py-2">
+                <i class="bi bi-bucket me-2 text-info"></i>
+                <strong class="small">Allowed S3 Storage</strong>
+            </div>
+            <div class="card-body">
+                <ul class="list-group list-group-flush mb-0">
+                    @foreach (AppAllowedStorage storage in allowedStorages)
+                    {
+                        <li class="list-group-item d-flex align-items-center gap-2 px-0 py-1">
+                            <i class="bi bi-check-circle text-success small"></i>
+                            <span class="badge bg-info-subtle text-info border border-info-subtle small">@storage.StorageLink.Provider</span>
+                            <span class="small fw-medium">@storage.StorageLink.Name</span>
+                            @if (!string.IsNullOrWhiteSpace(storage.StorageLink.BucketName))
+                            {
+                                <code class="small text-muted">@storage.StorageLink.BucketName</code>
+                            }
+                        </li>
+                    }
+                </ul>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid AppId { get; set; }
+    [Parameter, EditorRequired] public string AppName { get; set; } = "";
+    [Parameter, EditorRequired] public Guid EnvironmentId { get; set; }
+    [Parameter] public Guid CustomerId { get; set; }
+
+    private AppGovernanceData? data;
+    private List<CustomerGitRepoPolicy> gitPolicies = [];
+    private bool loading = true;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        loading = true;
+        data = await GovernanceService.LoadAsync(AppId, EnvironmentId);
+        if (CustomerId != Guid.Empty)
+            gitPolicies = await CustomerGitService.GetRepoPoliciesAsync(CustomerId, EnvironmentId);
+        loading = false;
+    }
+
+    private static string NpTypeLabel(AppNetworkPolicyType t) => t switch
+    {
+        AppNetworkPolicyType.DenyAll               => "Deny all",
+        AppNetworkPolicyType.AllowFromIngress       => "Allow ingress",
+        AppNetworkPolicyType.AllowFromSameNamespace => "Allow same ns",
+        AppNetworkPolicyType.AllowFromNamespace     => "Allow from ns",
+        AppNetworkPolicyType.Custom                 => "Custom",
+        _                                           => t.ToString()
+    };
+
+    private static string NpIcon(AppNetworkPolicyType t) => t switch
+    {
+        AppNetworkPolicyType.DenyAll   => "bi-slash-circle",
+        AppNetworkPolicyType.AllowFromIngress or AppNetworkPolicyType.AllowFromNamespace or AppNetworkPolicyType.AllowFromSameNamespace => "bi-check-circle",
+        _ => "bi-code-slash"
+    };
+
+    private static string AllowedDbTypeLabel(AppAllowedDatabase entry)
+    {
+        if (entry.CnpgDatabase is not null) return "PostgreSQL";
+        if (entry.MongoDatabase is not null) return "MongoDB";
+        if (entry.RegisteredPostgresDatabase is not null) return "Postgres";
+        return "Database";
+    }
+
+    private static string AllowedDbName(AppAllowedDatabase entry)
+    {
+        if (entry.CnpgDatabase is not null) return entry.CnpgDatabase.Name;
+        if (entry.MongoDatabase is not null) return entry.MongoDatabase.Name;
+        if (entry.RegisteredPostgresDatabase is not null) return entry.RegisteredPostgresDatabase.Name;
+        return "—";
+    }
+}

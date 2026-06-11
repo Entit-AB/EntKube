@@ -1,0 +1,2910 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Components.Pages.Portal
+@using Microsoft.EntityFrameworkCore
+@implements IAsyncDisposable
+@inject DeploymentService DeploymentService
+@inject CnpgService CnpgService
+@inject MongoService MongoService
+@inject KubernetesOperationsService K8sOps
+@inject PrometheusService PrometheusService
+@inject AuditService AuditService
+@inject RedisService RedisService
+@inject GitSyncService GitSyncService
+@inject TenantService TenantService
+@inject AppGovernanceService AppGovernanceService
+@inject CustomerGitService CustomerGitService
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject RabbitMQService RabbitMQService
+@inject StorageService StorageService
+@inject RegisteredPostgresService RegisteredPostgresService
+@inject VaultService VaultService
+@inject DeploymentStatusNotifier StatusNotifier
+
+@* ═══════════════════════════════════════════════════════════════════
+   Per-environment detail view. All tabs — deployments, resources,
+   governance, metrics, and external access — are scoped to this
+   single environment. Used in both tenant-admin and portal contexts.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+@* --- Back button --- *@
+<nav class="mb-3">
+    <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="OnBack">
+        <i class="bi bi-arrow-left me-1"></i>Back to @App.Name
+    </button>
+</nav>
+
+@* --- Environment header --- *@
+<div class="card shadow-sm mb-4">
+    <div class="card-body py-2">
+        <div class="d-flex align-items-center gap-3">
+            <i class="bi bi-layers fs-4 text-primary"></i>
+            <div>
+                <h5 class="mb-0">@Environment.Name</h5>
+                <small class="text-muted">@App.Name</small>
+            </div>
+            @if (deployments is not null)
+            {
+                <div class="ms-auto d-flex gap-2">
+                    @foreach (AppDeployment d in deployments)
+                    {
+                        <span class="d-flex align-items-center gap-1">
+                            @GetSyncBadge(d.SyncStatus)
+                            @GetHealthBadge(d.HealthStatus)
+                        </span>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+</div>
+
+@* --- Per-environment tabs --- *@
+<ul class="nav nav-pills mb-3 gap-1">
+    <li class="nav-item">
+        <button class="nav-link @(section == "deployments" ? "active" : "")"
+                @onclick="SwitchToDeployments">
+            <i class="bi bi-rocket-takeoff me-1"></i>Deployments
+            @if (deployments is not null && deployments.Count > 0)
+            {
+                <span class="badge bg-primary ms-1">@deployments.Count</span>
+            }
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(section == "resources" ? "active" : "")"
+                @onclick='() => section = "resources"'>
+            <i class="bi bi-diagram-3 me-1"></i>Resources
+        </button>
+    </li>
+    @if (!IsPortalView)
+    {
+        <li class="nav-item">
+            <button class="nav-link @(section == "governance" ? "active" : "")"
+                    @onclick='() => section = "governance"'>
+                <i class="bi bi-shield-check me-1"></i>Governance
+            </button>
+        </li>
+    }
+    <li class="nav-item">
+        <button class="nav-link @(section == "metrics" ? "active" : "")"
+                @onclick="OpenMetricsSection">
+            <i class="bi bi-bar-chart-line me-1"></i>Metrics
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(section == "external-access" ? "active" : "")"
+                @onclick='() => section = "external-access"'>
+            <i class="bi bi-globe me-1"></i>External Access
+        </button>
+    </li>
+    @if (!IsPortalView)
+    {
+    <li class="nav-item">
+        <button class="nav-link @(section == "git-access" ? "active" : "")"
+                @onclick="SwitchToGitAccess">
+            <i class="bi bi-git me-1"></i>Git Access
+        </button>
+    </li>
+    }
+    <li class="nav-item">
+        <button class="nav-link @(section == "databases" ? "active" : "")"
+                @onclick="OpenDatabasesSection">
+            <i class="bi bi-database me-1"></i>Databases
+            @if (dbBindingsByDeployment.Values.Any(b => b.Count > 0))
+            {
+                <span class="badge bg-primary ms-1">@dbBindingsByDeployment.Values.Sum(b => b.Count)</span>
+            }
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(section == "messaging" ? "active" : "")"
+                @onclick="OpenMessagingSection">
+            <i class="bi bi-send me-1"></i>Messaging
+            @if (msgBindingsByDeployment.Values.Any(b => b.Count > 0))
+            {
+                <span class="badge bg-primary ms-1">@msgBindingsByDeployment.Values.Sum(b => b.Count)</span>
+            }
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(section == "cache" ? "active" : "")"
+                @onclick="OpenCacheSection">
+            <i class="bi bi-lightning me-1"></i>Cache
+            @if (cacheBindingsByDeployment.Values.Any(b => b.Count > 0))
+            {
+                <span class="badge bg-warning text-dark ms-1">@cacheBindingsByDeployment.Values.Sum(b => b.Count)</span>
+            }
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(section == "storage" ? "active" : "")"
+                @onclick="OpenStorageSection">
+            <i class="bi bi-bucket me-1"></i>Storage
+            @if (storageBindingsByDeployment.Values.Any(b => b.Count > 0))
+            {
+                <span class="badge bg-info ms-1">@storageBindingsByDeployment.Values.Sum(b => b.Count)</span>
+            }
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(section == "vault" ? "active" : "")"
+                @onclick='() => section = "vault"'>
+            <i class="bi bi-shield-lock me-1"></i>Vault
+        </button>
+    </li>
+</ul>
+
+@* ══════════════════════════════════════════════════════
+   Deployments tab
+   ══════════════════════════════════════════════════════ *@
+@if (section == "deployments")
+{
+    @if (selectedDeployment is not null)
+    {
+        @* ── Deployment detail drill-down ── *@
+        <nav class="mb-3">
+            <button class="btn btn-sm btn-link text-decoration-none p-0"
+                    @onclick="() => selectedDeployment = null">
+                <i class="bi bi-arrow-left me-1"></i>Back to deployments
+            </button>
+        </nav>
+
+        <div class="card shadow-sm mb-3">
+            <div class="card-body">
+                <div class="d-flex align-items-start justify-content-between">
+                    <div>
+                        <h5 class="mb-1">
+                            <i class="bi bi-rocket-takeoff me-2 text-primary"></i>@selectedDeployment.Name
+                        </h5>
+                        <div class="d-flex flex-wrap gap-2 text-muted small">
+                            <span>@GetTypeBadge(selectedDeployment.Type)</span>
+                            <span><i class="bi bi-hdd-network me-1"></i>@selectedDeployment.Cluster?.Name</span>
+                            <span><i class="bi bi-box me-1"></i>@selectedDeployment.Namespace</span>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-start gap-1">
+                        <button class="btn btn-link p-0 border-0 bg-transparent" title="View resources"
+                                @onclick="OpenDeploymentResourcesTab">
+                            @GetSyncBadge(selectedDeployment.SyncStatus)
+                        </button>
+                        <button class="btn btn-link p-0 border-0 bg-transparent" title="View activity"
+                                @onclick="OpenActivityTab">
+                            @GetHealthBadge(selectedDeployment.HealthStatus)
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary ms-2"
+                                @onclick="StartEditDeployment" title="Edit deployment">
+                            <i class="bi bi-pencil"></i>
+                        </button>
+                        @if (!confirmDeleteDeployment)
+                        {
+                            <button class="btn btn-sm btn-outline-danger"
+                                    @onclick="() => confirmDeleteDeployment = true">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        }
+                    </div>
+                </div>
+
+                @if (showEditDeployment)
+                {
+                    <div class="mt-3 p-3 bg-light rounded">
+                        @if (editDeployError is not null)
+                        {
+                            <div class="alert alert-danger py-1 small mb-2">@editDeployError</div>
+                        }
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-6">
+                                <label class="form-label small">Name</label>
+                                <input class="form-control form-control-sm" @bind="editDeployName" />
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">Namespace</label>
+                                @if (!string.IsNullOrWhiteSpace(governanceNamespace))
+                                {
+                                    <input class="form-control form-control-sm font-monospace" value="@governanceNamespace" disabled />
+                                    <div class="form-text small text-warning"><i class="bi bi-lock me-1"></i>Locked by governance policy.</div>
+                                }
+                                else
+                                {
+                                    <input class="form-control form-control-sm" @bind="editDeployNamespace" />
+                                }
+                            </div>
+                            @if (selectedDeployment.Type == DeploymentType.HelmChart)
+                            {
+                                <div class="col-md-4">
+                                    <label class="form-label small">Helm Repo URL</label>
+                                    <input class="form-control form-control-sm" @bind="editHelmRepoUrl" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Chart Name</label>
+                                    <input class="form-control form-control-sm" @bind="editHelmChartName" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Chart Version</label>
+                                    <input class="form-control form-control-sm" @bind="editHelmChartVersion" />
+                                </div>
+                            }
+                        </div>
+                        <div class="d-flex gap-1">
+                            <button class="btn btn-sm btn-primary" @onclick="SaveDeployment"
+                                    disabled="@(string.IsNullOrWhiteSpace(editDeployName) || string.IsNullOrWhiteSpace(editDeployNamespace))">
+                                Save
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => showEditDeployment = false">Cancel</button>
+                        </div>
+                    </div>
+                }
+
+                @if (confirmDeleteDeployment)
+                {
+                    <div class="mt-3 p-2 bg-danger bg-opacity-10 rounded d-flex align-items-center justify-content-between">
+                        <span class="text-danger small">
+                            <i class="bi bi-exclamation-triangle me-1"></i>
+                            Permanently delete <strong>@selectedDeployment.Name</strong>?
+                        </span>
+                        <div>
+                            <button class="btn btn-sm btn-danger me-1" @onclick="DeleteDeployment">Yes, delete</button>
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => confirmDeleteDeployment = false">Cancel</button>
+                        </div>
+                    </div>
+                }
+
+                @if (!showEditDeployment && selectedDeployment.Type == DeploymentType.HelmChart)
+                {
+                    <div class="mt-3 p-2 bg-light rounded">
+                        <small class="text-muted">
+                            <i class="bi bi-box-seam me-1"></i>
+                            @selectedDeployment.HelmChartName
+                            <span class="mx-1">@selectedDeployment.HelmChartVersion</span>
+                            <span class="text-muted">from @selectedDeployment.HelmRepoUrl</span>
+                        </small>
+                    </div>
+                }
+
+                @if (!showEditDeployment && IsGitManaged)
+                {
+                    @if (showEditGitSettings)
+                    {
+                        <div class="mt-3 p-3 bg-light rounded">
+                            <h6 class="mb-2 small fw-semibold"><i class="bi bi-git me-1"></i>Git Source</h6>
+                            @if (editGitError is not null)
+                            {
+                                <div class="alert alert-danger py-1 small mb-2">@editGitError</div>
+                            }
+                            @if (gitRepoPolicies is { Count: > 0 })
+                            {
+                                <div class="alert alert-warning py-1 small mb-2">
+                                    <i class="bi bi-shield-check me-1"></i>
+                                    <strong>Repo URL policy active.</strong>
+                                    Allowed patterns:
+                                    @foreach (CustomerGitRepoPolicy p in gitRepoPolicies)
+                                    {
+                                        <code class="ms-1">@p.UrlPattern</code>
+                                    }
+                                </div>
+                            }
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-5">
+                                    <label class="form-label small">Git Repository URL</label>
+                                    <input class="form-control form-control-sm font-monospace @(editGitUrlError is not null ? "is-invalid" : "")"
+                                           value="@editGitUrl"
+                                           @oninput="ValidateEditGitUrl"
+                                           placeholder="https://github.com/org/repo" />
+                                    @if (editGitUrlError is not null)
+                                    {
+                                        <div class="invalid-feedback">@editGitUrlError</div>
+                                    }
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small">Path</label>
+                                    <input class="form-control form-control-sm font-monospace" @bind="editGitPath" placeholder="." />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Branch / Tag / Commit</label>
+                                    <input class="form-control form-control-sm font-monospace" @bind="editGitRevision"
+                                           placeholder="default branch" />
+                                </div>
+                            </div>
+                            <div class="mb-2">
+                                <div class="form-check form-check-sm">
+                                    <input class="form-check-input" type="checkbox" id="editGitAutoSyncEnv" @bind="editGitAutoSync" />
+                                    <label class="form-check-label small" for="editGitAutoSyncEnv">
+                                        Auto-sync (poll every 3 minutes)
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm btn-primary" @onclick="SaveGitSettings"
+                                        disabled="@(editGitUrlError is not null || savingGitSettings)">
+                                    @if (savingGitSettings) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Save
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary"
+                                        @onclick="() => showEditGitSettings = false">Cancel</button>
+                            </div>
+                        </div>
+                    }
+                    else if (selectedDeployment.GitUrl is not null)
+                    {
+                        <div class="mt-2 p-2 bg-light rounded d-flex align-items-center justify-content-between flex-wrap gap-2">
+                            <div class="small text-muted">
+                                <i class="bi bi-git me-1"></i>
+                                <strong class="font-monospace">@selectedDeployment.GitUrl</strong>
+                                <span class="ms-1">@(selectedDeployment.GitRevision ?? "main")</span>
+                                @if (!string.IsNullOrEmpty(selectedDeployment.GitPath) && selectedDeployment.GitPath != ".")
+                                {
+                                    <span class="ms-1 text-muted">→ <code>@selectedDeployment.GitPath</code></span>
+                                }
+                                @if (selectedDeployment.GitLastSyncedCommit is not null)
+                                {
+                                    <span class="ms-2 badge bg-secondary">@selectedDeployment.GitLastSyncedCommit[..7]</span>
+                                }
+                                @if (selectedDeployment.GitAutoSync)
+                                {
+                                    <span class="badge bg-success-subtle text-success border border-success-subtle ms-1">auto-sync</span>
+                                }
+                            </div>
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm btn-outline-secondary" title="Edit git source"
+                                        @onclick="StartEditGitSettings">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-primary" @onclick="TriggerGitSync" disabled="@syncingGit">
+                                    @if (syncingGit) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    else { <i class="bi bi-arrow-repeat me-1"></i> }
+                                    Sync now
+                                </button>
+                            </div>
+                        </div>
+                        @if (gitSyncResult is not null)
+                        {
+                            <div class="mt-1 alert @(gitSyncSuccess ? "alert-success" : "alert-danger") py-1 small">
+                                <i class="bi @(gitSyncSuccess ? "bi-check-circle" : "bi-exclamation-triangle") me-1"></i>@gitSyncResult
+                            </div>
+                        }
+                    }
+                    else
+                    {
+                        <div class="mt-2 p-2 bg-light rounded d-flex align-items-center justify-content-between">
+                            <span class="small text-muted"><i class="bi bi-git me-1"></i>No git source configured.</span>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="StartEditGitSettings">
+                                <i class="bi bi-gear me-1"></i>Configure
+                            </button>
+                        </div>
+                    }
+                }
+            </div>
+        </div>
+
+        @* ── Deployment sub-tabs ── *@
+        <ul class="nav nav-tabs mb-3">
+            @if (selectedDeployment.Type is DeploymentType.Manual or DeploymentType.Yaml or DeploymentType.GitYaml)
+            {
+                <li class="nav-item">
+                    <button class="nav-link @(deploymentSection == "manifests" ? "active" : "")"
+                            @onclick='() => deploymentSection = "manifests"'>
+                        <i class="bi bi-file-earmark-code me-1"></i>Manifests
+                    </button>
+                </li>
+            }
+            @if (selectedDeployment.Type is DeploymentType.HelmChart or DeploymentType.GitHelm)
+            {
+                <li class="nav-item">
+                    <button class="nav-link @(deploymentSection == "helm-values" ? "active" : "")"
+                            @onclick='() => deploymentSection = "helm-values"'>
+                        <i class="bi bi-sliders me-1"></i>Values
+                    </button>
+                </li>
+            }
+            <li class="nav-item">
+                <button class="nav-link @(deploymentSection == "resources" ? "active" : "")"
+                        @onclick="OpenDeploymentResourcesTab">
+                    <i class="bi bi-diagram-3 me-1"></i>Resources
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(deploymentSection == "deployment-metrics" ? "active" : "")"
+                        @onclick="OpenDeploymentMetricsTab">
+                    <i class="bi bi-bar-chart-line me-1"></i>Metrics
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(deploymentSection == "activity" ? "active" : "")"
+                        @onclick="OpenActivityTab">
+                    <i class="bi bi-clock-history me-1"></i>Activity
+                </button>
+            </li>
+        </ul>
+
+        @* Manifests *@
+        @if (deploymentSection == "manifests")
+        {
+            <div class="card shadow-sm">
+                <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+                    <div><i class="bi bi-file-earmark-code me-2 text-primary"></i><strong>Manifests</strong></div>
+                    <div class="d-flex gap-1">
+                        <button class="btn btn-sm btn-success" @onclick="ApplyYamlDeployment"
+                                disabled="@(applyingYaml || manifests is null || manifests.Count == 0)">
+                            @if (applyingYaml) { <span class="spinner-border spinner-border-sm me-1"></span><span>Applying…</span> }
+                            else { <i class="bi bi-cloud-upload me-1"></i><span>Apply to Cluster</span> }
+                        </button>
+                        @if (!IsGitManaged)
+                        {
+                            <button class="btn btn-sm btn-outline-primary" @onclick="() => showAddManifest = !showAddManifest">
+                                <i class="bi bi-plus me-1"></i>Add Manifest
+                            </button>
+                        }
+                    </div>
+                </div>
+                <div class="card-body">
+                    @if (showAddManifest && !IsGitManaged)
+                    {
+                        <div class="card border-primary mb-3">
+                            <div class="card-body">
+                                <h6 class="mb-3"><i class="bi bi-plus-circle me-1"></i>Add YAML Manifest</h6>
+                                <div class="row g-2 mb-2">
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Kind</label>
+                                        <input class="form-control form-control-sm" @bind="newManifestKind" placeholder="e.g. Deployment" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Name</label>
+                                        <input class="form-control form-control-sm" @bind="newManifestName" placeholder="e.g. billing-api" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Sort Order</label>
+                                        <input class="form-control form-control-sm" type="number" @bind="newManifestSortOrder" />
+                                    </div>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">YAML Content</label>
+                                    <YamlEditor @bind-Value="newManifestYaml" />
+                                </div>
+                                <div class="d-flex gap-1">
+                                    <button class="btn btn-sm btn-primary" @onclick="AddManifest"
+                                            disabled="@(string.IsNullOrWhiteSpace(newManifestKind) || string.IsNullOrWhiteSpace(newManifestYaml) || savingManifest)">
+                                        @if (savingManifest) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        Add
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddManifest = false">Cancel</button>
+                                </div>
+                            </div>
+                        </div>
+                    }
+                    <LoadingPanel Loading="@(manifests is null)">
+                    @if (manifests is not null && manifests.Count == 0)
+                    {
+                        <EmptyState Icon="bi-file-earmark-code" Message="No manifests yet." />
+                    }
+                    else if (manifests is not null)
+                    {
+                        @foreach (DeploymentManifest manifest in manifests)
+                        {
+                            <div class="card mb-2">
+                                <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+                                    <div>
+                                        <span class="badge bg-secondary me-1">@manifest.Kind</span>
+                                        <span class="fw-medium">@manifest.Name</span>
+                                        <span class="text-muted small ms-2">#@manifest.SortOrder</span>
+                                    </div>
+                                    @if (!IsGitManaged)
+                                    {
+                                        <div class="d-flex gap-1">
+                                            @if (editingManifestId == manifest.Id)
+                                            {
+                                                <button class="btn btn-sm btn-primary" @onclick="() => SaveManifest(manifest.Id)" disabled="@savingManifest">
+                                                    @if (savingManifest) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Save
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => editingManifestId = null" disabled="@savingManifest">Cancel</button>
+                                            }
+                                            else if (confirmDeleteManifestId == manifest.Id)
+                                            {
+                                                <button class="btn btn-sm btn-danger" @onclick="() => DeleteManifest(manifest.Id)">
+                                                    <i class="bi bi-trash me-1"></i>Delete
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDeleteManifestId = null">Cancel</button>
+                                            }
+                                            else
+                                            {
+                                                <button class="btn btn-sm btn-outline-primary" @onclick="() => StartEditManifest(manifest)">
+                                                    <i class="bi bi-pencil"></i>
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteManifestId = manifest.Id">
+                                                    <i class="bi bi-trash"></i>
+                                                </button>
+                                            }
+                                        </div>
+                                    }
+                                </div>
+                                @if (editingManifestId == manifest.Id)
+                                {
+                                    <div class="card-body p-2"><YamlEditor @bind-Value="editManifestYaml" /></div>
+                                }
+                                else
+                                {
+                                    <div class="card-body p-0" style="border-radius: 0 0 var(--bs-card-border-radius) var(--bs-card-border-radius); overflow: hidden;">
+                                        <YamlEditor Value="@manifest.YamlContent" ReadOnly="true" Borderless="true" />
+                                    </div>
+                                }
+                            </div>
+                        }
+                    }
+                    </LoadingPanel>
+                    @if (yamlApplyOutput is not null)
+                    {
+                        <div class="mt-3">
+                            <div class="d-flex align-items-center justify-content-between mb-1">
+                                <span class="small fw-medium @(yamlApplySuccess == true ? "text-success" : "text-danger")">
+                                    <i class="bi @(yamlApplySuccess == true ? "bi-check-circle" : "bi-x-circle") me-1"></i>
+                                    @(yamlApplySuccess == true ? "Applied successfully" : "Apply failed")
+                                </span>
+                                <button class="btn btn-sm btn-link text-muted py-0" @onclick="() => yamlApplyOutput = null">
+                                    <i class="bi bi-x"></i>
+                                </button>
+                            </div>
+                            <pre class="bg-dark text-light p-2 rounded small mb-0"
+                                 style="max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;">@yamlApplyOutput</pre>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+
+        @* Helm Values *@
+        @if (deploymentSection == "helm-values")
+        {
+            <div class="card shadow-sm">
+                <div class="card-header bg-white py-2">
+                    <i class="bi bi-sliders me-2 text-primary"></i><strong>Helm Values</strong>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small mb-2">Override the chart's default values (YAML format).</p>
+                    @if (helmValuesError is not null) { <div class="alert alert-danger py-1 small mb-2">@helmValuesError</div> }
+                    <YamlEditor @bind-Value="helmValuesYaml" />
+                    <div class="d-flex align-items-center gap-2 mt-2 flex-wrap">
+                        <button class="btn btn-sm btn-primary" @onclick="SaveHelmValues" disabled="@(savingHelmValues || installingHelm)">
+                            @if (savingHelmValues) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            <i class="bi bi-floppy me-1"></i>Save Values
+                        </button>
+                        <button class="btn btn-sm btn-success" @onclick="InstallOrUpgradeHelm" disabled="@(installingHelm || savingHelmValues)">
+                            @if (installingHelm) { <span class="spinner-border spinner-border-sm me-1"></span><span>Running helm upgrade…</span> }
+                            else { <i class="bi bi-cloud-upload me-1"></i><span>Install / Upgrade Release</span> }
+                        </button>
+                        @if (helmValuesSaved) { <span class="text-success small"><i class="bi bi-check-circle me-1"></i>Saved</span> }
+                    </div>
+                    @if (helmInstallOutput is not null)
+                    {
+                        <div class="mt-3">
+                            <div class="d-flex align-items-center justify-content-between mb-1">
+                                <span class="small fw-medium @(helmInstallSuccess == true ? "text-success" : "text-danger")">
+                                    <i class="bi @(helmInstallSuccess == true ? "bi-check-circle" : "bi-x-circle") me-1"></i>
+                                    @(helmInstallSuccess == true ? "Release applied successfully" : "Helm operation failed")
+                                </span>
+                                <button class="btn btn-sm btn-link text-muted py-0" @onclick="() => helmInstallOutput = null"><i class="bi bi-x"></i></button>
+                            </div>
+                            <pre class="bg-dark text-light p-2 rounded small mb-0"
+                                 style="max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;">@helmInstallOutput</pre>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+
+        @* Deployment Resources *@
+        @if (deploymentSection == "resources")
+        {
+            <div class="card shadow-sm">
+                <div class="card-header bg-white py-2">
+                    <i class="bi bi-diagram-3 me-2 text-primary"></i><strong>Resource Tree</strong>
+                </div>
+                <div class="card-body">
+                    <ResourceTreePanel Loading="@(resourceTree is null)"
+                                       Error="@resourcesError"
+                                       Resources="@resourceTree"
+                                       Namespace="@selectedDeployment?.Namespace"
+                                       DeploymentId="@(selectedDeployment?.Id ?? Guid.Empty)"
+                                       AccessRole="@null"
+                                       OnRefresh="OpenDeploymentResourcesTab"
+                                       LastRefreshed="@resourceTreeRefreshedAt" />
+                </div>
+            </div>
+        }
+
+        @* Deployment Metrics *@
+        @if (deploymentSection == "deployment-metrics")
+        {
+            <div class="card shadow-sm">
+                <div class="card-header bg-white py-2">
+                    <i class="bi bi-bar-chart-line me-2 text-primary"></i><strong>Namespace Metrics</strong>
+                    <span class="text-muted small ms-2">@selectedDeployment.Namespace</span>
+                </div>
+                <div class="card-body">
+                    @if (deploymentMetricsLoading) { <div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div> }
+                    else if (deploymentMetricsError is not null)
+                    {
+                        <div class="alert alert-warning small py-2 mb-0">
+                            <i class="bi bi-exclamation-triangle me-1"></i>@deploymentMetricsError
+                        </div>
+                    }
+                    else if (deploymentMetrics is not null)
+                    {
+                        <div class="row g-3 mb-2">
+                            <div class="col-sm-6 col-lg-3">
+                                <div class="border rounded text-center p-3">
+                                    <div class="fs-3 fw-bold text-primary">@(deploymentMetrics.CpuCores >= 1 ? $"{(int)Math.Round(deploymentMetrics.CpuCores)} cores" : $"{(int)Math.Round(deploymentMetrics.CpuCores * 1000)}m")</div>
+                                    <div class="small text-muted">CPU cores (5 m avg)</div>
+                                </div>
+                            </div>
+                            <div class="col-sm-6 col-lg-3">
+                                <div class="border rounded text-center p-3">
+                                    <div class="fs-3 fw-bold text-info">@deploymentMetrics.MemoryMiB.ToString("F0") <small class="fs-6">MiB</small></div>
+                                    <div class="small text-muted">Memory (working set)</div>
+                                </div>
+                            </div>
+                            <div class="col-sm-6 col-lg-3">
+                                <div class="border rounded text-center p-3">
+                                    <div class="fs-3 fw-bold text-success">@deploymentMetrics.PodCount</div>
+                                    <div class="small text-muted">Pods in namespace</div>
+                                </div>
+                            </div>
+                            <div class="col-sm-6 col-lg-3">
+                                <div class="border rounded text-center p-3">
+                                    <div class="fs-3 fw-bold @(deploymentMetrics.RestartCount > 0 ? "text-warning" : "text-success")">@deploymentMetrics.RestartCount</div>
+                                    <div class="small text-muted">Container restarts</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="text-muted small"><i class="bi bi-clock me-1"></i>Queried @deploymentMetrics.QueriedAt.ToLocalTime().ToString("HH:mm:ss")</div>
+                    }
+                </div>
+            </div>
+        }
+
+        @* Activity *@
+        @if (deploymentSection == "activity")
+        {
+            <div class="card shadow-sm">
+                <div class="card-header bg-white py-2">
+                    <i class="bi bi-clock-history me-2 text-primary"></i><strong>Activity Log</strong>
+                </div>
+                <div class="card-body p-0">
+                    @if (activityLoading) { <div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div> }
+                    else if (deploymentAuditEvents is not null && deploymentAuditEvents.Count == 0)
+                    {
+                        <div class="text-muted small py-4 text-center">No activity recorded yet.</div>
+                    }
+                    else if (deploymentAuditEvents is not null)
+                    {
+                        <div class="list-group list-group-flush">
+                            @foreach (AuditEvent ev in deploymentAuditEvents)
+                            {
+                                <div class="list-group-item px-3 py-2">
+                                    <div class="d-flex justify-content-between align-items-start">
+                                        <div>
+                                            <span class="badge bg-secondary me-2">@ev.ResourceKind</span>
+                                            <strong>@ev.Action</strong>
+                                            @if (!string.IsNullOrEmpty(ev.ResourceName)) { <span class="text-muted ms-1 font-monospace small">@ev.ResourceName</span> }
+                                            @if (!string.IsNullOrEmpty(ev.Details)) { <span class="text-muted ms-2 small">— @ev.Details</span> }
+                                        </div>
+                                        <div class="text-end text-nowrap ms-3">
+                                            <div class="small text-muted">@ev.OccurredAt.ToLocalTime().ToString("MMM d HH:mm")</div>
+                                            @if (!string.IsNullOrEmpty(ev.PerformedBy)) { <div class="small text-muted">@ev.PerformedBy</div> }
+                                        </div>
+                                    </div>
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    }
+    else
+    {
+        @* ── Deployment list ── *@
+        <div class="card shadow-sm">
+            <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+                <div><i class="bi bi-rocket-takeoff me-2 text-primary"></i><strong>Deployments</strong></div>
+                <button class="btn btn-sm btn-outline-primary" @onclick="() => showCreateDeployment = !showCreateDeployment">
+                    <i class="bi bi-plus me-1"></i>New Deployment
+                </button>
+            </div>
+            <div class="card-body">
+                @if (showCreateDeployment)
+                {
+                    <div class="card border-primary mb-3">
+                        <div class="card-body">
+                            <h6 class="mb-3"><i class="bi bi-plus-circle me-1"></i>Create Deployment</h6>
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-6">
+                                    <label class="form-label small">Name</label>
+                                    <input class="form-control form-control-sm" @bind="newDeployName" placeholder="e.g. billing-api-prod" />
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small">Type</label>
+                                    <select class="form-select form-select-sm" @bind="newDeployType" @bind:after="OnNewDeployTypeChanged">
+                                        <option value="@DeploymentType.Manual">Manual</option>
+                                        <option value="@DeploymentType.Yaml">YAML</option>
+                                        <option value="@DeploymentType.HelmChart">Helm Chart</option>
+                                        <option value="@DeploymentType.GitYaml">Git — YAML</option>
+                                        <option value="@DeploymentType.GitHelm">Git — Helm</option>
+                                        <option value="@DeploymentType.GitAppOfApps">Git — App of Apps</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-6">
+                                    <label class="form-label small">Cluster</label>
+                                    <select class="form-select form-select-sm" @bind="newDeployClusterId">
+                                        <option value="@Guid.Empty">Select cluster…</option>
+                                        @foreach (KubernetesCluster cluster in envClusters ?? [])
+                                        {
+                                            <option value="@cluster.Id">@cluster.Name</option>
+                                        }
+                                    </select>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small">Namespace</label>
+                                    @if (!string.IsNullOrWhiteSpace(governanceNamespace))
+                                    {
+                                        <input class="form-control form-control-sm font-monospace" value="@governanceNamespace" disabled />
+                                        <div class="form-text small text-warning"><i class="bi bi-lock me-1"></i>Locked by governance policy.</div>
+                                    }
+                                    else
+                                    {
+                                        <input class="form-control form-control-sm" @bind="newDeployNamespace" placeholder="e.g. billing" />
+                                    }
+                                </div>
+                            </div>
+                            @if (newDeployType == DeploymentType.HelmChart)
+                            {
+                                <div class="row g-2 mb-2">
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Helm Repo URL</label>
+                                        <input class="form-control form-control-sm" @bind="newHelmRepoUrl" placeholder="https://charts.bitnami.com/bitnami" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Chart Name</label>
+                                        <input class="form-control form-control-sm" @bind="newHelmChartName" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Chart Version</label>
+                                        <input class="form-control form-control-sm" @bind="newHelmChartVersion" />
+                                    </div>
+                                </div>
+                            }
+                            @if (newDeployType is DeploymentType.GitYaml or DeploymentType.GitHelm or DeploymentType.GitAppOfApps)
+                            {
+                                <div class="row g-2 mb-2">
+                                    <div class="col-md-5">
+                                        <label class="form-label small">Git Repository URL</label>
+                                        <input class="form-control form-control-sm font-monospace @(newGitUrlError is not null ? "is-invalid" : "")"
+                                               value="@newGitUrl"
+                                               @oninput="ValidateNewGitUrl"
+                                               placeholder="https://github.com/org/repo" />
+                                        @if (newGitUrlError is not null)
+                                        {
+                                            <div class="invalid-feedback">@newGitUrlError</div>
+                                        }
+                                        @if (gitRepoPolicies is { Count: > 0 })
+                                        {
+                                            <div class="form-text small">
+                                                <i class="bi bi-shield-check me-1"></i>Allowed:
+                                                @foreach (CustomerGitRepoPolicy p in gitRepoPolicies)
+                                                {
+                                                    <code class="ms-1">@p.UrlPattern</code>
+                                                }
+                                            </div>
+                                        }
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small">Path</label>
+                                        <input class="form-control form-control-sm" @bind="newGitPath" placeholder="." />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Branch / Tag / Commit</label>
+                                        <input class="form-control form-control-sm" @bind="newGitRevision" placeholder="leave blank for default" />
+                                    </div>
+                                </div>
+                                <div class="mb-2">
+                                    <div class="form-check form-check-sm">
+                                        <input class="form-check-input" type="checkbox" id="newGitAutoSyncEnv" @bind="newGitAutoSync" />
+                                        <label class="form-check-label small" for="newGitAutoSyncEnv">
+                                            Auto-sync (poll every 3 minutes)
+                                        </label>
+                                    </div>
+                                </div>
+                            }
+                            @if (!string.IsNullOrEmpty(createDeployError)) { <div class="alert alert-danger py-1 small mb-2">@createDeployError</div> }
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm btn-primary" @onclick="CreateDeployment"
+                                        disabled="@(string.IsNullOrWhiteSpace(newDeployName) || newDeployClusterId == Guid.Empty || (newDeployType is DeploymentType.GitYaml or DeploymentType.GitHelm or DeploymentType.GitAppOfApps && (string.IsNullOrWhiteSpace(newGitUrl) || newGitUrlError is not null)))">
+                                    Create
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showCreateDeployment = false">Cancel</button>
+                            </div>
+                        </div>
+                    </div>
+                }
+
+                <LoadingPanel Loading="@(deployments is null)">
+                @if (deployments is not null && deployments.Count == 0)
+                {
+                    <EmptyState Icon="bi-rocket-takeoff" Message="@($"No deployments in {Environment.Name} yet.")" />
+                }
+                else if (deployments is not null)
+                {
+                    <div class="row row-cols-1 row-cols-lg-2 g-2">
+                        @foreach (AppDeployment deploy in deployments)
+                        {
+                            <div class="col">
+                                <div class="card border-light h-100" role="button" style="cursor: pointer;"
+                                     @onclick="() => SelectDeployment(deploy)">
+                                    <div class="card-body py-2">
+                                        <div class="d-flex align-items-center justify-content-between mb-1">
+                                            <span class="fw-medium">
+                                                <i class="bi bi-rocket-takeoff me-1 text-primary"></i>@deploy.Name
+                                            </span>
+                                            <div class="d-flex gap-1">
+                                                @GetSyncBadge(deploy.SyncStatus)
+                                                @GetHealthBadge(deploy.HealthStatus)
+                                            </div>
+                                        </div>
+                                        <div class="d-flex flex-wrap gap-2 text-muted small">
+                                            @GetTypeBadge(deploy.Type)
+                                            <span><i class="bi bi-hdd-network me-1"></i>@deploy.Cluster?.Name</span>
+                                            <span><i class="bi bi-box me-1"></i>@deploy.Namespace</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+                </LoadingPanel>
+            </div>
+        </div>
+    }
+}
+
+@* ══════════════════════════════════════════════════════
+   Resources tab
+   ══════════════════════════════════════════════════════ *@
+@if (section == "resources")
+{
+    <AppResourcesPanel AppId="App.Id" EnvironmentId="Environment.Id" />
+}
+
+@* ══════════════════════════════════════════════════════
+   Governance tab — full editor for tenant admins, read-only for portal
+   ══════════════════════════════════════════════════════ *@
+@if (section == "governance")
+{
+    @if (IsPortalView)
+    {
+        <AppGovernancePanel AppId="App.Id" AppName="App.Name" EnvironmentId="Environment.Id" CustomerId="App.CustomerId" />
+    }
+    else
+    {
+        <GovernanceTab AppId="App.Id" TenantId="TenantId" EnvironmentId="Environment.Id" />
+    }
+}
+
+@* ══════════════════════════════════════════════════════
+   Env-aggregate metrics tab
+   ══════════════════════════════════════════════════════ *@
+@if (section == "metrics")
+{
+    <div class="card shadow-sm">
+        <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
+            <div>
+                <i class="bi bi-bar-chart-line me-2 text-primary"></i>
+                <strong>@Environment.Name Metrics</strong>
+                <span class="text-muted small ms-2">aggregate across all deployments in this environment</span>
+            </div>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="OpenMetricsSection" disabled="@envMetricsLoading">
+                <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+            </button>
+        </div>
+        <div class="card-body">
+            @if (envMetricsLoading) { <div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div> }
+            else if (envMetricsError is not null)
+            {
+                <div class="alert alert-warning small py-2 mb-0">
+                    <i class="bi bi-exclamation-triangle me-1"></i>@envMetricsError
+                </div>
+            }
+            else if (envMetrics is not null)
+            {
+                <div class="row g-3 mb-2">
+                    <div class="col-sm-6 col-lg-3">
+                        <div class="border rounded text-center p-3">
+                            <div class="fs-3 fw-bold text-primary">
+                                @(envMetrics.CpuCores >= 1 ? $"{(int)Math.Round(envMetrics.CpuCores)} cores" : $"{(int)Math.Round(envMetrics.CpuCores * 1000)}m")
+                            </div>
+                            <div class="small text-muted">CPU (5 m avg)</div>
+                        </div>
+                    </div>
+                    <div class="col-sm-6 col-lg-3">
+                        <div class="border rounded text-center p-3">
+                            <div class="fs-3 fw-bold text-info">@envMetrics.MemoryMiB.ToString("F0") <small class="fs-6">MiB</small></div>
+                            <div class="small text-muted">Memory (working set)</div>
+                        </div>
+                    </div>
+                    <div class="col-sm-6 col-lg-3">
+                        <div class="border rounded text-center p-3">
+                            <div class="fs-3 fw-bold text-success">@envMetrics.PodCount</div>
+                            <div class="small text-muted">Pods running</div>
+                        </div>
+                    </div>
+                    <div class="col-sm-6 col-lg-3">
+                        <div class="border rounded text-center p-3">
+                            <div class="fs-3 fw-bold @(envMetrics.RestartCount > 0 ? "text-warning" : "text-success")">@envMetrics.RestartCount</div>
+                            <div class="small text-muted">Container restarts</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="text-muted small"><i class="bi bi-clock me-1"></i>Queried @envMetrics.QueriedAt.ToLocalTime().ToString("HH:mm:ss")</div>
+            }
+        </div>
+    </div>
+}
+
+@* ══════════════════════════════════════════════════════
+   External Access tab
+   ══════════════════════════════════════════════════════ *@
+@if (section == "external-access")
+{
+    <AppExternalAccessPanel App="App" TenantId="TenantId" EnvironmentId="Environment.Id" IsPortalView="IsPortalView" />
+}
+
+@* ══════════════════════════════════════════════════════
+   Git Access tab — URL policies + credentials for this customer/environment
+   ══════════════════════════════════════════════════════ *@
+@if (section == "git-access")
+{
+    <div class="row g-4">
+        @* --- URL Policies --- *@
+        <div class="col-12 col-xl-6">
+            <div class="card shadow-sm h-100">
+                <div class="card-header bg-white py-2">
+                    <i class="bi bi-git me-2 text-primary"></i>
+                    <strong>Git Repo URL Policies</strong>
+                    <div><small class="text-muted">Allowed repository URL patterns. Supports <code>*</code> (within segment) and <code>**</code> (across segments).</small></div>
+                </div>
+                <div class="card-body">
+                    <div class="input-group mb-3">
+                        <input type="text" class="form-control form-control-sm font-monospace"
+                               placeholder="e.g. https://github.com/acme/* or git@github.com:acme/**"
+                               @bind="newRepoPolicyPattern" @bind:event="oninput"
+                               @onkeydown="@(async (e) => { if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(newRepoPolicyPattern)) await AddRepoPolicy(); })" />
+                        <button class="btn btn-sm btn-outline-primary" @onclick="AddRepoPolicy"
+                                disabled="@string.IsNullOrWhiteSpace(newRepoPolicyPattern)">
+                            <i class="bi bi-plus me-1"></i>Add
+                        </button>
+                    </div>
+                    @if (!string.IsNullOrEmpty(repoPolicyError))
+                    {
+                        <div class="alert alert-danger py-1 small mb-2">@repoPolicyError</div>
+                    }
+                    <LoadingPanel Loading="@(gitRepoPolicies is null)">
+                    @if (gitRepoPolicies is not null && gitRepoPolicies.Count == 0)
+                    {
+                        <EmptyState Icon="bi-slash-circle"
+                                    Message="No URL patterns defined. All repo URLs are implicitly denied for this customer." />
+                    }
+                    else if (gitRepoPolicies is not null)
+                    {
+                        @foreach (CustomerGitRepoPolicy policy in gitRepoPolicies)
+                        {
+                            <div class="d-flex align-items-center justify-content-between py-1 border-bottom">
+                                <code class="small">@policy.UrlPattern</code>
+                                @if (confirmDeletePolicyId == policy.Id)
+                                {
+                                    <div class="d-flex gap-1">
+                                        <button class="btn btn-sm btn-danger" @onclick="() => DeleteRepoPolicy(policy.Id)">Remove</button>
+                                        <button class="btn btn-sm btn-link p-0" @onclick="() => confirmDeletePolicyId = null">Cancel</button>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-outline-danger" title="Remove pattern"
+                                            @onclick="() => confirmDeletePolicyId = policy.Id">
+                                        <i class="bi bi-x"></i>
+                                    </button>
+                                }
+                            </div>
+                        }
+                    }
+                    </LoadingPanel>
+                </div>
+            </div>
+        </div>
+
+        @* --- Credentials --- *@
+        <div class="col-12 col-xl-6">
+            <div class="card shadow-sm h-100">
+                <div class="card-header bg-white py-2">
+                    <i class="bi bi-key me-2 text-primary"></i>
+                    <strong>Git Credentials</strong>
+                    <div><small class="text-muted">Reusable credential sets for this customer's repositories in this environment.</small></div>
+                </div>
+                <div class="card-body">
+                    <div class="row g-2 align-items-end mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label small mb-1">Name</label>
+                            <input type="text" class="form-control form-control-sm" placeholder="e.g. GitHub PAT"
+                                   @bind="newCredName" @bind:event="oninput" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small mb-1">Auth type</label>
+                            <select class="form-select form-select-sm" @bind="newCredAuthType">
+                                <option value="@GitAuthType.None">None (public)</option>
+                                <option value="@GitAuthType.HttpsPat">HTTPS – PAT</option>
+                                <option value="@GitAuthType.HttpsPassword">HTTPS – Password</option>
+                                <option value="@GitAuthType.SshKey">SSH Key</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small mb-1">Repo URL pattern <span class="text-muted">(optional)</span></label>
+                            <input type="text" class="form-control form-control-sm font-monospace"
+                                   placeholder="e.g. https://github.com/acme/*"
+                                   @bind="newCredUrlPattern" @bind:event="oninput" />
+                        </div>
+                        @if (newCredAuthType == GitAuthType.HttpsPassword)
+                        {
+                            <div class="col-md-3">
+                                <label class="form-label small mb-1">Username</label>
+                                <input type="text" class="form-control form-control-sm" placeholder="e.g. myuser"
+                                       @bind="newCredUsername" @bind:event="oninput" />
+                            </div>
+                        }
+                        <div class="col-auto">
+                            <button class="btn btn-sm btn-outline-primary" @onclick="AddGitCredential"
+                                    disabled="@string.IsNullOrWhiteSpace(newCredName)">
+                                <i class="bi bi-plus me-1"></i>Add
+                            </button>
+                        </div>
+                    </div>
+                    @if (!string.IsNullOrEmpty(credentialError))
+                    {
+                        <div class="alert alert-danger py-1 small mb-2">@credentialError</div>
+                    }
+                    @if (!string.IsNullOrEmpty(credentialSuccess))
+                    {
+                        <div class="alert alert-success py-1 small mb-2">@credentialSuccess</div>
+                    }
+                    <LoadingPanel Loading="@(gitCredentials is null)">
+                    @if (gitCredentials is not null && gitCredentials.Count == 0)
+                    {
+                        <EmptyState Icon="bi-key" Message="No credentials configured yet." />
+                    }
+                    else if (gitCredentials is not null)
+                    {
+                        @foreach (CustomerGitCredential cred in gitCredentials)
+                        {
+                            <div class="border rounded p-3 mb-2">
+                                <div class="d-flex align-items-start justify-content-between">
+                                    <div>
+                                        <span class="fw-semibold"><i class="bi bi-key me-1 text-primary"></i>@cred.Name</span>
+                                        <span class="badge bg-secondary ms-2">@cred.AuthType</span>
+                                        @if (cred.AuthType == GitAuthType.HttpsPassword && cred.Username is not null)
+                                        {
+                                            <span class="text-muted small ms-2">(@cred.Username)</span>
+                                        }
+                                        @if (cred.UrlPattern is not null)
+                                        {
+                                            <code class="small ms-2 text-muted">@cred.UrlPattern</code>
+                                        }
+                                    </div>
+                                    @if (confirmDeleteCredentialId == cred.Id)
+                                    {
+                                        <div class="d-flex gap-1">
+                                            <button class="btn btn-sm btn-danger" @onclick="() => DeleteGitCredential(cred.Id)">Delete</button>
+                                            <button class="btn btn-sm btn-link p-0" @onclick="() => confirmDeleteCredentialId = null">Cancel</button>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <button class="btn btn-sm btn-outline-danger" title="Delete credential"
+                                                @onclick="() => confirmDeleteCredentialId = cred.Id">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    }
+                                </div>
+                                @if (cred.AuthType != GitAuthType.None)
+                                {
+                                    <div class="mt-2">
+                                        @if (cred.AuthType == GitAuthType.HttpsPat)
+                                        {
+                                            <div class="input-group input-group-sm">
+                                                <span class="input-group-text">PAT</span>
+                                                <input type="password" class="form-control form-control-sm"
+                                                       placeholder="Personal Access Token"
+                                                       @bind="credSecretValues[cred.Id]" @bind:event="oninput" />
+                                                <button class="btn btn-sm btn-outline-secondary"
+                                                        @onclick="() => SaveCredentialSecret(cred)">Save</button>
+                                            </div>
+                                        }
+                                        else if (cred.AuthType == GitAuthType.HttpsPassword)
+                                        {
+                                            <div class="input-group input-group-sm">
+                                                <span class="input-group-text">Password</span>
+                                                <input type="password" class="form-control form-control-sm"
+                                                       placeholder="Password"
+                                                       @bind="credSecretValues[cred.Id]" @bind:event="oninput" />
+                                                <button class="btn btn-sm btn-outline-secondary"
+                                                        @onclick="() => SaveCredentialSecret(cred)">Save</button>
+                                            </div>
+                                        }
+                                        else if (cred.AuthType == GitAuthType.SshKey)
+                                        {
+                                            <textarea class="form-control form-control-sm font-monospace mb-1"
+                                                      rows="3" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                                                      @bind="credSecretValues[cred.Id]" @bind:event="oninput"></textarea>
+                                            <button class="btn btn-sm btn-outline-secondary"
+                                                    @onclick="() => SaveCredentialSecret(cred)">Save SSH Key</button>
+                                        }
+                                        @if (credSaveMessages.TryGetValue(cred.Id, out string? msg) && msg is not null)
+                                        {
+                                            <div class="small mt-1 @(credSaveOk.GetValueOrDefault(cred.Id) ? "text-success" : "text-danger")">
+                                                <i class="bi @(credSaveOk.GetValueOrDefault(cred.Id) ? "bi-check-circle" : "bi-x-circle") me-1"></i>@msg
+                                            </div>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        }
+                    }
+                    </LoadingPanel>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@* ══════════════════════════════════════════════════════
+   Vault tab — app secrets scoped to this environment
+   ══════════════════════════════════════════════════════ *@
+@if (section == "vault")
+{
+    <PortalSecretsDetail App="App"
+                         TenantId="TenantId"
+                         AccessRole="AccessRole"
+                         InitialScope="app" />
+}
+
+@* ══════════════════════════════════════════════════════
+   Databases tab
+   ══════════════════════════════════════════════════════ *@
+@if (section == "databases")
+{
+    @if (!dbBindingsLoaded)
+    {
+        <div class="text-center py-4"><div class="spinner-border text-primary" role="status"></div></div>
+    }
+    else
+    {
+        @if (!IsPortalView)
+        {
+            <div class="card shadow-sm mb-3">
+                <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+                    <div><i class="bi bi-plus-circle me-1 text-primary"></i><strong>Attach Database</strong></div>
+                    <button class="btn btn-sm btn-outline-primary" @onclick="() => showDbAttachForm = !showDbAttachForm">
+                        <i class="bi bi-plus me-1"></i>Attach
+                    </button>
+                </div>
+                @if (showDbAttachForm)
+                {
+                    <div class="card-body">
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-4">
+                                <label class="form-label small">Deployment</label>
+                                <select class="form-select form-select-sm" @bind="newDbAttachDeploymentId">
+                                    <option value="@Guid.Empty">Select deployment…</option>
+                                    @foreach (AppDeployment dep in deployments ?? [])
+                                    {
+                                        <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Database</label>
+                                <select class="form-select form-select-sm" @bind="newBindingDatabaseId">
+                                    <option value="@Guid.Empty">Select database…</option>
+                                    @if (availableCnpgDatabases is { Count: > 0 })
+                                    {
+                                        <optgroup label="PostgreSQL (CNPG)">
+                                            @foreach ((CnpgCluster cluster, CnpgDatabase database) in availableCnpgDatabases)
+                                            {
+                                                <option value="@database.Id">@cluster.Name / @database.Name</option>
+                                            }
+                                        </optgroup>
+                                    }
+                                    @if (availableMongoDatabases is { Count: > 0 })
+                                    {
+                                        <optgroup label="MongoDB">
+                                            @foreach ((MongoCluster cluster, MongoDatabase database) in availableMongoDatabases)
+                                            {
+                                                <option value="@database.Id">@cluster.Name / @database.Name</option>
+                                            }
+                                        </optgroup>
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">K8s Secret name</label>
+                                <input class="form-control form-control-sm" @bind="newBindingSecretName" placeholder="e.g. my-app-db" />
+                            </div>
+                        </div>
+                        @if (bindingError is not null) { <div class="alert alert-danger py-1 small mb-2">@bindingError</div> }
+                        @if (bindingWarning is not null) { <div class="alert alert-warning py-1 small mb-2">@bindingWarning</div> }
+                        <div class="d-flex gap-1">
+                            <button class="btn btn-sm btn-primary" @onclick="AddDatabaseBindingAppLevel"
+                                    disabled="@(newDbAttachDeploymentId == Guid.Empty || newBindingDatabaseId == Guid.Empty || string.IsNullOrWhiteSpace(newBindingSecretName))">
+                                Attach &amp; Sync
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showDbAttachForm = false">Cancel</button>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+
+        @if (!dbBindingsByDeployment.Values.Any(b => b.Count > 0))
+        {
+            <EmptyState Icon="bi-database" Message="No databases are connected to this app's deployments." />
+        }
+        else
+        {
+            @foreach (AppDeployment deployment in deployments ?? [])
+            {
+                List<DatabaseBinding> bindings = dbBindingsByDeployment.GetValueOrDefault(deployment.Id, []);
+                if (bindings.Count == 0) continue;
+                <div class="card shadow-sm mb-3">
+                    <div class="card-header bg-white py-2">
+                        <div class="d-flex align-items-center gap-2">
+                            <i class="bi bi-rocket-takeoff text-primary"></i>
+                            <strong>@deployment.Name</strong>
+                            <span class="text-muted small">
+                                <i class="bi bi-hdd-network me-1"></i>@deployment.Cluster?.Name
+                                <i class="bi bi-box ms-2 me-1"></i>@deployment.Namespace
+                            </span>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Type</th>
+                                        <th>Database</th>
+                                        <th>K8s Secret</th>
+                                        <th>Last Synced</th>
+                                        <th class="text-end">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (DatabaseBinding binding in bindings)
+                                    {
+                                        <tr>
+                                            <td>@DbTypeBadge(binding)</td>
+                                            <td>
+                                                <span class="fw-medium">@DbDisplayName(binding)</span>
+                                                @if (binding.CnpgDatabase?.CnpgCluster is not null)
+                                                {
+                                                    <br /><small class="text-muted">@binding.CnpgDatabase.CnpgCluster.Name</small>
+                                                }
+                                                else if (binding.MongoDatabase?.MongoCluster is not null)
+                                                {
+                                                    <br /><small class="text-muted">@binding.MongoDatabase.MongoCluster.Name</small>
+                                                }
+                                            </td>
+                                            <td>
+                                                <code class="small">@binding.KubernetesSecretName</code>
+                                                <br /><small class="text-muted">@deployment.Namespace</small>
+                                            </td>
+                                            <td>
+                                                @if (binding.LastSyncedAt is not null)
+                                                { <small class="text-muted">@binding.LastSyncedAt.Value.ToString("MMM d, HH:mm")</small> }
+                                                else
+                                                { <span class="badge bg-warning text-dark small">Never synced</span> }
+                                            </td>
+                                            <td class="text-end">
+                                                <button class="btn btn-sm btn-outline-secondary me-1"
+                                                        @onclick="() => ToggleDbCredentials(binding)"
+                                                        title="@(revealedDbBindingId == binding.Id ? "Hide credentials" : "View credentials")">
+                                                    <i class="bi @(revealedDbBindingId == binding.Id ? "bi-eye-slash" : "bi-eye")"></i>
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-success me-1"
+                                                        @onclick="() => SyncDatabaseBinding(binding)"
+                                                        disabled="@syncingBindingIds.Contains(binding.Id)">
+                                                    @if (syncingBindingIds.Contains(binding.Id))
+                                                    { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    else { <i class="bi bi-cloud-arrow-up me-1"></i> }
+                                                    Sync
+                                                </button>
+                                                @if (!IsPortalView)
+                                                {
+                                                    @if (confirmRemoveBindingId == binding.Id)
+                                                    {
+                                                        <button class="btn btn-sm btn-danger me-1" @onclick="() => RemoveDatabaseBindingAppLevel(binding.Id)">Detach</button>
+                                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmRemoveBindingId = null">Cancel</button>
+                                                    }
+                                                    else
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmRemoveBindingId = binding.Id" title="Detach database">
+                                                            <i class="bi bi-x-circle"></i>
+                                                        </button>
+                                                    }
+                                                }
+                                                @if (bindingSyncErrors.TryGetValue(binding.Id, out string? dbErr) && dbErr is not null)
+                                                { <div class="text-danger small mt-1">@dbErr</div> }
+                                            </td>
+                                        </tr>
+                                        @if (revealedDbBindingId == binding.Id)
+                                        {
+                                            <tr class="table-light">
+                                                <td colspan="5" class="px-3 py-2">
+                                                    @if (dbCredLoading)
+                                                    {
+                                                        <div class="text-center py-2"><div class="spinner-border spinner-border-sm text-primary" role="status"></div></div>
+                                                    }
+                                                    else if (dbCredSecrets is { Count: > 0 })
+                                                    {
+                                                        <div class="d-flex flex-wrap gap-3 align-items-center">
+                                                            @foreach (VaultSecret sec in dbCredSecrets)
+                                                            {
+                                                                <div class="d-flex align-items-center gap-1">
+                                                                    <span class="text-muted small">@sec.Name:</span>
+                                                                    @if (sec.Name == "PASSWORD")
+                                                                    {
+                                                                        @if (revealedDbPasswordSecretId == sec.Id)
+                                                                        {
+                                                                            <code class="user-select-all small">@dbCredValues.GetValueOrDefault(sec.Id, "•••")</code>
+                                                                            <button class="btn btn-sm btn-link py-0 px-1" @onclick="() => revealedDbPasswordSecretId = null"><i class="bi bi-eye-slash"></i></button>
+                                                                        }
+                                                                        else
+                                                                        {
+                                                                            <code class="small text-muted">••••••••</code>
+                                                                            <button class="btn btn-sm btn-link py-0 px-1" @onclick="() => RevealDbPassword(sec)" disabled="@dbPasswordRevealing">
+                                                                                @if (dbPasswordRevealing) { <span class="spinner-border spinner-border-sm"></span> }
+                                                                                else { <i class="bi bi-eye"></i> }
+                                                                            </button>
+                                                                        }
+                                                                    }
+                                                                    else
+                                                                    {
+                                                                        <code class="user-select-all small">@(dbCredValues.GetValueOrDefault(sec.Id, "…"))</code>
+                                                                    }
+                                                                </div>
+                                                            }
+                                                        </div>
+                                                    }
+                                                    else
+                                                    { <div class="text-muted small">No credentials found in vault for this database.</div> }
+                                                </td>
+                                            </tr>
+                                        }
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            }
+        }
+    }
+}
+
+@* ══════════════════════════════════════════════════════
+   Messaging tab
+   ══════════════════════════════════════════════════════ *@
+@if (section == "messaging")
+{
+    @if (!msgBindingsLoaded)
+    {
+        <div class="text-center py-4"><div class="spinner-border text-primary" role="status"></div></div>
+    }
+    else
+    {
+        @if (!IsPortalView)
+        {
+            <div class="card shadow-sm mb-3">
+                <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+                    <div><i class="bi bi-plus-circle me-1 text-primary"></i><strong>Attach Messaging</strong></div>
+                    <button class="btn btn-sm btn-outline-primary" @onclick="() => showMsgAttachForm = !showMsgAttachForm">
+                        <i class="bi bi-plus me-1"></i>Attach
+                    </button>
+                </div>
+                @if (showMsgAttachForm)
+                {
+                    <div class="card-body">
+                        @if (msgAttachError is not null) { <div class="alert alert-danger py-1 small mb-2">@msgAttachError</div> }
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-4">
+                                <label class="form-label small">Deployment</label>
+                                <select class="form-select form-select-sm" @bind="newMsgDeploymentId">
+                                    <option value="@Guid.Empty">Select deployment…</option>
+                                    @foreach (AppDeployment dep in deployments ?? [])
+                                    {
+                                        <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">RabbitMQ Cluster</label>
+                                <select class="form-select form-select-sm" @bind="newMsgClusterId">
+                                    <option value="@Guid.Empty">Select cluster…</option>
+                                    @if (availableRabbitClusters is not null)
+                                    {
+                                        @foreach (RabbitMQCluster rc in availableRabbitClusters)
+                                        {
+                                            <option value="@rc.Id">@rc.Name</option>
+                                        }
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Vhost</label>
+                                <input class="form-control form-control-sm" @bind="newMsgVhost" placeholder="/" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Queue name <span class="text-muted">(optional)</span></label>
+                                <input class="form-control form-control-sm" @bind="newMsgQueueName" placeholder="my-queue" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Exchange name <span class="text-muted">(optional)</span></label>
+                                <input class="form-control form-control-sm" @bind="newMsgExchangeName" placeholder="my-exchange" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">K8s Secret name</label>
+                                <input class="form-control form-control-sm" @bind="newMsgSecretName" placeholder="e.g. rabbitmq-creds" />
+                            </div>
+                        </div>
+                        <div class="d-flex gap-1">
+                            <button class="btn btn-sm btn-primary" @onclick="AddMessagingBinding"
+                                    disabled="@(newMsgDeploymentId == Guid.Empty || newMsgClusterId == Guid.Empty || string.IsNullOrWhiteSpace(newMsgSecretName))">
+                                Attach &amp; Sync
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showMsgAttachForm = false">Cancel</button>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+
+        @if (!msgBindingsByDeployment.Values.Any(b => b.Count > 0))
+        {
+            <EmptyState Icon="bi-send" Message="No RabbitMQ connections are configured for this app's deployments." />
+        }
+        else
+        {
+            @foreach (AppDeployment deployment in deployments ?? [])
+            {
+                List<MessagingBinding> bindings = msgBindingsByDeployment.GetValueOrDefault(deployment.Id, []);
+                if (bindings.Count == 0) continue;
+                <div class="card shadow-sm mb-3">
+                    <div class="card-header bg-white py-2">
+                        <div class="d-flex align-items-center gap-2">
+                            <i class="bi bi-rocket-takeoff text-primary"></i>
+                            <strong>@deployment.Name</strong>
+                            <span class="text-muted small">
+                                <i class="bi bi-hdd-network me-1"></i>@deployment.Cluster?.Name
+                                <i class="bi bi-box ms-2 me-1"></i>@deployment.Namespace
+                            </span>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Cluster</th>
+                                        <th>Vhost</th>
+                                        <th>Queue / Exchange</th>
+                                        <th>K8s Secret</th>
+                                        <th>Last Synced</th>
+                                        <th class="text-end">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (MessagingBinding binding in bindings)
+                                    {
+                                        <tr>
+                                            <td><small>@binding.Cluster?.Name</small></td>
+                                            <td><code class="small">@binding.Vhost</code></td>
+                                            <td>
+                                                @if (binding.QueueName is not null)
+                                                {
+                                                    <span class="badge bg-info-subtle text-info border border-info-subtle me-1">
+                                                        <i class="bi bi-collection me-1"></i>Queue
+                                                    </span>
+                                                    <code class="small">@binding.QueueName</code>
+                                                }
+                                                @if (binding.ExchangeName is not null)
+                                                {
+                                                    <span class="badge bg-warning-subtle text-warning border border-warning-subtle me-1">
+                                                        <i class="bi bi-arrow-left-right me-1"></i>Exchange
+                                                    </span>
+                                                    <code class="small">@binding.ExchangeName</code>
+                                                }
+                                                @if (binding.QueueName is null && binding.ExchangeName is null)
+                                                {
+                                                    <span class="text-muted small">vhost only</span>
+                                                }
+                                            </td>
+                                            <td>
+                                                <code class="small">@binding.KubernetesSecretName</code>
+                                                <br /><small class="text-muted">@deployment.Namespace</small>
+                                            </td>
+                                            <td>
+                                                @if (binding.LastSyncedAt is not null)
+                                                { <small class="text-muted">@binding.LastSyncedAt.Value.ToString("MMM d, HH:mm")</small> }
+                                                else
+                                                { <span class="badge bg-warning text-dark small">Never synced</span> }
+                                            </td>
+                                            <td class="text-end">
+                                                <button class="btn btn-sm btn-outline-success me-1"
+                                                        @onclick="() => SyncMessagingBinding(binding)"
+                                                        disabled="@syncingBindingIds.Contains(binding.Id)">
+                                                    @if (syncingBindingIds.Contains(binding.Id))
+                                                    { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    else { <i class="bi bi-cloud-arrow-up me-1"></i> }
+                                                    Sync
+                                                </button>
+                                                @if (!IsPortalView)
+                                                {
+                                                    @if (confirmDetachMsgId == binding.Id)
+                                                    {
+                                                        <button class="btn btn-sm btn-danger me-1" @onclick="() => RemoveMessagingBinding(binding.Id)">Detach</button>
+                                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDetachMsgId = null">Cancel</button>
+                                                    }
+                                                    else
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDetachMsgId = binding.Id" title="Detach">
+                                                            <i class="bi bi-x-circle"></i>
+                                                        </button>
+                                                    }
+                                                }
+                                                @if (bindingSyncErrors.TryGetValue(binding.Id, out string? msgErr) && msgErr is not null)
+                                                { <div class="text-danger small mt-1">@msgErr</div> }
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            }
+        }
+    }
+}
+
+@* ══════════════════════════════════════════════════════
+   Cache tab
+   ══════════════════════════════════════════════════════ *@
+@if (section == "cache")
+{
+    @if (!cacheBindingsLoaded)
+    {
+        <div class="text-center py-4"><div class="spinner-border text-primary" role="status"></div></div>
+    }
+    else
+    {
+        @if (!IsPortalView)
+        {
+            <div class="card shadow-sm mb-3">
+                <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+                    <div><i class="bi bi-plus-circle me-1 text-primary"></i><strong>Attach Redis Cluster</strong></div>
+                    <button class="btn btn-sm btn-outline-warning" @onclick="() => showCacheAttachForm = !showCacheAttachForm">
+                        <i class="bi bi-plus me-1"></i>Attach
+                    </button>
+                </div>
+                @if (showCacheAttachForm)
+                {
+                    <div class="card-body">
+                        @if (!string.IsNullOrEmpty(cacheBindingError)) { <div class="alert alert-danger py-1 small mb-2">@cacheBindingError</div> }
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-4">
+                                <label class="form-label small">Deployment</label>
+                                <select class="form-select form-select-sm" @bind="newCacheAttachDeploymentId">
+                                    <option value="@Guid.Empty">Select deployment…</option>
+                                    @foreach (AppDeployment dep in deployments ?? [])
+                                    {
+                                        <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Redis Cluster</label>
+                                <select class="form-select form-select-sm" @bind="newCacheBindingClusterId">
+                                    <option value="@Guid.Empty">Select cluster…</option>
+                                    @if (availableRedisClusters is not null)
+                                    {
+                                        @foreach (RedisCluster rc in availableRedisClusters)
+                                        {
+                                            <option value="@rc.Id">@rc.Name (@rc.Namespace)</option>
+                                        }
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">K8s Secret name</label>
+                                <input class="form-control form-control-sm" @bind="newCacheBindingSecretName" placeholder="redis-cache" />
+                            </div>
+                        </div>
+                        <div class="d-flex gap-1">
+                            <button class="btn btn-sm btn-warning" @onclick="AddCacheBindingAppLevel"
+                                    disabled="@(newCacheAttachDeploymentId == Guid.Empty || newCacheBindingClusterId == Guid.Empty || string.IsNullOrWhiteSpace(newCacheBindingSecretName))">
+                                Attach &amp; Sync
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showCacheAttachForm = false">Cancel</button>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+
+        @if (!cacheBindingsByDeployment.Values.Any(b => b.Count > 0))
+        {
+            <EmptyState Icon="bi-lightning" Message="No Redis cache connections are configured for this app's deployments." />
+        }
+        else
+        {
+            @foreach (AppDeployment deployment in deployments ?? [])
+            {
+                List<CacheBinding> bindings = cacheBindingsByDeployment.GetValueOrDefault(deployment.Id, []);
+                if (bindings.Count == 0) continue;
+                <div class="card shadow-sm mb-3">
+                    <div class="card-header bg-white py-2">
+                        <div class="d-flex align-items-center gap-2">
+                            <i class="bi bi-rocket-takeoff text-primary"></i>
+                            <strong>@deployment.Name</strong>
+                            <span class="text-muted small">
+                                <i class="bi bi-hdd-network me-1"></i>@deployment.Cluster?.Name
+                                <i class="bi bi-box ms-2 me-1"></i>@deployment.Namespace
+                            </span>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Redis Cluster</th>
+                                        <th>K8s Secret</th>
+                                        <th>Last Synced</th>
+                                        <th class="text-end">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (CacheBinding binding in bindings)
+                                    {
+                                        <tr>
+                                            <td>
+                                                <i class="bi bi-lightning text-warning me-1"></i>
+                                                <span class="fw-medium">@binding.RedisCluster.Name</span>
+                                                @if (binding.RedisCluster.KubernetesCluster is not null)
+                                                {
+                                                    <br /><small class="text-muted">@binding.RedisCluster.KubernetesCluster.Name</small>
+                                                }
+                                            </td>
+                                            <td>
+                                                <code class="small">@binding.KubernetesSecretName</code>
+                                                <br /><small class="text-muted">@deployment.Namespace</small>
+                                            </td>
+                                            <td>
+                                                @if (binding.LastSyncedAt is not null)
+                                                { <small class="text-muted">@binding.LastSyncedAt.Value.ToString("MMM d, HH:mm")</small> }
+                                                else
+                                                { <span class="badge bg-warning text-dark small">Never synced</span> }
+                                            </td>
+                                            <td class="text-end">
+                                                <button class="btn btn-sm btn-outline-success me-1"
+                                                        @onclick="() => SyncCacheBinding(binding)"
+                                                        disabled="@syncingBindingIds.Contains(binding.Id)">
+                                                    @if (syncingBindingIds.Contains(binding.Id))
+                                                    { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    else { <i class="bi bi-cloud-arrow-up me-1"></i> }
+                                                    Sync
+                                                </button>
+                                                @if (!IsPortalView)
+                                                {
+                                                    @if (confirmRemoveCacheBindingId == binding.Id)
+                                                    {
+                                                        <button class="btn btn-sm btn-danger me-1" @onclick="() => RemoveCacheBindingAppLevel(binding.Id)">Detach</button>
+                                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmRemoveCacheBindingId = null">Cancel</button>
+                                                    }
+                                                    else
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmRemoveCacheBindingId = binding.Id" title="Detach">
+                                                            <i class="bi bi-x-circle"></i>
+                                                        </button>
+                                                    }
+                                                }
+                                                @if (bindingSyncErrors.TryGetValue(binding.Id, out string? cacheErr) && cacheErr is not null)
+                                                { <div class="text-danger small mt-1">@cacheErr</div> }
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            }
+        }
+    }
+}
+
+@* ══════════════════════════════════════════════════════
+   Storage tab
+   ══════════════════════════════════════════════════════ *@
+@if (section == "storage")
+{
+    @if (!storageBindingsLoaded)
+    {
+        <div class="text-center py-4"><div class="spinner-border text-primary" role="status"></div></div>
+    }
+    else
+    {
+        @if (!IsPortalView)
+        {
+            <div class="card shadow-sm mb-3">
+                <div class="card-header bg-white py-2">
+                    <i class="bi bi-plus-circle me-1 text-primary"></i><strong>Attach Storage</strong>
+                </div>
+                <div class="card-body">
+                    @if (storageBindingError is not null) { <div class="alert alert-danger py-1 small mb-2">@storageBindingError</div> }
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-4">
+                            <label class="form-label small">Deployment</label>
+                            <select class="form-select form-select-sm" @bind="newStorageDeploymentId">
+                                <option value="@Guid.Empty">Select deployment…</option>
+                                @foreach (AppDeployment dep in deployments ?? [])
+                                {
+                                    <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Storage Link</label>
+                            <select class="form-select form-select-sm" @bind="newStorageLinkId">
+                                <option value="@Guid.Empty">Select storage link…</option>
+                                @foreach (StorageLink link in availableStorageLinks)
+                                {
+                                    <option value="@link.Id">@link.Name (@link.Provider)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">K8s Secret name</label>
+                            <input class="form-control form-control-sm" @bind="newStorageSecretName" placeholder="e.g. s3-creds" />
+                        </div>
+                    </div>
+                    <div class="d-flex gap-1">
+                        <button class="btn btn-sm btn-info" @onclick="AddStorageBinding"
+                                disabled="@(addingStorageBinding || newStorageDeploymentId == Guid.Empty || newStorageLinkId == Guid.Empty || string.IsNullOrWhiteSpace(newStorageSecretName))">
+                            @if (addingStorageBinding) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Attach
+                        </button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (!storageBindingsByDeployment.Values.Any(b => b.Count > 0))
+        {
+            <EmptyState Icon="bi-bucket" Message="No storage buckets are connected to this app's deployments." />
+        }
+        else
+        {
+            @foreach (AppDeployment deployment in deployments ?? [])
+            {
+                List<StorageBinding> bindings = storageBindingsByDeployment.GetValueOrDefault(deployment.Id, []);
+                if (bindings.Count == 0) continue;
+                <div class="card shadow-sm mb-3">
+                    <div class="card-header bg-white py-2">
+                        <div class="d-flex align-items-center gap-2">
+                            <i class="bi bi-rocket-takeoff text-primary"></i>
+                            <strong>@deployment.Name</strong>
+                            <span class="text-muted small">
+                                <i class="bi bi-hdd-network me-1"></i>@deployment.Cluster?.Name
+                                <i class="bi bi-box ms-2 me-1"></i>@deployment.Namespace
+                            </span>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Provider</th>
+                                        <th>Bucket</th>
+                                        <th>K8s Secret</th>
+                                        <th>Linked</th>
+                                        @if (!IsPortalView) { <th class="text-end">Actions</th> }
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (StorageBinding binding in bindings)
+                                    {
+                                        <tr>
+                                            <td>
+                                                <span class="badge bg-info-subtle text-info border border-info-subtle">
+                                                    <i class="bi bi-bucket me-1"></i>@binding.StorageLink.Provider
+                                                </span>
+                                            </td>
+                                            <td>
+                                                <span class="fw-medium">@binding.StorageLink.Name</span>
+                                                @if (!string.IsNullOrWhiteSpace(binding.StorageLink.BucketName))
+                                                {
+                                                    <br /><code class="small text-muted">@binding.StorageLink.BucketName</code>
+                                                }
+                                            </td>
+                                            <td>
+                                                <code class="small">@binding.KubernetesSecretName</code>
+                                                <br /><small class="text-muted">@deployment.Namespace</small>
+                                            </td>
+                                            <td>
+                                                <small class="text-muted">@binding.CreatedAt.ToString("MMM d, HH:mm")</small>
+                                            </td>
+                                            @if (!IsPortalView)
+                                            {
+                                                <td class="text-end">
+                                                    @if (confirmUnbindStorageId == binding.Id)
+                                                    {
+                                                        <button class="btn btn-sm btn-danger me-1" @onclick="() => UnbindStorage(binding.Id)">Unlink</button>
+                                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmUnbindStorageId = null">Cancel</button>
+                                                    }
+                                                    else
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmUnbindStorageId = binding.Id" title="Unlink storage">
+                                                            <i class="bi bi-x-circle"></i>
+                                                        </button>
+                                                    }
+                                                    @if (storageBindingSyncErrors.TryGetValue(binding.Id, out string? stErr) && stErr is not null)
+                                                    { <div class="text-danger small mt-1">@stErr</div> }
+                                                </td>
+                                            }
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            }
+        }
+    }
+}
+
+@code {
+    [Parameter] public required Data.App App { get; set; }
+    [Parameter] public required Data.Environment Environment { get; set; }
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public bool IsPortalView { get; set; }
+    [Parameter] public CustomerAccessRole AccessRole { get; set; } = CustomerAccessRole.Admin;
+    [Parameter] public EventCallback OnBack { get; set; }
+
+    private string section = "deployments";
+
+    // Governance
+    private string? governanceNamespace;
+
+    // Deployments
+    private List<AppDeployment>? deployments;
+    private List<KubernetesCluster>? envClusters;
+    private AppDeployment? selectedDeployment;
+    private string deploymentSection = "manifests";
+    private bool IsGitManaged => selectedDeployment?.Type is
+        DeploymentType.GitYaml or DeploymentType.GitHelm or DeploymentType.GitAppOfApps;
+    private bool confirmDeleteDeployment;
+
+    // Create deployment form
+    private bool showCreateDeployment;
+    private string newDeployName = "";
+    private DeploymentType newDeployType = DeploymentType.Manual;
+    private Guid newDeployClusterId;
+    private string newDeployNamespace = "";
+    private string newHelmRepoUrl = "", newHelmChartName = "", newHelmChartVersion = "";
+    private string? createDeployError;
+    private string newGitUrl = "";
+    private string? newGitUrlError;
+    private string newGitPath = ".", newGitRevision = "";
+    private bool newGitAutoSync = true;
+
+    // Git sync
+    private bool syncingGit;
+    private string? gitSyncResult;
+    private bool gitSyncSuccess;
+
+    // Edit deployment
+    private bool showEditDeployment;
+    private string editDeployName = "", editDeployNamespace = "";
+    private string editHelmRepoUrl = "", editHelmChartName = "", editHelmChartVersion = "";
+    private string? editDeployError;
+
+    // Edit git settings
+    private bool showEditGitSettings;
+    private string editGitUrl = "";
+    private string? editGitUrlError;
+    private string editGitPath = ".";
+    private string editGitRevision = "";
+    private bool editGitAutoSync = true;
+    private string? editGitError;
+    private bool savingGitSettings;
+
+    // Manifests
+    private List<DeploymentManifest>? manifests;
+    private bool showAddManifest, savingManifest;
+    private string newManifestKind = "", newManifestName = "", newManifestYaml = "";
+    private int newManifestSortOrder;
+    private Guid? editingManifestId, confirmDeleteManifestId;
+    private string editManifestYaml = "";
+
+    // Helm
+    private string helmValuesYaml = "";
+    private bool savingHelmValues, helmValuesSaved, installingHelm;
+    private bool? helmInstallSuccess;
+    private string? helmInstallOutput, helmValuesError;
+
+    // YAML apply
+    private bool applyingYaml;
+    private bool? yamlApplySuccess;
+    private string? yamlApplyOutput;
+
+    // Resource tree (per-deployment)
+    private List<DeploymentResource>? resourceTree;
+    private string? resourcesError;
+    private DateTime? resourceTreeRefreshedAt;
+
+    // Deployment metrics
+    private DeploymentMetricsSummary? deploymentMetrics;
+    private bool deploymentMetricsLoading;
+    private string? deploymentMetricsError;
+
+    // Activity
+    private List<AuditEvent>? deploymentAuditEvents;
+    private bool activityLoading;
+
+    // Env-aggregate metrics
+    private DeploymentMetricsSummary? envMetrics;
+    private bool envMetricsLoading;
+    private string? envMetricsError;
+
+    // Database bindings (form state shared between app-level tab and legacy methods)
+    private List<(CnpgCluster Cluster, CnpgDatabase Database)>? availableCnpgDatabases;
+    private List<(MongoCluster Cluster, MongoDatabase Database)>? availableMongoDatabases;
+    private Guid newBindingDatabaseId;
+    private string newBindingSecretName = "";
+    private string? bindingError;
+    private string? bindingWarning;
+    private Guid? confirmRemoveBindingId;
+
+    // Cache bindings (form state shared with app-level tab)
+    private List<RedisCluster>? availableRedisClusters;
+    private Guid newCacheBindingClusterId;
+    private string newCacheBindingSecretName = "redis-cache";
+    private string? cacheBindingError;
+    private Guid? confirmRemoveCacheBindingId;
+
+    // ── App-level database bindings ──────────────────────────────────
+    private Dictionary<Guid, List<DatabaseBinding>> dbBindingsByDeployment = new();
+    private bool dbBindingsLoaded;
+    private Guid? revealedDbBindingId;
+    private bool dbCredLoading;
+    private List<VaultSecret>? dbCredSecrets;
+    private Dictionary<Guid, string?> dbCredValues = new();
+    private Guid? revealedDbPasswordSecretId;
+    private bool dbPasswordRevealing;
+    private Guid newDbAttachDeploymentId;
+    private bool showDbAttachForm;
+
+    // Shared sync state for app-level binding tabs
+    private HashSet<Guid> syncingBindingIds = [];
+    private Dictionary<Guid, string?> bindingSyncErrors = new();
+
+    // ── App-level messaging bindings ─────────────────────────────────
+    private Dictionary<Guid, List<MessagingBinding>> msgBindingsByDeployment = new();
+    private bool msgBindingsLoaded;
+    private List<RabbitMQCluster>? availableRabbitClusters;
+    private Guid newMsgDeploymentId;
+    private Guid newMsgClusterId;
+    private string newMsgVhost = "/";
+    private string newMsgQueueName = "";
+    private string newMsgExchangeName = "";
+    private string newMsgSecretName = "";
+    private bool showMsgAttachForm;
+    private string? msgAttachError;
+    private Guid? confirmDetachMsgId;
+
+    // ── App-level cache bindings ─────────────────────────────────────
+    private Dictionary<Guid, List<CacheBinding>> cacheBindingsByDeployment = new();
+    private bool cacheBindingsLoaded;
+    private Guid newCacheAttachDeploymentId;
+    private bool showCacheAttachForm;
+
+    // ── App-level storage bindings ───────────────────────────────────
+    private Dictionary<Guid, List<StorageBinding>> storageBindingsByDeployment = new();
+    private bool storageBindingsLoaded;
+    private List<StorageLink> availableStorageLinks = [];
+    private Guid newStorageDeploymentId;
+    private Guid newStorageLinkId;
+    private string newStorageSecretName = "";
+    private bool addingStorageBinding;
+    private string? storageBindingError;
+    private Guid? confirmUnbindStorageId;
+    private Dictionary<Guid, string?> storageBindingSyncErrors = new();
+
+    // Git Access tab
+    private List<CustomerGitRepoPolicy>? gitRepoPolicies;
+    private string newRepoPolicyPattern = "";
+    private string? repoPolicyError;
+    private Guid? confirmDeletePolicyId;
+
+    private List<CustomerGitCredential>? gitCredentials;
+    private string newCredName = "";
+    private GitAuthType newCredAuthType = GitAuthType.HttpsPat;
+    private string newCredUsername = "";
+    private string newCredUrlPattern = "";
+    private string? credentialError;
+    private string? credentialSuccess;
+    private Dictionary<Guid, string> credSecretValues = new();
+    private Dictionary<Guid, string?> credSaveMessages = new();
+    private Dictionary<Guid, bool> credSaveOk = new();
+    private Guid? confirmDeleteCredentialId;
+
+    private void HandleDeploymentStatusChanged(Guid deploymentId, SyncStatus sync, HealthStatus health)
+    {
+        bool changed = false;
+        if (deployments is not null)
+        {
+            AppDeployment? entry = deployments.FirstOrDefault(d => d.Id == deploymentId);
+            if (entry is not null) { entry.SyncStatus = sync; entry.HealthStatus = health; changed = true; }
+        }
+        if (selectedDeployment?.Id == deploymentId)
+        {
+            selectedDeployment.SyncStatus = sync;
+            selectedDeployment.HealthStatus = health;
+            changed = true;
+        }
+        if (changed) InvokeAsync(StateHasChanged);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        StatusNotifier.OnStatusChanged -= HandleDeploymentStatusChanged;
+        return ValueTask.CompletedTask;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        StatusNotifier.OnStatusChanged += HandleDeploymentStatusChanged;
+        await LoadDeployments();
+        envClusters = (await TenantService.GetClustersAsync(TenantId))
+            .Where(c => c.EnvironmentId == Environment.Id)
+            .ToList();
+        if (envClusters.Count == 1)
+            newDeployClusterId = envClusters[0].Id;
+        try
+        {
+            governanceNamespace = await AppGovernanceService.GetNamespaceAsync(App.Id, Environment.Id);
+        }
+        catch
+        {
+            // Namespace column may be absent on databases that haven't been migrated yet.
+        }
+    }
+
+    // ── Deployments ────────────────────────────────────────────────
+
+    private async Task SwitchToDeployments()
+    {
+        section = "deployments";
+        if (deployments is null) await LoadDeployments();
+        try
+        {
+            governanceNamespace = await AppGovernanceService.GetNamespaceAsync(App.Id, Environment.Id);
+        }
+        catch { }
+    }
+
+    private async Task LoadDeployments()
+    {
+        List<AppDeployment> all = await DeploymentService.GetDeploymentsAsync(App.Id);
+        deployments = all.Where(d => d.EnvironmentId == Environment.Id).ToList();
+    }
+
+    private void ValidateNewGitUrl(ChangeEventArgs e)
+    {
+        newGitUrl = e.Value?.ToString() ?? "";
+        newGitUrlError = !string.IsNullOrWhiteSpace(newGitUrl)
+            && gitRepoPolicies is { Count: > 0 }
+            && !CustomerGitService.MatchesAnyPolicy(newGitUrl, gitRepoPolicies)
+                ? "URL does not match any allowed policy pattern."
+                : null;
+    }
+
+    private void ValidateEditGitUrl(ChangeEventArgs e)
+    {
+        editGitUrl = e.Value?.ToString() ?? "";
+        editGitUrlError = !string.IsNullOrWhiteSpace(editGitUrl)
+            && gitRepoPolicies is { Count: > 0 }
+            && !CustomerGitService.MatchesAnyPolicy(editGitUrl, gitRepoPolicies)
+                ? "URL does not match any allowed policy pattern."
+                : null;
+    }
+
+    private async Task OnNewDeployTypeChanged()
+    {
+        if (newDeployType is DeploymentType.GitYaml or DeploymentType.GitHelm or DeploymentType.GitAppOfApps)
+        {
+            gitRepoPolicies ??= await CustomerGitService.GetRepoPoliciesAsync(App.CustomerId, Environment.Id);
+        }
+    }
+
+    private async Task CreateDeployment()
+    {
+        createDeployError = null;
+        bool isGit = newDeployType is DeploymentType.GitYaml or DeploymentType.GitHelm or DeploymentType.GitAppOfApps;
+
+        string? resolvedGitUrl = null;
+        if (isGit)
+        {
+            if (string.IsNullOrWhiteSpace(newGitUrl)) { createDeployError = "Enter a Git repository URL."; return; }
+            if (newGitUrlError is not null) { createDeployError = newGitUrlError; return; }
+            resolvedGitUrl = newGitUrl.Trim();
+        }
+
+        try
+        {
+            string effectiveNs = !string.IsNullOrWhiteSpace(governanceNamespace) ? governanceNamespace : newDeployNamespace;
+            await DeploymentService.CreateDeploymentAsync(
+                App.Id, newDeployName, newDeployType,
+                Environment.Id, newDeployClusterId, effectiveNs,
+                newDeployType == DeploymentType.HelmChart ? newHelmRepoUrl : null,
+                newDeployType == DeploymentType.HelmChart ? newHelmChartName : null,
+                newDeployType == DeploymentType.HelmChart ? newHelmChartVersion : null,
+                gitUrl: resolvedGitUrl,
+                gitPath: isGit ? newGitPath : null,
+                gitRevision: isGit && !string.IsNullOrWhiteSpace(newGitRevision) ? newGitRevision : null,
+                gitAutoSync: isGit && newGitAutoSync);
+
+            showCreateDeployment = false;
+            newDeployName = newDeployNamespace = newHelmRepoUrl = newHelmChartName = newHelmChartVersion = "";
+            newGitUrl = ""; newGitUrlError = null; newGitPath = "."; newGitRevision = ""; newGitAutoSync = true;
+            await LoadDeployments();
+        }
+        catch (Exception ex) { createDeployError = ex.Message; }
+    }
+
+    private async Task SelectDeployment(AppDeployment deploy)
+    {
+        selectedDeployment = deploy;
+        confirmDeleteDeployment = false;
+        helmValuesSaved = false; helmValuesError = null; helmInstallOutput = null; helmInstallSuccess = null;
+        yamlApplyOutput = null; yamlApplySuccess = null; savingManifest = false; editingManifestId = null;
+        resourceTree = null; resourcesError = null; deploymentMetrics = null; deploymentMetricsError = null;
+        deploymentAuditEvents = null; gitSyncResult = null; syncingGit = false;
+
+        if (deploy.Type == DeploymentType.HelmChart || deploy.Type == DeploymentType.GitHelm)
+        {
+            deploymentSection = "helm-values";
+            helmValuesYaml = deploy.HelmValues ?? "";
+        }
+        else if (deploy.Type == DeploymentType.GitAppOfApps)
+        {
+            deploymentSection = "resources";
+            await OpenDeploymentResourcesTab();
+        }
+        else
+        {
+            deploymentSection = "manifests";
+            await LoadManifests();
+        }
+    }
+
+    private async Task DeleteDeployment()
+    {
+        if (selectedDeployment is not null)
+        {
+            await DeploymentService.DeleteDeploymentAsync(selectedDeployment.Id);
+            selectedDeployment = null;
+            confirmDeleteDeployment = false;
+            await LoadDeployments();
+        }
+    }
+
+    private void StartEditDeployment()
+    {
+        if (selectedDeployment is null) return;
+        editDeployName = selectedDeployment.Name;
+        editDeployNamespace = selectedDeployment.Namespace;
+        editHelmRepoUrl = selectedDeployment.HelmRepoUrl ?? "";
+        editHelmChartName = selectedDeployment.HelmChartName ?? "";
+        editHelmChartVersion = selectedDeployment.HelmChartVersion ?? "";
+        editDeployError = null;
+        showEditDeployment = true;
+        showEditGitSettings = false;
+        confirmDeleteDeployment = false;
+    }
+
+    private async Task StartEditGitSettings()
+    {
+        if (selectedDeployment is null) return;
+        editGitUrl = selectedDeployment.GitUrl ?? "";
+        editGitPath = selectedDeployment.GitPath ?? ".";
+        editGitRevision = selectedDeployment.GitRevision ?? "";
+        editGitAutoSync = selectedDeployment.GitAutoSync;
+        editGitError = null;
+        editGitUrlError = null;
+        showEditGitSettings = true;
+        showEditDeployment = false;
+
+        gitRepoPolicies ??= await CustomerGitService.GetRepoPoliciesAsync(App.CustomerId, Environment.Id);
+    }
+
+    private async Task SaveGitSettings()
+    {
+        if (selectedDeployment is null) return;
+        editGitError = null;
+        savingGitSettings = true;
+        try
+        {
+            if (editGitUrlError is not null) { editGitError = editGitUrlError; return; }
+
+            await DeploymentService.UpdateGitSettingsAsync(
+                selectedDeployment.Id,
+                string.IsNullOrWhiteSpace(editGitUrl) ? null : editGitUrl.Trim(),
+                editGitPath, editGitRevision, editGitAutoSync);
+            await LoadDeployments();
+            selectedDeployment = deployments?.FirstOrDefault(d => d.Id == selectedDeployment.Id) ?? selectedDeployment;
+            showEditGitSettings = false;
+        }
+        catch (Exception ex) { editGitError = ex.Message; }
+        finally { savingGitSettings = false; }
+    }
+
+    private async Task SaveDeployment()
+    {
+        if (selectedDeployment is null) return;
+        editDeployError = null;
+        try
+        {
+            string effectiveNs = !string.IsNullOrWhiteSpace(governanceNamespace) ? governanceNamespace : editDeployNamespace;
+            await DeploymentService.UpdateDeploymentAsync(
+                selectedDeployment.Id, editDeployName, effectiveNs,
+                selectedDeployment.Type == DeploymentType.HelmChart ? editHelmRepoUrl : null,
+                selectedDeployment.Type == DeploymentType.HelmChart ? editHelmChartName : null,
+                selectedDeployment.Type == DeploymentType.HelmChart ? editHelmChartVersion : null);
+            await LoadDeployments();
+            selectedDeployment = deployments?.FirstOrDefault(d => d.Id == selectedDeployment.Id) ?? selectedDeployment;
+            showEditDeployment = false;
+        }
+        catch (Exception ex) { editDeployError = ex.Message; }
+    }
+
+    private async Task TriggerGitSync()
+    {
+        if (selectedDeployment is null) return;
+        syncingGit = true; gitSyncResult = null; StateHasChanged();
+        try
+        {
+            GitSyncResult result = await GitSyncService.SyncDeploymentAsync(selectedDeployment.Id);
+            gitSyncSuccess = result.IsSuccess;
+            gitSyncResult = result.AlreadyCurrent
+                ? "Already up to date."
+                : result.IsSuccess
+                    ? $"Synced to {result.CommitSha[..Math.Min(7, result.CommitSha.Length)]} — {result.CommitMessage}"
+                    : result.Error ?? "Sync failed.";
+            if (result.IsSuccess)
+            {
+                await LoadDeployments();
+                selectedDeployment = deployments?.FirstOrDefault(d => d.Id == selectedDeployment.Id) ?? selectedDeployment;
+            }
+        }
+        catch (Exception ex) { gitSyncSuccess = false; gitSyncResult = ex.Message; }
+        finally { syncingGit = false; }
+    }
+
+    // ── Manifests ────────────────────────────────────────────────
+
+    private async Task LoadManifests()
+    {
+        if (selectedDeployment is not null)
+            manifests = await DeploymentService.GetManifestsAsync(selectedDeployment.Id);
+    }
+
+    private async Task AddManifest()
+    {
+        if (selectedDeployment is null) return;
+        savingManifest = true;
+        try
+        {
+            await DeploymentService.AddManifestAsync(
+                selectedDeployment.Id, newManifestKind, newManifestName, newManifestYaml, newManifestSortOrder);
+            showAddManifest = false; newManifestKind = newManifestName = newManifestYaml = ""; newManifestSortOrder = 0;
+            await LoadManifests();
+        }
+        finally { savingManifest = false; }
+    }
+
+    private void StartEditManifest(DeploymentManifest m) { editingManifestId = m.Id; editManifestYaml = m.YamlContent; }
+
+    private async Task SaveManifest(Guid id)
+    {
+        savingManifest = true;
+        try { await DeploymentService.UpdateManifestAsync(id, editManifestYaml); editingManifestId = null; await LoadManifests(); }
+        finally { savingManifest = false; }
+    }
+
+    private async Task DeleteManifest(Guid id)
+    {
+        confirmDeleteManifestId = null;
+        await DeploymentService.DeleteManifestAsync(id);
+        await LoadManifests();
+    }
+
+    // ── YAML / Helm apply ────────────────────────────────────────
+
+    private async Task ApplyYamlDeployment()
+    {
+        if (selectedDeployment is null) return;
+        applyingYaml = true; yamlApplyOutput = null; yamlApplySuccess = null;
+        try
+        {
+            KubernetesOperationResult<string> result = await K8sOps.ApplyYamlDeploymentAsync(selectedDeployment.Id);
+            yamlApplySuccess = result.IsSuccess;
+            yamlApplyOutput = result.IsSuccess ? result.Data : result.Error;
+        }
+        finally { applyingYaml = false; }
+    }
+
+    private async Task InstallOrUpgradeHelm()
+    {
+        if (selectedDeployment is null) return;
+        installingHelm = true; helmInstallOutput = null; helmInstallSuccess = null;
+        try
+        {
+            KubernetesOperationResult<string> result = await K8sOps.HelmInstallOrUpgradeAsync(selectedDeployment.Id);
+            helmInstallSuccess = result.IsSuccess;
+            helmInstallOutput = result.IsSuccess ? result.Data : result.Error;
+        }
+        finally { installingHelm = false; }
+    }
+
+    private async Task SaveHelmValues()
+    {
+        savingHelmValues = true; helmValuesSaved = false; helmValuesError = null;
+        try
+        {
+            if (selectedDeployment is not null)
+            {
+                await DeploymentService.UpdateHelmValuesAsync(selectedDeployment.Id, helmValuesYaml);
+                selectedDeployment.HelmValues = helmValuesYaml;
+            }
+            helmValuesSaved = true;
+        }
+        catch (Exception ex) { helmValuesError = ex.Message; }
+        finally { savingHelmValues = false; }
+    }
+
+    // ── Resource tree ────────────────────────────────────────────
+
+    private async Task OpenDeploymentResourcesTab()
+    {
+        deploymentSection = "resources";
+        resourceTree = null; resourcesError = null;
+        if (selectedDeployment is not null)
+        {
+            KubernetesOperationResult<List<DeploymentResource>> result =
+                await K8sOps.GetLiveResourcesAsync(selectedDeployment.Id);
+            if (result.IsSuccess)
+            {
+                resourceTree = result.Data ?? [];
+                resourceTreeRefreshedAt = DateTime.UtcNow;
+                (SyncStatus sync, HealthStatus health) =
+                    KubernetesOperationsService.ComputeStatusFromResources(resourceTree);
+                await DeploymentService.UpdateDeploymentStatusAsync(selectedDeployment.Id, sync, health);
+                selectedDeployment.SyncStatus = sync;
+                selectedDeployment.HealthStatus = health;
+                AppDeployment? listEntry = deployments?.FirstOrDefault(d => d.Id == selectedDeployment.Id);
+                if (listEntry is not null) { listEntry.SyncStatus = sync; listEntry.HealthStatus = health; }
+            }
+            else { resourcesError = result.Error; resourceTree = []; }
+        }
+    }
+
+
+    // ── App-level section open/load methods ──────────────────────────
+
+    private async Task OpenDatabasesSection()
+    {
+        section = "databases";
+        if (!dbBindingsLoaded) await LoadAppDatabaseBindings();
+    }
+
+    private async Task LoadAppDatabaseBindings()
+    {
+        dbBindingsByDeployment.Clear();
+        foreach (AppDeployment dep in deployments ?? [])
+            dbBindingsByDeployment[dep.Id] = await CnpgService.GetDatabaseBindingsAsync(dep.Id);
+        dbBindingsLoaded = true;
+        if (availableCnpgDatabases is null)
+        {
+            List<CnpgCluster> clusters = await CnpgService.GetClustersAsync(TenantId);
+            availableCnpgDatabases = clusters.SelectMany(c => c.Databases.Select(d => (c, d))).ToList();
+        }
+        if (availableMongoDatabases is null)
+        {
+            List<MongoCluster> mongos = await MongoService.GetClustersAsync(TenantId);
+            availableMongoDatabases = mongos.Where(c => !c.IsExternal)
+                .SelectMany(c => c.Databases.Select(d => (c, d))).ToList();
+        }
+    }
+
+    private async Task OpenMessagingSection()
+    {
+        section = "messaging";
+        if (!msgBindingsLoaded) await LoadAppMessagingBindings();
+    }
+
+    private async Task LoadAppMessagingBindings()
+    {
+        msgBindingsByDeployment.Clear();
+        foreach (AppDeployment dep in deployments ?? [])
+            msgBindingsByDeployment[dep.Id] = await RabbitMQService.GetMessagingBindingsForDeploymentAsync(dep.Id);
+        msgBindingsLoaded = true;
+        if (availableRabbitClusters is null)
+            availableRabbitClusters = await RabbitMQService.GetClustersAsync(TenantId);
+    }
+
+    private async Task OpenCacheSection()
+    {
+        section = "cache";
+        if (!cacheBindingsLoaded) await LoadAppCacheBindings();
+    }
+
+    private async Task LoadAppCacheBindings()
+    {
+        cacheBindingsByDeployment.Clear();
+        foreach (AppDeployment dep in deployments ?? [])
+            cacheBindingsByDeployment[dep.Id] = await RedisService.GetCacheBindingsForDeploymentAsync(dep.Id);
+        cacheBindingsLoaded = true;
+        if (availableRedisClusters is null)
+            availableRedisClusters = await RedisService.GetClustersAsync(TenantId);
+    }
+
+    private async Task OpenStorageSection()
+    {
+        section = "storage";
+        if (!storageBindingsLoaded) await LoadAppStorageBindings();
+    }
+
+    private async Task LoadAppStorageBindings()
+    {
+        storageBindingsByDeployment.Clear();
+        foreach (AppDeployment dep in deployments ?? [])
+            storageBindingsByDeployment[dep.Id] = await StorageService.GetBindingsForDeploymentAsync(dep.Id);
+        availableStorageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+        storageBindingsLoaded = true;
+    }
+
+    // ── App-level database actions ────────────────────────────────────
+
+    private async Task AddDatabaseBindingAppLevel()
+    {
+        if (newDbAttachDeploymentId == Guid.Empty || newBindingDatabaseId == Guid.Empty) return;
+        bindingError = null;
+        bindingWarning = null;
+        try
+        {
+            var mongoMatch = availableMongoDatabases?.FirstOrDefault(x => x.Database.Id == newBindingDatabaseId);
+            if (mongoMatch is { Database: not null })
+            {
+                await MongoService.AddMongoDatabaseBindingAsync(newDbAttachDeploymentId, newBindingDatabaseId, newBindingSecretName);
+                try { await MongoService.SyncDatabaseCredentialsToK8sAsync(TenantId, mongoMatch.Value.Cluster.Id, newBindingDatabaseId); }
+                catch (Exception syncEx) { bindingWarning = $"Database attached, but credential sync failed: {syncEx.Message}"; }
+            }
+            else
+            {
+                await CnpgService.AddCnpgDatabaseBindingAsync(newDbAttachDeploymentId, newBindingDatabaseId, newBindingSecretName);
+                var cnpgMatch = availableCnpgDatabases?.FirstOrDefault(x => x.Database.Id == newBindingDatabaseId);
+                if (cnpgMatch is { Database: not null })
+                {
+                    try { await CnpgService.SyncDatabaseCredentialsToK8sAsync(TenantId, cnpgMatch.Value.Cluster.Id, newBindingDatabaseId); }
+                    catch (Exception syncEx) { bindingWarning = $"Database attached, but credential sync failed: {syncEx.Message}"; }
+                }
+            }
+            showDbAttachForm = false; newDbAttachDeploymentId = Guid.Empty; newBindingDatabaseId = Guid.Empty; newBindingSecretName = "";
+            await LoadAppDatabaseBindings();
+        }
+        catch (Exception ex)
+        {
+            Exception inner = ex;
+            while (inner.InnerException is not null) inner = inner.InnerException;
+            bindingError = $"Failed to attach database: {ex.Message}{(inner != ex ? $" ({inner.Message})" : "")}";
+        }
+    }
+
+    private async Task RemoveDatabaseBindingAppLevel(Guid id)
+    {
+        confirmRemoveBindingId = null; bindingError = null;
+        try
+        {
+            await CnpgService.RemoveDatabaseBindingAsync(id);
+            await LoadAppDatabaseBindings();
+        }
+        catch (Exception ex) { bindingError = $"Failed to detach: {ex.Message}"; }
+    }
+
+    private async Task SyncDatabaseBinding(DatabaseBinding binding)
+    {
+        syncingBindingIds.Add(binding.Id);
+        bindingSyncErrors.Remove(binding.Id);
+        try
+        {
+            if (binding.CnpgDatabaseId.HasValue && binding.CnpgDatabase is not null)
+                await CnpgService.SyncDatabaseCredentialsToK8sAsync(TenantId, binding.CnpgDatabase.CnpgClusterId, binding.CnpgDatabase.Id);
+            else if (binding.MongoDatabaseId.HasValue && binding.MongoDatabase is not null)
+                await MongoService.SyncDatabaseCredentialsToK8sAsync(TenantId, binding.MongoDatabase.MongoClusterId, binding.MongoDatabase.Id);
+            else if (binding.RegisteredPostgresDatabaseId.HasValue && binding.RegisteredPostgresDatabase is not null)
+                await RegisteredPostgresService.SyncCredentialsToK8sAsync(TenantId, binding.RegisteredPostgresDatabase.RegisteredPostgresInstanceId, binding.RegisteredPostgresDatabaseId.Value);
+            await LoadAppDatabaseBindings();
+        }
+        catch (Exception ex) { bindingSyncErrors[binding.Id] = ex.Message; }
+        finally { syncingBindingIds.Remove(binding.Id); }
+    }
+
+    private async Task ToggleDbCredentials(DatabaseBinding binding)
+    {
+        if (revealedDbBindingId == binding.Id)
+        {
+            revealedDbBindingId = null; dbCredSecrets = null; dbCredValues.Clear(); revealedDbPasswordSecretId = null; return;
+        }
+        revealedDbBindingId = binding.Id; dbCredLoading = true; dbCredSecrets = null; dbCredValues.Clear(); revealedDbPasswordSecretId = null;
+        try
+        {
+            if (binding.CnpgDatabaseId.HasValue)
+                dbCredSecrets = await VaultService.GetCnpgDatabaseSecretsAsync(TenantId, binding.CnpgDatabaseId.Value);
+            else if (binding.MongoDatabaseId.HasValue)
+                dbCredSecrets = await VaultService.GetMongoDatabaseSecretsAsync(TenantId, binding.MongoDatabaseId.Value);
+            else if (binding.RegisteredPostgresDatabaseId.HasValue)
+                dbCredSecrets = await VaultService.GetRegisteredPostgresDatabaseSecretsAsync(TenantId, binding.RegisteredPostgresDatabaseId.Value);
+            foreach (VaultSecret sec in dbCredSecrets ?? [])
+                if (sec.Name != "PASSWORD")
+                    dbCredValues[sec.Id] = await VaultService.GetSecretValueByIdAsync(sec.Id);
+        }
+        finally { dbCredLoading = false; }
+    }
+
+    private async Task RevealDbPassword(VaultSecret secret)
+    {
+        dbPasswordRevealing = true; revealedDbPasswordSecretId = secret.Id;
+        try { dbCredValues[secret.Id] = await VaultService.GetSecretValueByIdAsync(secret.Id); }
+        finally { dbPasswordRevealing = false; }
+    }
+
+    private RenderFragment DbTypeBadge(DatabaseBinding binding)
+    {
+        if (binding.CnpgDatabaseId.HasValue)
+            return @<span class="badge bg-primary-subtle text-primary border border-primary-subtle"><i class="bi bi-database me-1"></i>PostgreSQL</span>;
+        if (binding.MongoDatabaseId.HasValue)
+            return @<span class="badge bg-success-subtle text-success border border-success-subtle"><i class="bi bi-database me-1"></i>MongoDB</span>;
+        if (binding.RegisteredPostgresDatabaseId.HasValue)
+            return @<span class="badge bg-info-subtle text-info border border-info-subtle"><i class="bi bi-database me-1"></i>Postgres (ext)</span>;
+        return @<span class="badge bg-secondary">Unknown</span>;
+    }
+
+    private static string DbDisplayName(DatabaseBinding binding)
+    {
+        if (binding.CnpgDatabase is not null) return binding.CnpgDatabase.Name;
+        if (binding.MongoDatabase is not null) return binding.MongoDatabase.Name;
+        if (binding.RegisteredPostgresDatabase is not null) return binding.RegisteredPostgresDatabase.Name;
+        return "—";
+    }
+
+    // ── App-level messaging actions ───────────────────────────────────
+
+    private async Task AddMessagingBinding()
+    {
+        if (newMsgDeploymentId == Guid.Empty || newMsgClusterId == Guid.Empty) return;
+        msgAttachError = null;
+        try
+        {
+            await RabbitMQService.CreateMessagingBindingAsync(
+                TenantId, newMsgClusterId, newMsgDeploymentId,
+                newMsgVhost.Trim(),
+                string.IsNullOrWhiteSpace(newMsgQueueName) ? null : newMsgQueueName.Trim(),
+                string.IsNullOrWhiteSpace(newMsgExchangeName) ? null : newMsgExchangeName.Trim(),
+                newMsgSecretName.Trim());
+            showMsgAttachForm = false;
+            newMsgDeploymentId = Guid.Empty; newMsgClusterId = Guid.Empty;
+            newMsgVhost = "/"; newMsgSecretName = ""; newMsgQueueName = ""; newMsgExchangeName = "";
+            await LoadAppMessagingBindings();
+        }
+        catch (Exception ex) { msgAttachError = ex.Message; }
+    }
+
+    private async Task RemoveMessagingBinding(Guid id)
+    {
+        confirmDetachMsgId = null;
+        try
+        {
+            await RabbitMQService.DeleteMessagingBindingAsync(TenantId, id);
+            await LoadAppMessagingBindings();
+        }
+        catch { }
+    }
+
+    private async Task SyncMessagingBinding(MessagingBinding binding)
+    {
+        syncingBindingIds.Add(binding.Id);
+        bindingSyncErrors.Remove(binding.Id);
+        try
+        {
+            await RabbitMQService.SyncMessagingBindingAsync(TenantId, binding.Id);
+            await LoadAppMessagingBindings();
+        }
+        catch (Exception ex) { bindingSyncErrors[binding.Id] = ex.Message; }
+        finally { syncingBindingIds.Remove(binding.Id); }
+    }
+
+    // ── App-level cache actions ────────────────────────────────────────
+
+    private async Task AddCacheBindingAppLevel()
+    {
+        if (newCacheAttachDeploymentId == Guid.Empty || newCacheBindingClusterId == Guid.Empty) return;
+        cacheBindingError = null;
+        try
+        {
+            await RedisService.CreateCacheBindingAsync(TenantId, newCacheBindingClusterId, newCacheAttachDeploymentId, newCacheBindingSecretName.Trim());
+            showCacheAttachForm = false; newCacheAttachDeploymentId = Guid.Empty; newCacheBindingClusterId = Guid.Empty; newCacheBindingSecretName = "redis-cache";
+            await LoadAppCacheBindings();
+        }
+        catch (Exception ex) { cacheBindingError = $"Failed to attach Redis: {ex.Message}"; }
+    }
+
+    private async Task RemoveCacheBindingAppLevel(Guid id)
+    {
+        confirmRemoveCacheBindingId = null; cacheBindingError = null;
+        try
+        {
+            await RedisService.DeleteCacheBindingAsync(TenantId, id);
+            await LoadAppCacheBindings();
+        }
+        catch (Exception ex) { cacheBindingError = $"Failed to detach: {ex.Message}"; }
+    }
+
+    private async Task SyncCacheBinding(CacheBinding binding)
+    {
+        syncingBindingIds.Add(binding.Id);
+        bindingSyncErrors.Remove(binding.Id);
+        try
+        {
+            await RedisService.SyncCacheBindingAsync(TenantId, binding.Id);
+            await LoadAppCacheBindings();
+        }
+        catch (Exception ex) { bindingSyncErrors[binding.Id] = ex.Message; }
+        finally { syncingBindingIds.Remove(binding.Id); }
+    }
+
+    // ── App-level storage actions ─────────────────────────────────────
+
+    private async Task AddStorageBinding()
+    {
+        storageBindingError = null; addingStorageBinding = true;
+        try
+        {
+            await StorageService.BindStorageToDeploymentAsync(newStorageLinkId, newStorageDeploymentId, newStorageSecretName.Trim());
+            newStorageDeploymentId = Guid.Empty; newStorageLinkId = Guid.Empty; newStorageSecretName = "";
+            await LoadAppStorageBindings();
+        }
+        catch (Exception ex) { storageBindingError = ex.Message; }
+        finally { addingStorageBinding = false; }
+    }
+
+    private async Task UnbindStorage(Guid bindingId)
+    {
+        confirmUnbindStorageId = null;
+        storageBindingSyncErrors.Remove(bindingId);
+        await StorageService.UnbindStorageAsync(bindingId);
+        await LoadAppStorageBindings();
+    }
+
+    // ── Metrics ───────────────────────────────────────────────────
+
+    private async Task OpenDeploymentMetricsTab()
+    {
+        deploymentSection = "deployment-metrics";
+        if (selectedDeployment is null) return;
+        deploymentMetricsLoading = true; deploymentMetricsError = null; deploymentMetrics = null; StateHasChanged();
+        KubernetesOperationResult<DeploymentMetricsSummary> result =
+            await PrometheusService.GetDeploymentMetricsAsync(selectedDeployment.Id);
+        if (result.IsSuccess) deploymentMetrics = result.Data;
+        else deploymentMetricsError = result.Error;
+        deploymentMetricsLoading = false;
+    }
+
+    private async Task OpenMetricsSection()
+    {
+        section = "metrics";
+        envMetricsLoading = true; envMetricsError = null; envMetrics = null; StateHasChanged();
+        KubernetesOperationResult<DeploymentMetricsSummary> result =
+            await PrometheusService.GetAppMetricsAsync(App.Id);
+        if (result.IsSuccess) envMetrics = result.Data;
+        else envMetricsError = result.Error;
+        envMetricsLoading = false;
+    }
+
+    // ── Activity ─────────────────────────────────────────────────
+
+    private async Task OpenActivityTab()
+    {
+        deploymentSection = "activity";
+        if (selectedDeployment is null) return;
+        activityLoading = true; deploymentAuditEvents = null; StateHasChanged();
+        deploymentAuditEvents = await AuditService.GetDeploymentEventsAsync(selectedDeployment.Id);
+        activityLoading = false;
+    }
+
+    // ── Git Access ────────────────────────────────────────────────
+
+    private async Task SwitchToGitAccess()
+    {
+        section = "git-access";
+        if (gitRepoPolicies is null)
+            gitRepoPolicies = await CustomerGitService.GetRepoPoliciesAsync(App.CustomerId, Environment.Id);
+        if (gitCredentials is null)
+        {
+            gitCredentials = await CustomerGitService.GetCredentialsAsync(App.CustomerId, Environment.Id);
+            foreach (CustomerGitCredential c in gitCredentials)
+                credSecretValues.TryAdd(c.Id, "");
+        }
+    }
+
+    private async Task AddRepoPolicy()
+    {
+        repoPolicyError = null;
+        try
+        {
+            await CustomerGitService.AddRepoPolicyAsync(App.CustomerId, Environment.Id, newRepoPolicyPattern.Trim());
+            newRepoPolicyPattern = "";
+            gitRepoPolicies = await CustomerGitService.GetRepoPoliciesAsync(App.CustomerId, Environment.Id);
+        }
+        catch (Microsoft.EntityFrameworkCore.DbUpdateException)
+        {
+            repoPolicyError = "That URL pattern already exists for this customer in this environment.";
+        }
+    }
+
+    private async Task DeleteRepoPolicy(Guid policyId)
+    {
+        confirmDeletePolicyId = null;
+        await CustomerGitService.DeleteRepoPolicyAsync(App.CustomerId, policyId);
+        gitRepoPolicies = await CustomerGitService.GetRepoPoliciesAsync(App.CustomerId, Environment.Id);
+    }
+
+    private async Task AddGitCredential()
+    {
+        credentialError = null;
+        credentialSuccess = null;
+        try
+        {
+            await CustomerGitService.CreateCredentialAsync(
+                App.CustomerId, Environment.Id, TenantId,
+                newCredName.Trim(), newCredAuthType,
+                newCredAuthType == GitAuthType.HttpsPassword ? newCredUsername : null,
+                string.IsNullOrWhiteSpace(newCredUrlPattern) ? null : newCredUrlPattern.Trim());
+            newCredName = "";
+            newCredAuthType = GitAuthType.HttpsPat;
+            newCredUsername = "";
+            newCredUrlPattern = "";
+            gitCredentials = await CustomerGitService.GetCredentialsAsync(App.CustomerId, Environment.Id);
+            foreach (CustomerGitCredential c in gitCredentials)
+                credSecretValues.TryAdd(c.Id, "");
+            credentialSuccess = "Credential added.";
+        }
+        catch (Microsoft.EntityFrameworkCore.DbUpdateException)
+        {
+            credentialError = "A credential with that name already exists for this customer in this environment.";
+        }
+    }
+
+    private async Task DeleteGitCredential(Guid credentialId)
+    {
+        confirmDeleteCredentialId = null;
+        credentialError = null;
+        await CustomerGitService.DeleteCredentialAsync(App.CustomerId, credentialId);
+        credSecretValues.Remove(credentialId);
+        credSaveMessages.Remove(credentialId);
+        credSaveOk.Remove(credentialId);
+        gitCredentials = await CustomerGitService.GetCredentialsAsync(App.CustomerId, Environment.Id);
+    }
+
+    private async Task SaveCredentialSecret(CustomerGitCredential cred)
+    {
+        credSaveMessages[cred.Id] = null;
+        if (!credSecretValues.TryGetValue(cred.Id, out string? value) || string.IsNullOrWhiteSpace(value))
+        {
+            credSaveMessages[cred.Id] = "Value cannot be empty.";
+            credSaveOk[cred.Id] = false;
+            return;
+        }
+        try
+        {
+            switch (cred.AuthType)
+            {
+                case GitAuthType.HttpsPat:     await CustomerGitService.SetPatAsync(TenantId, cred.Id, value); break;
+                case GitAuthType.HttpsPassword: await CustomerGitService.SetPasswordAsync(TenantId, cred.Id, value); break;
+                case GitAuthType.SshKey:       await CustomerGitService.SetSshKeyAsync(TenantId, cred.Id, value); break;
+            }
+            credSecretValues[cred.Id] = "";
+            credSaveMessages[cred.Id] = "Saved.";
+            credSaveOk[cred.Id] = true;
+        }
+        catch (Exception ex)
+        {
+            credSaveMessages[cred.Id] = ex.Message;
+            credSaveOk[cred.Id] = false;
+        }
+    }
+
+    // ── Badge helpers ─────────────────────────────────────────────
+
+    private RenderFragment GetTypeBadge(DeploymentType type) => type switch
+    {
+        DeploymentType.Manual    => @<span class="badge bg-info">Manual</span>,
+        DeploymentType.Yaml      => @<span class="badge bg-warning text-dark">YAML</span>,
+        DeploymentType.HelmChart => @<span class="badge bg-purple text-white" style="background-color: #6f42c1 !important;">Helm</span>,
+        DeploymentType.GitYaml   => @<span class="badge bg-success"><i class="bi bi-git me-1"></i>Git YAML</span>,
+        DeploymentType.GitHelm   => @<span class="badge bg-success"><i class="bi bi-git me-1"></i>Git Helm</span>,
+        _                        => @<span class="badge bg-secondary">Git</span>
+    };
+
+    private RenderFragment GetSyncBadge(SyncStatus status) => status switch
+    {
+        SyncStatus.Synced    => @<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Synced</span>,
+        SyncStatus.OutOfSync => @<span class="badge bg-warning text-dark"><i class="bi bi-exclamation-circle me-1"></i>OutOfSync</span>,
+        SyncStatus.Syncing   => @<span class="badge bg-info"><i class="bi bi-arrow-repeat me-1"></i>Syncing</span>,
+        SyncStatus.Failed    => @<span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>,
+        _                    => @<span class="badge bg-secondary">Unknown</span>
+    };
+
+    private RenderFragment GetHealthBadge(HealthStatus status) => status switch
+    {
+        HealthStatus.Healthy     => @<span class="badge bg-success"><i class="bi bi-heart-fill me-1"></i>Healthy</span>,
+        HealthStatus.Progressing => @<span class="badge bg-info"><i class="bi bi-hourglass-split me-1"></i>Progressing</span>,
+        HealthStatus.Degraded    => @<span class="badge bg-warning text-dark"><i class="bi bi-exclamation-triangle me-1"></i>Degraded</span>,
+        HealthStatus.Missing     => @<span class="badge bg-danger"><i class="bi bi-question-circle me-1"></i>Missing</span>,
+        HealthStatus.Suspended   => @<span class="badge bg-secondary"><i class="bi bi-pause-circle me-1"></i>Suspended</span>,
+        _                        => @<span class="badge bg-secondary">Unknown</span>
+    };
+}

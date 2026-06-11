@@ -1,0 +1,1057 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject HarborService HarborService
+@inject TenantService TenantService
+
+<LoadingPanel Loading="@loading" LoadingText="Scanning for Harbor instances…">
+@if (selectedProject is not null && selectedHarbor is not null)
+{
+    @* ── Level 3: Project repositories ── *@
+    <nav class="mb-3">
+        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="BackToProjects">
+            <i class="bi bi-arrow-left me-1"></i>Back to Projects
+        </button>
+    </nav>
+
+    <div class="d-flex align-items-center gap-2 mb-4">
+        <i class="bi bi-folder2-open fs-4 text-primary"></i>
+        <div>
+            <h5 class="mb-0">@selectedProject.Name</h5>
+            <small class="text-muted">
+                @if (selectedProject.Public) { <span class="badge bg-success-subtle text-success border border-success-subtle me-2">Public</span> }
+                else { <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle me-2">Private</span> }
+                @selectedProject.RepoCount repos · @FormatSize(selectedProject.StorageUsedBytes) used
+            </small>
+        </div>
+    </div>
+
+    @if (loadingRepos)
+    {
+        <div class="spinner-border spinner-border-sm text-primary"></div>
+    }
+    else if (repos is not null && repos.Count == 0)
+    {
+        <div class="alert alert-light border text-muted small">
+            <i class="bi bi-inbox me-1"></i>No repositories in this project yet.
+            Push an image to <code>@(selectedHarbor.Config?.RegistryUrl?.TrimEnd('/') ?? "registry")/</code><code>@selectedProject.Name/your-image:tag</code> to get started.
+        </div>
+    }
+    else if (repos is not null)
+    {
+        <div class="list-group">
+            @foreach (HarborRepositoryInfo repo in repos)
+            {
+                string shortName = repo.Name.Contains('/') ? repo.Name[(repo.Name.IndexOf('/') + 1)..] : repo.Name;
+                bool isExpanded = expandedRepo == repo.Name;
+
+                <div class="list-group-item p-0">
+                    <button class="btn w-100 text-start py-2 px-3 d-flex align-items-center justify-content-between"
+                            @onclick="() => ToggleRepo(repo)">
+                        <div class="d-flex align-items-center gap-2">
+                            <i class="bi @(isExpanded ? "bi-chevron-down" : "bi-chevron-right") text-muted small"></i>
+                            <i class="bi bi-box-seam text-primary"></i>
+                            <span class="font-monospace small">@shortName</span>
+                        </div>
+                        <div class="d-flex gap-3 text-muted small">
+                            <span>@repo.ArtifactCount artifacts</span>
+                            <span>@FormatSize(repo.SizeBytes)</span>
+                            @if (repo.UpdatedAt.HasValue)
+                            {
+                                <span>@repo.UpdatedAt.Value.ToString("yyyy-MM-dd")</span>
+                            }
+                        </div>
+                    </button>
+
+                    @if (isExpanded)
+                    {
+                        <div class="border-top bg-light px-3 py-2">
+                            @if (loadingArtifacts)
+                            {
+                                <div class="spinner-border spinner-border-sm text-primary m-2"></div>
+                            }
+                            else if (artifacts is not null && artifacts.Count == 0)
+                            {
+                                <p class="text-muted small mb-0">No artifacts.</p>
+                            }
+                            else if (artifacts is not null)
+                            {
+                                <table class="table table-sm table-borderless mb-0 small">
+                                    <thead>
+                                        <tr class="text-muted">
+                                            <th>Tags</th>
+                                            <th>Digest</th>
+                                            <th>Size</th>
+                                            <th>Pushed</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (HarborArtifactInfo artifact in artifacts)
+                                        {
+                                            <tr>
+                                                <td>
+                                                    @if (artifact.Tags.Count == 0)
+                                                    {
+                                                        <span class="text-muted fst-italic">untagged</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        @foreach (string tag in artifact.Tags)
+                                                        {
+                                                            <span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">@tag</span>
+                                                        }
+                                                    }
+                                                </td>
+                                                <td class="font-monospace text-muted">@artifact.Digest[..19]…</td>
+                                                <td>@FormatSize(artifact.SizeBytes)</td>
+                                                <td>@artifact.PushedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    }
+    @if (repoError is not null)
+    {
+        <div class="alert alert-danger small mt-2">@repoError</div>
+    }
+}
+else if (selectedHarbor is not null)
+{
+    @* ── Level 2: Harbor instance detail ── *@
+    <nav class="mb-3">
+        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="BackToList">
+            <i class="bi bi-arrow-left me-1"></i>Back to Harbor instances
+        </button>
+    </nav>
+
+    <div class="d-flex align-items-center justify-content-between mb-3">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-archive fs-4 text-primary"></i>
+            <div>
+                <h5 class="mb-0">@selectedHarbor.DisplayName</h5>
+                <small class="text-muted">
+                    @if (selectedHarbor.ClusterDisplayName is not null)
+                    {
+                        <span><i class="bi bi-hdd-rack me-1"></i>@selectedHarbor.ClusterDisplayName</span>
+                    }
+                    @if (selectedHarbor.Config?.RegistryUrl is not null)
+                    {
+                        <span class="ms-2"><i class="bi bi-link-45deg me-1"></i><code>@selectedHarbor.Config.RegistryUrl</code></span>
+                    }
+                </small>
+            </div>
+        </div>
+
+        @if (!selectedHarbor.IsConfigured)
+        {
+            <span class="badge bg-warning-subtle text-warning border border-warning-subtle">Not configured</span>
+        }
+        else
+        {
+            <span class="badge bg-success-subtle text-success border border-success-subtle">
+                <i class="bi bi-check-circle me-1"></i>Configured
+            </span>
+        }
+    </div>
+
+    @if (!selectedHarbor.IsConfigured)
+    {
+        <div class="alert alert-warning small">
+            <i class="bi bi-exclamation-triangle me-2"></i>
+            This Harbor instance has no admin credentials configured. Configure it from the
+            <strong>Components</strong> tab on the cluster detail page.
+        </div>
+    }
+    else
+    {
+        <ul class="nav nav-tabs mb-3 flex-wrap">
+            @foreach (string tab in new[] { "projects", "robots", "info" })
+            {
+                string label = tab switch
+                {
+                    "projects" => "Projects",
+                    "robots" => "Robot Accounts",
+                    "info" => "System Info",
+                    _ => tab
+                };
+                <li class="nav-item">
+                    <button class="nav-link @(instanceTab == tab ? "active" : "")"
+                            @onclick="() => SwitchTab(tab)">@label</button>
+                </li>
+            }
+        </ul>
+
+        @* ── Projects tab ── *@
+        @if (instanceTab == "projects")
+        {
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="text-muted small">@(projects?.Count ?? 0) projects</span>
+                <button class="btn btn-sm btn-primary" @onclick="() => showCreateProject = !showCreateProject">
+                    <i class="bi bi-plus-circle me-1"></i>New Project
+                </button>
+            </div>
+
+            @if (showCreateProject)
+            {
+                <div class="card mb-3 border-primary-subtle">
+                    <div class="card-body">
+                        @if (projectError is not null)
+                        {
+                            <div class="alert alert-danger py-2 small">@projectError</div>
+                        }
+                        <div class="row g-2 align-items-end">
+                            <div class="col-md-4">
+                                <label class="form-label form-label-sm">Project name</label>
+                                <input class="form-control form-control-sm font-monospace" placeholder="my-project"
+                                       @bind="newProjectName" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label form-label-sm">Description (optional)</label>
+                                <input class="form-control form-control-sm" placeholder="Description"
+                                       @bind="newProjectDescription" />
+                            </div>
+                            <div class="col-md-2 d-flex align-items-center gap-2 pt-3">
+                                <input type="checkbox" class="form-check-input" id="projPublic" @bind="newProjectPublic" />
+                                <label class="form-check-label small" for="projPublic">Public</label>
+                            </div>
+                        </div>
+                        <div class="mt-2 d-flex gap-2">
+                            <button class="btn btn-sm btn-primary" @onclick="CreateProject" disabled="@savingProject">
+                                @if (savingProject) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => { showCreateProject = false; projectError = null; }">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @if (loadingProjects)
+            {
+                <div class="spinner-border spinner-border-sm text-primary"></div>
+            }
+            else if (projectError is not null && !showCreateProject)
+            {
+                <div class="alert alert-danger small">@projectError</div>
+            }
+            else if (projects is not null)
+            {
+                <div class="list-group">
+                    @foreach (HarborProjectInfo project in projects)
+                    {
+                        HarborProject? tracked = trackedProjects?.FirstOrDefault(p => p.ProjectName == project.Name);
+                        bool showingPortalForm = portalLinkProjectName == project.Name;
+
+                        <div class="list-group-item py-2">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <button class="btn btn-link text-start p-0 text-decoration-none flex-grow-1"
+                                        @onclick="() => OpenProject(project)">
+                                    <div class="d-flex align-items-center gap-2">
+                                        <i class="bi bi-folder2 text-warning"></i>
+                                        <span class="fw-medium">@project.Name</span>
+                                        @if (project.Public)
+                                        {
+                                            <span class="badge bg-success-subtle text-success border border-success-subtle small">Public</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle small">Private</span>
+                                        }
+                                        @if (tracked?.LinkedApp is not null)
+                                        {
+                                            <span class="badge bg-primary-subtle text-primary border border-primary-subtle small">
+                                                <i class="bi bi-link-45deg me-1"></i>@tracked.LinkedApp.Customer.Name / @tracked.LinkedApp.Name
+                                            </span>
+                                        }
+                                    </div>
+                                    <div class="text-muted small mt-1">
+                                        <span><i class="bi bi-box-seam me-1"></i>@project.RepoCount repos</span>
+                                        <span class="ms-2"><i class="bi bi-hdd me-1"></i>@FormatSize(project.StorageUsedBytes)</span>
+                                    </div>
+                                </button>
+
+                                <div class="d-flex gap-1 align-items-start ms-2">
+                                    @if (confirmDeleteProject == project.Name)
+                                    {
+                                        <span class="text-danger small me-1 mt-1">Delete?</span>
+                                        <button class="btn btn-sm btn-danger" @onclick="() => DeleteProject(project.Name)">Yes</button>
+                                        <button class="btn btn-sm btn-outline-secondary"
+                                                @onclick="() => confirmDeleteProject = null">Cancel</button>
+                                    }
+                                    else
+                                    {
+                                        @if (tracked?.LinkedApp is not null)
+                                        {
+                                            <button class="btn btn-sm btn-outline-secondary"
+                                                    @onclick="() => UnlinkProject(tracked.Id)"
+                                                    title="Unlink from portal app">
+                                                <i class="bi bi-link-45deg me-1"></i>Unlink
+                                            </button>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-outline-primary"
+                                                    @onclick="() => ShowPortalLinkForm(project.Name)"
+                                                    title="Link to customer app for portal access">
+                                                <i class="bi bi-people me-1"></i>Link to app
+                                            </button>
+                                        }
+                                        <button class="btn btn-sm btn-outline-danger"
+                                                @onclick="() => confirmDeleteProject = project.Name"
+                                                title="Delete project">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    }
+                                </div>
+                            </div>
+
+                            @if (showingPortalForm)
+                            {
+                                <div class="mt-2 p-2 bg-light rounded border">
+                                    @if (portalLinkError is not null)
+                                    {
+                                        <div class="alert alert-danger py-1 small mb-2">@portalLinkError</div>
+                                    }
+                                    <div class="d-flex gap-2 align-items-center flex-wrap">
+                                        <select class="form-select form-select-sm" style="max-width:300px" @bind="portalLinkAppId">
+                                            <option value="@Guid.Empty">Select app…</option>
+                                            @if (allApps is not null)
+                                            {
+                                                @foreach (Data.App app in allApps)
+                                                {
+                                                    <option value="@app.Id">@app.Customer.Name / @app.Name</option>
+                                                }
+                                            }
+                                        </select>
+                                        <button class="btn btn-sm btn-primary"
+                                                @onclick="() => LinkProjectToApp(project.Name)"
+                                                disabled="@(savingPortalLink || portalLinkAppId == Guid.Empty)">
+                                            @if (savingPortalLink) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            Link
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary"
+                                                @onclick="() => { portalLinkProjectName = null; portalLinkError = null; }">Cancel</button>
+                                    </div>
+                                    <div class="text-muted small mt-1">
+                                        The customer will see a <strong>Registry</strong> button in their portal for this app and can browse repositories and manage robot accounts.
+                                    </div>
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+        }
+
+        @* ── Robot Accounts tab ── *@
+        @if (instanceTab == "robots")
+        {
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="text-muted small">@(robots?.Count ?? 0) robot accounts</span>
+                <button class="btn btn-sm btn-primary" @onclick="() => showCreateRobot = !showCreateRobot">
+                    <i class="bi bi-robot me-1"></i>New Robot
+                </button>
+            </div>
+
+            @if (showCreateRobot)
+            {
+                <div class="card mb-3 border-primary-subtle">
+                    <div class="card-body">
+                        @if (robotError is not null)
+                        {
+                            <div class="alert alert-danger py-2 small">@robotError</div>
+                        }
+                        @if (newRobotSecret is not null)
+                        {
+                            <div class="alert alert-success py-2">
+                                <strong><i class="bi bi-key me-1"></i>Robot created!</strong> Copy the secret now — it will not be shown again.
+                                <div class="mt-2 font-monospace small bg-white border rounded p-2 user-select-all">@newRobotSecret</div>
+                                <div class="mt-2 text-muted small">The secret is also stored in Vault as <code>harbor-robot-@newRobotName</code>.</div>
+                                <button class="btn btn-sm btn-outline-secondary mt-2"
+                                        @onclick="() => { showCreateRobot = false; newRobotSecret = null; }">Close</button>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="row g-2">
+                                <div class="col-md-4">
+                                    <label class="form-label form-label-sm">Robot name</label>
+                                    <input class="form-control form-control-sm font-monospace" placeholder="ci-runner"
+                                           @bind="newRobotName" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label form-label-sm">Description (optional)</label>
+                                    <input class="form-control form-control-sm" placeholder="Description"
+                                           @bind="newRobotDescription" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label form-label-sm">Scope</label>
+                                    <select class="form-select form-select-sm" @bind="newRobotScope">
+                                        <option value="system">System-wide</option>
+                                        <option value="project">Specific project</option>
+                                    </select>
+                                </div>
+                                @if (newRobotScope == "project")
+                                {
+                                    <div class="col-md-4">
+                                        <label class="form-label form-label-sm">Project</label>
+                                        <select class="form-select form-select-sm" @bind="newRobotProject">
+                                            <option value="">Select project…</option>
+                                            @if (projects is not null)
+                                            {
+                                                @foreach (HarborProjectInfo p in projects)
+                                                {
+                                                    <option value="@p.Name">@p.Name</option>
+                                                }
+                                            }
+                                        </select>
+                                    </div>
+                                }
+                                <div class="col-12 d-flex gap-3 align-items-center">
+                                    <div class="form-check">
+                                        <input type="checkbox" class="form-check-input" id="robotPull" @bind="newRobotCanPull" />
+                                        <label class="form-check-label small" for="robotPull">Pull</label>
+                                    </div>
+                                    <div class="form-check">
+                                        <input type="checkbox" class="form-check-input" id="robotPush" @bind="newRobotCanPush" />
+                                        <label class="form-check-label small" for="robotPush">Push</label>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mt-2 d-flex gap-2">
+                                <button class="btn btn-sm btn-primary" @onclick="CreateRobot" disabled="@savingRobot">
+                                    @if (savingRobot) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Create
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary"
+                                        @onclick="() => { showCreateRobot = false; robotError = null; }">Cancel</button>
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+
+            @if (loadingRobots)
+            {
+                <div class="spinner-border spinner-border-sm text-primary"></div>
+            }
+            else if (robotListError is not null)
+            {
+                <div class="alert alert-danger small">@robotListError</div>
+            }
+            else if (robots is not null)
+            {
+                @if (robots.Count == 0)
+                {
+                    <p class="text-muted small">No robot accounts yet.</p>
+                }
+                else
+                {
+                    <div class="list-group">
+                        @foreach (HarborRobotInfo robot in robots)
+                        {
+                            <div class="list-group-item py-2">
+                                <div class="d-flex justify-content-between align-items-start">
+                                    <div>
+                                        <div class="d-flex align-items-center gap-2">
+                                            <i class="bi bi-robot text-primary"></i>
+                                            <span class="font-monospace small fw-medium">@robot.Name</span>
+                                            @if (robot.Disabled)
+                                            {
+                                                <span class="badge bg-danger-subtle text-danger border border-danger-subtle small">Disabled</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-success-subtle text-success border border-success-subtle small">Active</span>
+                                            }
+                                        </div>
+                                        @if (!string.IsNullOrWhiteSpace(robot.Description))
+                                        {
+                                            <div class="text-muted small mt-1">@robot.Description</div>
+                                        }
+                                        <div class="text-muted small mt-1">
+                                            Created @robot.CreatedAt.ToString("yyyy-MM-dd")
+                                            @if (robot.ExpiresAt == -1)
+                                            {
+                                                <span class="ms-2">· Never expires</span>
+                                            }
+                                            else
+                                            {
+                                                DateTime expiry = DateTimeOffset.FromUnixTimeSeconds(robot.ExpiresAt).UtcDateTime;
+                                                <span class="ms-2">· Expires @expiry.ToString("yyyy-MM-dd")</span>
+                                            }
+                                        </div>
+                                    </div>
+
+                                    @if (confirmDeleteRobot == robot.Id)
+                                    {
+                                        <div class="d-flex gap-1 align-items-center">
+                                            <span class="text-danger small me-2">Delete?</span>
+                                            <button class="btn btn-sm btn-danger" @onclick="() => DeleteRobot(robot.Id)">Yes</button>
+                                            <button class="btn btn-sm btn-outline-secondary"
+                                                    @onclick="() => confirmDeleteRobot = null">Cancel</button>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <button class="btn btn-sm btn-outline-danger"
+                                                @onclick="() => confirmDeleteRobot = robot.Id"
+                                                title="Delete robot">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+            }
+        }
+
+        @* ── System Info tab ── *@
+        @if (instanceTab == "info")
+        {
+            @if (loadingInfo)
+            {
+                <div class="spinner-border spinner-border-sm text-primary"></div>
+            }
+            else if (infoError is not null)
+            {
+                <div class="alert alert-danger small">@infoError</div>
+            }
+            else if (systemInfo is not null)
+            {
+                <div class="card border-0 bg-light">
+                    <div class="card-body">
+                        <dl class="row mb-0 small">
+                            <dt class="col-sm-3 text-muted">Harbor Version</dt>
+                            <dd class="col-sm-9 font-monospace">@(systemInfo.HarborVersion ?? "—")</dd>
+
+                            <dt class="col-sm-3 text-muted">Registry URL</dt>
+                            <dd class="col-sm-9">
+                                @if (systemInfo.RegistryUrl is not null)
+                                {
+                                    <code>@systemInfo.RegistryUrl</code>
+                                }
+                                else
+                                {
+                                    <span>—</span>
+                                }
+                            </dd>
+
+                            <dt class="col-sm-3 text-muted">Auth Mode</dt>
+                            <dd class="col-sm-9">@(systemInfo.AuthMode ?? "—")</dd>
+
+                            <dt class="col-sm-3 text-muted">Trivy Scanner</dt>
+                            <dd class="col-sm-9">
+                                @if (systemInfo.WithTrivy)
+                                {
+                                    <span class="badge bg-success-subtle text-success border border-success-subtle">Enabled</span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">Disabled</span>
+                                }
+                            </dd>
+                        </dl>
+                    </div>
+                </div>
+
+                @if (selectedHarbor.Config?.RegistryUrl is not null)
+                {
+                    <div class="mt-3">
+                        <h6 class="text-muted mb-2">Quick start</h6>
+                        <div class="bg-dark text-white rounded p-3 font-monospace small">
+                            <div class="text-success mb-1"># Login</div>
+                            <div>docker login @selectedHarbor.Config.RegistryUrl.TrimEnd('/')</div>
+                            <div class="text-success mt-2 mb-1"># Pull an image</div>
+                            <div>docker pull @selectedHarbor.Config.RegistryUrl.TrimEnd('/')/<span class="text-warning">project/image:tag</span></div>
+                            <div class="text-success mt-2 mb-1"># Add as Helm repo</div>
+                            <div>helm repo add <span class="text-warning">my-harbor</span> oci://@selectedHarbor.Config.RegistryUrl.TrimEnd('/')/<span class="text-warning">project</span></div>
+                        </div>
+                    </div>
+                }
+            }
+        }
+    }
+}
+else
+{
+    @* ── Level 1: List of Harbor instances ── *@
+    @if (harborInstances is null || harborInstances.Count == 0)
+    {
+        <div class="alert alert-light border text-muted">
+            <i class="bi bi-archive me-2"></i>
+            No Harbor instances found. Install Harbor from the Components tab on a cluster.
+        </div>
+    }
+    else
+    {
+        <div class="row g-3">
+            @foreach (DetectedHarbor harbor in harborInstances)
+            {
+                <div class="col-md-6">
+                    <div class="card h-100 @(harbor.IsConfigured ? "" : "border-warning-subtle")"
+                         style="cursor: pointer" @onclick="() => SelectHarbor(harbor)">
+                        <div class="card-body">
+                            <div class="d-flex align-items-start justify-content-between">
+                                <div class="d-flex align-items-center gap-2">
+                                    <i class="bi bi-archive fs-4 text-primary"></i>
+                                    <div>
+                                        <div class="fw-medium">@harbor.DisplayName</div>
+                                        @if (harbor.ClusterDisplayName is not null)
+                                        {
+                                            <div class="text-muted small">
+                                                <i class="bi bi-hdd-rack me-1"></i>@harbor.ClusterDisplayName
+                                            </div>
+                                        }
+                                    </div>
+                                </div>
+                                @if (harbor.IsConfigured)
+                                {
+                                    <span class="badge bg-success-subtle text-success border border-success-subtle small">
+                                        <i class="bi bi-check-circle me-1"></i>Ready
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span class="badge bg-warning-subtle text-warning border border-warning-subtle small">
+                                        <i class="bi bi-exclamation-triangle me-1"></i>Not configured
+                                    </span>
+                                }
+                            </div>
+                            @if (harbor.Config?.RegistryUrl is not null)
+                            {
+                                <div class="mt-2 text-muted small font-monospace">@harbor.Config.RegistryUrl</div>
+                            }
+                        </div>
+                        <div class="card-footer bg-transparent border-top-0 text-end">
+                            <small class="text-muted">Click to manage <i class="bi bi-arrow-right ms-1"></i></small>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private List<DetectedHarbor>? harborInstances;
+    private DetectedHarbor? selectedHarbor;
+    private string instanceTab = "projects";
+
+    // Projects
+    private List<HarborProjectInfo>? projects;
+    private bool loadingProjects;
+    private bool showCreateProject;
+    private bool savingProject;
+    private string newProjectName = "";
+    private string newProjectDescription = "";
+    private bool newProjectPublic;
+    private string? projectError;
+    private string? confirmDeleteProject;
+
+    // Repositories (level 3)
+    private HarborProjectInfo? selectedProject;
+    private List<HarborRepositoryInfo>? repos;
+    private bool loadingRepos;
+    private string? expandedRepo;
+    private List<HarborArtifactInfo>? artifacts;
+    private bool loadingArtifacts;
+    private string? repoError;
+
+    // Robots
+    private List<HarborRobotInfo>? robots;
+    private bool loadingRobots;
+    private bool showCreateRobot;
+    private bool savingRobot;
+    private string newRobotName = "";
+    private string newRobotDescription = "";
+    private string newRobotScope = "system";
+    private string newRobotProject = "";
+    private bool newRobotCanPull = true;
+    private bool newRobotCanPush;
+    private string? newRobotSecret;
+    private string? robotError;
+    private string? robotListError;
+    private long? confirmDeleteRobot;
+
+    // Info
+    private HarborSystemInfo? systemInfo;
+    private bool loadingInfo;
+    private string? infoError;
+
+    // Portal linking
+    private List<HarborProject>? trackedProjects;
+    private List<Data.App>? allApps;
+    private string? portalLinkProjectName;
+    private Guid portalLinkAppId = Guid.Empty;
+    private bool savingPortalLink;
+    private string? portalLinkError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        harborInstances = await HarborService.GetDetectedHarborInstancesAsync(TenantId);
+        loading = false;
+    }
+
+    private async Task SelectHarbor(DetectedHarbor harbor)
+    {
+        selectedHarbor = harbor;
+        instanceTab = "projects";
+        selectedProject = null;
+        trackedProjects = null;
+        portalLinkProjectName = null;
+
+        if (harbor.IsConfigured && harbor.Config is not null)
+        {
+            // Load tracked projects and available apps in parallel.
+            Task<List<HarborProject>> trackedTask = HarborService.GetTrackedProjectsAsync(TenantId, harbor.Config.Id);
+            Task<List<Data.App>> appsTask = TenantService.GetAppsWithCustomersAsync(TenantId);
+            await Task.WhenAll(trackedTask, appsTask);
+            trackedProjects = trackedTask.Result;
+            allApps = appsTask.Result;
+
+            await SwitchTab("projects");
+        }
+    }
+
+    private void BackToList()
+    {
+        selectedHarbor = null;
+        selectedProject = null;
+        projects = null;
+        robots = null;
+        systemInfo = null;
+        trackedProjects = null;
+        allApps = null;
+        portalLinkProjectName = null;
+    }
+
+    private void BackToProjects()
+    {
+        selectedProject = null;
+        repos = null;
+        artifacts = null;
+        expandedRepo = null;
+    }
+
+    private async Task SwitchTab(string tab)
+    {
+        instanceTab = tab;
+        projectError = null;
+        robotError = null;
+        robotListError = null;
+        infoError = null;
+
+        if (tab == "projects")
+        {
+            await LoadProjects();
+        }
+        else if (tab == "robots")
+        {
+            await LoadRobots();
+        }
+        else if (tab == "info")
+        {
+            await LoadInfo();
+        }
+    }
+
+    private async Task LoadProjects()
+    {
+        if (selectedHarbor?.Config is null) return;
+
+        loadingProjects = true;
+        projectError = null;
+        StateHasChanged();
+
+        try
+        {
+            projects = await HarborService.GetProjectsAsync(TenantId, selectedHarbor.Config);
+        }
+        catch (Exception ex)
+        {
+            projectError = ex.Message;
+        }
+        finally
+        {
+            loadingProjects = false;
+        }
+    }
+
+    private async Task LoadRobots()
+    {
+        if (selectedHarbor?.Config is null) return;
+
+        loadingRobots = true;
+        robotListError = null;
+        StateHasChanged();
+
+        try
+        {
+            robots = await HarborService.GetRobotsAsync(TenantId, selectedHarbor.Config);
+        }
+        catch (Exception ex)
+        {
+            robotListError = ex.Message;
+        }
+        finally
+        {
+            loadingRobots = false;
+        }
+    }
+
+    private async Task LoadInfo()
+    {
+        if (selectedHarbor?.Config is null) return;
+
+        loadingInfo = true;
+        infoError = null;
+        StateHasChanged();
+
+        try
+        {
+            systemInfo = await HarborService.GetSystemInfoAsync(TenantId, selectedHarbor.Config);
+        }
+        catch (Exception ex)
+        {
+            infoError = ex.Message;
+        }
+        finally
+        {
+            loadingInfo = false;
+        }
+    }
+
+    private async Task OpenProject(HarborProjectInfo project)
+    {
+        if (selectedHarbor?.Config is null) return;
+
+        selectedProject = project;
+        repos = null;
+        artifacts = null;
+        expandedRepo = null;
+        repoError = null;
+        loadingRepos = true;
+        StateHasChanged();
+
+        try
+        {
+            repos = await HarborService.GetRepositoriesAsync(TenantId, selectedHarbor.Config, project.Name);
+        }
+        catch (Exception ex)
+        {
+            repoError = ex.Message;
+        }
+        finally
+        {
+            loadingRepos = false;
+        }
+    }
+
+    private async Task ToggleRepo(HarborRepositoryInfo repo)
+    {
+        if (selectedHarbor?.Config is null || selectedProject is null) return;
+
+        if (expandedRepo == repo.Name)
+        {
+            expandedRepo = null;
+            artifacts = null;
+            return;
+        }
+
+        expandedRepo = repo.Name;
+        artifacts = null;
+        loadingArtifacts = true;
+        repoError = null;
+        StateHasChanged();
+
+        try
+        {
+            string shortName = repo.Name.Contains('/') ? repo.Name[(repo.Name.IndexOf('/') + 1)..] : repo.Name;
+            artifacts = await HarborService.GetArtifactsAsync(
+                TenantId, selectedHarbor.Config, selectedProject.Name, shortName);
+        }
+        catch (Exception ex)
+        {
+            repoError = ex.Message;
+        }
+        finally
+        {
+            loadingArtifacts = false;
+        }
+    }
+
+    private async Task CreateProject()
+    {
+        if (selectedHarbor?.Config is null || string.IsNullOrWhiteSpace(newProjectName)) return;
+
+        savingProject = true;
+        projectError = null;
+
+        try
+        {
+            await HarborService.CreateProjectAsync(
+                TenantId, selectedHarbor.Config,
+                newProjectName.Trim(), newProjectPublic,
+                string.IsNullOrWhiteSpace(newProjectDescription) ? null : newProjectDescription.Trim());
+
+            projects = await HarborService.GetProjectsAsync(TenantId, selectedHarbor.Config);
+            showCreateProject = false;
+            newProjectName = "";
+            newProjectDescription = "";
+            newProjectPublic = false;
+        }
+        catch (Exception ex)
+        {
+            projectError = ex.Message;
+        }
+        finally
+        {
+            savingProject = false;
+        }
+    }
+
+    private async Task DeleteProject(string projectName)
+    {
+        if (selectedHarbor?.Config is null) return;
+
+        confirmDeleteProject = null;
+        projectError = null;
+
+        try
+        {
+            await HarborService.DeleteProjectAsync(TenantId, selectedHarbor.Config, projectName);
+            projects = await HarborService.GetProjectsAsync(TenantId, selectedHarbor.Config);
+        }
+        catch (Exception ex)
+        {
+            projectError = ex.Message;
+        }
+    }
+
+    private async Task CreateRobot()
+    {
+        if (selectedHarbor?.Config is null || string.IsNullOrWhiteSpace(newRobotName)) return;
+
+        savingRobot = true;
+        robotError = null;
+
+        try
+        {
+            IEnumerable<string>? projectNames = newRobotScope == "project"
+                ? (!string.IsNullOrWhiteSpace(newRobotProject) ? [newRobotProject] : null)
+                : null;
+
+            string secret = await HarborService.CreateRobotAsync(
+                TenantId, selectedHarbor.Config,
+                newRobotName.Trim(),
+                string.IsNullOrWhiteSpace(newRobotDescription) ? null : newRobotDescription.Trim(),
+                projectNames,
+                newRobotCanPush, newRobotCanPull);
+
+            newRobotSecret = secret;
+            robots = await HarborService.GetRobotsAsync(TenantId, selectedHarbor.Config);
+            newRobotDescription = "";
+            newRobotScope = "system";
+            newRobotProject = "";
+            newRobotCanPull = true;
+            newRobotCanPush = false;
+        }
+        catch (Exception ex)
+        {
+            robotError = ex.Message;
+        }
+        finally
+        {
+            savingRobot = false;
+        }
+    }
+
+    private async Task DeleteRobot(long robotId)
+    {
+        if (selectedHarbor?.Config is null) return;
+
+        confirmDeleteRobot = null;
+        robotListError = null;
+
+        try
+        {
+            await HarborService.DeleteRobotAsync(TenantId, selectedHarbor.Config, robotId);
+            robots = await HarborService.GetRobotsAsync(TenantId, selectedHarbor.Config);
+        }
+        catch (Exception ex)
+        {
+            robotListError = ex.Message;
+        }
+    }
+
+    // ── Portal linking ────────────────────────────────────────────────────────
+
+    private void ShowPortalLinkForm(string projectName)
+    {
+        portalLinkProjectName = projectName;
+        portalLinkAppId = Guid.Empty;
+        portalLinkError = null;
+    }
+
+    private async Task LinkProjectToApp(string projectName)
+    {
+        if (selectedHarbor?.Config is null || portalLinkAppId == Guid.Empty) return;
+
+        savingPortalLink = true;
+        portalLinkError = null;
+
+        try
+        {
+            await HarborService.LinkProjectToAppAsync(
+                TenantId, selectedHarbor.Config.Id, projectName, portalLinkAppId);
+
+            trackedProjects = await HarborService.GetTrackedProjectsAsync(TenantId, selectedHarbor.Config.Id);
+            portalLinkProjectName = null;
+        }
+        catch (Exception ex)
+        {
+            portalLinkError = ex.Message;
+        }
+        finally
+        {
+            savingPortalLink = false;
+        }
+    }
+
+    private async Task UnlinkProject(Guid projectId)
+    {
+        if (selectedHarbor?.Config is null) return;
+
+        try
+        {
+            await HarborService.UnlinkProjectFromAppAsync(TenantId, projectId);
+            trackedProjects = await HarborService.GetTrackedProjectsAsync(TenantId, selectedHarbor.Config.Id);
+        }
+        catch (Exception ex)
+        {
+            projectError = ex.Message;
+        }
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes <= 0) return "0 B";
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
+    }
+}

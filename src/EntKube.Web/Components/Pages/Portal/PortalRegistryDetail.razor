@@ -1,0 +1,513 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject HarborService HarborService
+
+<LoadingPanel Loading="@loading" LoadingText="Loading registry…" Error="@loadError">
+@if (!loading && loadError is null)
+{
+    <div class="d-flex align-items-center gap-2 mb-3">
+        <i class="bi bi-archive fs-4 text-primary"></i>
+        <div>
+            <h5 class="mb-0">@Project.ProjectName</h5>
+            @if (Project.HarborComponentConfig?.RegistryUrl is not null)
+            {
+                <small class="text-muted font-monospace">@Project.HarborComponentConfig.RegistryUrl/@Project.ProjectName</small>
+            }
+        </div>
+    </div>
+
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item">
+            <button class="nav-link @(activeTab == "repos" ? "active" : "")" @onclick='() => SwitchTab("repos")'>
+                <i class="bi bi-box-seam me-1"></i>Repositories
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link @(activeTab == "robots" ? "active" : "")" @onclick='() => SwitchTab("robots")'>
+                <i class="bi bi-robot me-1"></i>Robot Accounts
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link @(activeTab == "info" ? "active" : "")" @onclick='() => SwitchTab("info")'>
+                <i class="bi bi-info-circle me-1"></i>Info
+            </button>
+        </li>
+    </ul>
+
+    @* ── Repositories tab ── *@
+    @if (activeTab == "repos")
+    {
+        @if (loadingRepos)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else if (repoError is not null)
+        {
+            <div class="alert alert-danger small">@repoError</div>
+        }
+        else if (repos is not null && repos.Count == 0)
+        {
+            <div class="alert alert-light border text-muted small">
+                <i class="bi bi-inbox me-1"></i>No repositories in this project yet. Push an image to get started.
+                @if (Project.HarborComponentConfig?.RegistryUrl is not null)
+                {
+                    <div class="mt-2 font-monospace">docker push @Project.HarborComponentConfig.RegistryUrl.TrimEnd('/')/@Project.ProjectName/your-image:tag</div>
+                }
+            </div>
+        }
+        else if (repos is not null)
+        {
+            <div class="list-group">
+                @foreach (HarborRepositoryInfo repo in repos)
+                {
+                    string shortName = repo.Name.Contains('/') ? repo.Name[(repo.Name.IndexOf('/') + 1)..] : repo.Name;
+                    bool isExpanded = expandedRepo == repo.Name;
+
+                    <div class="list-group-item p-0">
+                        <button class="btn w-100 text-start py-2 px-3 d-flex align-items-center justify-content-between"
+                                @onclick="() => ToggleRepo(repo)">
+                            <div class="d-flex align-items-center gap-2">
+                                <i class="bi @(isExpanded ? "bi-chevron-down" : "bi-chevron-right") text-muted small"></i>
+                                <i class="bi bi-box-seam text-primary"></i>
+                                <span class="font-monospace small fw-medium">@shortName</span>
+                            </div>
+                            <div class="d-flex gap-3 text-muted small">
+                                <span>@repo.ArtifactCount artifacts</span>
+                                <span>@FormatSize(repo.SizeBytes)</span>
+                                @if (repo.UpdatedAt.HasValue)
+                                {
+                                    <span>@repo.UpdatedAt.Value.ToString("yyyy-MM-dd")</span>
+                                }
+                            </div>
+                        </button>
+
+                        @if (isExpanded)
+                        {
+                            <div class="border-top bg-light px-3 py-2">
+                                @if (loadingArtifacts)
+                                {
+                                    <div class="spinner-border spinner-border-sm text-primary m-2"></div>
+                                }
+                                else if (artifacts is not null && artifacts.Count == 0)
+                                {
+                                    <p class="text-muted small mb-0">No artifacts in this repository.</p>
+                                }
+                                else if (artifacts is not null)
+                                {
+                                    <table class="table table-sm table-borderless mb-0 small">
+                                        <thead>
+                                            <tr class="text-muted">
+                                                <th>Tags</th>
+                                                <th>Digest</th>
+                                                <th>Size</th>
+                                                <th>Pushed</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (HarborArtifactInfo artifact in artifacts)
+                                            {
+                                                <tr>
+                                                    <td>
+                                                        @if (artifact.Tags.Count == 0)
+                                                        {
+                                                            <span class="text-muted fst-italic">untagged</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            @foreach (string tag in artifact.Tags)
+                                                            {
+                                                                <span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">@tag</span>
+                                                            }
+                                                        }
+                                                    </td>
+                                                    <td class="font-monospace text-muted">@artifact.Digest[..19]…</td>
+                                                    <td>@FormatSize(artifact.SizeBytes)</td>
+                                                    <td>@artifact.PushedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        }
+    }
+
+    @* ── Robot Accounts tab ── *@
+    @if (activeTab == "robots")
+    {
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <span class="text-muted small">@(robots?.Count ?? 0) robot accounts for this project</span>
+            @if (AccessRole >= CustomerAccessRole.Admin)
+            {
+                <button class="btn btn-sm btn-primary" @onclick="() => showCreateRobot = !showCreateRobot">
+                    <i class="bi bi-robot me-1"></i>New Robot
+                </button>
+            }
+        </div>
+
+        @if (showCreateRobot && AccessRole >= CustomerAccessRole.Admin)
+        {
+            <div class="card mb-3 border-primary-subtle">
+                <div class="card-body">
+                    @if (robotError is not null)
+                    {
+                        <div class="alert alert-danger py-2 small">@robotError</div>
+                    }
+                    @if (newRobotSecret is not null)
+                    {
+                        <div class="alert alert-success py-2">
+                            <strong><i class="bi bi-key me-1"></i>Robot created!</strong> Copy the secret now — it will not be shown again.
+                            <div class="mt-2 font-monospace small bg-white border rounded p-2 user-select-all">@newRobotSecret</div>
+                            <button class="btn btn-sm btn-outline-secondary mt-2"
+                                    @onclick="() => { showCreateRobot = false; newRobotSecret = null; }">Close</button>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="row g-2">
+                            <div class="col-md-4">
+                                <label class="form-label form-label-sm">Robot name</label>
+                                <input class="form-control form-control-sm font-monospace" placeholder="ci-runner"
+                                       @bind="newRobotName" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label form-label-sm">Description (optional)</label>
+                                <input class="form-control form-control-sm" @bind="newRobotDescription" />
+                            </div>
+                            <div class="col-12 d-flex gap-3 align-items-center">
+                                <div class="form-check">
+                                    <input type="checkbox" class="form-check-input" id="rPull" @bind="newRobotCanPull" />
+                                    <label class="form-check-label small" for="rPull">Pull</label>
+                                </div>
+                                <div class="form-check">
+                                    <input type="checkbox" class="form-check-input" id="rPush" @bind="newRobotCanPush" />
+                                    <label class="form-check-label small" for="rPush">Push</label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="mt-2 d-flex gap-2">
+                            <button class="btn btn-sm btn-primary" @onclick="CreateRobot" disabled="@savingRobot">
+                                @if (savingRobot) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => { showCreateRobot = false; robotError = null; }">Cancel</button>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+
+        @if (loadingRobots)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else if (robotListError is not null)
+        {
+            <div class="alert alert-danger small">@robotListError</div>
+        }
+        else if (robots is not null)
+        {
+            @if (robots.Count == 0)
+            {
+                <p class="text-muted small">No robot accounts yet.</p>
+            }
+            else
+            {
+                <div class="list-group">
+                    @foreach (HarborRobotInfo robot in robots)
+                    {
+                        <div class="list-group-item py-2">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <i class="bi bi-robot text-primary"></i>
+                                        <span class="font-monospace small fw-medium">@robot.Name</span>
+                                        @if (robot.Disabled)
+                                        {
+                                            <span class="badge bg-danger-subtle text-danger border border-danger-subtle small">Disabled</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="badge bg-success-subtle text-success border border-success-subtle small">Active</span>
+                                        }
+                                    </div>
+                                    @if (!string.IsNullOrWhiteSpace(robot.Description))
+                                    {
+                                        <div class="text-muted small mt-1">@robot.Description</div>
+                                    }
+                                    <div class="text-muted small mt-1">
+                                        Created @robot.CreatedAt.ToString("yyyy-MM-dd")
+                                        @if (robot.ExpiresAt == -1)
+                                        {
+                                            <span class="ms-2">· Never expires</span>
+                                        }
+                                        else
+                                        {
+                                            DateTime expiry = DateTimeOffset.FromUnixTimeSeconds(robot.ExpiresAt).UtcDateTime;
+                                            <span class="ms-2">· Expires @expiry.ToString("yyyy-MM-dd")</span>
+                                        }
+                                    </div>
+                                </div>
+
+                                @if (AccessRole >= CustomerAccessRole.Admin)
+                                {
+                                    @if (confirmDeleteRobot == robot.Id)
+                                    {
+                                        <div class="d-flex gap-1 align-items-center">
+                                            <span class="text-danger small me-2">Delete?</span>
+                                            <button class="btn btn-sm btn-danger" @onclick="() => DeleteRobot(robot.Id)">Yes</button>
+                                            <button class="btn btn-sm btn-outline-secondary"
+                                                    @onclick="() => confirmDeleteRobot = null">Cancel</button>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <button class="btn btn-sm btn-outline-danger"
+                                                @onclick="() => confirmDeleteRobot = robot.Id"
+                                                title="Delete robot">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    }
+                                }
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        }
+    }
+
+    @* ── Info tab ── *@
+    @if (activeTab == "info")
+    {
+        <div class="card border-0 bg-light">
+            <div class="card-body">
+                <dl class="row mb-0 small">
+                    <dt class="col-sm-3 text-muted">Project</dt>
+                    <dd class="col-sm-9 font-monospace">@Project.ProjectName</dd>
+
+                    @if (Project.HarborComponentConfig?.RegistryUrl is not null)
+                    {
+                        <dt class="col-sm-3 text-muted">Registry</dt>
+                        <dd class="col-sm-9"><code>@Project.HarborComponentConfig.RegistryUrl</code></dd>
+                    }
+                </dl>
+            </div>
+        </div>
+
+        @if (Project.HarborComponentConfig?.RegistryUrl is not null)
+        {
+            <div class="mt-3">
+                <h6 class="text-muted mb-2">Quick start</h6>
+                <div class="bg-dark text-white rounded p-3 font-monospace small">
+                    <div class="text-success mb-1"># Login</div>
+                    <div>docker login @Project.HarborComponentConfig.RegistryUrl.TrimEnd('/')</div>
+                    <div class="text-success mt-2 mb-1"># Pull an image</div>
+                    <div>docker pull @Project.HarborComponentConfig.RegistryUrl.TrimEnd('/')/@Project.ProjectName/<span class="text-warning">image:tag</span></div>
+                    <div class="text-success mt-2 mb-1"># Push an image</div>
+                    <div>docker tag <span class="text-warning">local-image:tag</span> @Project.HarborComponentConfig.RegistryUrl.TrimEnd('/')/@Project.ProjectName/<span class="text-warning">image:tag</span></div>
+                    <div>docker push @Project.HarborComponentConfig.RegistryUrl.TrimEnd('/')/@Project.ProjectName/<span class="text-warning">image:tag</span></div>
+                </div>
+            </div>
+        }
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public required HarborProject Project { get; set; }
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public CustomerAccessRole AccessRole { get; set; }
+
+    private bool loading = true;
+    private string? loadError;
+    private string activeTab = "repos";
+
+    // Repos
+    private List<HarborRepositoryInfo>? repos;
+    private bool loadingRepos;
+    private string? expandedRepo;
+    private List<HarborArtifactInfo>? artifacts;
+    private bool loadingArtifacts;
+    private string? repoError;
+
+    // Robots
+    private List<HarborRobotInfo>? robots;
+    private bool loadingRobots;
+    private bool showCreateRobot;
+    private bool savingRobot;
+    private string newRobotName = "";
+    private string newRobotDescription = "";
+    private bool newRobotCanPull = true;
+    private bool newRobotCanPush;
+    private string? newRobotSecret;
+    private string? robotError;
+    private string? robotListError;
+    private long? confirmDeleteRobot;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            await LoadRepos();
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task SwitchTab(string tab)
+    {
+        activeTab = tab;
+        repoError = null;
+        robotListError = null;
+        robotError = null;
+
+        if (tab == "repos" && repos is null)
+            await LoadRepos();
+        else if (tab == "robots" && robots is null)
+            await LoadRobots();
+    }
+
+    private async Task LoadRepos()
+    {
+        loadingRepos = true;
+        repoError = null;
+        StateHasChanged();
+
+        try
+        {
+            repos = await HarborService.GetRepositoriesAsync(TenantId, Project.HarborComponentConfig!, Project.ProjectName);
+        }
+        catch (Exception ex)
+        {
+            repoError = ex.Message;
+        }
+        finally
+        {
+            loadingRepos = false;
+        }
+    }
+
+    private async Task LoadRobots()
+    {
+        loadingRobots = true;
+        robotListError = null;
+        StateHasChanged();
+
+        try
+        {
+            List<HarborRobotInfo> all = await HarborService.GetRobotsAsync(TenantId, Project.HarborComponentConfig!);
+            // Filter to robots scoped to this project (robot name contains project name after the $ prefix).
+            string projectPrefix = $"robot${Project.ProjectName}+";
+            robots = all.Where(r => r.Name.StartsWith(projectPrefix, StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+        catch (Exception ex)
+        {
+            robotListError = ex.Message;
+        }
+        finally
+        {
+            loadingRobots = false;
+        }
+    }
+
+    private async Task ToggleRepo(HarborRepositoryInfo repo)
+    {
+        if (expandedRepo == repo.Name)
+        {
+            expandedRepo = null;
+            artifacts = null;
+            return;
+        }
+
+        expandedRepo = repo.Name;
+        artifacts = null;
+        loadingArtifacts = true;
+        repoError = null;
+        StateHasChanged();
+
+        try
+        {
+            string shortName = repo.Name.Contains('/') ? repo.Name[(repo.Name.IndexOf('/') + 1)..] : repo.Name;
+            artifacts = await HarborService.GetArtifactsAsync(
+                TenantId, Project.HarborComponentConfig!, Project.ProjectName, shortName);
+        }
+        catch (Exception ex)
+        {
+            repoError = ex.Message;
+        }
+        finally
+        {
+            loadingArtifacts = false;
+        }
+    }
+
+    private async Task CreateRobot()
+    {
+        if (string.IsNullOrWhiteSpace(newRobotName)) return;
+
+        savingRobot = true;
+        robotError = null;
+
+        try
+        {
+            string secret = await HarborService.CreateRobotAsync(
+                TenantId, Project.HarborComponentConfig!,
+                newRobotName.Trim(),
+                string.IsNullOrWhiteSpace(newRobotDescription) ? null : newRobotDescription.Trim(),
+                [Project.ProjectName],
+                newRobotCanPush, newRobotCanPull);
+
+            newRobotSecret = secret;
+            await LoadRobots();
+            newRobotName = "";
+            newRobotDescription = "";
+            newRobotCanPull = true;
+            newRobotCanPush = false;
+        }
+        catch (Exception ex)
+        {
+            robotError = ex.Message;
+        }
+        finally
+        {
+            savingRobot = false;
+        }
+    }
+
+    private async Task DeleteRobot(long robotId)
+    {
+        confirmDeleteRobot = null;
+        robotListError = null;
+
+        try
+        {
+            await HarborService.DeleteRobotAsync(TenantId, Project.HarborComponentConfig!, robotId);
+            await LoadRobots();
+        }
+        catch (Exception ex)
+        {
+            robotListError = ex.Message;
+        }
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes <= 0) return "0 B";
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
+    }
+}

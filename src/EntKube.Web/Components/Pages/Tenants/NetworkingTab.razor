@@ -1,0 +1,1279 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject VpnService VpnService
+@inject TenantService TenantService
+
+@* ============================================================================
+   Networking Tab — manages site-to-site IPsec tunnels (StrongSwan) and
+   cluster mesh connections (Submariner) for the tenant. Tunnels are
+   tenant-scoped, multi-cluster aware, and upgraded via the standard
+   Helm component flow — no separate ops process needed.
+   ============================================================================ *@
+
+<LoadingPanel Loading="@loading" LoadingText="Loading VPN tunnels…">
+@if (!loading)
+{
+    @* ── Header ── *@
+    <div class="d-flex align-items-center justify-content-between mb-4">
+        <div>
+            <h5 class="mb-0"><i class="bi bi-shield-lock me-2 text-primary"></i>VPN Tunnels</h5>
+            <p class="text-muted small mb-0">
+                Site-to-site IPsec (StrongSwan) and cluster mesh (Submariner). Gateway components are upgraded via the cluster's Components tab.
+            </p>
+        </div>
+        @if (!showAddForm)
+        {
+            <button class="btn btn-primary btn-sm" @onclick="() => showAddForm = true">
+                <i class="bi bi-plus-lg me-1"></i>Add Tunnel
+            </button>
+        }
+    </div>
+
+    @* ── Error banner ── *@
+    @if (errorMessage is not null)
+    {
+        <div class="alert alert-danger alert-dismissible">
+            <i class="bi bi-exclamation-triangle me-2"></i>@errorMessage
+            <button type="button" class="btn-close" @onclick="() => errorMessage = null"></button>
+        </div>
+    }
+
+    @* ── Add Tunnel Wizard ── *@
+    @if (showAddForm)
+    {
+        <div class="card shadow-sm mb-4 border-primary border-opacity-25">
+            <div class="card-header bg-primary bg-opacity-10 d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-plus-circle me-2"></i><strong>New VPN Tunnel</strong> — Step @wizardStep of @(newTunnelType == VpnTunnelType.SiteToSite ? 4 : 3)</span>
+                <button class="btn-close btn-sm" @onclick="CancelAdd"></button>
+            </div>
+            <div class="card-body">
+
+                @* Step 1: Name + Type *@
+                @if (wizardStep == 1)
+                {
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Tunnel Name</label>
+                        <input class="form-control" @bind="newTunnelName" placeholder="e.g. Customer HQ Link" />
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Optional Description</label>
+                        <input class="form-control" @bind="newTunnelDescription" placeholder="What does this tunnel connect?" />
+                    </div>
+                    <label class="form-label fw-semibold">Tunnel Type</label>
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <div class="card h-100 @(newTunnelType == VpnTunnelType.SiteToSite ? "border-primary bg-primary bg-opacity-10" : "") cursor-pointer"
+                                 style="cursor:pointer" @onclick='() => newTunnelType = VpnTunnelType.SiteToSite'>
+                                <div class="card-body">
+                                    <div class="d-flex align-items-center gap-2 mb-2">
+                                        <i class="bi bi-shield-lock fs-4 text-primary"></i>
+                                        <strong>Site-to-Site IPsec</strong>
+                                    </div>
+                                    <p class="small text-muted mb-0">
+                                        Connect this cluster to an external network (customer data centre, cloud VGW).
+                                        Uses <strong>StrongSwan</strong> with IKEv2.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card h-100 @(newTunnelType == VpnTunnelType.ClusterMesh ? "border-primary bg-primary bg-opacity-10" : "") cursor-pointer"
+                                 style="cursor:pointer" @onclick='() => newTunnelType = VpnTunnelType.ClusterMesh'>
+                                <div class="card-body">
+                                    <div class="d-flex align-items-center gap-2 mb-2">
+                                        <i class="bi bi-diagram-3 fs-4 text-primary"></i>
+                                        <strong>Cluster Mesh</strong>
+                                    </div>
+                                    <p class="small text-muted mb-0">
+                                        Connect multiple platform clusters so pods and services can reach each other.
+                                        Uses <strong>Submariner</strong> with IPsec.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
+
+                @* Step 2: Local cluster(s) *@
+                @if (wizardStep == 2)
+                {
+                    @if (newTunnelType == VpnTunnelType.SiteToSite)
+                    {
+                        <div class="mb-3">
+                            <label class="form-label fw-semibold">Gateway Cluster</label>
+                            <p class="text-muted small">The cluster where the StrongSwan pod will be installed.</p>
+                            <select class="form-select" value="@selectedGatewayClusterId"
+                                    @onchange="OnGatewayClusterChanged">
+                                <option value="">— select cluster —</option>
+                                @foreach (KubernetesCluster cluster in availableClusters)
+                                {
+                                    <option value="@cluster.Id">@cluster.Name</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label fw-semibold d-flex align-items-center gap-2">
+                                    Pod CIDR
+                                    @if (detectingCidrs)
+                                    {
+                                        <span class="spinner-border spinner-border-sm text-muted" style="width:0.8rem;height:0.8rem"></span>
+                                        <span class="text-muted small">Detecting...</span>
+                                    }
+                                    else if (podCidrDetected)
+                                    {
+                                        <span class="badge bg-success-subtle text-success border border-success-subtle small">Auto-detected</span>
+                                    }
+                                </label>
+                                <input class="form-control" @bind="gatewayPodCidr" placeholder="e.g. 10.244.0.0/16" />
+                                <div class="form-text">Pod network CIDR — routed through the VPN to the remote site.</div>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label fw-semibold d-flex align-items-center gap-2">
+                                    Service CIDR
+                                    @if (detectingCidrs)
+                                    {
+                                        <span class="spinner-border spinner-border-sm text-muted" style="width:0.8rem;height:0.8rem"></span>
+                                    }
+                                    else if (serviceCidrDetected)
+                                    {
+                                        <span class="badge bg-success-subtle text-success border border-success-subtle small">Auto-detected</span>
+                                    }
+                                </label>
+                                <input class="form-control" @bind="gatewayServiceCidr" placeholder="e.g. 10.96.0.0/12" />
+                                <div class="form-text">Service network CIDR — include if remote side needs to reach cluster services.</div>
+                            </div>
+                        </div>
+                    }
+                    else
+                    {
+                        <p class="text-muted small mb-3">
+                            Select all clusters that will join the mesh.
+                            The broker host stores cluster metadata — it carries no data-plane traffic.
+                        </p>
+                        @foreach (KubernetesCluster cluster in availableClusters)
+                        {
+                            bool selected = meshClusterSelections.ContainsKey(cluster.Id) && meshClusterSelections[cluster.Id].Selected;
+                            <div class="card mb-2 @(selected ? "border-primary" : "")">
+                                <div class="card-body py-2">
+                                    <div class="d-flex align-items-center gap-2 mb-2">
+                                        <input type="checkbox" class="form-check-input" id="cluster-@cluster.Id"
+                                               checked="@selected"
+                                               @onchange="e => ToggleMeshCluster(cluster.Id, (bool)(e.Value ?? false))" />
+                                        <label class="form-check-label fw-semibold" for="cluster-@cluster.Id">@cluster.Name</label>
+                                        @if (selected && meshBrokerClusterId == cluster.Id)
+                                        {
+                                            <span class="badge bg-primary-subtle text-primary border border-primary-subtle small">Broker host</span>
+                                        }
+                                    </div>
+                                    @if (selected)
+                                    {
+                                        <div class="row ps-4">
+                                            <div class="col-md-5 mb-1">
+                                                <input class="form-control form-control-sm"
+                                                       placeholder="Pod CIDR e.g. 10.244.0.0/16"
+                                                       value="@meshClusterSelections[cluster.Id].PodCidr"
+                                                       @onchange="e => SetMeshClusterCidr(cluster.Id, e.Value?.ToString() ?? string.Empty, true)" />
+                                            </div>
+                                            <div class="col-md-5 mb-1">
+                                                <input class="form-control form-control-sm"
+                                                       placeholder="Service CIDR e.g. 10.96.0.0/12"
+                                                       value="@meshClusterSelections[cluster.Id].ServiceCidr"
+                                                       @onchange="e => SetMeshClusterCidr(cluster.Id, e.Value?.ToString() ?? string.Empty, false)" />
+                                            </div>
+                                            <div class="col-md-2">
+                                                @if (meshBrokerClusterId != cluster.Id)
+                                                {
+                                                    <button class="btn btn-outline-secondary btn-sm w-100"
+                                                            @onclick="() => meshBrokerClusterId = cluster.Id"
+                                                            title="Set as broker host">
+                                                        Set broker
+                                                    </button>
+                                                }
+                                            </div>
+                                        </div>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    }
+                }
+
+                @* Step 3 (SiteToSite): Remote endpoint *@
+                @if (wizardStep == 3 && newTunnelType == VpnTunnelType.SiteToSite)
+                {
+                    <p class="text-muted small mb-3">Configure the external site that this tunnel connects to.</p>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Remote Site Name</label>
+                        <input class="form-control" @bind="remoteEndpointName" placeholder="e.g. Customer HQ Frankfurt" />
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Remote Public IP</label>
+                        <input class="form-control" @bind="remotePublicIp" placeholder="e.g. 203.0.113.1" />
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Remote Subnets</label>
+                        <input class="form-control" @bind="remoteSubnets"
+                               placeholder="Comma-separated CIDRs, e.g. 192.168.10.0/24,172.16.0.0/16" />
+                        <div class="form-text">Enter the networks behind the remote gateway.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Pre-Shared Key (PSK)</label>
+                        <input type="password" class="form-control" @bind="remotePsk"
+                               placeholder="Strong random secret, min 32 chars" autocomplete="new-password" />
+                        <div class="form-text">Stored encrypted in the tenant vault.</div>
+                    </div>
+                }
+
+                @* Step 3 (ClusterMesh) or Step 4 (SiteToSite): Security profile *@
+                @if ((wizardStep == 3 && newTunnelType == VpnTunnelType.ClusterMesh) ||
+                     (wizardStep == 4 && newTunnelType == VpnTunnelType.SiteToSite))
+                {
+                    <p class="fw-semibold mb-2">Security Profile</p>
+                    <div class="row g-2 mb-3">
+                        @foreach (SecurityProfile profile in SecurityProfiles)
+                        {
+                            bool active = selectedProfile == profile.Key;
+                            <div class="col-md-4">
+                                <div class="card h-100 @(active ? "border-primary bg-primary bg-opacity-10" : "border")"
+                                     style="cursor:pointer" @onclick="() => ApplyProfile(profile.Key)">
+                                    <div class="card-body py-2 px-3">
+                                        <div class="d-flex align-items-center gap-2 mb-1">
+                                            <i class="bi @profile.Icon @(active ? "text-primary" : "text-muted")"></i>
+                                            <strong class="small">@profile.Name</strong>
+                                            @if (profile.Recommended)
+                                            {
+                                                <span class="badge bg-success-subtle text-success border border-success-subtle small ms-auto">Recommended</span>
+                                            }
+                                        </div>
+                                        <p class="text-muted small mb-1">@profile.Description</p>
+                                        <div class="small font-monospace text-muted" style="font-size:0.7em">
+                                            <div>Phase 1: @profile.IkeProposal</div>
+                                            <div>Phase 2: @profile.EspProposal</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                        <div class="col-md-4">
+                            <div class="card h-100 @(selectedProfile == "custom" ? "border-primary bg-primary bg-opacity-10" : "border")"
+                                 style="cursor:pointer" @onclick='() => selectedProfile = "custom"'>
+                                <div class="card-body py-2 px-3">
+                                    <div class="d-flex align-items-center gap-2 mb-1">
+                                        <i class="bi bi-pencil @(selectedProfile == "custom" ? "text-primary" : "text-muted")"></i>
+                                        <strong class="small">Custom</strong>
+                                    </div>
+                                    <p class="text-muted small mb-0">Manually specify IKE and ESP proposals.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    @if (selectedProfile == "custom")
+                    {
+                        bool p1IsAead = p1Enc.Contains("gcm") || p1Enc == "chacha20poly1305";
+                        bool p2IsAead = p2Enc.Contains("gcm") || p2Enc == "chacha20poly1305";
+
+                        <div class="card border mb-3">
+                            <div class="card-header bg-light small fw-semibold py-1">
+                                Phase 1 — IKE SA (key exchange &amp; authentication)
+                            </div>
+                            <div class="card-body py-2">
+                                <div class="row g-2">
+                                    <div class="col-md-2">
+                                        <label class="form-label small">Version</label>
+                                        <select class="form-select form-select-sm" @bind="ikeVersion">
+                                            <option value="2">IKEv2</option>
+                                            <option value="1">IKEv1 (legacy)</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Encryption</label>
+                                        <select class="form-select form-select-sm" @bind="p1Enc" @bind:after="BuildProposals">
+                                            <optgroup label="AEAD (recommended)">
+                                                <option value="aes256gcm16">AES-256-GCM-128</option>
+                                                <option value="aes128gcm16">AES-128-GCM-128</option>
+                                                <option value="chacha20poly1305">ChaCha20-Poly1305</option>
+                                            </optgroup>
+                                            <optgroup label="CBC (broad compatibility)">
+                                                <option value="aes256">AES-256-CBC</option>
+                                                <option value="aes128">AES-128-CBC</option>
+                                                <option value="3des">3DES (legacy)</option>
+                                            </optgroup>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small">
+                                            @(p1IsAead ? "PRF (pseudo-random function)" : "Integrity / PRF")
+                                        </label>
+                                        <select class="form-select form-select-sm" @bind="p1Integrity" @bind:after="BuildProposals">
+                                            <option value="sha256">SHA-256</option>
+                                            <option value="sha384">SHA-384</option>
+                                            <option value="sha512">SHA-512</option>
+                                            <option value="sha1">SHA-1 (legacy)</option>
+                                        </select>
+                                        @if (p1IsAead)
+                                        {
+                                            <div class="form-text">AEAD provides its own auth; this is the PRF only.</div>
+                                        }
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small">DH Group (key exchange)</label>
+                                        <select class="form-select form-select-sm" @bind="p1Dh" @bind:after="BuildProposals">
+                                            <optgroup label="Elliptic curve (faster)">
+                                                <option value="ecp384">Group 20 — ECP P-384</option>
+                                                <option value="ecp256">Group 19 — ECP P-256</option>
+                                                <option value="curve25519">Group 31 — Curve25519</option>
+                                            </optgroup>
+                                            <optgroup label="MODP (broad compatibility)">
+                                                <option value="modp2048">Group 14 — MODP 2048-bit</option>
+                                                <option value="modp3072">Group 15 — MODP 3072-bit</option>
+                                                <option value="modp4096">Group 16 — MODP 4096-bit</option>
+                                            </optgroup>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="mt-1 small text-muted">
+                                    <i class="bi bi-terminal me-1"></i>Proposal string: <code>@ikeProposal</code>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card border mb-3">
+                            <div class="card-header bg-light small fw-semibold py-1">
+                                Phase 2 — Child SA / ESP (data encryption)
+                            </div>
+                            <div class="card-body py-2">
+                                <div class="row g-2">
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Encryption</label>
+                                        <select class="form-select form-select-sm" @bind="p2Enc" @bind:after="BuildProposals">
+                                            <optgroup label="AEAD (recommended)">
+                                                <option value="aes256gcm16">AES-256-GCM-128</option>
+                                                <option value="aes128gcm16">AES-128-GCM-128</option>
+                                                <option value="chacha20poly1305">ChaCha20-Poly1305</option>
+                                            </optgroup>
+                                            <optgroup label="CBC">
+                                                <option value="aes256">AES-256-CBC</option>
+                                                <option value="aes128">AES-128-CBC</option>
+                                                <option value="3des">3DES (legacy)</option>
+                                            </optgroup>
+                                        </select>
+                                    </div>
+                                    @if (!p2IsAead)
+                                    {
+                                        <div class="col-md-4">
+                                            <label class="form-label small">Integrity (HMAC)</label>
+                                            <select class="form-select form-select-sm" @bind="p2Integrity" @bind:after="BuildProposals">
+                                                <option value="sha256">SHA-256</option>
+                                                <option value="sha384">SHA-384</option>
+                                                <option value="sha512">SHA-512</option>
+                                                <option value="sha1">SHA-1 (legacy)</option>
+                                            </select>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="col-md-4 d-flex align-items-end pb-2">
+                                            <span class="text-muted small"><i class="bi bi-check-circle-fill text-success me-1"></i>AEAD mode — integrity is built in, no separate HMAC needed.</span>
+                                        </div>
+                                    }
+                                    <div class="col-md-4">
+                                        <label class="form-label small">PFS DH Group <span class="text-muted fw-normal">(Perfect Forward Secrecy)</span></label>
+                                        <select class="form-select form-select-sm" @bind="p2Pfs" @bind:after="BuildProposals">
+                                            <option value="">Same as Phase 1 (recommended)</option>
+                                            <option value="none">No PFS</option>
+                                            <optgroup label="Elliptic curve">
+                                                <option value="ecp384">Group 20 — ECP P-384</option>
+                                                <option value="ecp256">Group 19 — ECP P-256</option>
+                                                <option value="curve25519">Group 31 — Curve25519</option>
+                                            </optgroup>
+                                            <optgroup label="MODP">
+                                                <option value="modp2048">Group 14 — MODP 2048-bit</option>
+                                                <option value="modp3072">Group 15 — MODP 3072-bit</option>
+                                                <option value="modp4096">Group 16 — MODP 4096-bit</option>
+                                            </optgroup>
+                                        </select>
+                                        <div class="form-text">PFS generates a fresh DH key for each Child SA rekey.</div>
+                                    </div>
+                                </div>
+                                <div class="mt-1 small text-muted">
+                                    <i class="bi bi-terminal me-1"></i>Proposal string: <code>@espProposal</code>
+                                </div>
+                            </div>
+                        </div>
+                    }
+
+                    <div class="row">
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label small fw-semibold">DPD Delay <span class="text-muted fw-normal">(s)</span></label>
+                            <input type="number" class="form-control form-control-sm" @bind="dpdDelay" />
+                            <div class="form-text">Liveness check interval.</div>
+                        </div>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label small fw-semibold">DPD Timeout <span class="text-muted fw-normal">(s)</span></label>
+                            <input type="number" class="form-control form-control-sm" @bind="dpdTimeout" />
+                            <div class="form-text">Dead peer threshold.</div>
+                        </div>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label small fw-semibold">IKE SA Lifetime <span class="text-muted fw-normal">(s)</span></label>
+                            <input type="number" class="form-control form-control-sm" @bind="ikeLifetime" />
+                            <div class="form-text">Phase 1 rekey interval. Default: 86400 (24h).</div>
+                        </div>
+                        <div class="col-md-3 mb-2">
+                            <label class="form-label small fw-semibold">Child SA Lifetime <span class="text-muted fw-normal">(s)</span></label>
+                            <input type="number" class="form-control form-control-sm" @bind="childLifetime" />
+                            <div class="form-text">Phase 2 / ESP rekey interval. Default: 3600 (1h).</div>
+                        </div>
+                    </div>
+                }
+
+                @* Wizard nav buttons *@
+                <div class="d-flex justify-content-between mt-3">
+                    <button class="btn btn-outline-secondary btn-sm" @onclick="WizardBack" disabled="@(wizardStep == 1)">
+                        <i class="bi bi-arrow-left me-1"></i>Back
+                    </button>
+                    @if ((newTunnelType == VpnTunnelType.SiteToSite && wizardStep < 4) ||
+                         (newTunnelType == VpnTunnelType.ClusterMesh && wizardStep < 3))
+                    {
+                        <button class="btn btn-primary btn-sm" @onclick="WizardNext" disabled="@saving">
+                            Next <i class="bi bi-arrow-right ms-1"></i>
+                        </button>
+                    }
+                    else
+                    {
+                        <button class="btn btn-success btn-sm" @onclick="CreateTunnel" disabled="@saving">
+                            @if (saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            <i class="bi bi-check-lg me-1"></i>Create Tunnel
+                        </button>
+                    }
+                </div>
+            </div>
+        </div>
+    }
+
+    @* ── Tunnel List ── *@
+    @if (tunnels.Count == 0 && !showAddForm)
+    {
+        <div class="text-center py-5 text-muted">
+            <i class="bi bi-shield-lock display-4 d-block mb-3 opacity-25"></i>
+            <p class="mb-1">No VPN tunnels configured.</p>
+            <p class="small">Add a tunnel to connect this tenant to external networks or link your clusters together.</p>
+        </div>
+    }
+    else
+    {
+        @foreach (VpnTunnel tunnel in tunnels)
+        {
+            bool expanded = expandedTunnelId == tunnel.Id;
+            <div class="card shadow-sm mb-3">
+                <div class="card-body py-2">
+                    <div class="d-flex align-items-center justify-content-between"
+                         style="cursor:pointer" @onclick="() => ToggleExpand(tunnel.Id)">
+                        <div class="d-flex align-items-center gap-3">
+                            <i class="bi @(tunnel.TunnelType == VpnTunnelType.SiteToSite ? "bi-shield-lock" : "bi-diagram-3") text-primary fs-5"></i>
+                            <div>
+                                <strong>@tunnel.Name</strong>
+                                @if (!string.IsNullOrWhiteSpace(tunnel.Description))
+                                {
+                                    <span class="text-muted small ms-2">— @tunnel.Description</span>
+                                }
+                                <div class="d-flex gap-2 mt-1">
+                                    @GetTunnelTypeBadge(tunnel.TunnelType)
+                                    @GetStatusBadge(tunnel.Status)
+                                    <span class="badge bg-secondary-subtle text-secondary border small">
+                                        @tunnel.LocalEndpoints.Count cluster@(tunnel.LocalEndpoints.Count != 1 ? "s" : "")
+                                    </span>
+                                    @if (tunnel.TunnelType == VpnTunnelType.SiteToSite)
+                                    {
+                                        <span class="badge bg-secondary-subtle text-secondary border small">
+                                            @tunnel.RemoteEndpoints.Count remote site@(tunnel.RemoteEndpoints.Count != 1 ? "s" : "")
+                                        </span>
+                                    }
+                                </div>
+                            </div>
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                            @if (tunnel.LastStatusCheckAt.HasValue)
+                            {
+                                <span class="text-muted small">Checked @tunnel.LastStatusCheckAt.Value.ToString("HH:mm")</span>
+                            }
+                            <i class="bi @(expanded ? "bi-chevron-up" : "bi-chevron-down") text-muted"></i>
+                        </div>
+                    </div>
+
+                    @* ── Expanded detail ── *@
+                    @if (expanded)
+                    {
+                        <hr class="my-3" />
+
+                        @* Local endpoints *@
+                        <h6 class="text-muted small text-uppercase mb-2">Platform Clusters</h6>
+                        <div class="table-responsive mb-3">
+                            <table class="table table-sm mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Cluster</th>
+                                        <th>Role</th>
+                                        <th>Subnets</th>
+                                        <th>Public IP</th>
+                                        <th>Gateway Component</th>
+                                        <th>Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (VpnLocalEndpoint ep in tunnel.LocalEndpoints)
+                                    {
+                                        <tr>
+                                            <td><i class="bi bi-hdd-rack me-1 text-muted"></i>@ep.Cluster.Name</td>
+                                            <td>@GetRoleBadge(ep.Role)</td>
+                                            <td>
+                                                <code class="small">@string.Join(", ", VpnService.ParseSubnets(ep.Subnets))</code>
+                                            </td>
+                                            <td>
+                                                @if (!string.IsNullOrWhiteSpace(ep.PublicIp))
+                                                {
+                                                    <code class="small">@ep.PublicIp</code>
+                                                }
+                                                else
+                                                {
+                                                    <span class="text-muted small">—</span>
+                                                }
+                                            </td>
+                                            <td>
+                                                @if (ep.Component is not null)
+                                                {
+                                                    <span class="badge bg-success-subtle text-success border border-success-subtle small">
+                                                        <i class="bi bi-puzzle me-1"></i>@ep.Component.Name
+                                                    </span>
+                                                }
+                                                else
+                                                {
+                                                    <span class="badge bg-warning-subtle text-warning border border-warning-subtle small">Not deployed</span>
+                                                }
+                                            </td>
+                                            <td>@GetEndpointStatusBadge(ep.Status)</td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+
+                        @* Remote endpoints (SiteToSite only) *@
+                        @if (tunnel.TunnelType == VpnTunnelType.SiteToSite)
+                        {
+                            <div class="d-flex align-items-center justify-content-between mb-2">
+                                <h6 class="text-muted small text-uppercase mb-0">Remote Sites</h6>
+                                <button class="btn btn-outline-secondary btn-sm"
+                                        @onclick="() => StartAddRemoteEndpoint(tunnel.Id)">
+                                    <i class="bi bi-plus me-1"></i>Add Remote Site
+                                </button>
+                            </div>
+                            @if (tunnel.RemoteEndpoints.Count == 0)
+                            {
+                                <p class="text-muted small">No remote sites configured. Add one to activate the tunnel.</p>
+                            }
+                            else
+                            {
+                                <div class="table-responsive mb-3">
+                                    <table class="table table-sm mb-0">
+                                        <thead class="table-light">
+                                            <tr>
+                                                <th>Name</th>
+                                                <th>Remote IP</th>
+                                                <th>Subnets</th>
+                                                <th>Auth</th>
+                                                <th>Status</th>
+                                                <th></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (VpnRemoteEndpoint rep in tunnel.RemoteEndpoints)
+                                            {
+                                                <tr>
+                                                    <td><strong class="small">@rep.Name</strong></td>
+                                                    <td><code class="small">@rep.PublicIp</code></td>
+                                                    <td>
+                                                        <code class="small">@string.Join(", ", VpnService.ParseSubnets(rep.Subnets))</code>
+                                                    </td>
+                                                    <td>
+                                                        <span class="badge bg-secondary-subtle text-secondary border small">@rep.AuthMode</span>
+                                                        @if (rep.AuthMode == VpnAuthMode.Psk)
+                                                        {
+                                                            <span class="badge bg-success-subtle text-success border border-success-subtle small ms-1"
+                                                                  title="PSK stored encrypted in tenant vault">
+                                                                <i class="bi bi-shield-lock me-1"></i>Vault
+                                                            </span>
+                                                        }
+                                                    </td>
+                                                    <td>@GetConnectionStatusBadge(rep.Status)</td>
+                                                    <td>
+                                                        <div class="d-flex gap-1">
+                                                            <button class="btn btn-sm btn-outline-secondary"
+                                                                    title="Rotate PSK"
+                                                                    @onclick="() => StartRotatePsk(rep.Id)">
+                                                                <i class="bi bi-key"></i>
+                                                            </button>
+                                                            <button class="btn btn-sm btn-outline-danger"
+                                                                    @onclick="() => ConfirmDeleteRemoteEndpoint(rep.Id)">
+                                                                <i class="bi bi-trash"></i>
+                                                            </button>
+                                                        </div>
+                                                        @if (rotatePskEndpointId == rep.Id)
+                                                        {
+                                                            <div class="mt-2 d-flex gap-1 align-items-center">
+                                                                <input type="password" class="form-control form-control-sm"
+                                                                       style="max-width:200px"
+                                                                       @bind="rotatePskValue"
+                                                                       placeholder="New PSK"
+                                                                       autocomplete="new-password" />
+                                                                <button class="btn btn-sm btn-success"
+                                                                        @onclick="() => RotatePsk(tunnel.TenantId)"
+                                                                        disabled="@saving">
+                                                                    <i class="bi bi-check-lg"></i>
+                                                                </button>
+                                                                <button class="btn btn-sm btn-outline-secondary"
+                                                                        @onclick="() => rotatePskEndpointId = null">
+                                                                    <i class="bi bi-x-lg"></i>
+                                                                </button>
+                                                            </div>
+                                                        }
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            }
+
+                            @* Inline add-remote-endpoint form *@
+                            @if (addRemoteEndpointTunnelId == tunnel.Id)
+                            {
+                                <div class="card border-secondary mb-3">
+                                    <div class="card-header bg-light small fw-semibold">Add Remote Site</div>
+                                    <div class="card-body">
+                                        <div class="row">
+                                            <div class="col-md-4 mb-2">
+                                                <label class="form-label small">Name</label>
+                                                <input class="form-control form-control-sm" @bind="addRemoteName" placeholder="Customer HQ" />
+                                            </div>
+                                            <div class="col-md-4 mb-2">
+                                                <label class="form-label small">Remote Public IP</label>
+                                                <input class="form-control form-control-sm" @bind="addRemoteIp" placeholder="203.0.113.1" />
+                                            </div>
+                                            <div class="col-md-4 mb-2">
+                                                <label class="form-label small">Remote Subnets (comma-separated)</label>
+                                                <input class="form-control form-control-sm" @bind="addRemoteSubnets" placeholder="192.168.10.0/24,172.16.0.0/16" />
+                                            </div>
+                                            <div class="col-md-4 mb-2">
+                                                <label class="form-label small">Pre-Shared Key <span class="text-muted">(stored in vault)</span></label>
+                                                <input type="password" class="form-control form-control-sm" @bind="addRemotePsk"
+                                                       autocomplete="new-password" placeholder="Strong random secret" />
+                                            </div>
+                                            <div class="col-md-4 mb-2">
+                                                <label class="form-label small">
+                                                    Our IKE Identity <span class="text-muted fw-normal">(optional)</span>
+                                                </label>
+                                                <input class="form-control form-control-sm" @bind="addRemoteLocalId"
+                                                       placeholder="e.g. @@vpn.example.com or our public IP" />
+                                                <div class="form-text">Sent to this peer during IKE. Defaults to gateway's public IP.</div>
+                                            </div>
+                                            <div class="col-md-4 mb-2">
+                                                <label class="form-label small">
+                                                    Expected Peer Identity <span class="text-muted fw-normal">(optional)</span>
+                                                </label>
+                                                <input class="form-control form-control-sm" @bind="addRemoteRemoteId"
+                                                       placeholder="e.g. @@vpn.customer.com or their IP" />
+                                                <div class="form-text">Reject connections if peer doesn't match.</div>
+                                            </div>
+                                        </div>
+                                        <div class="d-flex gap-2 mt-1">
+                                            <button class="btn btn-success btn-sm" @onclick="() => AddRemoteEndpoint(tunnel.TenantId)" disabled="@saving">
+                                                @if (saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Save
+                                            </button>
+                                            <button class="btn btn-outline-secondary btn-sm" @onclick="CancelAddRemoteEndpoint">Cancel</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            }
+                        }
+
+                        @* IKE settings summary *@
+                        <div class="d-flex gap-4 small text-muted mb-3">
+                            <span><i class="bi bi-gear me-1"></i>IKEv@tunnel.IkeVersion</span>
+                            <span>IKE: <code>@tunnel.IkeProposal</code></span>
+                            <span>ESP: <code>@tunnel.EspProposal</code></span>
+                            <span>DPD: @tunnel.DpdDelay s / @tunnel.DpdTimeout s</span>
+                        </div>
+
+                        @* Actions *@
+                        <div class="d-flex gap-2 flex-wrap">
+                            @foreach (VpnLocalEndpoint ep in tunnel.LocalEndpoints)
+                            {
+                                <button class="btn btn-outline-primary btn-sm"
+                                        @onclick="() => SyncConfig(ep.Id, tunnel.TenantId)"
+                                        disabled="@saving">
+                                    <i class="bi bi-arrow-repeat me-1"></i>Sync Config (@ep.Cluster.Name)
+                                </button>
+                            }
+                            @if (!confirmDeleteTunnelId.HasValue || confirmDeleteTunnelId != tunnel.Id)
+                            {
+                                <button class="btn btn-outline-danger btn-sm ms-auto"
+                                        @onclick="() => confirmDeleteTunnelId = tunnel.Id">
+                                    <i class="bi bi-trash me-1"></i>Delete Tunnel
+                                </button>
+                            }
+                            else
+                            {
+                                <div class="d-flex align-items-center gap-2 ms-auto">
+                                    <span class="text-danger small">Delete <strong>@tunnel.Name</strong>?</span>
+                                    <button class="btn btn-danger btn-sm" @onclick="() => DeleteTunnel(tunnel.Id)" disabled="@saving">Yes, delete</button>
+                                    <button class="btn btn-outline-secondary btn-sm" @onclick="() => confirmDeleteTunnelId = null">Cancel</button>
+                                </div>
+                            }
+                        </div>
+
+                        @* Sync result *@
+                        @if (syncResultTunnelId == tunnel.Id && syncResult is not null)
+                        {
+                            <div class="mt-2 p-2 rounded small @(syncResult.Success ? "bg-success-subtle text-success" : "bg-danger-subtle text-danger")">
+                                <pre class="mb-0 small" style="white-space:pre-wrap">@syncResult.Output</pre>
+                            </div>
+                        }
+                    }
+                </div>
+            </div>
+        }
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private bool saving = false;
+    private string? errorMessage;
+
+    private List<VpnTunnel> tunnels = [];
+    private List<KubernetesCluster> availableClusters = [];
+
+    // Expand state
+    private Guid? expandedTunnelId;
+    private Guid? confirmDeleteTunnelId;
+    private Guid? confirmDeleteRemoteEndpointId;
+
+    // Sync result display
+    private Guid? syncResultTunnelId;
+    private HelmExecutionResult? syncResult;
+
+    // ── Security profiles ────────────────────────────────────────────────────────
+
+    private record SecurityProfile(
+        string Key, string Name, string Icon, string Description, bool Recommended,
+        int IkeVersion, string IkeProposal, string EspProposal);
+
+    private static readonly SecurityProfile[] SecurityProfiles =
+    [
+        new("modern", "Modern", "bi-shield-check",
+            "AES-256-GCM · SHA-256 · Group 15 (MODP 3072-bit). Best for new deployments — both ends must support IKEv2.",
+            Recommended: true,
+            IkeVersion: 2, IkeProposal: "aes256-sha256-modp3072", EspProposal: "aes256gcm16"),
+        new("compatible", "Compatible", "bi-shield",
+            "AES-256-CBC · SHA-256 · Group 14 (MODP 2048-bit). Works with most firewalls, hardware VPN routers, and older appliances.",
+            Recommended: false,
+            IkeVersion: 2, IkeProposal: "aes256-sha256-modp2048", EspProposal: "aes256-sha256"),
+        new("highsec", "High Security", "bi-shield-fill-check",
+            "AES-256-GCM · SHA-384 · Group 20 (ECP P-384). Use when compliance requires NSA Suite B or equivalent.",
+            Recommended: false,
+            IkeVersion: 2, IkeProposal: "aes256-sha384-ecp384", EspProposal: "aes256gcm16-sha384"),
+    ];
+
+    // ── Add tunnel wizard state ──
+    private bool showAddForm;
+    private int wizardStep = 1;
+    private string newTunnelName = "";
+    private string newTunnelDescription = "";
+    private VpnTunnelType newTunnelType = VpnTunnelType.SiteToSite;
+
+    // SiteToSite wizard
+    private string selectedGatewayClusterId = "";
+    private string gatewayPodCidr = "";
+    private string gatewayServiceCidr = "";
+    private bool detectingCidrs;
+    private bool podCidrDetected;
+    private bool serviceCidrDetected;
+
+    // ClusterMesh wizard
+    private Dictionary<Guid, MeshClusterSelection> meshClusterSelections = [];
+    private Guid? meshBrokerClusterId;
+
+    // Remote endpoint for SiteToSite
+    private string remoteEndpointName = "";
+    private string remotePublicIp = "";
+    private string remoteSubnets = "";
+    private string remotePsk = "";
+
+    // Security profile + IKE settings
+    private string selectedProfile = "modern";
+    private int ikeVersion = 2;
+    private string ikeProposal = "aes256-sha256-modp3072";
+    private string espProposal = "aes256gcm16";
+    private int dpdDelay = 30;
+    private int dpdTimeout = 150;
+    private int ikeLifetime = 86400;
+    private int childLifetime = 3600;
+
+    // Custom proposal component fields (phase 1)
+    private string p1Enc = "aes256";
+    private string p1Integrity = "sha256";
+    private string p1Dh = "modp3072";
+    // Custom proposal component fields (phase 2)
+    private string p2Enc = "aes256gcm16";
+    private string p2Integrity = "sha256";
+    private string p2Pfs = "";  // empty = no PFS override (inherit from IKE)
+
+    // Inline add-remote-endpoint
+    private Guid? addRemoteEndpointTunnelId;
+    private string addRemoteName = "";
+    private string addRemoteIp = "";
+    private string addRemoteSubnets = "";
+    private string addRemotePsk = "";
+    private string addRemoteLocalId = "";
+    private string addRemoteRemoteId = "";
+
+    // PSK rotation
+    private Guid? rotatePskEndpointId;
+    private string rotatePskValue = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        errorMessage = null;
+
+        try
+        {
+            await VpnService.ReconcileGatewayLinksAsync(TenantId);
+            tunnels = await VpnService.GetTunnelsForTenantAsync(TenantId);
+            availableClusters = await TenantService.GetClustersAsync(TenantId);
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to load VPN tunnels: {ex.Message}";
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task OnGatewayClusterChanged(ChangeEventArgs e)
+    {
+        selectedGatewayClusterId = e.Value?.ToString() ?? string.Empty;
+        gatewayPodCidr = "";
+        gatewayServiceCidr = "";
+        podCidrDetected = false;
+        serviceCidrDetected = false;
+
+        if (!Guid.TryParse(selectedGatewayClusterId, out Guid clusterId)) return;
+
+        KubernetesCluster? cluster = availableClusters.FirstOrDefault(c => c.Id == clusterId);
+        if (cluster is null) return;
+
+        detectingCidrs = true;
+        StateHasChanged();
+
+        try
+        {
+            (string? pod, string? svc) = await VpnService.DetectClusterCidrsAsync(cluster);
+            if (!string.IsNullOrWhiteSpace(pod)) { gatewayPodCidr = pod; podCidrDetected = true; }
+            if (!string.IsNullOrWhiteSpace(svc)) { gatewayServiceCidr = svc; serviceCidrDetected = true; }
+        }
+        catch { }
+        finally
+        {
+            detectingCidrs = false;
+        }
+    }
+
+    private void ApplyProfile(string key)
+    {
+        selectedProfile = key;
+        SecurityProfile? p = SecurityProfiles.FirstOrDefault(x => x.Key == key);
+        if (p is null) return;
+        ikeVersion = p.IkeVersion;
+        ikeProposal = p.IkeProposal;
+        espProposal = p.EspProposal;
+    }
+
+    /// <summary>
+    /// Recomputes the ikeProposal and espProposal strings from the custom component
+    /// dropdowns whenever any of them change. Called via @bind:after on each select.
+    /// </summary>
+    private void BuildProposals()
+    {
+        bool p1IsAead = p1Enc.Contains("gcm") || p1Enc == "chacha20poly1305";
+        ikeProposal = p1IsAead
+            ? $"{p1Enc}-prf{p1Integrity}-{p1Dh}"  // AEAD IKE needs explicit PRF
+            : $"{p1Enc}-{p1Integrity}-{p1Dh}";
+
+        bool p2IsAead = p2Enc.Contains("gcm") || p2Enc == "chacha20poly1305";
+        string pfsPart = p2Pfs == "none" ? "" : (string.IsNullOrEmpty(p2Pfs) ? p1Dh : p2Pfs);
+        if (p2IsAead)
+            espProposal = string.IsNullOrEmpty(pfsPart) ? p2Enc : $"{p2Enc}-{pfsPart}";
+        else
+            espProposal = string.IsNullOrEmpty(pfsPart) ? $"{p2Enc}-{p2Integrity}" : $"{p2Enc}-{p2Integrity}-{pfsPart}";
+    }
+
+    private void ToggleExpand(Guid tunnelId)
+    {
+        expandedTunnelId = expandedTunnelId == tunnelId ? null : tunnelId;
+        syncResult = null;
+        syncResultTunnelId = null;
+    }
+
+    // ── Wizard ──────────────────────────────────────────────────────────────────
+
+    private void WizardNext()
+    {
+        errorMessage = null;
+
+        if (wizardStep == 1 && string.IsNullOrWhiteSpace(newTunnelName))
+        {
+            errorMessage = "Please enter a tunnel name.";
+            return;
+        }
+
+        if (wizardStep == 2 && newTunnelType == VpnTunnelType.SiteToSite)
+        {
+            if (string.IsNullOrWhiteSpace(selectedGatewayClusterId))
+            {
+                errorMessage = "Please select a gateway cluster.";
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(gatewayPodCidr) || string.IsNullOrWhiteSpace(gatewayServiceCidr))
+            {
+                errorMessage = "Please enter both Pod CIDR and Service CIDR.";
+                return;
+            }
+        }
+
+        if (wizardStep == 2 && newTunnelType == VpnTunnelType.ClusterMesh)
+        {
+            if (meshClusterSelections.Count(kv => kv.Value.Selected) < 2)
+            {
+                errorMessage = "Select at least two clusters for a cluster mesh.";
+                return;
+            }
+            if (!meshBrokerClusterId.HasValue)
+            {
+                errorMessage = "Please select which cluster hosts the Submariner broker.";
+                return;
+            }
+        }
+
+        wizardStep++;
+    }
+
+    private void WizardBack()
+    {
+        if (wizardStep > 1) wizardStep--;
+        errorMessage = null;
+    }
+
+    private void CancelAdd()
+    {
+        showAddForm = false;
+        wizardStep = 1;
+        ResetWizardState();
+    }
+
+    private void ResetWizardState()
+    {
+        newTunnelName = "";
+        newTunnelDescription = "";
+        newTunnelType = VpnTunnelType.SiteToSite;
+        selectedGatewayClusterId = "";
+        gatewayPodCidr = "";
+        gatewayServiceCidr = "";
+        meshClusterSelections = [];
+        meshBrokerClusterId = null;
+        remoteEndpointName = "";
+        remotePublicIp = "";
+        remoteSubnets = "";
+        remotePsk = "";
+        selectedProfile = "modern";
+        ikeVersion = 2;
+        ikeProposal = "aes256-sha256-modp3072";
+        espProposal = "aes256gcm16";
+        dpdDelay = 30;
+        dpdTimeout = 150;
+        detectingCidrs = false;
+        podCidrDetected = false;
+        serviceCidrDetected = false;
+    }
+
+    private async Task CreateTunnel()
+    {
+        errorMessage = null;
+
+        if (newTunnelType == VpnTunnelType.SiteToSite &&
+            (string.IsNullOrWhiteSpace(remoteEndpointName) || string.IsNullOrWhiteSpace(remotePublicIp) ||
+             string.IsNullOrWhiteSpace(remoteSubnets) || string.IsNullOrWhiteSpace(remotePsk)))
+        {
+            errorMessage = "Please fill in all remote site fields including the PSK.";
+            return;
+        }
+
+        saving = true;
+        try
+        {
+            VpnTunnel tunnel = await VpnService.CreateTunnelAsync(
+                TenantId, newTunnelName, newTunnelType,
+                string.IsNullOrWhiteSpace(newTunnelDescription) ? null : newTunnelDescription);
+
+            await VpnService.UpdateCryptoSettingsAsync(tunnel.Id, ikeVersion, ikeProposal, espProposal, dpdDelay, dpdTimeout, ikeLifetime, childLifetime);
+
+            if (newTunnelType == VpnTunnelType.SiteToSite)
+            {
+                if (Guid.TryParse(selectedGatewayClusterId, out Guid gwClusterId))
+                {
+                    string[] localSubnets = [gatewayPodCidr.Trim(), gatewayServiceCidr.Trim()];
+                    await VpnService.AddLocalEndpointAsync(tunnel.Id, gwClusterId, localSubnets, VpnEndpointRole.Gateway);
+                }
+
+                string[] subnets = remoteSubnets.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                await VpnService.AddRemoteEndpointAsync(
+                    tunnel.Id, remoteEndpointName.Trim(), remotePublicIp.Trim(),
+                    subnets, VpnAuthMode.Psk, remotePsk, TenantId);
+            }
+            else
+            {
+                foreach ((Guid clusterId, MeshClusterSelection sel) in meshClusterSelections.Where(kv => kv.Value.Selected))
+                {
+                    VpnEndpointRole role = clusterId == meshBrokerClusterId
+                        ? VpnEndpointRole.Gateway
+                        : VpnEndpointRole.Participant;
+                    string[] subnets = [sel.PodCidr.Trim(), sel.ServiceCidr.Trim()];
+                    await VpnService.AddLocalEndpointAsync(tunnel.Id, clusterId, subnets, role);
+                }
+            }
+
+            showAddForm = false;
+            wizardStep = 1;
+            ResetWizardState();
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to create tunnel: {ex.Message}";
+        }
+        finally
+        {
+            saving = false;
+        }
+    }
+
+    // ── Mesh cluster selection helpers ───────────────────────────────────────────
+
+    private void ToggleMeshCluster(Guid clusterId, bool selected)
+    {
+        if (!meshClusterSelections.ContainsKey(clusterId))
+            meshClusterSelections[clusterId] = new();
+
+        meshClusterSelections[clusterId].Selected = selected;
+
+        if (!selected && meshBrokerClusterId == clusterId)
+            meshBrokerClusterId = null;
+    }
+
+    private void SetMeshClusterCidr(Guid clusterId, string value, bool isPod)
+    {
+        if (!meshClusterSelections.ContainsKey(clusterId))
+            meshClusterSelections[clusterId] = new();
+
+        if (isPod)
+            meshClusterSelections[clusterId].PodCidr = value;
+        else
+            meshClusterSelections[clusterId].ServiceCidr = value;
+    }
+
+    // ── Inline add-remote-endpoint ────────────────────────────────────────────
+
+    private void StartAddRemoteEndpoint(Guid tunnelId)
+    {
+        addRemoteEndpointTunnelId = tunnelId;
+        addRemoteName = "";
+        addRemoteIp = "";
+        addRemoteSubnets = "";
+        addRemotePsk = "";
+        addRemoteLocalId = "";
+        addRemoteRemoteId = "";
+    }
+
+    private void CancelAddRemoteEndpoint()
+    {
+        addRemoteEndpointTunnelId = null;
+    }
+
+    private void StartRotatePsk(Guid endpointId)
+    {
+        rotatePskEndpointId = endpointId;
+        rotatePskValue = "";
+    }
+
+    private async Task RotatePsk(Guid tenantId)
+    {
+        if (rotatePskEndpointId is null || string.IsNullOrWhiteSpace(rotatePskValue)) return;
+        errorMessage = null;
+        saving = true;
+        try
+        {
+            await VpnService.RotatePskAsync(rotatePskEndpointId.Value, rotatePskValue, tenantId);
+            rotatePskEndpointId = null;
+            rotatePskValue = "";
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to rotate PSK: {ex.Message}";
+        }
+        finally
+        {
+            saving = false;
+        }
+    }
+
+    private async Task AddRemoteEndpoint(Guid tenantId)
+    {
+        if (addRemoteEndpointTunnelId is null) return;
+        errorMessage = null;
+        saving = true;
+
+        try
+        {
+            string[] subnets = addRemoteSubnets.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            await VpnService.AddRemoteEndpointAsync(
+                addRemoteEndpointTunnelId.Value, addRemoteName.Trim(), addRemoteIp.Trim(),
+                subnets, VpnAuthMode.Psk, addRemotePsk, tenantId,
+                string.IsNullOrWhiteSpace(addRemoteLocalId) ? null : addRemoteLocalId.Trim(),
+                string.IsNullOrWhiteSpace(addRemoteRemoteId) ? null : addRemoteRemoteId.Trim());
+
+            addRemoteEndpointTunnelId = null;
+            await LoadAsync();
+            expandedTunnelId = tunnels.FirstOrDefault(t => t.RemoteEndpoints.Any(r => r.Name == addRemoteName))?.Id;
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to add remote site: {ex.Message}";
+        }
+        finally
+        {
+            saving = false;
+        }
+    }
+
+    private void ConfirmDeleteRemoteEndpoint(Guid endpointId)
+    {
+        confirmDeleteRemoteEndpointId = endpointId;
+    }
+
+    // ── Config sync ──────────────────────────────────────────────────────────────
+
+    private async Task SyncConfig(Guid localEndpointId, Guid tenantId)
+    {
+        saving = true;
+        syncResult = null;
+        try
+        {
+            HelmExecutionResult result = await VpnService.SyncConfigToClusterAsync(localEndpointId, tenantId);
+            syncResult = result;
+            syncResultTunnelId = expandedTunnelId;
+        }
+        catch (Exception ex)
+        {
+            syncResult = new HelmExecutionResult { Success = false, Output = ex.Message };
+            syncResultTunnelId = expandedTunnelId;
+        }
+        finally
+        {
+            saving = false;
+        }
+    }
+
+    // ── Delete ────────────────────────────────────────────────────────────────────
+
+    private async Task DeleteTunnel(Guid tunnelId)
+    {
+        saving = true;
+        errorMessage = null;
+        try
+        {
+            await VpnService.DeleteTunnelAsync(tunnelId);
+            confirmDeleteTunnelId = null;
+            if (expandedTunnelId == tunnelId) expandedTunnelId = null;
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to delete tunnel: {ex.Message}";
+        }
+        finally
+        {
+            saving = false;
+        }
+    }
+
+    // ── Badge helpers ─────────────────────────────────────────────────────────────
+
+    private static RenderFragment GetTunnelTypeBadge(VpnTunnelType type) => type switch
+    {
+        VpnTunnelType.SiteToSite => @<span class="badge bg-primary-subtle text-primary border border-primary-subtle small"><i class="bi bi-shield-lock me-1"></i>Site-to-Site</span>,
+        VpnTunnelType.ClusterMesh => @<span class="badge bg-info-subtle text-info border border-info-subtle small"><i class="bi bi-diagram-3 me-1"></i>Cluster Mesh</span>,
+        _ => @<span class="badge bg-secondary-subtle text-secondary border small">@type</span>
+    };
+
+    private static RenderFragment GetStatusBadge(VpnTunnelStatus status) => status switch
+    {
+        VpnTunnelStatus.Active => @<span class="badge bg-success-subtle text-success border border-success-subtle small"><i class="bi bi-circle-fill me-1" style="font-size:0.5em"></i>Active</span>,
+        VpnTunnelStatus.Deploying => @<span class="badge bg-warning-subtle text-warning border border-warning-subtle small"><i class="bi bi-arrow-repeat me-1"></i>Deploying</span>,
+        VpnTunnelStatus.Degraded => @<span class="badge bg-warning-subtle text-warning border border-warning-subtle small"><i class="bi bi-exclamation-triangle me-1"></i>Degraded</span>,
+        VpnTunnelStatus.Failed => @<span class="badge bg-danger-subtle text-danger border border-danger-subtle small"><i class="bi bi-x-circle me-1"></i>Failed</span>,
+        VpnTunnelStatus.Disabled => @<span class="badge bg-secondary-subtle text-secondary border small">Disabled</span>,
+        _ => @<span class="badge bg-secondary-subtle text-secondary border small">Draft</span>
+    };
+
+    private static RenderFragment GetRoleBadge(VpnEndpointRole role) => role switch
+    {
+        VpnEndpointRole.Gateway => @<span class="badge bg-primary-subtle text-primary border border-primary-subtle small">Gateway</span>,
+        _ => @<span class="badge bg-secondary-subtle text-secondary border small">Participant</span>
+    };
+
+    private static RenderFragment GetEndpointStatusBadge(VpnEndpointStatus status) => status switch
+    {
+        VpnEndpointStatus.Ready => @<span class="badge bg-success-subtle text-success border border-success-subtle small">Ready</span>,
+        VpnEndpointStatus.Error => @<span class="badge bg-danger-subtle text-danger border border-danger-subtle small">Error</span>,
+        _ => @<span class="badge bg-secondary-subtle text-secondary border small">Pending</span>
+    };
+
+    private static RenderFragment GetConnectionStatusBadge(VpnConnectionStatus status) => status switch
+    {
+        VpnConnectionStatus.Connected => @<span class="badge bg-success-subtle text-success border border-success-subtle small"><i class="bi bi-circle-fill me-1" style="font-size:0.5em"></i>Connected</span>,
+        VpnConnectionStatus.Disconnected => @<span class="badge bg-danger-subtle text-danger border border-danger-subtle small"><i class="bi bi-circle me-1" style="font-size:0.5em"></i>Disconnected</span>,
+        _ => @<span class="badge bg-secondary-subtle text-secondary border small">Unknown</span>
+    };
+
+    // ── Inner types ───────────────────────────────────────────────────────────────
+
+    private class MeshClusterSelection
+    {
+        public bool Selected { get; set; }
+        public string PodCidr { get; set; } = "";
+        public string ServiceCidr { get; set; } = "";
+    }
+}

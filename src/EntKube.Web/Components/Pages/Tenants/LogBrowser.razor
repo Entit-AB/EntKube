@@ -1,0 +1,235 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject LokiService LokiService
+
+@if (!lokiAvailable && !isLoading)
+{
+    <div class="alert alert-light border text-muted small py-2">
+        <span class="bi bi-journal-x me-1"></span>
+        Loki is not installed or configured on this cluster. Deploy a Loki component to enable log browsing.
+    </div>
+}
+else
+{
+    @if (!string.IsNullOrEmpty(loadError))
+    {
+        <div class="alert alert-warning small py-2">
+            <span class="bi bi-exclamation-triangle me-1"></span>
+            Could not reach Loki: @loadError
+        </div>
+    }
+
+    @* ── Controls ── *@
+    <div class="row g-2 mb-3 align-items-end">
+        <div class="col-md-3">
+            <label class="form-label small text-muted mb-1">Namespace</label>
+            <select class="form-select form-select-sm" @bind="selectedNamespace" @bind:after="OnNamespaceChanged"
+                    disabled="@(namespaces.Count == 0)">
+                <option value="">— select namespace —</option>
+                @foreach (string ns in namespaces)
+                {
+                    <option value="@ns">@ns</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label small text-muted mb-1">Pod</label>
+            <select class="form-select form-select-sm" @bind="selectedPod"
+                    disabled="@(string.IsNullOrEmpty(selectedNamespace))">
+                <option value="">All pods</option>
+                @foreach (string pod in pods)
+                {
+                    <option value="@pod">@pod</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label small text-muted mb-1">Time range</label>
+            <select class="form-select form-select-sm" @bind="timeRangeMinutes">
+                <option value="15">Last 15 minutes</option>
+                <option value="60">Last 1 hour</option>
+                <option value="180">Last 3 hours</option>
+                <option value="720">Last 12 hours</option>
+                <option value="1440">Last 24 hours</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label small text-muted mb-1">Lines</label>
+            <select class="form-select form-select-sm" @bind="limit">
+                <option value="100">100</option>
+                <option value="200">200</option>
+                <option value="500">500</option>
+                <option value="1000">1000</option>
+            </select>
+        </div>
+        <div class="col-12 col-md-9">
+            <label class="form-label small text-muted mb-1">Filter text</label>
+            <input class="form-control form-control-sm font-monospace" @bind="textFilter"
+                   placeholder="e.g. error, connection refused" />
+        </div>
+        <div class="col-12 col-md-3">
+            <button class="btn btn-sm btn-primary w-100" @onclick="Search"
+                    disabled="@(isQuerying || string.IsNullOrEmpty(selectedNamespace))">
+                @if (isQuerying) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                <span class="bi bi-search me-1"></span>Search
+            </button>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(queryError))
+    {
+        <div class="alert alert-warning small py-2">
+            <span class="bi bi-exclamation-triangle me-1"></span>@queryError
+        </div>
+    }
+
+    @* ── Log output ── *@
+    @if (allEntries.Count > 0)
+    {
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <span class="text-muted small">@allEntries.Count entries · @queried.ToLocalTime().ToString("HH:mm:ss")</span>
+            <div class="d-flex gap-2 align-items-center">
+                <select class="form-select form-select-sm" style="width:auto" @bind="levelFilter">
+                    <option value="">All levels</option>
+                    <option value="Error">Error + Fatal</option>
+                    <option value="Warn">Warn+</option>
+                    <option value="Info">Info+</option>
+                </select>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => allEntries = []">
+                    <span class="bi bi-x-lg"></span>
+                </button>
+            </div>
+        </div>
+
+        <div class="border rounded font-monospace" style="background:#1e1e1e;max-height:500px;overflow-y:auto">
+            @foreach (LokiLogEntry entry in FilteredEntries)
+            {
+                <div class="px-3 py-0" style="line-height:1.4;border-bottom:1px solid #2d2d2d">
+                    <span style="color:#888;font-size:0.72rem;user-select:none">
+                        @entry.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")
+                    </span>
+                    <span class="ms-2" style="@LineStyle(entry.DetectedLevel); font-size:0.8rem; white-space:pre-wrap; word-break:break-all">@entry.Line</span>
+                </div>
+            }
+        </div>
+    }
+    else if (hasQueried && !isQuerying)
+    {
+        <div class="text-center py-4 text-muted">
+            <span class="bi bi-journal display-4 d-block mb-2"></span>
+            No logs found for the selected criteria.
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public required Guid ClusterId { get; set; }
+    [Parameter] public string? PresetNamespace { get; set; }
+    [Parameter] public string? PresetPod { get; set; }
+
+    private List<string> namespaces = [];
+    private List<string> pods = [];
+    private List<LokiLogEntry> allEntries = [];
+    private string selectedNamespace = "";
+    private string selectedPod = "";
+    private string textFilter = "";
+    private string levelFilter = "";
+    private int timeRangeMinutes = 60;
+    private int limit = 200;
+    private bool lokiAvailable;
+    private bool isLoading = true;
+    private bool isQuerying;
+    private bool hasQueried;
+    private string? queryError;
+    private string? loadError;
+    private DateTime queried;
+
+    private IEnumerable<LokiLogEntry> FilteredEntries => allEntries.Where(e => levelFilter switch
+    {
+        "Error" => e.DetectedLevel >= LogLevel.Error,
+        "Warn"  => e.DetectedLevel >= LogLevel.Warn,
+        "Info"  => e.DetectedLevel >= LogLevel.Info,
+        _ => true
+    });
+
+    protected override async Task OnParametersSetAsync()
+    {
+        isLoading = true;
+        lokiAvailable = await LokiService.IsAvailableAsync(ClusterId);
+
+        loadError = null;
+        if (lokiAvailable)
+        {
+            KubernetesOperationResult<List<string>> nsResult = await LokiService.GetNamespacesAsync(ClusterId);
+            if (nsResult.IsSuccess)
+                namespaces = nsResult.Data ?? [];
+            else
+                loadError = nsResult.Error;
+
+            if (!string.IsNullOrEmpty(PresetNamespace))
+            {
+                selectedNamespace = PresetNamespace;
+                await OnNamespaceChanged();
+            }
+            if (!string.IsNullOrEmpty(PresetPod))
+                selectedPod = PresetPod;
+        }
+        isLoading = false;
+    }
+
+    private async Task OnNamespaceChanged()
+    {
+        pods = [];
+        selectedPod = "";
+        if (string.IsNullOrEmpty(selectedNamespace)) return;
+
+        KubernetesOperationResult<List<string>> podResult =
+            await LokiService.GetPodsAsync(ClusterId, selectedNamespace);
+        if (podResult.IsSuccess) pods = podResult.Data ?? [];
+    }
+
+    private async Task Search()
+    {
+        if (string.IsNullOrEmpty(selectedNamespace)) return;
+        isQuerying = true;
+        queryError = null;
+        allEntries = [];
+        StateHasChanged();
+
+        DateTime to   = DateTime.UtcNow;
+        DateTime from = to.AddMinutes(-timeRangeMinutes);
+
+        KubernetesOperationResult<List<LokiLogStream>> result =
+            await LokiService.QueryRangeAsync(
+                ClusterId, selectedNamespace,
+                string.IsNullOrEmpty(selectedPod) ? null : selectedPod,
+                null,
+                string.IsNullOrEmpty(textFilter) ? null : textFilter,
+                from, to, limit);
+
+        if (result.IsSuccess && result.Data is not null)
+        {
+            allEntries = result.Data
+                .SelectMany(s => s.Entries)
+                .OrderBy(e => e.Timestamp)
+                .ToList();
+        }
+        else
+        {
+            queryError = result.Error;
+        }
+
+        queried = DateTime.UtcNow;
+        hasQueried = true;
+        isQuerying = false;
+    }
+
+    private static string LineStyle(LogLevel level) => level switch
+    {
+        LogLevel.Fatal or LogLevel.Error => "color:#f48771",
+        LogLevel.Warn  => "color:#cca700",
+        LogLevel.Info  => "color:#9cdcfe",
+        LogLevel.Debug => "color:#808080",
+        _ => "color:#d4d4d4"
+    };
+}

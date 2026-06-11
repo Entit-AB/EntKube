@@ -1,0 +1,81 @@
+services:
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      DOMAIN: "${DOMAIN}"
+      ACME_EMAIL: "${ACME_EMAIL}"
+    depends_on:
+      - entkube
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: entkube
+      POSTGRES_USER: entkube
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-changeme}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U entkube -d entkube"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  entkube:
+    image: ${REGISTRY:-entit.azurecr.io}/entkube:${IMAGE_TAG:-latest}
+    volumes:
+      - entkube-data:/app/Data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # --- Database ---
+      DatabaseProvider: Postgres
+      ConnectionStrings__DefaultConnection: "Host=postgres;Port=5432;Database=entkube;Username=entkube;Password=${POSTGRES_PASSWORD:-changeme}"
+
+      # --- Vault encryption ---
+      # Required — set VAULT__ROOTKEY in your .env file (openssl rand -base64 32)
+      Vault__RootKey: "${VAULT__ROOTKEY}"
+
+      # --- Reverse proxy ---
+      # Tells ASP.NET Core to trust X-Forwarded-For / X-Forwarded-Proto from Caddy.
+      # Required for Blazor Server SignalR (WebSocket) to work correctly behind a proxy.
+      ASPNETCORE_FORWARDEDHEADERS_ENABLED: "true"
+
+      # --- Auth ---
+      # Set to false after the first admin account is created.
+      Auth__AllowRegistration: "true"
+
+      # --- Temporary: log all HTTP requests so we can see 404s ---
+      Logging__LogLevel__Microsoft__AspNetCore__Hosting__Diagnostics: "Information"
+
+      # --- Bootstrap ---
+      # Optional. If set, this user is granted the Admin role on every startup
+      # (no-op if already admin). Useful for recovering access.
+      # Seed__AdminEmail: "admin@example.com"
+
+      # --- Email / SMTP (optional) ---
+      # Smtp__Host: "smtp.example.com"
+      # Smtp__Username: "user"
+      # Smtp__Password: "password"
+      # Smtp__FromAddress: "alerts@entkube.io"
+    restart: unless-stopped
+
+volumes:
+  # Named volumes are NOT removed by "docker compose down".
+  # Data is only deleted if you explicitly run "docker compose down -v".
+  postgres-data:
+  entkube-data:
+  caddy-data:
+  caddy-config:

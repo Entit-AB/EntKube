@@ -1,0 +1,54 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject IncidentService IncidentService
+
+@if (windows.Count > 0)
+{
+    <div class="alert @(hasActive ? "alert-warning" : "alert-info") d-flex align-items-start gap-3 py-2 mb-3">
+        <span class="bi bi-tools fs-5 mt-1 flex-shrink-0"></span>
+        <div class="flex-grow-1">
+            <strong>@(hasActive ? "Active Maintenance" : "Upcoming Maintenance")</strong>
+            <div class="mt-1">
+                @foreach (MaintenanceWindow w in windows)
+                {
+                    bool active = w.StartsAt <= DateTime.UtcNow;
+                    <div class="small @(active ? "fw-semibold" : "text-muted")">
+                        @if (active)
+                        {
+                            <span class="badge bg-warning text-dark me-1">Now</span>
+                        }
+                        else
+                        {
+                            <span class="badge bg-info text-dark me-1">@w.StartsAt.ToLocalTime().ToString("MMM d HH:mm")</span>
+                        }
+                        @w.Title
+                        @if (w.Cluster is not null)
+                        {
+                            <span class="text-muted ms-1">(@w.Cluster.Name)</span>
+                        }
+                        <span class="text-muted ms-1">— until @w.EndsAt.ToLocalTime().ToString("HH:mm")</span>
+                    </div>
+                }
+            </div>
+            @if (hasActive)
+            {
+                <div class="small text-muted mt-1">Alert notifications are suppressed during maintenance.</div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+    [Parameter] public HashSet<Guid>? ClusterIds { get; set; }
+
+    private List<MaintenanceWindow> windows = [];
+    private bool hasActive;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        windows = await IncidentService.GetUpcomingMaintenanceAsync(TenantId, ClusterIds);
+        DateTime now = DateTime.UtcNow;
+        hasActive = windows.Any(w => w.StartsAt <= now && w.EndsAt >= now);
+    }
+}

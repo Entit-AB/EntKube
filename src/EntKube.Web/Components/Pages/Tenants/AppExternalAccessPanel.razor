@@ -1,0 +1,826 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject AppRouteService AppRouteService
+@inject DeploymentService DeploymentService
+@inject TenantService TenantService
+@inject ComponentLifecycleService ComponentLifecycleService
+@inject KubernetesOperationsService K8sOps
+
+@* ═══════════════════════════════════════════════════════════════════
+   App External Access — ops panel for managing Gateway API HTTPRoutes.
+   Ops configures hostname + TLS (AppRoute); each deployment environment
+   attaches under a path prefix with target service (AppDeploymentRoute).
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <div class="d-flex align-items-center">
+            <i class="bi bi-globe me-2 text-primary"></i>
+            <strong>External Access</strong>
+        </div>
+        @if (!IsPortalView)
+        {
+            <button class="btn btn-sm btn-outline-primary" @onclick="OpenAddRoute">
+                <i class="bi bi-plus me-1"></i>Add Hostname
+            </button>
+        }
+    </div>
+
+    @* ── Add new AppRoute form (ops only) ── *@
+    @if (!IsPortalView && showAddRoute)
+    {
+        <div class="card-body border-bottom">
+            @if (addRouteError is not null)
+            {
+                <div class="alert alert-danger py-1 small mb-2">@addRouteError</div>
+            }
+            <div class="row g-2">
+                <div class="col-md-5">
+                    <label class="form-label small">Hostname</label>
+                    <input class="form-control form-control-sm" placeholder="app.example.com"
+                           @bind="newHostname" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">TLS Mode</label>
+                    <select class="form-select form-select-sm" @bind="newTlsMode">
+                        <option value="@TlsMode.ClusterIssuer">ClusterIssuer (auto)</option>
+                        <option value="@TlsMode.Manual">Manual certificate</option>
+                    </select>
+                </div>
+
+                @if (newTlsMode == TlsMode.ClusterIssuer)
+                {
+                    @* Cluster selector drives the ClusterIssuer dropdown *@
+                    <div class="col-md-4">
+                        <label class="form-label small">Load issuers from cluster</label>
+                        <select class="form-select form-select-sm" value="@issuerClusterId"
+                                @onchange="OnIssuerClusterChanged">
+                            <option value="">— pick cluster —</option>
+                            @foreach (KubernetesCluster c in (tenantClusters ?? []))
+                            {
+                                <option value="@c.Id">@c.Name</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small">ClusterIssuer</label>
+                        @if (loadingIssuers)
+                        {
+                            <div class="form-control form-control-sm text-muted small">
+                                <span class="spinner-border spinner-border-sm me-1"></span>Loading…
+                            </div>
+                        }
+                        else if (availableIssuers.Count > 0)
+                        {
+                            <select class="form-select form-select-sm" @bind="newClusterIssuer">
+                                <option value="">— select —</option>
+                                @foreach (string issuer in availableIssuers)
+                                {
+                                    <option value="@issuer">@issuer</option>
+                                }
+                            </select>
+                        }
+                        else
+                        {
+                            <input class="form-control form-control-sm" placeholder="letsencrypt-prod"
+                                   @bind="newClusterIssuer" />
+                            <div class="form-text small text-muted">
+                                @(issuerClusterId == Guid.Empty ? "Pick a cluster above to load available issuers." : "No ClusterIssuers found — enter manually.")
+                            </div>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <div class="col-12">
+                        <label class="form-label small">Certificate (PEM)</label>
+                        <textarea class="form-control form-control-sm font-monospace" rows="3"
+                                  placeholder="-----BEGIN CERTIFICATE-----" @bind="newTlsCert" />
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label small">Private Key (PEM, optional)</label>
+                        <textarea class="form-control form-control-sm font-monospace" rows="3"
+                                  placeholder="-----BEGIN PRIVATE KEY-----" @bind="newTlsKey" />
+                    </div>
+                }
+            </div>
+            <div class="d-flex gap-1 mt-2">
+                <button class="btn btn-sm btn-primary" @onclick="AddRoute"
+                        disabled="@(string.IsNullOrWhiteSpace(newHostname) || addingRoute)">
+                    @if (addingRoute) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                    Save
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelAddRoute">Cancel</button>
+            </div>
+        </div>
+    }
+
+    @* ── Route list ── *@
+    <div class="card-body p-0">
+        @if (loadError is not null)
+        {
+            <div class="alert alert-danger m-3 py-2 small">
+                <i class="bi bi-exclamation-triangle me-1"></i>
+                Failed to load routes: @loadError
+            </div>
+        }
+        <LoadingPanel Loading="@(routes is null && loadError is null)">
+            @if (routes is not null && routes.Count == 0 && !showAddRoute)
+            {
+                <div class="p-3">
+                    <EmptyState Icon="bi-globe"
+                                Message="No hostnames configured. Click 'Add Hostname' to expose this app externally." />
+                </div>
+            }
+            else if (routes is not null)
+            {
+                @foreach (AppRoute route in routes)
+                {
+                    bool isExpanded = expandedRouteId == route.Id;
+
+                    <div class="border-bottom">
+                        @* ── Route header ── *@
+                        <div class="d-flex align-items-center px-3 py-2 gap-2"
+                             style="cursor: pointer;" @onclick="() => ToggleExpand(route.Id)">
+                            <i class="bi @(isExpanded ? "bi-chevron-down" : "bi-chevron-right") text-muted small"></i>
+                            <i class="bi bi-globe2 text-primary"></i>
+                            <a href="https://@route.Hostname" target="_blank" rel="noopener noreferrer"
+                               class="fw-medium text-decoration-none" @onclick:stopPropagation="true">
+                                @route.Hostname
+                            </a>
+                            @TlsBadge(route)
+                            @if (!route.IsEnabled)
+                            {
+                                <span class="badge bg-secondary ms-1">Disabled</span>
+                            }
+                            <span class="badge bg-light text-dark border ms-1">
+                                @route.DeploymentRoutes.Count deployment@(route.DeploymentRoutes.Count != 1 ? "s" : "")
+                            </span>
+                            @if (!IsPortalView)
+                            {
+                                <div class="ms-auto d-flex gap-1" @onclick:stopPropagation="true">
+                                    <button class="btn btn-sm btn-outline-secondary py-0"
+                                            title="Toggle enabled"
+                                            @onclick="() => ToggleRouteEnabled(route)">
+                                        <i class="bi @(route.IsEnabled ? "bi-toggle-on text-success" : "bi-toggle-off text-muted")"></i>
+                                    </button>
+                                    @if (deleteConfirmRouteId == route.Id)
+                                    {
+                                        <button class="btn btn-sm btn-danger py-0" @onclick="() => DeleteRoute(route.Id)">Confirm</button>
+                                        <button class="btn btn-sm btn-outline-secondary py-0" @onclick="() => deleteConfirmRouteId = null">Cancel</button>
+                                    }
+                                    else
+                                    {
+                                        <button class="btn btn-sm btn-outline-danger py-0"
+                                                title="Delete hostname and all deployment routes"
+                                                @onclick="() => deleteConfirmRouteId = route.Id">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    }
+                                </div>
+                            }
+                        </div>
+
+                        @* ── Deployment routes (expanded) ── *@
+                        @if (isExpanded)
+                        {
+                            <div class="px-4 pb-2">
+                                @if (applyRouteError is not null)
+                                {
+                                    <div class="alert alert-danger py-1 small mx-0 mb-2">
+                                        <i class="bi bi-exclamation-triangle me-1"></i>Apply failed: @applyRouteError
+                                        <button type="button" class="btn-close btn-close-sm float-end"
+                                                @onclick="() => applyRouteError = null"></button>
+                                    </div>
+                                }
+
+                                @if (route.DeploymentRoutes.Count > 0)
+                                {
+                                    <table class="table table-sm table-hover mb-2">
+                                        <thead class="table-light">
+                                            <tr>
+                                                <th class="small">Deployment</th>
+                                                <th class="small">Env</th>
+                                                <th class="small">Path</th>
+                                                <th class="small">Service</th>
+                                                <th class="small">Cluster</th>
+                                                <th class="small">Health</th>
+                                                <th></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (AppDeploymentRoute dr in route.DeploymentRoutes.OrderBy(r => r.PathPrefix))
+                                            {
+                                                bool isApplying = applyingRouteId == dr.Id;
+                                                <tr>
+                                                    <td class="small align-middle">@dr.AppDeployment.Name</td>
+                                                    <td class="small align-middle text-muted">@dr.AppDeployment.Environment?.Name</td>
+                                                    <td class="small align-middle"><code class="small">@dr.PathPrefix</code></td>
+                                                    <td class="small align-middle text-muted">@dr.ServiceName:@dr.ServicePort</td>
+                                                    <td class="small align-middle">@ClusterStatusBadge(dr)</td>
+                                                    <td class="small align-middle">@HealthBadge(dr)</td>
+                                                    <td class="text-end align-middle" style="white-space: nowrap;">
+                                                        @if (dr.ClusterAppliedAt is null)
+                                                        {
+                                                            <button class="btn btn-sm btn-primary py-0"
+                                                                    title="Apply HTTPRoute to cluster"
+                                                                    disabled="@isApplying"
+                                                                    @onclick="() => ApplyRouteToCluster(dr.Id)">
+                                                                @if (isApplying)
+                                                                {
+                                                                    <span class="spinner-border spinner-border-sm me-1"></span>
+                                                                }
+                                                                else
+                                                                {
+                                                                    <i class="bi bi-cloud-upload me-1"></i>
+                                                                }
+                                                                Apply to cluster
+                                                            </button>
+                                                        }
+                                                        else
+                                                        {
+                                                            <button class="btn btn-sm btn-outline-secondary py-0"
+                                                                    title="Re-apply to cluster"
+                                                                    disabled="@isApplying"
+                                                                    @onclick="() => ApplyRouteToCluster(dr.Id)">
+                                                                @if (isApplying)
+                                                                {
+                                                                    <span class="spinner-border spinner-border-sm"></span>
+                                                                }
+                                                                else
+                                                                {
+                                                                    <i class="bi bi-arrow-repeat"></i>
+                                                                }
+                                                            </button>
+                                                        }
+                                                        <button class="btn btn-sm btn-outline-secondary py-0 ms-1"
+                                                                title="View manifest YAML"
+                                                                @onclick="() => ShowYaml(dr)">
+                                                            <i class="bi bi-code-slash"></i>
+                                                        </button>
+                                                        @if (deleteConfirmDrId == dr.Id)
+                                                        {
+                                                            <button class="btn btn-sm btn-danger py-0 ms-1"
+                                                                    @onclick="() => DeleteDeploymentRoute(dr.Id, route.Id)">Confirm</button>
+                                                            <button class="btn btn-sm btn-outline-secondary py-0 ms-1"
+                                                                    @onclick="() => deleteConfirmDrId = null">Cancel</button>
+                                                        }
+                                                        else
+                                                        {
+                                                            <button class="btn btn-sm btn-outline-danger py-0 ms-1"
+                                                                    title="Remove deployment route"
+                                                                    @onclick="() => deleteConfirmDrId = dr.Id">
+                                                                <i class="bi bi-x-lg"></i>
+                                                            </button>
+                                                        }
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+
+                                @* ── Add deployment route form ── *@
+                                @if (addDrRouteId == route.Id)
+                                {
+                                    <div class="p-2 bg-light rounded mb-2">
+                                        @if (addDrError is not null)
+                                        {
+                                            <div class="alert alert-danger py-1 small mb-2">@addDrError</div>
+                                        }
+                                        <div class="row g-2">
+                                            @* Deployment selector — loading services when changed *@
+                                            <div class="col-md-4">
+                                                <label class="form-label small">Deployment</label>
+                                                <select class="form-select form-select-sm"
+                                                        value="@newDrDeploymentId"
+                                                        @onchange="OnDeploymentSelected">
+                                                    <option value="">— select —</option>
+                                                    @foreach (AppDeployment d in (deployments ?? []))
+                                                    {
+                                                        <option value="@d.Id">@d.Name (@d.Environment?.Name)</option>
+                                                    }
+                                                </select>
+                                            </div>
+
+                                            @* Path prefix *@
+                                            <div class="col-md-2">
+                                                <label class="form-label small">Path Prefix</label>
+                                                <input class="form-control form-control-sm" placeholder="/"
+                                                       @bind="newDrPath" />
+                                            </div>
+
+                                            @* Service name — dropdown from K8s or fallback text *@
+                                            <div class="col-md-3">
+                                                <label class="form-label small">
+                                                    Service
+                                                    @if (loadingServices)
+                                                    {
+                                                        <span class="spinner-border spinner-border-sm ms-1" style="width:.7rem;height:.7rem;"></span>
+                                                    }
+                                                </label>
+                                                @if (availableServices.Count > 0)
+                                                {
+                                                    <select class="form-select form-select-sm"
+                                                            value="@newDrService"
+                                                            @onchange="OnServiceSelected">
+                                                        <option value="">— select —</option>
+                                                        @foreach (KubeServiceInfo svc in availableServices)
+                                                        {
+                                                            <option value="@svc.Name">@svc.Name (@svc.Type)</option>
+                                                        }
+                                                    </select>
+                                                }
+                                                else
+                                                {
+                                                    <input class="form-control form-control-sm" placeholder="my-service"
+                                                           @bind="newDrService" />
+                                                }
+                                            </div>
+
+                                            @* Port — dropdown from selected service or fallback number *@
+                                            <div class="col-md-2">
+                                                <label class="form-label small">Port</label>
+                                                @if (availablePorts.Count > 0)
+                                                {
+                                                    <select class="form-select form-select-sm" @bind="newDrPort">
+                                                        @foreach (KubeServicePort p in availablePorts)
+                                                        {
+                                                            <option value="@p.Port">@p.Port@(p.Name is not null ? $" ({p.Name})" : "")</option>
+                                                        }
+                                                    </select>
+                                                }
+                                                else
+                                                {
+                                                    <input type="number" class="form-control form-control-sm"
+                                                           @bind="newDrPort" />
+                                                }
+                                            </div>
+                                        </div>
+
+                                        @* Endpoint health preview *@
+                                        @if (endpointSummary is not null && endpointSummary.HasEndpoints)
+                                        {
+                                            <div class="mt-1 small">
+                                                <span class="text-success me-2">
+                                                    <i class="bi bi-circle-fill me-1" style="font-size:.5rem;vertical-align:middle;"></i>
+                                                    @endpointSummary.TotalReady ready
+                                                </span>
+                                                @if (endpointSummary.TotalNotReady > 0)
+                                                {
+                                                    <span class="text-warning">
+                                                        <i class="bi bi-circle-fill me-1" style="font-size:.5rem;vertical-align:middle;"></i>
+                                                        @endpointSummary.TotalNotReady not ready
+                                                    </span>
+                                                }
+                                            </div>
+                                        }
+                                        else if (endpointSummary is not null && !endpointSummary.HasEndpoints && !string.IsNullOrEmpty(newDrService))
+                                        {
+                                            <div class="mt-1 small text-warning">
+                                                <i class="bi bi-exclamation-triangle me-1"></i>No endpoints — service has no ready pods.
+                                            </div>
+                                        }
+
+                                        <div class="d-flex gap-1 mt-2">
+                                            <button class="btn btn-sm btn-primary"
+                                                    disabled="@(newDrDeploymentId == Guid.Empty || string.IsNullOrWhiteSpace(newDrService) || addingDr)"
+                                                    @onclick="() => AddDeploymentRoute(route.Id)">
+                                                @if (addingDr) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Link Deployment
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="CancelAddDr">Cancel</button>
+                                        </div>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-outline-secondary mb-1"
+                                            @onclick="() => StartAddDr(route.Id)">
+                                        <i class="bi bi-plus me-1"></i>Link Deployment
+                                    </button>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            }
+        </LoadingPanel>
+    </div>
+</div>
+
+@* ── YAML preview modal ── *@
+@if (yamlPreview is not null)
+{
+    <div class="modal fade show d-block" tabindex="-1" style="background: rgba(0,0,0,0.4);">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header py-2">
+                    <h6 class="modal-title mb-0">
+                        <i class="bi bi-code-slash me-2"></i>HTTPRoute Manifest
+                    </h6>
+                    <button type="button" class="btn-close" @onclick="() => yamlPreview = null"></button>
+                </div>
+                <div class="modal-body p-0">
+                    <pre class="m-0 p-3 bg-dark text-white small"
+                         style="max-height: 400px; overflow-y: auto;"><code>@yamlPreview</code></pre>
+                </div>
+                <div class="modal-footer py-2">
+                    <small class="text-muted me-auto">Apply this to the target cluster.</small>
+                    <button class="btn btn-sm btn-secondary" @onclick="() => yamlPreview = null">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public required Data.App App { get; set; }
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public Guid? EnvironmentId { get; set; }
+    [Parameter] public bool IsPortalView { get; set; }
+
+    private List<AppRoute>? routes;
+    private List<AppDeployment>? deployments;
+    private List<KubernetesCluster>? tenantClusters;
+
+    // Add route form
+    private bool showAddRoute;
+    private string newHostname = "";
+    private TlsMode newTlsMode = TlsMode.ClusterIssuer;
+    private string newClusterIssuer = "";
+    private string newTlsCert = "";
+    private string newTlsKey = "";
+    private string? addRouteError;
+    private bool addingRoute;
+
+    // ClusterIssuer selector
+    private Guid issuerClusterId;
+    private bool loadingIssuers;
+    private List<string> availableIssuers = [];
+
+    // Deployment route form
+    private Guid? addDrRouteId;
+    private Guid newDrDeploymentId;
+    private string newDrPath = "/";
+    private string newDrService = "";
+    private int newDrPort = 80;
+    private string? addDrError;
+    private bool addingDr;
+
+    // Service / endpoint discovery
+    private bool loadingServices;
+    private List<KubeServiceInfo> availableServices = [];
+    private List<KubeServicePort> availablePorts = [];
+    private KubeEndpointSummary? endpointSummary;
+
+    // Expand / delete state
+    private Guid? expandedRouteId;
+    private Guid? deleteConfirmRouteId;
+    private Guid? deleteConfirmDrId;
+
+    // Apply to cluster
+    private Guid? applyingRouteId;
+    private string? applyRouteError;
+
+    // YAML preview
+    private string? yamlPreview;
+    private string? loadError;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        loadError = null;
+        try
+        {
+            await LoadAsync();
+            tenantClusters ??= await TenantService.GetClustersAsync(TenantId);
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        List<AppRoute> allRoutes = await AppRouteService.GetRoutesForAppAsync(App.Id);
+        List<AppDeployment> allDeployments = await DeploymentService.GetDeploymentsAsync(App.Id);
+
+        if (EnvironmentId.HasValue)
+        {
+            HashSet<Guid> envDeploymentIds = allDeployments
+                .Where(d => d.EnvironmentId == EnvironmentId.Value)
+                .Select(d => d.Id)
+                .ToHashSet();
+
+            routes = allRoutes
+                .Where(r => r.DeploymentRoutes.Any(dr => envDeploymentIds.Contains(dr.AppDeploymentId))
+                         || r.DeploymentRoutes.Count == 0)
+                .ToList();
+            deployments = allDeployments.Where(d => d.EnvironmentId == EnvironmentId.Value).ToList();
+        }
+        else
+        {
+            routes = allRoutes;
+            deployments = allDeployments;
+        }
+    }
+
+    private void OpenAddRoute()
+    {
+        showAddRoute = !showAddRoute;
+        if (showAddRoute)
+        {
+            newHostname = "";
+            newTlsMode = TlsMode.ClusterIssuer;
+            newClusterIssuer = "";
+            newTlsCert = "";
+            newTlsKey = "";
+            addRouteError = null;
+            issuerClusterId = Guid.Empty;
+            availableIssuers = [];
+        }
+    }
+
+    private async Task OnIssuerClusterChanged(ChangeEventArgs e)
+    {
+        if (!Guid.TryParse(e.Value?.ToString(), out Guid clusterId) || clusterId == Guid.Empty)
+        {
+            issuerClusterId = Guid.Empty;
+            availableIssuers = [];
+            return;
+        }
+
+        issuerClusterId = clusterId;
+        loadingIssuers = true;
+        availableIssuers = [];
+        newClusterIssuer = "";
+
+        availableIssuers = await ComponentLifecycleService.ListClusterIssuersAsync(clusterId);
+        if (availableIssuers.Count == 1)
+            newClusterIssuer = availableIssuers[0];
+
+        loadingIssuers = false;
+    }
+
+    private async Task AddRoute()
+    {
+        addRouteError = null;
+        addingRoute = true;
+        try
+        {
+            await AppRouteService.AddRouteAsync(App.Id, new AppRouteRequest
+            {
+                Hostname = newHostname,
+                TlsMode = newTlsMode,
+                ClusterIssuerName = newTlsMode == TlsMode.ClusterIssuer ? newClusterIssuer : null,
+                TlsCertificate = newTlsMode == TlsMode.Manual ? newTlsCert : null,
+                TlsPrivateKey = newTlsMode == TlsMode.Manual ? newTlsKey : null,
+            });
+            showAddRoute = false;
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            addRouteError = ex.Message;
+        }
+        finally
+        {
+            addingRoute = false;
+        }
+    }
+
+    private void CancelAddRoute()
+    {
+        showAddRoute = false;
+        addRouteError = null;
+    }
+
+    private async Task ToggleRouteEnabled(AppRoute route)
+    {
+        await AppRouteService.UpdateRouteAsync(route.Id, new AppRouteRequest
+        {
+            Hostname = route.Hostname,
+            TlsMode = route.TlsMode,
+            ClusterIssuerName = route.ClusterIssuerName,
+            TlsCertificate = route.TlsCertificate,
+            TlsPrivateKey = route.TlsPrivateKey,
+            IsEnabled = !route.IsEnabled
+        });
+        await LoadAsync();
+    }
+
+    private async Task DeleteRoute(Guid routeId)
+    {
+        await AppRouteService.DeleteRouteAsync(routeId);
+        deleteConfirmRouteId = null;
+        if (expandedRouteId == routeId) expandedRouteId = null;
+        await LoadAsync();
+    }
+
+    private void ToggleExpand(Guid routeId)
+    {
+        expandedRouteId = expandedRouteId == routeId ? null : routeId;
+    }
+
+    private async Task StartAddDr(Guid routeId)
+    {
+        addDrRouteId = routeId;
+        newDrDeploymentId = Guid.Empty;
+        newDrPath = "/";
+        newDrService = "";
+        newDrPort = 80;
+        addDrError = null;
+        availableServices = [];
+        availablePorts = [];
+        endpointSummary = null;
+
+        // If there's only one deployment, pre-select it and load its services.
+        if (deployments?.Count == 1)
+            await SelectDeployment(deployments[0].Id);
+    }
+
+    private void CancelAddDr()
+    {
+        addDrRouteId = null;
+        addDrError = null;
+        availableServices = [];
+        availablePorts = [];
+        endpointSummary = null;
+    }
+
+    private async Task OnDeploymentSelected(ChangeEventArgs e)
+    {
+        if (!Guid.TryParse(e.Value?.ToString(), out Guid id) || id == Guid.Empty)
+        {
+            newDrDeploymentId = Guid.Empty;
+            availableServices = [];
+            availablePorts = [];
+            endpointSummary = null;
+            return;
+        }
+        await SelectDeployment(id);
+    }
+
+    private async Task SelectDeployment(Guid deploymentId)
+    {
+        newDrDeploymentId = deploymentId;
+        newDrService = "";
+        availablePorts = [];
+        endpointSummary = null;
+
+        AppDeployment? deployment = deployments?.FirstOrDefault(d => d.Id == deploymentId);
+        if (deployment?.Cluster is null) return;
+
+        loadingServices = true;
+        availableServices = await K8sOps.GetServicesInNamespaceAsync(deployment.Cluster.Id, deployment.Namespace);
+        loadingServices = false;
+
+        // Auto-select if there's only one service.
+        if (availableServices.Count == 1)
+            await SelectService(availableServices[0].Name, deploymentId, deployment.Namespace, deployment.Cluster.Id);
+    }
+
+    private async Task OnServiceSelected(ChangeEventArgs e)
+    {
+        string svcName = e.Value?.ToString() ?? "";
+        newDrService = svcName;
+        availablePorts = [];
+        endpointSummary = null;
+        if (string.IsNullOrEmpty(svcName)) return;
+
+        AppDeployment? deployment = deployments?.FirstOrDefault(d => d.Id == newDrDeploymentId);
+        if (deployment?.Cluster is null) return;
+
+        await SelectService(svcName, newDrDeploymentId, deployment.Namespace, deployment.Cluster.Id);
+    }
+
+    private async Task SelectService(string serviceName, Guid deploymentId, string ns, Guid clusterId)
+    {
+        newDrService = serviceName;
+
+        KubeServiceInfo? svc = availableServices.FirstOrDefault(s => s.Name == serviceName);
+        availablePorts = svc?.Ports ?? [];
+        if (availablePorts.Count > 0) newDrPort = availablePorts[0].Port;
+
+        endpointSummary = await K8sOps.GetEndpointsForServiceAsync(clusterId, ns, serviceName);
+    }
+
+    private async Task AddDeploymentRoute(Guid routeId)
+    {
+        addDrError = null;
+        addingDr = true;
+        try
+        {
+            await AppRouteService.AddDeploymentRouteAsync(routeId, newDrDeploymentId, new AppDeploymentRouteRequest
+            {
+                ServiceName = newDrService,
+                ServicePort = newDrPort,
+                PathPrefix = newDrPath
+            });
+            CancelAddDr();
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            addDrError = ex.Message;
+        }
+        finally
+        {
+            addingDr = false;
+        }
+    }
+
+    private async Task DeleteDeploymentRoute(Guid drId, Guid routeId)
+    {
+        await K8sOps.DeleteDeploymentRouteFromClusterAsync(drId);
+        await AppRouteService.DeleteDeploymentRouteAsync(drId);
+        deleteConfirmDrId = null;
+        await LoadAsync();
+    }
+
+    private async Task ApplyRouteToCluster(Guid drId)
+    {
+        applyingRouteId = drId;
+        applyRouteError = null;
+        try
+        {
+            KubernetesOperationResult<string> result = await K8sOps.ApplyDeploymentRouteAsync(drId);
+            if (!result.IsSuccess)
+                applyRouteError = result.Error;
+            await LoadAsync();
+        }
+        catch (Exception ex) { applyRouteError = ex.Message; }
+        finally { applyingRouteId = null; }
+    }
+
+    private void ShowYaml(AppDeploymentRoute dr)
+    {
+        yamlPreview = AppRouteService.GenerateManifestYaml(dr);
+    }
+
+    private static RenderFragment TlsBadge(AppRoute route) => __builder =>
+    {
+        if (route.TlsMode == TlsMode.ClusterIssuer)
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-success bg-opacity-75 small");
+            __builder.AddAttribute(2, "title", $"Auto TLS via {route.ClusterIssuerName}");
+            __builder.AddContent(3, $"TLS auto · {route.ClusterIssuerName}");
+            __builder.CloseElement();
+        }
+        else
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-warning text-dark small");
+            __builder.AddAttribute(2, "title", "Manual TLS certificate");
+            __builder.AddContent(3, "TLS manual");
+            __builder.CloseElement();
+        }
+    };
+
+    private static RenderFragment ClusterStatusBadge(AppDeploymentRoute dr) => __builder =>
+    {
+        if (dr.ClusterAppliedAt is null)
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-warning text-dark small");
+            __builder.AddAttribute(2, "title", "HTTPRoute not yet applied to cluster");
+            __builder.AddContent(3, "not applied");
+            __builder.CloseElement();
+        }
+        else
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-success bg-opacity-75 small");
+            __builder.AddAttribute(2, "title", $"Applied {dr.ClusterAppliedAt:yyyy-MM-dd HH:mm} UTC");
+            __builder.AddContent(3, $"applied {dr.ClusterAppliedAt:dd MMM HH:mm}");
+            __builder.CloseElement();
+        }
+    };
+
+    private static RenderFragment HealthBadge(AppDeploymentRoute dr) => __builder =>
+    {
+        if (dr.IsReachable == true)
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-success bg-opacity-75 small");
+            __builder.AddContent(2, $"✓ {dr.LastStatusCode}");
+            __builder.CloseElement();
+        }
+        else if (dr.IsReachable == false)
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-danger bg-opacity-75 small");
+            __builder.AddContent(2, dr.LastStatusCode.HasValue ? $"✗ {dr.LastStatusCode}" : "✗ unreachable");
+            __builder.CloseElement();
+        }
+        else
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-secondary bg-opacity-50 small");
+            __builder.AddContent(2, "—");
+            __builder.CloseElement();
+        }
+    };
+}

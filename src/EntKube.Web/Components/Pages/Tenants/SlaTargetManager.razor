@@ -1,0 +1,250 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject IncidentService IncidentService
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h6 class="mb-0">SLA Targets</h6>
+    <button class="btn btn-sm btn-primary" @onclick="ShowAdd">
+        <span class="bi bi-plus-lg"></span> Add Target
+    </button>
+</div>
+
+<div class="text-muted small mb-3">
+    Define uptime targets per customer or app. More specific targets (app > customer) take precedence.
+</div>
+
+@if (targets.Count == 0)
+{
+    <EmptyState Icon="bi-shield"
+                Title="No SLA targets"
+                Message="Add one to track uptime compliance." />
+}
+else
+{
+    <div class="table-responsive">
+        <table class="table table-sm align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th>Scope</th>
+                    <th>Target</th>
+                    <th>Window</th>
+                    <th>Compliance (30d)</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (SlaTargetRow row in targets)
+                {
+                    <tr>
+                        <td>
+                            @if (row.AppName is not null)
+                            {
+                                <span><span class="bi bi-app me-1 text-muted"></span>@row.AppName</span>
+                                <div class="text-muted small">@row.CustomerName</div>
+                            }
+                            else if (row.CustomerName is not null)
+                            {
+                                <span><span class="bi bi-person me-1 text-muted"></span>@row.CustomerName</span>
+                            }
+                            else
+                            {
+                                <span class="text-muted">All customers (tenant default)</span>
+                            }
+                        </td>
+                        <td class="fw-semibold">@row.Target.TargetPercent.ToString("F1")%</td>
+                        <td class="text-muted small">@row.Target.MeasurementWindowDays days</td>
+                        <td>
+                            @if (row.CompliancePercent.HasValue)
+                            {
+                                bool met = row.CompliancePercent.Value >= row.Target.TargetPercent;
+                                <span class="@(met ? "text-success" : "text-danger") fw-semibold">
+                                    <span class="bi bi-@(met ? "check-circle" : "exclamation-circle") me-1"></span>
+                                    @row.CompliancePercent.Value.ToString("F2")%
+                                </span>
+                            }
+                            else
+                            {
+                                <span class="text-muted small">No data</span>
+                            }
+                        </td>
+                        <td class="text-end">
+                            <button class="btn btn-sm btn-outline-danger" @onclick="() => Delete(row.Target)">
+                                <span class="bi bi-trash"></span>
+                            </button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@if (showAdd)
+{
+    <div class="card mt-3 border-primary">
+        <div class="card-header d-flex justify-content-between align-items-center py-2">
+            <h6 class="mb-0">Add SLA Target</h6>
+            <button class="btn-close btn-sm" @onclick="() => showAdd = false"></button>
+        </div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <label class="form-label small">Customer (optional)</label>
+                    <select class="form-select form-select-sm" @bind="newCustomerId" @bind:after="OnCustomerChanged">
+                        <option value="">All customers (tenant default)</option>
+                        @foreach (Customer c in customers)
+                        {
+                            <option value="@c.Id">@c.Name</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label small">App (optional)</label>
+                    <select class="form-select form-select-sm" @bind="newAppId" disabled="@(filteredApps.Count == 0)">
+                        <option value="">All apps for selected customer</option>
+                        @foreach (EntKube.Web.Data.App a in filteredApps)
+                        {
+                            <option value="@a.Id">@a.Name</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small">Uptime Target (%)</label>
+                    <input class="form-control form-control-sm" type="number" min="90" max="100" step="0.1"
+                           @bind="newTargetPercent" />
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small">Measurement Window (days)</label>
+                    <select class="form-select form-select-sm" @bind="newWindowDays">
+                        <option value="7">7 days</option>
+                        <option value="30">30 days</option>
+                        <option value="90">90 days</option>
+                    </select>
+                </div>
+            </div>
+            @if (!string.IsNullOrEmpty(formError))
+            {
+                <div class="alert alert-danger py-1 small mt-2 mb-0">@formError</div>
+            }
+            <div class="mt-3 d-flex gap-2">
+                <button class="btn btn-sm btn-primary" @onclick="Save">Save Target</button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAdd = false">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<SlaTargetRow> targets = [];
+    private List<Customer> customers = [];
+    private List<EntKube.Web.Data.App> filteredApps = [];
+    private bool showAdd;
+    private string newCustomerId = "";
+    private string newAppId = "";
+    private double newTargetPercent = 99.9;
+    private int newWindowDays = 30;
+    private string? formError;
+
+    protected override async Task OnInitializedAsync() => await Load();
+
+    private async Task Load()
+    {
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+
+        customers = await db.Customers
+            .Include(c => c.Apps)
+            .Where(c => c.TenantId == TenantId)
+            .OrderBy(c => c.Name)
+            .ToListAsync();
+
+        List<SlaTarget> slaTargets = await db.SlaTargets
+            .Include(s => s.Customer)
+            .Include(s => s.App)
+            .Where(s => s.TenantId == TenantId)
+            .OrderBy(s => s.Customer!.Name).ThenBy(s => s.App!.Name)
+            .ToListAsync();
+
+        // Compute compliance for each target
+        targets = [];
+        foreach (SlaTarget t in slaTargets)
+        {
+            // Find all deployments in scope
+            List<Guid> deploymentIds = await db.AppDeployments
+                .Where(d => (t.AppId == null || d.AppId == t.AppId)
+                         && (t.CustomerId == null || d.App.CustomerId == t.CustomerId)
+                         && d.App.Customer.TenantId == TenantId)
+                .Select(d => d.Id)
+                .ToListAsync();
+
+            double? compliance = null;
+            if (deploymentIds.Count > 0)
+            {
+                DateTime from = DateTime.UtcNow.AddDays(-t.MeasurementWindowDays);
+                var snaps = await db.DeploymentHealthSnapshots
+                    .Where(s => deploymentIds.Contains(s.DeploymentId) && s.SnapshotAt >= from)
+                    .Select(s => s.HealthStatus)
+                    .ToListAsync();
+
+                if (snaps.Count > 0)
+                    compliance = Math.Round((double)snaps.Count(s => s == HealthStatus.Healthy) / snaps.Count * 100, 2);
+            }
+
+            targets.Add(new SlaTargetRow(t, t.Customer?.Name, t.App?.Name, compliance));
+        }
+    }
+
+    private async Task OnCustomerChanged()
+    {
+        filteredApps = [];
+        newAppId = "";
+        if (!Guid.TryParse(newCustomerId, out Guid cid)) return;
+        Customer? customer = customers.FirstOrDefault(c => c.Id == cid);
+        if (customer is not null)
+            filteredApps = customer.Apps.OfType<EntKube.Web.Data.App>().OrderBy(a => a.Name).ToList();
+    }
+
+    private void ShowAdd()
+    {
+        showAdd = true;
+        newCustomerId = "";
+        newAppId = "";
+        newTargetPercent = 99.9;
+        newWindowDays = 30;
+        filteredApps = [];
+        formError = null;
+    }
+
+    private async Task Save()
+    {
+        formError = null;
+        if (newTargetPercent < 50 || newTargetPercent > 100)
+        {
+            formError = "Target must be between 50% and 100%.";
+            return;
+        }
+
+        Guid? customerId = Guid.TryParse(newCustomerId, out Guid cid) ? cid : null;
+        Guid? appId      = Guid.TryParse(newAppId, out Guid aid) ? aid : null;
+
+        await IncidentService.UpsertSlaTargetAsync(
+            TenantId, customerId, appId, newTargetPercent, newWindowDays);
+
+        showAdd = false;
+        await Load();
+    }
+
+    private async Task Delete(SlaTarget target)
+    {
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        SlaTarget? found = await db.SlaTargets.FindAsync(target.Id);
+        if (found is not null) db.SlaTargets.Remove(found);
+        await db.SaveChangesAsync();
+        await Load();
+    }
+
+    private record SlaTargetRow(SlaTarget Target, string? CustomerName, string? AppName, double? CompliancePercent);
+}

@@ -1,0 +1,481 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject AlertRoutingService AlertRoutingService
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+<div class="mb-3">
+    <p class="text-muted small mb-2">
+        Routing rules match incoming alerts and direct them to a notification channel — or suppress them so no incident is created at all.
+        Rules are evaluated in priority order (lower number = higher priority). The first matching rule wins.
+    </p>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h6 class="mb-0">Routing Rules</h6>
+    <button class="btn btn-sm btn-primary" @onclick="() => { showForm = !showForm; editId = null; ResetForm(); }">
+        <span class="bi bi-plus-circle me-1"></span>Add Rule
+    </button>
+</div>
+
+@if (showForm)
+{
+    <div class="card border-primary mb-4">
+        <div class="card-header py-2">
+            <strong class="small">@(editId.HasValue ? "Edit Rule" : "New Rule")</strong>
+        </div>
+        <div class="card-body">
+            <div class="row g-2 mb-2">
+                <div class="col-md-4">
+                    <label class="form-label small">Rule name <span class="text-danger">*</span></label>
+                    <input class="form-control form-control-sm" @bind="formName" placeholder="Suppress KubeProxy on autoscale cluster" />
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small">Priority</label>
+                    <input type="number" class="form-control form-control-sm" @bind="formPriority" min="0" max="999" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">Scope to cluster</label>
+                    <select class="form-select form-select-sm" @bind="formMatchClusterId">
+                        <option value="">Any cluster</option>
+                        @foreach (KubernetesCluster c in clusters)
+                        {
+                            <option value="@c.Id">@c.Name</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-md-3 d-flex flex-column justify-content-end">
+                    <div class="form-check mb-1">
+                        <input class="form-check-input" type="checkbox" id="chkSuppress" @bind="formSuppressIncident" />
+                        <label class="form-check-label small fw-semibold" for="chkSuppress">
+                            Suppress incident
+                        </label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="chkEnabled" @bind="formEnabled" />
+                        <label class="form-check-label small" for="chkEnabled">Enabled</label>
+                    </div>
+                </div>
+            </div>
+
+            @if (formSuppressIncident)
+            {
+                <div class="alert alert-warning py-2 mb-2 small">
+                    <span class="bi bi-slash-circle me-1"></span>
+                    Matching alerts will be silently dropped — no incident is created and no notification is sent.
+                    No channel needed.
+                </div>
+            }
+            else
+            {
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6">
+                        <label class="form-label small">Channel <span class="text-danger">*</span></label>
+                        <select class="form-select form-select-sm" @bind="formChannelId">
+                            <option value="">— select channel —</option>
+                            @foreach (NotificationChannel ch in channels)
+                            {
+                                <option value="@ch.Id">@ch.Name (@ch.Type)</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+            }
+
+            <div class="row g-2 mb-3">
+                <div class="col-md-3">
+                    <label class="form-label small text-muted">Match alert name (contains)</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="formAlertName" placeholder="KubeProxy…" />
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small text-muted">Match severity</label>
+                    <select class="form-select form-select-sm" @bind="formSeverity">
+                        <option value="">Any</option>
+                        <option value="critical">critical</option>
+                        <option value="warning">warning</option>
+                        <option value="info">info</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small text-muted">Match namespace</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="formNamespace" placeholder="kube-system" />
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small text-muted">Label key</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="formLabelKey" placeholder="team" />
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small text-muted">Label value</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="formLabelValue" placeholder="backend" />
+                </div>
+            </div>
+
+            @if (!string.IsNullOrEmpty(formError))
+            {
+                <div class="alert alert-danger py-1 small mb-2">@formError</div>
+            }
+            <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-primary" @onclick="SaveRule"
+                        disabled="@(string.IsNullOrWhiteSpace(formName) || (!formSuppressIncident && string.IsNullOrWhiteSpace(formChannelId)))">
+                    @(editId.HasValue ? "Save Changes" : "Create Rule")
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelForm">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (rules.Count == 0 && !isLoading)
+{
+    <EmptyState Icon="bi-funnel"
+                Title="No routing rules"
+                Message="Without rules, alerts are delivered to channels based on the channel's severity filter setting." />
+}
+else
+{
+    <div class="table-responsive">
+        <table class="table table-hover align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th style="width:60px">Priority</th>
+                    <th>Name</th>
+                    <th>Action</th>
+                    <th>Matches</th>
+                    <th style="width:80px">Status</th>
+                    <th style="width:100px"></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (AlertRoutingRule rule in rules)
+                {
+                    <tr>
+                        <td class="text-muted small font-monospace">@rule.Priority</td>
+                        <td class="fw-semibold small">@rule.Name</td>
+                        <td class="small">
+                            @if (rule.SuppressIncident)
+                            {
+                                <span class="badge bg-danger"><span class="bi bi-slash-circle me-1"></span>Suppress</span>
+                            }
+                            else
+                            {
+                                <span class="bi bi-send me-1 text-muted"></span>@rule.Channel?.Name
+                            }
+                        </td>
+                        <td>
+                            <div class="d-flex flex-wrap gap-1">
+                                @if (rule.MatchClusterId.HasValue)
+                                {
+                                    string clusterName = clusters.FirstOrDefault(c => c.Id == rule.MatchClusterId)?.Name ?? rule.MatchClusterId.Value.ToString("D")[..8];
+                                    <span class="badge bg-secondary small font-monospace">cluster=@clusterName</span>
+                                }
+                                @if (!string.IsNullOrEmpty(rule.MatchAlertName))
+                                {
+                                    <span class="badge bg-light text-dark border small font-monospace">alert~@rule.MatchAlertName</span>
+                                }
+                                @if (!string.IsNullOrEmpty(rule.MatchSeverity))
+                                {
+                                    string sevColor = rule.MatchSeverity == "critical" ? "danger" : rule.MatchSeverity == "warning" ? "warning" : "info";
+                                    <span class="badge bg-@sevColor @(rule.MatchSeverity == "warning" ? "text-dark" : "") small">@rule.MatchSeverity</span>
+                                }
+                                @if (!string.IsNullOrEmpty(rule.MatchNamespace))
+                                {
+                                    <span class="badge bg-light text-dark border small font-monospace">ns=@rule.MatchNamespace</span>
+                                }
+                                @if (!string.IsNullOrEmpty(rule.MatchLabelKey))
+                                {
+                                    <span class="badge bg-light text-dark border small font-monospace">
+                                        @rule.MatchLabelKey@(!string.IsNullOrEmpty(rule.MatchLabelValue) ? $"={rule.MatchLabelValue}" : "")
+                                    </span>
+                                }
+                                @if (!rule.MatchClusterId.HasValue && string.IsNullOrEmpty(rule.MatchAlertName) && string.IsNullOrEmpty(rule.MatchSeverity)
+                                    && string.IsNullOrEmpty(rule.MatchNamespace) && string.IsNullOrEmpty(rule.MatchLabelKey))
+                                {
+                                    <span class="text-muted small">catch-all</span>
+                                }
+                            </div>
+                        </td>
+                        <td>
+                            @if (rule.IsEnabled)
+                            {
+                                <span class="badge bg-success">Enabled</span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-secondary">Disabled</span>
+                            }
+                        </td>
+                        <td>
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => StartEdit(rule)"
+                                        title="Edit rule">
+                                    <span class="bi bi-pencil"></span>
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteRule(rule)"
+                                        title="Delete rule">
+                                    <span class="bi bi-trash"></span>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@* ── Test routing rules ── *@
+@if (rules.Count > 0)
+{
+    <div class="card mt-4 border-secondary">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <strong class="small"><span class="bi bi-play-circle me-1"></span>Test Routing</strong>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showTest = !showTest">
+                @(showTest ? "Hide" : "Test")
+            </button>
+        </div>
+        @if (showTest)
+        {
+            <div class="card-body">
+                <p class="text-muted small mb-3">Enter alert attributes to see which rule would match.</p>
+                <div class="row g-2 mb-3">
+                    <div class="col-md-3">
+                        <label class="form-label small">Cluster</label>
+                        <select class="form-select form-select-sm" @bind="testClusterId">
+                            <option value="">Any / unspecified</option>
+                            @foreach (KubernetesCluster c in clusters)
+                            {
+                                <option value="@c.Id">@c.Name</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small">Alert name</label>
+                        <input class="form-control form-control-sm font-monospace" @bind="testAlertName" placeholder="KubePodCrashLooping" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small">Severity</label>
+                        <select class="form-select form-select-sm" @bind="testSeverity">
+                            <option value="">—</option>
+                            <option value="critical">critical</option>
+                            <option value="warning">warning</option>
+                            <option value="info">info</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small">Namespace</label>
+                        <input class="form-control form-control-sm font-monospace" @bind="testNamespace" placeholder="kube-system" />
+                    </div>
+                    <div class="col-md-1">
+                        <label class="form-label small">Label key</label>
+                        <input class="form-control form-control-sm font-monospace" @bind="testLabelKey" />
+                    </div>
+                    <div class="col-md-1">
+                        <label class="form-label small">Label value</label>
+                        <input class="form-control form-control-sm font-monospace" @bind="testLabelValue" />
+                    </div>
+                </div>
+                <button class="btn btn-sm btn-secondary mb-3" @onclick="RunTest">
+                    <span class="bi bi-play-fill me-1"></span>Test
+                </button>
+                @if (testRan)
+                {
+                    @if (testMatchedRule is not null && testMatchedRule.SuppressIncident)
+                    {
+                        <div class="alert alert-danger py-2 mb-0">
+                            <span class="bi bi-slash-circle me-1"></span>
+                            Matched suppression rule <strong>@testMatchedRule.Name</strong>
+                            (priority @testMatchedRule.Priority) — <strong>no incident would be created</strong>.
+                        </div>
+                    }
+                    else if (testMatchedRule is not null)
+                    {
+                        <div class="alert alert-success py-2 mb-0">
+                            <span class="bi bi-check-circle me-1"></span>
+                            Matched rule <strong>@testMatchedRule.Name</strong>
+                            (priority @testMatchedRule.Priority)
+                            → channel <strong>@testMatchedRule.Channel?.Name</strong>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="alert alert-secondary py-2 mb-0">
+                            <span class="bi bi-funnel me-1"></span>
+                            No rule matched — alert would be sent to <strong>all enabled channels</strong>
+                            (filtered by each channel's severity setting).
+                        </div>
+                    }
+                }
+            </div>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<AlertRoutingRule> rules = [];
+    private List<NotificationChannel> channels = [];
+    private List<KubernetesCluster> clusters = [];
+    private bool isLoading = true;
+    private bool showForm;
+    private Guid? editId;
+
+    private string formName = "";
+    private int formPriority;
+    private string formChannelId = "";
+    private string formMatchClusterId = "";
+    private bool formEnabled = true;
+    private bool formSuppressIncident;
+    private string formAlertName = "";
+    private string formSeverity = "";
+    private string formNamespace = "";
+    private string formLabelKey = "";
+    private string formLabelValue = "";
+    private string? formError;
+
+    // Test panel
+    private bool showTest;
+    private string testClusterId = "";
+    private string testAlertName = "";
+    private string testSeverity = "";
+    private string testNamespace = "";
+    private string testLabelKey = "";
+    private string testLabelValue = "";
+    private bool testRan;
+    private AlertRoutingRule? testMatchedRule;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+    }
+
+    private async Task Load()
+    {
+        isLoading = true;
+
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        channels = await db.NotificationChannels
+            .Where(c => c.TenantId == TenantId)
+            .OrderBy(c => c.Name)
+            .ToListAsync();
+
+        clusters = await db.KubernetesClusters
+            .Where(c => c.TenantId == TenantId)
+            .OrderBy(c => c.Name)
+            .ToListAsync();
+
+        rules = await AlertRoutingService.GetRulesAsync(TenantId);
+        isLoading = false;
+    }
+
+    private void ResetForm()
+    {
+        formName = "";
+        formPriority = rules.Count > 0 ? (rules.Max(r => r.Priority) + 10) : 0;
+        formChannelId = "";
+        formMatchClusterId = "";
+        formEnabled = true;
+        formSuppressIncident = false;
+        formAlertName = "";
+        formSeverity = "";
+        formNamespace = "";
+        formLabelKey = "";
+        formLabelValue = "";
+        formError = null;
+    }
+
+    private void StartEdit(AlertRoutingRule rule)
+    {
+        editId = rule.Id;
+        formName = rule.Name;
+        formPriority = rule.Priority;
+        formChannelId = rule.ChannelId?.ToString() ?? "";
+        formMatchClusterId = rule.MatchClusterId?.ToString() ?? "";
+        formEnabled = rule.IsEnabled;
+        formSuppressIncident = rule.SuppressIncident;
+        formAlertName = rule.MatchAlertName ?? "";
+        formSeverity = rule.MatchSeverity ?? "";
+        formNamespace = rule.MatchNamespace ?? "";
+        formLabelKey = rule.MatchLabelKey ?? "";
+        formLabelValue = rule.MatchLabelValue ?? "";
+        formError = null;
+        showForm = true;
+    }
+
+    private async Task SaveRule()
+    {
+        formError = null;
+        if (string.IsNullOrWhiteSpace(formName)) return;
+
+        Guid? channelGuid = null;
+        if (!formSuppressIncident)
+        {
+            if (string.IsNullOrWhiteSpace(formChannelId)) return;
+            if (!Guid.TryParse(formChannelId, out Guid cg))
+            {
+                formError = "Invalid channel.";
+                return;
+            }
+            channelGuid = cg;
+        }
+
+        Guid? matchClusterGuid = null;
+        if (!string.IsNullOrWhiteSpace(formMatchClusterId) && Guid.TryParse(formMatchClusterId, out Guid mcg))
+            matchClusterGuid = mcg;
+
+        if (editId.HasValue)
+        {
+            await AlertRoutingService.UpdateRuleAsync(editId.Value, formName.Trim(), formPriority, channelGuid,
+                formAlertName, formNamespace, formSeverity, formLabelKey, formLabelValue, formEnabled,
+                formSuppressIncident, matchClusterGuid);
+        }
+        else
+        {
+            await AlertRoutingService.CreateRuleAsync(TenantId, formName.Trim(), formPriority, channelGuid,
+                formAlertName, formNamespace, formSeverity, formLabelKey, formLabelValue,
+                formSuppressIncident, matchClusterGuid);
+        }
+
+        showForm = false;
+        editId = null;
+        await Load();
+    }
+
+    private void CancelForm()
+    {
+        showForm = false;
+        editId = null;
+        formError = null;
+    }
+
+    private async Task DeleteRule(AlertRoutingRule rule)
+    {
+        await AlertRoutingService.DeleteRuleAsync(rule.Id);
+        await Load();
+    }
+
+    private async Task RunTest()
+    {
+        Dictionary<string, string>? labels = null;
+        if (!string.IsNullOrWhiteSpace(testLabelKey))
+            labels = new() { [testLabelKey.Trim()] = testLabelValue.Trim() };
+
+        Guid? clusterId = null;
+        if (Guid.TryParse(testClusterId, out Guid cid))
+            clusterId = cid;
+
+        testMatchedRule = await AlertRoutingService.MatchAsync(
+            TenantId,
+            clusterId,
+            testAlertName,
+            testSeverity,
+            string.IsNullOrWhiteSpace(testNamespace) ? null : testNamespace.Trim(),
+            labels);
+
+        // Reload the channel nav property from the already-loaded rules list
+        if (testMatchedRule is not null)
+            testMatchedRule = rules.FirstOrDefault(r => r.Id == testMatchedRule.Id) ?? testMatchedRule;
+
+        testRan = true;
+    }
+}

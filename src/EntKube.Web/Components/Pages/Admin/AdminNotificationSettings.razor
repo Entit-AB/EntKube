@@ -1,0 +1,499 @@
+@page "/admin/notifications"
+@using Microsoft.AspNetCore.Authorization
+@using System.Text.Json
+@using System.Security.Claims
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = "Admin")]
+
+@inject NotificationProviderConfigService ProviderConfigService
+@inject AuthenticationStateProvider AuthState
+
+<PageTitle>Notification Settings</PageTitle>
+
+<div class="d-flex align-items-center justify-content-between mb-4">
+    <div>
+        <h1 class="mb-0"><i class="bi bi-bell-fill me-2 text-primary"></i>Notification Settings</h1>
+        <p class="text-muted small mb-0 mt-1">Configure global notification providers used by tenant alert channels.</p>
+    </div>
+</div>
+
+@if (loading)
+{
+    <div class="d-flex justify-content-center py-5">
+        <div class="spinner-border text-primary" role="status"></div>
+    </div>
+}
+else
+{
+    <div class="row g-4">
+
+        <!-- SMTP -->
+        <div class="col-12 col-xl-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-header bg-transparent d-flex align-items-center gap-2">
+                    <i class="bi bi-envelope-fill text-warning fs-5"></i>
+                    <h5 class="mb-0">SMTP / Email</h5>
+                    @if (smtpConfig is not null)
+                    {
+                        <span class="badge @(smtpConfig.IsEnabled ? "bg-success" : "bg-secondary") ms-auto">@(smtpConfig.IsEnabled ? "Enabled" : "Disabled")</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-light text-dark ms-auto">Not configured</span>
+                    }
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small">Configure an SMTP server so email notification channels can deliver alerts.</p>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Host</label>
+                        <input class="form-control" @bind="smtpHost" placeholder="smtp.example.com" />
+                    </div>
+                    <div class="row g-2 mb-3">
+                        <div class="col-4">
+                            <label class="form-label fw-semibold">Port</label>
+                            <input class="form-control" type="number" @bind="smtpPort" />
+                        </div>
+                        <div class="col-8">
+                            <label class="form-label fw-semibold">From Address</label>
+                            <input class="form-control" type="email" @bind="smtpFrom" placeholder="alerts@example.com" />
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Username</label>
+                        <input class="form-control" @bind="smtpUsername" placeholder="(optional)" autocomplete="username" />
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Password</label>
+                        <input class="form-control" type="password" @bind="smtpPassword" placeholder="@(smtpConfig is not null ? "••••••••  (leave blank to keep current)" : "(optional)")" autocomplete="current-password" />
+                    </div>
+                    <div class="mb-3 form-check form-switch">
+                        <input class="form-check-input" type="checkbox" role="switch" id="smtpSsl" @bind="smtpEnableSsl" />
+                        <label class="form-check-label" for="smtpSsl">Enable SSL/TLS</label>
+                    </div>
+                    <div class="mb-3 form-check form-switch">
+                        <input class="form-check-input" type="checkbox" role="switch" id="smtpEnabled" @bind="smtpEnabled" />
+                        <label class="form-check-label" for="smtpEnabled">Enabled</label>
+                    </div>
+
+                    @if (!string.IsNullOrEmpty(smtpError))
+                    {
+                        <div class="alert alert-danger py-2 small">@smtpError</div>
+                    }
+                    @if (!string.IsNullOrEmpty(smtpSuccess))
+                    {
+                        <div class="alert alert-success py-2 small">@smtpSuccess</div>
+                    }
+
+                    <div class="d-flex gap-2 mt-3">
+                        <button class="btn btn-primary" @onclick="SaveSmtp" disabled="@smtpBusy">
+                            @if (smtpBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Save
+                        </button>
+                        <div class="input-group" style="max-width:260px">
+                            <input class="form-control form-control-sm" @bind="smtpTestRecipient" placeholder="test@example.com" />
+                            <button class="btn btn-outline-secondary btn-sm" @onclick="TestSmtp" disabled="@smtpBusy">
+                                Test
+                            </button>
+                        </div>
+                        @if (smtpConfig is not null)
+                        {
+                            <button class="btn btn-outline-danger ms-auto" @onclick="DeleteSmtp" disabled="@smtpBusy">Remove</button>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- MS Teams via Microsoft Graph -->
+        <div class="col-12 col-xl-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-header bg-transparent d-flex align-items-center gap-2">
+                    <i class="bi bi-microsoft-teams text-primary fs-5"></i>
+                    <h5 class="mb-0">Microsoft Teams (Graph API)</h5>
+                    @if (teamsConfig is not null)
+                    {
+                        <span class="badge @(teamsConfig.IsEnabled ? "bg-success" : "bg-secondary") ms-auto">@(teamsConfig.IsEnabled ? "Enabled" : "Disabled")</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-light text-dark ms-auto">Not configured</span>
+                    }
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small">
+                        Send alerts directly to Teams channels using the Microsoft Graph API.
+                        Requires an Azure AD app registration with <code>ChannelMessage.Send</code> application permission.
+                    </p>
+                    <div class="alert alert-info py-2 small mb-3">
+                        <i class="bi bi-info-circle me-1"></i>
+                        Once configured, add a Teams notification channel to a tenant and supply a <strong>Team ID</strong> and <strong>Channel ID</strong> instead of a webhook URL.
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Tenant ID (Directory ID)</label>
+                        <input class="form-control font-monospace" @bind="teamsTenantId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Client ID (Application ID)</label>
+                        <input class="form-control font-monospace" @bind="teamsClientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Client Secret</label>
+                        <input class="form-control" type="password" @bind="teamsClientSecret"
+                               placeholder="@(teamsConfig is not null ? "••••••••  (leave blank to keep current)" : "")"
+                               autocomplete="current-password" />
+                    </div>
+                    <div class="mb-3 form-check form-switch">
+                        <input class="form-check-input" type="checkbox" role="switch" id="teamsEnabled" @bind="teamsEnabled" />
+                        <label class="form-check-label" for="teamsEnabled">Enabled</label>
+                    </div>
+
+                    @if (!string.IsNullOrEmpty(teamsError))
+                    {
+                        <div class="alert alert-danger py-2 small">@teamsError</div>
+                    }
+                    @if (!string.IsNullOrEmpty(teamsSuccess))
+                    {
+                        <div class="alert alert-success py-2 small">@teamsSuccess</div>
+                    }
+
+                    <div class="d-flex gap-2 mt-3">
+                        <button class="btn btn-primary" @onclick="SaveTeams" disabled="@teamsBusy">
+                            @if (teamsBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Save
+                        </button>
+                        <button class="btn btn-outline-secondary" @onclick="TestTeams" disabled="@teamsBusy">
+                            Test Credentials
+                        </button>
+                        @if (teamsConfig is not null)
+                        {
+                            <button class="btn btn-outline-danger ms-auto" @onclick="DeleteTeams" disabled="@teamsBusy">Remove</button>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slack info card -->
+        <div class="col-12 col-xl-6">
+            <div class="card border-0 shadow-sm bg-light">
+                <div class="card-body">
+                    <div class="d-flex align-items-center gap-2 mb-2">
+                        <i class="bi bi-slack text-success fs-5"></i>
+                        <h6 class="mb-0">Slack</h6>
+                        <span class="badge bg-success ms-auto">Ready</span>
+                    </div>
+                    <p class="text-muted small mb-0">
+                        Slack notifications use <strong>Incoming Webhooks</strong> — no global configuration needed.
+                        Each tenant notification channel stores its own webhook URL.
+                        Create webhooks at <strong>api.slack.com/apps</strong>.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Webhook info card -->
+        <div class="col-12 col-xl-6">
+            <div class="card border-0 shadow-sm bg-light">
+                <div class="card-body">
+                    <div class="d-flex align-items-center gap-2 mb-2">
+                        <i class="bi bi-link-45deg text-secondary fs-5"></i>
+                        <h6 class="mb-0">Generic Webhook</h6>
+                        <span class="badge bg-success ms-auto">Ready</span>
+                    </div>
+                    <p class="text-muted small mb-0">
+                        Webhook channels post a JSON payload to any URL and optionally authenticate with a Bearer token.
+                        No global configuration required — configure per-channel in the tenant settings.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+    </div>
+}
+
+@code {
+    private bool loading = true;
+    private string? currentUserId;
+
+    // SMTP state
+    private NotificationProviderConfig? smtpConfig;
+    private string smtpHost = "";
+    private int smtpPort = 587;
+    private string smtpFrom = "";
+    private string smtpUsername = "";
+    private string smtpPassword = "";
+    private bool smtpEnableSsl = true;
+    private bool smtpEnabled = true;
+    private string smtpTestRecipient = "";
+    private bool smtpBusy;
+    private string? smtpError;
+    private string? smtpSuccess;
+
+    // Teams state
+    private NotificationProviderConfig? teamsConfig;
+    private string teamsTenantId = "";
+    private string teamsClientId = "";
+    private string teamsClientSecret = "";
+    private bool teamsEnabled = true;
+    private bool teamsBusy;
+    private string? teamsError;
+    private string? teamsSuccess;
+
+    protected override async Task OnInitializedAsync()
+    {
+        AuthenticationState authState = await AuthState.GetAuthenticationStateAsync();
+        currentUserId = authState.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+
+        await LoadAsync();
+        loading = false;
+    }
+
+    private async Task LoadAsync()
+    {
+        smtpConfig = await ProviderConfigService.GetAsync(NotificationProviderType.Smtp);
+        teamsConfig = await ProviderConfigService.GetAsync(NotificationProviderType.MsTeamsGraph);
+
+        if (smtpConfig is not null)
+        {
+            using JsonDocument doc = JsonDocument.Parse(smtpConfig.ConfigurationJson);
+            JsonElement root = doc.RootElement;
+            smtpHost = root.TryGetProperty("host", out var h) ? h.GetString() ?? "" : "";
+            smtpPort = root.TryGetProperty("port", out var p) ? p.GetInt32() : 587;
+            smtpFrom = root.TryGetProperty("from", out var f) ? f.GetString() ?? "" : "";
+            smtpUsername = root.TryGetProperty("username", out var u) ? u.GetString() ?? "" : "";
+            smtpEnableSsl = !root.TryGetProperty("enableSsl", out var ssl) || ssl.GetBoolean();
+            smtpEnabled = smtpConfig.IsEnabled;
+            smtpPassword = "";
+        }
+
+        if (teamsConfig is not null)
+        {
+            using JsonDocument doc = JsonDocument.Parse(teamsConfig.ConfigurationJson);
+            JsonElement root = doc.RootElement;
+            teamsTenantId = root.TryGetProperty("tenantId", out var t) ? t.GetString() ?? "" : "";
+            teamsClientId = root.TryGetProperty("clientId", out var c) ? c.GetString() ?? "" : "";
+            teamsEnabled = teamsConfig.IsEnabled;
+            teamsClientSecret = "";
+        }
+    }
+
+    private async Task SaveSmtp()
+    {
+        smtpError = null;
+        smtpSuccess = null;
+        if (string.IsNullOrWhiteSpace(smtpHost))
+        {
+            smtpError = "Host is required.";
+            return;
+        }
+
+        smtpBusy = true;
+        try
+        {
+            string password = smtpPassword;
+            if (string.IsNullOrEmpty(password) && smtpConfig is not null)
+            {
+                using JsonDocument existing = JsonDocument.Parse(smtpConfig.ConfigurationJson);
+                password = existing.RootElement.TryGetProperty("password", out var pw) ? pw.GetString() ?? "" : "";
+            }
+
+            string configJson = JsonSerializer.Serialize(new
+            {
+                host = smtpHost.Trim(),
+                port = smtpPort,
+                from = smtpFrom.Trim(),
+                username = smtpUsername.Trim(),
+                password,
+                enableSsl = smtpEnableSsl
+            });
+
+            await ProviderConfigService.SaveAsync(NotificationProviderType.Smtp, configJson, smtpEnabled, currentUserId);
+            smtpSuccess = "SMTP configuration saved.";
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            smtpError = ex.Message;
+        }
+        finally
+        {
+            smtpBusy = false;
+        }
+    }
+
+    private async Task TestSmtp()
+    {
+        smtpError = null;
+        smtpSuccess = null;
+        if (string.IsNullOrWhiteSpace(smtpTestRecipient))
+        {
+            smtpError = "Enter a test recipient email address.";
+            return;
+        }
+
+        smtpBusy = true;
+        try
+        {
+            string password = smtpPassword;
+            if (string.IsNullOrEmpty(password) && smtpConfig is not null)
+            {
+                using JsonDocument existing = JsonDocument.Parse(smtpConfig.ConfigurationJson);
+                password = existing.RootElement.TryGetProperty("password", out var pw) ? pw.GetString() ?? "" : "";
+            }
+
+            string configJson = JsonSerializer.Serialize(new
+            {
+                host = smtpHost.Trim(),
+                port = smtpPort,
+                from = smtpFrom.Trim(),
+                username = smtpUsername.Trim(),
+                password,
+                enableSsl = smtpEnableSsl
+            });
+
+            await ProviderConfigService.TestSmtpAsync(configJson, smtpTestRecipient.Trim());
+            smtpSuccess = $"Test email sent to {smtpTestRecipient}.";
+        }
+        catch (Exception ex)
+        {
+            smtpError = $"Test failed: {ex.Message}";
+        }
+        finally
+        {
+            smtpBusy = false;
+        }
+    }
+
+    private async Task DeleteSmtp()
+    {
+        smtpBusy = true;
+        smtpError = null;
+        smtpSuccess = null;
+        try
+        {
+            await ProviderConfigService.DeleteAsync(NotificationProviderType.Smtp);
+            smtpHost = ""; smtpPort = 587; smtpFrom = ""; smtpUsername = ""; smtpPassword = ""; smtpEnableSsl = true; smtpEnabled = true;
+            await LoadAsync();
+            smtpSuccess = "SMTP configuration removed.";
+        }
+        finally
+        {
+            smtpBusy = false;
+        }
+    }
+
+    private async Task SaveTeams()
+    {
+        teamsError = null;
+        teamsSuccess = null;
+        if (string.IsNullOrWhiteSpace(teamsTenantId) || string.IsNullOrWhiteSpace(teamsClientId))
+        {
+            teamsError = "Tenant ID and Client ID are required.";
+            return;
+        }
+
+        teamsBusy = true;
+        try
+        {
+            string secret = teamsClientSecret;
+            if (string.IsNullOrEmpty(secret) && teamsConfig is not null)
+            {
+                using JsonDocument existing = JsonDocument.Parse(teamsConfig.ConfigurationJson);
+                secret = existing.RootElement.TryGetProperty("clientSecret", out var s) ? s.GetString() ?? "" : "";
+            }
+
+            if (string.IsNullOrEmpty(secret))
+            {
+                teamsError = "Client Secret is required.";
+                return;
+            }
+
+            string configJson = JsonSerializer.Serialize(new
+            {
+                tenantId = teamsTenantId.Trim(),
+                clientId = teamsClientId.Trim(),
+                clientSecret = secret
+            });
+
+            await ProviderConfigService.SaveAsync(NotificationProviderType.MsTeamsGraph, configJson, teamsEnabled, currentUserId);
+            teamsSuccess = "Teams Graph configuration saved.";
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            teamsError = ex.Message;
+        }
+        finally
+        {
+            teamsBusy = false;
+        }
+    }
+
+    private async Task TestTeams()
+    {
+        teamsError = null;
+        teamsSuccess = null;
+        if (string.IsNullOrWhiteSpace(teamsTenantId) || string.IsNullOrWhiteSpace(teamsClientId))
+        {
+            teamsError = "Tenant ID and Client ID are required.";
+            return;
+        }
+
+        teamsBusy = true;
+        try
+        {
+            string secret = teamsClientSecret;
+            if (string.IsNullOrEmpty(secret) && teamsConfig is not null)
+            {
+                using JsonDocument existing = JsonDocument.Parse(teamsConfig.ConfigurationJson);
+                secret = existing.RootElement.TryGetProperty("clientSecret", out var s) ? s.GetString() ?? "" : "";
+            }
+
+            if (string.IsNullOrEmpty(secret))
+            {
+                teamsError = "Client Secret is required.";
+                return;
+            }
+
+            string configJson = JsonSerializer.Serialize(new
+            {
+                tenantId = teamsTenantId.Trim(),
+                clientId = teamsClientId.Trim(),
+                clientSecret = secret
+            });
+
+            await ProviderConfigService.TestMsTeamsGraphAsync(configJson);
+            teamsSuccess = "Successfully authenticated with Azure AD. Credentials are valid.";
+        }
+        catch (Exception ex)
+        {
+            teamsError = $"Test failed: {ex.Message}";
+        }
+        finally
+        {
+            teamsBusy = false;
+        }
+    }
+
+    private async Task DeleteTeams()
+    {
+        teamsBusy = true;
+        teamsError = null;
+        teamsSuccess = null;
+        try
+        {
+            await ProviderConfigService.DeleteAsync(NotificationProviderType.MsTeamsGraph);
+            teamsTenantId = ""; teamsClientId = ""; teamsClientSecret = ""; teamsEnabled = true;
+            await LoadAsync();
+            teamsSuccess = "Teams Graph configuration removed.";
+        }
+        finally
+        {
+            teamsBusy = false;
+        }
+    }
+}

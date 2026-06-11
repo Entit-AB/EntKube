@@ -1,0 +1,3018 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject TenantService TenantService
+@inject VaultService VaultService
+@inject ComponentLifecycleService LifecycleService
+@inject ExternalRouteService RouteService
+@inject ComponentScanService ScanService
+@inject KeycloakService KeycloakService
+@inject HarborService HarborService
+@inject LokiService LokiService
+@inject StorageService StorageService
+
+@* ═══════════════════════════════════════════════════════════════════
+   Cluster Detail — a full-page view for a single cluster.
+   Shows cluster info, components, and is the extension point
+   for future cluster-level features (health, logs, config, etc.).
+   ═══════════════════════════════════════════════════════════════════ *@
+
+@* --- Back button --- *@
+<nav class="mb-3">
+    <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="OnBack">
+        <i class="bi bi-arrow-left me-1"></i>Back to clusters
+    </button>
+</nav>
+
+@* --- Cluster header --- *@
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <div class="d-flex align-items-start justify-content-between">
+            <div class="d-flex align-items-start">
+                <i class="bi bi-hdd-rack fs-3 me-3 text-primary"></i>
+                <div>
+                    <h4 class="mb-1">@Cluster.Name</h4>
+                    <div class="d-flex flex-wrap gap-3 text-muted small">
+                        @if (!string.IsNullOrEmpty(Cluster.ContextName))
+                        {
+                            <span><i class="bi bi-terminal me-1"></i>Context: <code>@Cluster.ContextName</code></span>
+                        }
+                        <span><i class="bi bi-globe me-1"></i>@Cluster.ApiServerUrl</span>
+                    </div>
+                </div>
+            </div>
+
+            @if (!confirmDelete)
+            {
+                <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDelete = true" title="Delete cluster">
+                    <i class="bi bi-trash me-1"></i>Delete
+                </button>
+            }
+        </div>
+
+        @if (confirmDelete)
+        {
+            <div class="mt-3 p-2 bg-danger bg-opacity-10 rounded d-flex align-items-center justify-content-between">
+                <span class="text-danger small">
+                    <i class="bi bi-exclamation-triangle me-1"></i>
+                    Permanently delete <strong>@Cluster.Name</strong> and all its components?
+                </span>
+                <div>
+                    <button class="btn btn-sm btn-danger me-1" @onclick="DeleteCluster">Yes, delete</button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDelete = false">Cancel</button>
+                </div>
+            </div>
+        }
+    </div>
+</div>
+
+@* --- Cluster sub-sections (tabs for future expansion) --- *@
+<ul class="nav nav-pills mb-3 gap-1">
+    <li class="nav-item">
+        <button class="nav-link @(section == "monitoring" ? "active" : "")" @onclick='() => section = "monitoring"'>
+            <i class="bi bi-heart-pulse me-1"></i>Monitoring
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(section == "nodes" ? "active" : "")" @onclick='() => section = "nodes"'>
+            <i class="bi bi-hdd-stack me-1"></i>Nodes
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(section == "components" ? "active" : "")" @onclick='() => section = "components"'>
+            <i class="bi bi-puzzle me-1"></i>Components
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(section == "logs" ? "active" : "")" @onclick='() => section = "logs"'>
+            <i class="bi bi-journal-text me-1"></i>Logs
+        </button>
+    </li>
+</ul>
+
+@if (section == "monitoring")
+{
+    <ClusterMonitoring ClusterId="Cluster.Id" />
+}
+else if (section == "nodes")
+{
+    <ClusterNodes ClusterId="Cluster.Id" />
+}
+else if (section == "logs")
+{
+    <LogBrowser ClusterId="Cluster.Id" />
+}
+else if (section == "components")
+{
+    @* --- Register Component --- *@
+    @if (showRegisterForm)
+    {
+        <div class="card shadow-sm mb-3">
+            <div class="card-header bg-white d-flex align-items-center justify-content-between py-2">
+                <span><i class="bi bi-plus-circle me-2 text-success"></i><strong>Add Component</strong></span>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => { showRegisterForm = false; ResetRegisterForm(); }">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+            <div class="card-body">
+                @if (selectedCatalogEntry is null)
+                {
+                    @* ── Step 1: Pick from catalog ── *@
+                    <p class="text-muted small mb-3">
+                        Choose a component to add to this cluster. Configuration can be customised after selecting.
+                    </p>
+                    @foreach (IGrouping<string, CatalogEntry> group in ComponentCatalog.GetByCategory())
+                    {
+                        <h6 class="text-muted mb-2 mt-3">@group.Key</h6>
+                        <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-2">
+                            @foreach (CatalogEntry entry in group)
+                            {
+                                bool alreadyAdded = components?.Any(c =>
+                                    ComponentCatalog.IsComponentMatch(c.Name, entry, c.HelmChartName, c.ReleaseName)) ?? false;
+
+                                List<string> installedKeys = ComponentCatalog.ResolveInstalledKeys(
+                                    components?.Select(c => (c.Name, c.HelmChartName, c.ReleaseName)) ?? []);
+                                DependencyCheckResult depCheck = ComponentCatalog.CheckDependencies(entry, installedKeys);
+
+                                <div class="col">
+                                    <div class="card h-100 @(alreadyAdded ? "border-success bg-success bg-opacity-10" : "border-0 shadow-sm")"
+                                         role="@(alreadyAdded ? "" : "button")"
+                                         style="@(alreadyAdded ? "" : "cursor: pointer;")"
+                                         @onclick="async () => { if (!alreadyAdded) await SelectCatalogEntry(entry); }">
+                                        <div class="card-body py-2 px-3">
+                                            <div class="d-flex align-items-center gap-2 mb-1">
+                                                <i class="bi @entry.Icon text-primary"></i>
+                                                <strong class="small">@entry.DisplayName</strong>
+                                                @if (alreadyAdded)
+                                                {
+                                                    <span class="badge bg-success ms-auto"><i class="bi bi-check-lg me-1"></i>Added</span>
+                                                }
+                                                else if (!depCheck.IsSatisfied)
+                                                {
+                                                    <span class="badge bg-warning text-dark ms-auto" title="Has unmet dependencies">
+                                                        <i class="bi bi-exclamation-triangle me-1"></i>Deps
+                                                    </span>
+                                                }
+                                            </div>
+                                            <p class="text-muted mb-0" style="font-size: 0.75rem;">@entry.Description</p>
+                                            @if (entry.Dependencies.Count > 0 || entry.RequiresOneOf.Count > 0)
+                                            {
+                                                <div class="mt-1">
+                                                    @foreach (string dep in entry.Dependencies)
+                                                    {
+                                                        bool met = installedKeys.Any(n =>
+                                                            string.Equals(n, dep, StringComparison.OrdinalIgnoreCase));
+                                                        <span class="badge @(met ? "bg-success" : "bg-secondary") bg-opacity-75 me-1" style="font-size: 0.65rem;">
+                                                            <i class="bi @(met ? "bi-check" : "bi-link-45deg") me-1"></i>@dep
+                                                        </span>
+                                                    }
+                                                    @foreach (DependencyRequirement req in entry.RequiresOneOf)
+                                                    {
+                                                        bool met = req.Options.Any(opt =>
+                                                            installedKeys.Any(n => string.Equals(n, opt, StringComparison.OrdinalIgnoreCase)));
+                                                        <span class="badge @(met ? "bg-success" : "bg-secondary") bg-opacity-75 me-1" style="font-size: 0.65rem;">
+                                                            <i class="bi @(met ? "bi-check" : "bi-link-45deg") me-1"></i>@req.Label
+                                                        </span>
+                                                    }
+                                                </div>
+                                            }
+                                        </div>
+                                    </div>
+                                </div>
+                            }
+                        </div>
+                    }
+
+                    @* ── Custom component option ── *@
+                    <h6 class="text-muted mb-2 mt-3">Custom</h6>
+                    <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-2">
+                        <div class="col">
+                            <div class="card h-100 border-0 shadow-sm" role="button" style="cursor: pointer;"
+                                 @onclick="() => showCustomForm = true">
+                                <div class="card-body py-2 px-3">
+                                    <div class="d-flex align-items-center gap-2 mb-1">
+                                        <i class="bi bi-gear text-secondary"></i>
+                                        <strong class="small">Custom Helm Chart</strong>
+                                    </div>
+                                    <p class="text-muted mb-0" style="font-size: 0.75rem;">Add any Helm chart by specifying the repo URL, chart name, and version manually.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    @* ── Custom form (shown inline when "Custom" is clicked) ── *@
+                    @if (showCustomForm)
+                    {
+                        <div class="card border-0 shadow-sm mt-3">
+                            <div class="card-body">
+                                <div class="row g-2 mb-2">
+                                    <div class="col-md-4">
+                                        <label class="form-label small mb-0">Component name</label>
+                                        <input type="text" class="form-control form-control-sm" placeholder="e.g. my-chart"
+                                               @bind="regName" @bind:event="oninput" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small mb-0">Namespace</label>
+                                        <input type="text" class="form-control form-control-sm" placeholder="e.g. default"
+                                               @bind="regNamespace" @bind:event="oninput" />
+                                    </div>
+                                </div>
+                                <div class="row g-2 mb-2">
+                                    <div class="col-md-5">
+                                        <label class="form-label small mb-0">Helm repo URL</label>
+                                        <input type="text" class="form-control form-control-sm"
+                                               @bind="regRepoUrl" @bind:event="oninput" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small mb-0">Chart name</label>
+                                        <input type="text" class="form-control form-control-sm"
+                                               @bind="regChartName" @bind:event="oninput" />
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small mb-0">Version</label>
+                                        <input type="text" class="form-control form-control-sm" placeholder="latest"
+                                               @bind="regChartVersion" @bind:event="oninput" />
+                                    </div>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small mb-0">Helm values (YAML)</label>
+                                    <YamlEditor @bind-Value="regValues" />
+                                </div>
+                                <button class="btn btn-sm btn-success" @onclick="RegisterCustomComponent"
+                                        disabled="@(string.IsNullOrWhiteSpace(regName) || string.IsNullOrWhiteSpace(regChartName))">
+                                    <i class="bi bi-plus-lg me-1"></i>Add
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="() => showCustomForm = false">Cancel</button>
+                            </div>
+                        </div>
+                    }
+                }
+                else
+                {
+                    @* ── Step 2: Review & customise before adding ── *@
+                    <div class="d-flex align-items-center gap-2 mb-3">
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => selectedCatalogEntry = null">
+                            <i class="bi bi-arrow-left me-1"></i>Back
+                        </button>
+                        <i class="bi @selectedCatalogEntry.Icon text-primary"></i>
+                        <h6 class="mb-0">@selectedCatalogEntry.DisplayName</h6>
+                        <span class="badge bg-info bg-opacity-75 text-dark">@selectedCatalogEntry.Category</span>
+                    </div>
+
+                    <p class="text-muted small mb-3">@selectedCatalogEntry.Description</p>
+
+                    @* ── Dependency status ── *@
+                    @if (!GetDependencyCheck(selectedCatalogEntry).IsSatisfied)
+                    {
+                        <div class="alert alert-warning py-2 small mb-3">
+                            <i class="bi bi-exclamation-triangle me-1"></i><strong>Missing dependencies</strong> — add these components first:
+                            <ul class="mb-0 mt-1">
+                                @foreach (string missing in GetDependencyCheck(selectedCatalogEntry).MissingDependencies)
+                                {
+                                    CatalogEntry? missingEntry = ComponentCatalog.GetByKey(missing);
+                                    <li>
+                                        <strong>@(missingEntry?.DisplayName ?? missing)</strong>
+                                        @if (missingEntry is not null)
+                                        {
+                                            <span class="text-muted"> — @missingEntry.Description</span>
+                                        }
+                                    </li>
+                                }
+                                @foreach (DependencyRequirement missingReq in GetDependencyCheck(selectedCatalogEntry).MissingOneOfRequirements)
+                                {
+                                    <li>
+                                        <strong>@missingReq.Label</strong> — one of:
+                                        @string.Join(", ", missingReq.Options.Select(o => ComponentCatalog.GetByKey(o)?.DisplayName ?? o))
+                                    </li>
+                                }
+                            </ul>
+                        </div>
+                    }
+                    else if (selectedCatalogEntry.Dependencies.Count > 0 || selectedCatalogEntry.RequiresOneOf.Count > 0)
+                    {
+                        <div class="alert alert-success py-2 small mb-3">
+                            <i class="bi bi-check-circle me-1"></i>All dependencies are satisfied.
+                        </div>
+                    }
+
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-4">
+                            <label class="form-label small mb-0">Namespace</label>
+                            <input type="text" class="form-control form-control-sm"
+                                   @bind="regNamespace" @bind:event="oninput" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small mb-0">Release name</label>
+                            <input type="text" class="form-control form-control-sm"
+                                   @bind="regReleaseName" @bind:event="oninput" />
+                        </div>
+                    </div>
+
+                    @if (selectedCatalogEntry.FormFields.Count > 0)
+                    {
+                        <div class="row g-2 mb-2">
+                            @foreach (ComponentFormField field in selectedCatalogEntry.FormFields)
+                            {
+                                @if (!field.Hidden && IsFieldVisible(field, regFormFieldValues))
+                                {
+                                <div class="col-md-6">
+                                    <label class="form-label small mb-0">@field.Label</label>
+                                    @if (field.Type == FormFieldType.Toggle)
+                                    {
+                                        <div class="form-check form-switch mt-1">
+                                            <input type="checkbox" class="form-check-input"
+                                                   checked="@IsFormFieldTrue(field.Key)"
+                                                   @onchange="@(e => OnRegToggleChanged(field.Key, e))" />
+                                        </div>
+                                    }
+                                    else if (field.Type == FormFieldType.CnpgDatabase)
+                                    {
+                                        <select class="form-select form-select-sm"
+                                                value="@GetFormFieldValue(field.Key)"
+                                                @onchange="@(e => OnRegFieldChanged(field.Key, e))">
+                                            <option value="">-- Select a database --</option>
+                                            @if (keycloakDatabases is not null)
+                                            {
+                                                @foreach (CnpgDatabase kcDb in keycloakDatabases)
+                                                {
+                                                    <option value="@kcDb.Id">@kcDb.CnpgCluster.Name / @kcDb.Name</option>
+                                                }
+                                            }
+                                        </select>
+                                    }
+                                    else if (field.Type == FormFieldType.StorageLink)
+                                    {
+                                        <select class="form-select form-select-sm"
+                                                value="@GetFormFieldValue(field.Key)"
+                                                @onchange="@(e => OnRegFieldChanged(field.Key, e))">
+                                            <option value="">-- None (use local PVC) --</option>
+                                            @if (harborStorageLinks is not null)
+                                            {
+                                                @foreach (StorageLink sl in harborStorageLinks)
+                                                {
+                                                    <option value="@sl.Id">@sl.Name (@sl.BucketName)</option>
+                                                }
+                                            }
+                                        </select>
+                                    }
+                                    else if (field.Type == FormFieldType.ClusterIssuer)
+                                    {
+                                        @if (keycloakAvailableIssuers is { Count: > 0 })
+                                        {
+                                            <select class="form-select form-select-sm"
+                                                    value="@GetFormFieldValue(field.Key)"
+                                                    @onchange="@(e => OnRegFieldChanged(field.Key, e))">
+                                                @foreach (string issuer in keycloakAvailableIssuers)
+                                                {
+                                                    <option value="@issuer">@issuer</option>
+                                                }
+                                            </select>
+                                        }
+                                        else
+                                        {
+                                            <input type="text" class="form-control form-control-sm"
+                                                   placeholder="@(field.Placeholder ?? "letsencrypt-prod")"
+                                                   value="@GetFormFieldValue(field.Key)"
+                                                   @onchange="@(e => OnRegFieldChanged(field.Key, e))" />
+                                        }
+                                    }
+                                    else if (field.Type == FormFieldType.GatewaySelector)
+                                    {
+                                        <select class="form-select form-select-sm"
+                                                value="@GetFormFieldValue(field.Key)"
+                                                @onchange="@(e => OnRegGatewaySelected(field.Key, e))">
+                                            <option value="">-- Select a gateway --</option>
+                                            @foreach (ClusterComponent gw in GetInstalledGateways())
+                                            {
+                                                string releaseName = gw.ReleaseName ?? gw.Name;
+                                                <option value="@releaseName">@(ComponentCatalog.GetByKey(gw.Name)?.DisplayName ?? gw.Name) (@releaseName)</option>
+                                            }
+                                        </select>
+                                    }
+                                    else if (field.Type == FormFieldType.Select && field.Options is not null)
+                                    {
+                                        <select class="form-select form-select-sm"
+                                                value="@GetFormFieldValue(field.Key)"
+                                                @onchange="@(e => OnRegFieldChanged(field.Key, e))">
+                                            @foreach (string option in field.Options)
+                                            {
+                                                <option value="@option">@option</option>
+                                            }
+                                        </select>
+                                    }
+                                    else if (field.Type == FormFieldType.Password)
+                                    {
+                                        <input type="password" class="form-control form-control-sm"
+                                               placeholder="@field.Placeholder"
+                                               value="@GetFormFieldValue(field.Key)"
+                                               @onchange="@(e => OnRegFieldChanged(field.Key, e))" />
+                                    }
+                                    else if (field.Type == FormFieldType.Number)
+                                    {
+                                        <input type="number" class="form-control form-control-sm"
+                                               value="@GetFormFieldValue(field.Key)"
+                                               @onchange="@(e => OnRegFieldChanged(field.Key, e))" />
+                                    }
+                                    else
+                                    {
+                                        <input type="text" class="form-control form-control-sm"
+                                               placeholder="@field.Placeholder"
+                                               value="@GetFormFieldValue(field.Key)"
+                                               @onchange="@(e => OnRegFieldChanged(field.Key, e))" />
+                                    }
+                                    @if (!string.IsNullOrEmpty(field.HelpText))
+                                    {
+                                        <small class="text-muted">@field.HelpText</small>
+                                    }
+                                </div>
+                                }
+                            }
+                        </div>
+                    }
+
+                    <div class="accordion mb-2">
+                        <div class="accordion-item">
+                            <h2 class="accordion-header">
+                                <button class="accordion-button collapsed py-1 px-2 small" type="button"
+                                        @onclick="() => showAdvancedYaml = !showAdvancedYaml">
+                                    <i class="bi bi-code-slash me-1"></i>Advanced (YAML)
+                                </button>
+                            </h2>
+                            @if (showAdvancedYaml)
+                            {
+                                <div class="accordion-body p-2">
+                                    <YamlEditor @bind-Value="regValues" />
+                                </div>
+                            }
+                        </div>
+                    </div>
+
+                    <button class="btn btn-sm btn-success" @onclick="RegisterCatalogComponent">
+                        <i class="bi bi-plus-lg me-1"></i>Add to Cluster
+                    </button>
+                }
+            </div>
+        </div>
+    }
+    else
+    {
+        <div class="d-flex gap-2 mb-3">
+            <button class="btn btn-primary btn-sm" @onclick="() => showRegisterForm = true">
+                <i class="bi bi-plus-lg me-1"></i>Add Component
+            </button>
+            <button class="btn btn-outline-secondary btn-sm" @onclick="ScanClusterComponents" disabled="@scanning">
+                @if (scanning)
+                {
+                    <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+                    <span>Scanning…</span>
+                }
+                else
+                {
+                    <i class="bi bi-search me-1"></i><span>Scan Components</span>
+                }
+            </button>
+        </div>
+    }
+
+    @if (!string.IsNullOrEmpty(componentError))
+    {
+        <div class="alert alert-danger py-1 small mb-3">
+            <i class="bi bi-exclamation-triangle me-1"></i>@componentError
+        </div>
+    }
+
+    @* --- Scan Results Panel --- *@
+    @if (discoveredReleases is not null && discoveredReleases.Count > 0)
+    {
+        <div class="card shadow-sm mb-3 border-info">
+            <div class="card-header bg-info bg-opacity-10 d-flex align-items-center justify-content-between py-2">
+                <span>
+                    <i class="bi bi-search me-2 text-info"></i>
+                    <strong>Discovered Helm Releases</strong>
+                    <span class="badge bg-info ms-2">@discoveredReleases.Count(r => r.ParentComponentKey is null)</span>
+                </span>
+                <div class="d-flex gap-2">
+                    @{
+                        int newCount = discoveredReleases.Count(r => !r.AlreadyTracked && r.ParentComponentKey is null);
+                    }
+                    @if (newCount > 0)
+                    {
+                        <button class="btn btn-sm btn-success" @onclick="ImportAllDiscovered">
+                            <i class="bi bi-download me-1"></i>Import All New (@newCount)
+                        </button>
+                    }
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => discoveredReleases = null">
+                        <i class="bi bi-x-lg"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Release</th>
+                                <th>Namespace</th>
+                                <th>Chart</th>
+                                <th>Version</th>
+                                <th>Status</th>
+                                <th>Rev</th>
+                                <th class="text-end">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (DiscoveredHelmRelease release in discoveredReleases.Where(r => r.ParentComponentKey is null))
+                            {
+                                <tr class="@(release.AlreadyTracked ? "table-success" : "")">
+                                    <td class="fw-semibold">
+                                        @release.Name
+                                        @foreach (DiscoveredHelmRelease sub in GetSubchartsFor(release))
+                                        {
+                                            <br /><small class="text-muted"><i class="bi bi-puzzle-fill me-1"></i>@sub.Name (plugin)</small>
+                                        }
+                                    </td>
+                                    <td><code>@release.Namespace</code></td>
+                                    <td>@(release.ChartName ?? "—")</td>
+                                    <td>@(release.ChartVersion ?? "—")</td>
+                                    <td>
+                                        @if (release.Status == "deployed")
+                                        {
+                                            <span class="badge bg-success">deployed</span>
+                                        }
+                                        else if (release.Status == "failed")
+                                        {
+                                            <span class="badge bg-danger">failed</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="badge bg-secondary">@(release.Status ?? "unknown")</span>
+                                        }
+                                    </td>
+                                    <td>@release.Revision</td>
+                                    <td class="text-end">
+                                        @if (release.AlreadyTracked)
+                                        {
+                                            <span class="badge bg-success"><i class="bi bi-check-lg me-1"></i>Tracked</span>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-outline-success" @onclick="() => ImportSingleRelease(release)">
+                                                <i class="bi bi-download me-1"></i>Import
+                                            </button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    }
+    else if (discoveredReleases is not null && discoveredReleases.Count == 0)
+    {
+        <div class="alert alert-info py-2 small mb-3">
+            <i class="bi bi-info-circle me-1"></i>No Helm releases found on this cluster.
+        </div>
+    }
+
+    @* --- Component List --- *@
+    @if (components is null)
+    {
+        <div class="text-center py-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+        </div>
+    }
+    else if (components.Count == 0)
+    {
+        <div class="text-center py-5">
+            <i class="bi bi-puzzle text-muted" style="font-size: 3rem;"></i>
+            <p class="text-muted mt-2 mb-0">No components on this cluster yet. Register one above.</p>
+        </div>
+    }
+    else
+    {
+        <div class="row row-cols-1 g-3">
+            @foreach (ClusterComponent comp in components)
+            {
+                <div class="col">
+                    @{
+                        CatalogEntry? headerCatalog = ComponentCatalog.GetByKey(comp.Name);
+                        bool missingGatewayCrds = gatewayApiCrdsPresent == false
+                            && headerCatalog?.Dependencies.Contains("gateway-api-crds") == true
+                            && comp.Status == ComponentStatus.Installed;
+                        bool needsCertManagerGatewayRepair = certManagerGatewayApiEnabled == false
+                            && (comp.Name == "cert-manager" || comp.Name == "letsencrypt-issuer")
+                            && comp.Status == ComponentStatus.Installed;
+                        string cardBorder = selectedComponentId == comp.Id ? "border-primary"
+                            : comp.Status == ComponentStatus.Failed ? "border-danger"
+                            : missingGatewayCrds || needsCertManagerGatewayRepair ? "border-warning"
+                            : "";
+                    }
+                    <div class="card shadow-sm @cardBorder">
+                        @* ── Card Header ── *@
+                        <div class="card-header bg-white py-2" role="button" @onclick="async () => await ToggleComponentDetail(comp.Id)" style="cursor: pointer;">
+                            <div class="d-flex align-items-center justify-content-between">
+                                <div class="d-flex align-items-center gap-2">
+                                    @{
+                                        string icon = headerCatalog?.Icon ?? "bi-puzzle";
+                                    }
+                                    <i class="bi @icon fs-5 text-primary"></i>
+                                    <div>
+                                        <strong>@(headerCatalog?.DisplayName ?? comp.Name)</strong>
+                                        <div class="d-flex align-items-center gap-2 mt-0">
+                                            @GetStatusBadge(comp.Status)
+                                            @if (missingGatewayCrds)
+                                            {
+                                                <span class="badge bg-warning text-dark" title="Gateway API CRDs are not installed on this cluster">
+                                                    <i class="bi bi-exclamation-triangle-fill me-1"></i>CRDs missing
+                                                </span>
+                                            }
+                                            @if (needsCertManagerGatewayRepair)
+                                            {
+                                                <span class="badge bg-warning text-dark" title="cert-manager does not have Gateway API support enabled. HTTP-01 ACME challenges via Gateway API will fail.">
+                                                    <i class="bi bi-exclamation-triangle-fill me-1"></i>Gateway API disabled
+                                                </span>
+                                            }
+                                            @if (!string.IsNullOrEmpty(comp.Namespace))
+                                            {
+                                                <small class="text-muted"><i class="bi bi-box me-1"></i>@comp.Namespace</small>
+                                            }
+                                            @if (!string.IsNullOrEmpty(comp.HelmChartVersion))
+                                            {
+                                                <small class="text-muted"><i class="bi bi-tag me-1"></i>v@(comp.HelmChartVersion)</small>
+                                            }
+                                            @if (comp.InstalledAt.HasValue)
+                                            {
+                                                <small class="text-muted"><i class="bi bi-clock me-1"></i>@comp.InstalledAt.Value.ToString("g")</small>
+                                            }
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="d-flex align-items-center gap-1" @onclick:stopPropagation="true">
+                                    @* ── Lifecycle action buttons ── *@
+                                    @if (operationInProgress == comp.Id)
+                                    {
+                                        <div class="d-flex align-items-center gap-2 px-2">
+                                            <span class="spinner-border spinner-border-sm text-primary"></span>
+                                            <small class="text-primary fw-semibold">
+                                                @(comp.Status == ComponentStatus.Uninstalling ? "Uninstalling..." : "Installing...")
+                                            </small>
+                                        </div>
+                                    }
+                                    else if (comp.Status == ComponentStatus.NotInstalled || comp.Status == ComponentStatus.Failed)
+                                    {
+                                        bool needsDbConfig = IsKeycloakComponent(comp)
+                                            && (!keycloakConfigsByComponentId.TryGetValue(comp.Id, out KeycloakComponentConfig? kcCfg) || kcCfg.CnpgDatabaseId is null);
+                                        <button class="btn btn-sm btn-success"
+                                                @onclick="() => InstallComponent(comp.Id)"
+                                                disabled="@needsDbConfig"
+                                                title="@(needsDbConfig ? "Configure a CNPG database in the Identity tab first" : "Install this component")">
+                                            <i class="bi bi-play-fill me-1"></i>Install
+                                        </button>
+                                        if (needsDbConfig)
+                                        {
+                                            <small class="text-warning ms-1" title="Configure a database in the Identity tab first">
+                                                <i class="bi bi-exclamation-triangle-fill"></i> Database required
+                                            </small>
+                                        }
+                                    }
+                                    else if (comp.Status == ComponentStatus.Installed)
+                                    {
+                                        @if (missingGatewayCrds)
+                                        {
+                                            <button class="btn btn-sm btn-warning" @onclick="RepairMissingGatewayApiCrds"
+                                                    title="Install Gateway API CRDs to fix this component">
+                                                <i class="bi bi-wrench me-1"></i>Install CRDs
+                                            </button>
+                                        }
+                                        @if (needsCertManagerGatewayRepair)
+                                        {
+                                            <button class="btn btn-sm btn-warning" @onclick="RepairCertManagerGatewayApi"
+                                                    title="Upgrade cert-manager to enable Gateway API support for ACME HTTP-01 challenges">
+                                                <i class="bi bi-wrench me-1"></i>Enable Gateway API
+                                            </button>
+                                        }
+                                        <button class="btn btn-sm btn-outline-primary" @onclick="() => UpgradeComponent(comp.Id)" title="Apply configuration changes">
+                                            <i class="bi bi-arrow-clockwise me-1"></i>Apply
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteComponentId = comp.Id" title="Uninstall">
+                                            <i class="bi bi-stop-fill me-1"></i>Uninstall
+                                        </button>
+                                    }
+                                    <button class="btn btn-sm btn-link text-muted p-1" @onclick="() => confirmDeleteComponentId = comp.Id" title="Remove from cluster">
+                                        <i class="bi bi-x-lg"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        @* ── Error / last failure ── *@
+                        @if (!string.IsNullOrEmpty(comp.LastError))
+                        {
+                            <div class="px-3 py-2 bg-danger bg-opacity-10 border-top border-danger border-opacity-25">
+                                <div class="d-flex align-items-start gap-2">
+                                    <i class="bi bi-exclamation-triangle-fill text-danger mt-1"></i>
+                                    <div>
+                                        <small class="fw-semibold text-danger">Last operation failed</small>
+                                        <pre class="text-danger small mb-0 mt-1" style="white-space: pre-wrap; max-height: 100px; overflow-y: auto;">@comp.LastError</pre>
+                                    </div>
+                                    <button class="btn btn-sm btn-link text-danger ms-auto p-0" @onclick="() => ClearError(comp.Id)" title="Dismiss">
+                                        <i class="bi bi-x-lg"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        }
+
+                        @* ── Confirm uninstall/remove ── *@
+                        @if (confirmDeleteComponentId == comp.Id)
+                        {
+                            <div class="px-3 py-2 bg-warning bg-opacity-10 border-top">
+                                <div class="d-flex align-items-center justify-content-between">
+                                    <div class="d-flex align-items-center gap-2">
+                                        <i class="bi bi-exclamation-triangle text-warning"></i>
+                                        <small>
+                                            @if (comp.Status == ComponentStatus.Installed)
+                                            {
+                                                <span><strong>Uninstall</strong> @(headerCatalog?.DisplayName ?? comp.Name) from the cluster?</span>
+                                            }
+                                            else
+                                            {
+                                                <span>Remove <strong>@(headerCatalog?.DisplayName ?? comp.Name)</strong> from the list?</span>
+                                            }
+                                        </small>
+                                    </div>
+                                    <div class="d-flex gap-1">
+                                        @if (comp.Status == ComponentStatus.Installed)
+                                        {
+                                            <button class="btn btn-sm btn-warning" @onclick="() => UninstallComponent(comp.Id)">
+                                                <i class="bi bi-stop-fill me-1"></i>Yes, uninstall
+                                            </button>
+                                        }
+                                        <button class="btn btn-sm btn-danger" @onclick="() => DeleteComponent(comp.Id)">
+                                            <i class="bi bi-trash me-1"></i>Remove
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDeleteComponentId = null">Cancel</button>
+                                    </div>
+                                </div>
+                            </div>
+                        }
+
+                        @* ── Operation output ── *@
+                        @if (operationOutput is not null && operationComponentId == comp.Id)
+                        {
+                            <div class="px-3 py-2 border-top">
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <small class="fw-bold text-muted">
+                                        <i class="bi bi-terminal me-1"></i>Helm Output
+                                    </small>
+                                    <button class="btn btn-sm btn-link text-muted p-0" @onclick="() => { operationOutput = null; operationComponentId = null; }">
+                                        <i class="bi bi-x-lg"></i>
+                                    </button>
+                                </div>
+                                <pre class="bg-dark text-light p-2 rounded small mb-0" style="max-height: 200px; overflow-y: auto; font-size: 0.75rem;">@operationOutput</pre>
+                            </div>
+                        }
+
+                        @* ── Expanded detail panel ── *@
+                        @if (selectedComponentId == comp.Id)
+                        {
+                            <div class="card-body border-top pt-2">
+                                @* Sub-tabs *@
+                                <ul class="nav nav-pills nav-fill mb-3 gap-1">
+                                    <li class="nav-item">
+                                        <button class="nav-link py-1 px-2 @(compDetailTab == "config" ? "active" : "")" @onclick='() => compDetailTab = "config"'>
+                                            <i class="bi bi-sliders me-1"></i>Configure
+                                        </button>
+                                    </li>
+                                    <li class="nav-item">
+                                        <button class="nav-link py-1 px-2 @(compDetailTab == "values" ? "active" : "")" @onclick='() => compDetailTab = "values"'>
+                                            <i class="bi bi-code-slash me-1"></i>Values
+                                            @if (!string.IsNullOrWhiteSpace(editValues))
+                                            {
+                                                <span class="badge bg-secondary ms-1">customized</span>
+                                            }
+                                        </button>
+                                    </li>
+                                    <li class="nav-item">
+                                        <button class="nav-link py-1 px-2 @(compDetailTab == "secrets" ? "active" : "")" @onclick="() => ShowSecrets(comp.Id)">
+                                            <i class="bi bi-key me-1"></i>Secrets
+                                        </button>
+                                    </li>
+                                    <li class="nav-item">
+                                        <button class="nav-link py-1 px-2 @(compDetailTab == "expose" ? "active" : "")" @onclick="() => ShowRoutes(comp.Id)">
+                                            <i class="bi bi-globe me-1"></i>Expose
+                                            @if (componentRoutes is not null && componentRoutes.Count > 0 && selectedComponentId == comp.Id && compDetailTab == "expose")
+                                            {
+                                                <span class="badge bg-success ms-1">@componentRoutes.Count</span>
+                                            }
+                                        </button>
+                                    </li>
+                                </ul>
+
+                                @if (compDetailTab == "config")
+                                {
+                                    @* ── Configuration ── *@
+
+                                    @* Form fields first (if catalog component) *@
+                                    @if (GetCatalogMatchForSelected()?.FormFields.Count > 0)
+                                    {
+                                        <div class="row g-2 mb-3">
+                                            @foreach (ComponentFormField field in GetCatalogMatchForSelected()!.FormFields)
+                                            {
+                                                @if (!field.Hidden && IsFieldVisible(field, editFormFieldValues))
+                                                {
+                                                <div class="col-md-6">
+                                                    <label class="form-label small mb-0 fw-semibold">@field.Label</label>
+                                                    @if (field.Type == FormFieldType.Toggle)
+                                                    {
+                                                        <div class="form-check form-switch mt-1">
+                                                            <input type="checkbox" class="form-check-input"
+                                                                   checked="@IsEditFormFieldTrue(field.Key)"
+                                                                   @onchange="@(e => OnEditToggleChanged(field.Key, e))" />
+                                                        </div>
+                                                    }
+                                                    else if (field.Type == FormFieldType.CnpgDatabase)
+                                                    {
+                                                        <select class="form-select form-select-sm"
+                                                                value="@GetEditFormFieldValue(field.Key)"
+                                                                @onchange="@(e => OnEditFieldChanged(field.Key, e))">
+                                                            <option value="">-- Select a database --</option>
+                                                            @if (keycloakDatabases is not null)
+                                                            {
+                                                                @foreach (CnpgDatabase kcDb in keycloakDatabases)
+                                                                {
+                                                                    <option value="@kcDb.Id">@kcDb.CnpgCluster.Name / @kcDb.Name</option>
+                                                                }
+                                                            }
+                                                        </select>
+                                                    }
+                                                    else if (field.Type == FormFieldType.StorageLink)
+                                                    {
+                                                        <select class="form-select form-select-sm"
+                                                                value="@GetEditFormFieldValue(field.Key)"
+                                                                @onchange="@(e => OnEditFieldChanged(field.Key, e))">
+                                                            <option value="">-- None (use local PVC) --</option>
+                                                            @if (harborStorageLinks is not null)
+                                                            {
+                                                                @foreach (StorageLink sl in harborStorageLinks)
+                                                                {
+                                                                    <option value="@sl.Id">@sl.Name (@sl.BucketName)</option>
+                                                                }
+                                                            }
+                                                        </select>
+                                                    }
+                                                    else if (field.Type == FormFieldType.ClusterIssuer)
+                                                    {
+                                                        @if (keycloakAvailableIssuers is { Count: > 0 })
+                                                        {
+                                                            <select class="form-select form-select-sm"
+                                                                    value="@GetEditFormFieldValue(field.Key)"
+                                                                    @onchange="@(e => OnEditFieldChanged(field.Key, e))">
+                                                                @foreach (string issuer in keycloakAvailableIssuers)
+                                                                {
+                                                                    <option value="@issuer">@issuer</option>
+                                                                }
+                                                            </select>
+                                                        }
+                                                        else
+                                                        {
+                                                            <input type="text" class="form-control form-control-sm"
+                                                                   placeholder="@(field.Placeholder ?? "letsencrypt-prod")"
+                                                                   value="@GetEditFormFieldValue(field.Key)"
+                                                                   @onchange="@(e => OnEditFieldChanged(field.Key, e))" />
+                                                        }
+                                                    }
+                                                    else if (field.Type == FormFieldType.GatewaySelector)
+                                                    {
+                                                        <select class="form-select form-select-sm"
+                                                                value="@GetEditFormFieldValue(field.Key)"
+                                                                @onchange="@(e => OnEditGatewaySelected(field.Key, e))">
+                                                            <option value="">-- Select a gateway --</option>
+                                                            @foreach (ClusterComponent gw in GetInstalledGateways())
+                                                            {
+                                                                string releaseName = gw.ReleaseName ?? gw.Name;
+                                                                <option value="@releaseName">@(ComponentCatalog.GetByKey(gw.Name)?.DisplayName ?? gw.Name) (@releaseName)</option>
+                                                            }
+                                                        </select>
+                                                    }
+                                                    else if (field.Type == FormFieldType.Select && field.Options is not null)
+                                                    {
+                                                        <select class="form-select form-select-sm"
+                                                                value="@GetEditFormFieldValue(field.Key)"
+                                                                @onchange="@(e => OnEditFieldChanged(field.Key, e))">
+                                                            @foreach (string option in field.Options)
+                                                            {
+                                                                <option value="@option">@option</option>
+                                                            }
+                                                        </select>
+                                                    }
+                                                    else if (field.Type == FormFieldType.Password)
+                                                    {
+                                                        <input type="password" class="form-control form-control-sm"
+                                                               placeholder="@field.Placeholder"
+                                                               value="@GetEditFormFieldValue(field.Key)"
+                                                               @onchange="@(e => OnEditFieldChanged(field.Key, e))" />
+                                                    }
+                                                    else if (field.Type == FormFieldType.Number)
+                                                    {
+                                                        <input type="number" class="form-control form-control-sm"
+                                                               value="@GetEditFormFieldValue(field.Key)"
+                                                               @onchange="@(e => OnEditFieldChanged(field.Key, e))" />
+                                                    }
+                                                    else
+                                                    {
+                                                        <input type="text" class="form-control form-control-sm"
+                                                               placeholder="@field.Placeholder"
+                                                               value="@GetEditFormFieldValue(field.Key)"
+                                                               @onchange="@(e => OnEditFieldChanged(field.Key, e))" />
+                                                    }
+                                                    @if (!string.IsNullOrEmpty(field.HelpText))
+                                                    {
+                                                        <small class="text-muted">@field.HelpText</small>
+                                                    }
+                                                </div>
+                                                }
+                                            }
+                                        </div>
+                                    }
+
+                                    @* Helm chart details (collapsible for catalog components) *@
+                                    <div class="accordion mb-3">
+                                        <div class="accordion-item border-0 bg-light rounded">
+                                            <h2 class="accordion-header">
+                                                <button class="accordion-button collapsed py-2 px-3 small bg-light rounded" type="button"
+                                                        @onclick="() => showHelmDetails = !showHelmDetails">
+                                                    <i class="bi bi-box-seam me-1"></i>Helm Chart Details
+                                                </button>
+                                            </h2>
+                                            @if (showHelmDetails)
+                                            {
+                                                <div class="p-3">
+                                                    <div class="row g-2">
+                                                        <div class="col-md-5">
+                                                            <label class="form-label small mb-0">Helm repo URL</label>
+                                                            <input type="text" class="form-control form-control-sm" @bind="editRepoUrl" @bind:event="oninput" />
+                                                        </div>
+                                                        <div class="col-md-4">
+                                                            <label class="form-label small mb-0">Chart name</label>
+                                                            <input type="text" class="form-control form-control-sm" @bind="editChartName" @bind:event="oninput" />
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <label class="form-label small mb-0">Version</label>
+                                                            <input type="text" class="form-control form-control-sm" @bind="editChartVersion" @bind:event="oninput" />
+                                                        </div>
+                                                    </div>
+                                                    <div class="row g-2 mt-1">
+                                                        <div class="col-md-4">
+                                                            <label class="form-label small mb-0">Namespace</label>
+                                                            <input type="text" class="form-control form-control-sm" @bind="editNamespace" @bind:event="oninput" />
+                                                        </div>
+                                                        <div class="col-md-4">
+                                                            <label class="form-label small mb-0">Release name</label>
+                                                            <input type="text" class="form-control form-control-sm" @bind="editReleaseName" @bind:event="oninput" />
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            }
+                                        </div>
+                                    </div>
+
+                                }
+                                else if (compDetailTab == "values")
+                                {
+                                    <YamlEditor @bind-Value="editValues" />
+                                }
+                                else if (compDetailTab == "secrets")
+                                {
+                                    @* ── Secrets management (existing functionality) ── *@
+                                    <div class="row g-2 mb-3">
+                                        <div class="col-md-4">
+                                            <div class="input-group input-group-sm">
+                                                <span class="input-group-text"><i class="bi bi-tag"></i></span>
+                                                <input type="text" class="form-control" placeholder="SECRET_NAME"
+                                                       @bind="newSecretName" @bind:event="oninput" />
+                                            </div>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <div class="input-group input-group-sm">
+                                                <span class="input-group-text"><i class="bi bi-key"></i></span>
+                                                <input type="password" class="form-control" placeholder="Value"
+                                                       @bind="newSecretValue" @bind:event="oninput" />
+                                            </div>
+                                        </div>
+                                        <div class="col-auto">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => AddSecret(comp.Id)"
+                                                    disabled="@(string.IsNullOrWhiteSpace(newSecretName) || string.IsNullOrWhiteSpace(newSecretValue))">
+                                                <i class="bi bi-plus-lg me-1"></i>Set
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    @if (componentSecrets is null)
+                                    {
+                                        <div class="text-center py-2">
+                                            <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                                        </div>
+                                    }
+                                    else if (componentSecrets.Count == 0)
+                                    {
+                                        <p class="text-muted small mb-0">No secrets for this component yet.</p>
+                                    }
+                                    else
+                                    {
+                                        <div class="table-responsive">
+                                            <table class="table table-sm table-hover align-middle mb-0">
+                                                <thead class="table-light">
+                                                    <tr>
+                                                        <th>Name</th>
+                                                        <th>K8s Sync</th>
+                                                        <th>Target Secret</th>
+                                                        <th>Namespace</th>
+                                                        <th class="text-end" style="width: 120px;">Actions</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    @foreach (VaultSecret secret in componentSecrets)
+                                                    {
+                                                        <tr>
+                                                            <td><code>@secret.Name</code></td>
+                                                            <td>
+                                                                @if (secret.SyncToKubernetes)
+                                                                {
+                                                                    <span class="badge bg-success"><i class="bi bi-cloud-check me-1"></i>Synced</span>
+                                                                }
+                                                                else
+                                                                {
+                                                                    <span class="badge bg-secondary">Off</span>
+                                                                }
+                                                            </td>
+                                                            <td><small class="text-muted">@(secret.KubernetesSecretName ?? "—")</small></td>
+                                                            <td><small class="text-muted">@(secret.KubernetesNamespace ?? "—")</small></td>
+                                                            <td class="text-end">
+                                                                <button class="btn btn-sm btn-outline-info me-1"
+                                                                        @onclick="() => ToggleSecretSync(secret)"
+                                                                        title="@(secret.SyncToKubernetes ? "Disable sync" : "Enable sync")">
+                                                                    <i class="bi @(secret.SyncToKubernetes ? "bi-cloud-slash" : "bi-cloud-arrow-up")"></i>
+                                                                </button>
+                                                                <button class="btn btn-sm btn-outline-danger"
+                                                                        @onclick="() => DeleteSecret(secret.Id, comp.Id)" title="Delete">
+                                                                    <i class="bi bi-trash"></i>
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+
+                                                        @if (syncConfigSecretId == secret.Id)
+                                                        {
+                                                            <tr>
+                                                                <td colspan="5" class="bg-light">
+                                                                    <div class="row g-2 p-2 align-items-center">
+                                                                        <div class="col-md-4">
+                                                                            <input type="text" class="form-control form-control-sm"
+                                                                                   placeholder="K8s Secret name" @bind="syncSecretName" />
+                                                                        </div>
+                                                                        <div class="col-md-4">
+                                                                            <input type="text" class="form-control form-control-sm"
+                                                                                   placeholder="Namespace" @bind="syncNamespace" />
+                                                                        </div>
+                                                                        <div class="col-auto">
+                                                                            <button class="btn btn-sm btn-success" @onclick="() => SaveSync(comp.Id)">
+                                                                                <i class="bi bi-check-lg me-1"></i>Save
+                                                                            </button>
+                                                                            <button class="btn btn-sm btn-outline-secondary ms-1"
+                                                                                    @onclick="() => syncConfigSecretId = null">Cancel</button>
+                                                                        </div>
+                                                                    </div>
+                                                                </td>
+                                                            </tr>
+                                                        }
+                                                    }
+                                                </tbody>
+                                            </table>
+                                        </div>
+
+                                        @if (componentSecrets.Any(s => s.SyncToKubernetes))
+                                        {
+                                            <div class="mt-3 d-flex align-items-center gap-2">
+                                                <button class="btn btn-sm btn-outline-primary" @onclick="() => SyncSecretsToCluster(comp.Id)"
+                                                        disabled="@(secretSyncInProgress)">
+                                                    @if (secretSyncInProgress)
+                                                    {
+                                                        <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <i class="bi bi-cloud-arrow-up me-1"></i>
+                                                    }
+                                                    Sync to Cluster
+                                                </button>
+                                                @if (!string.IsNullOrWhiteSpace(secretSyncOutput))
+                                                {
+                                                    <small class="text-muted">@secretSyncOutput</small>
+                                                }
+                                            </div>
+                                        }
+                                    }
+                                }
+                                else if (compDetailTab == "expose")
+                                {
+                                    @* ── External Routes management ── *@
+                                    <div class="mb-3">
+                                        <h6 class="small fw-bold mb-2">
+                                            <i class="bi bi-globe me-1"></i>Expose Externally
+                                        </h6>
+                                        <p class="text-muted small mb-2">
+                                            Add a hostname to expose this component to the internet via Gateway API with automatic or manual TLS.
+                                        </p>
+
+                                        @* ── Add route form ── *@
+                                        <div class="card border-0 bg-light mb-3">
+                                            <div class="card-body py-2">
+                                                <div class="row g-2 mb-2">
+                                                    <div class="col-md-5">
+                                                        <label class="form-label small mb-0">Hostname</label>
+                                                        <input type="text" class="form-control form-control-sm"
+                                                               placeholder="e.g. grafana.example.com"
+                                                               @bind="routeHostname" @bind:event="oninput" />
+                                                    </div>
+                                                    <div class="col-md-4">
+                                                        <label class="form-label small mb-0">Service name</label>
+                                                        <input type="text" class="form-control form-control-sm"
+                                                               placeholder="@(comp.ReleaseName ?? comp.Name)"
+                                                               @bind="routeServiceName" @bind:event="oninput" />
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small mb-0">Port</label>
+                                                        <input type="number" class="form-control form-control-sm"
+                                                               @bind="routeServicePort" />
+                                                    </div>
+                                                </div>
+                                                <div class="row g-2 mb-2">
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small mb-0">TLS Mode</label>
+                                                        <select class="form-select form-select-sm" @bind="routeTlsMode">
+                                                            <option value="ClusterIssuer">Auto (ClusterIssuer)</option>
+                                                            <option value="Manual">Manual Certificate</option>
+                                                        </select>
+                                                    </div>
+                                                    @if (routeTlsMode == "ClusterIssuer")
+                                                    {
+                                                        <div class="col-md-4">
+                                                            <label class="form-label small mb-0">ClusterIssuer name</label>
+                                                            <input type="text" class="form-control form-control-sm"
+                                                                   placeholder="letsencrypt-prod"
+                                                                   @bind="routeIssuerName" @bind:event="oninput" />
+                                                        </div>
+                                                    }
+                                                    else
+                                                    {
+                                                        <div class="col-md-9">
+                                                            <label class="form-label small mb-0">TLS Certificate (PEM)</label>
+                                                            <textarea class="form-control form-control-sm font-monospace" rows="3"
+                                                                      placeholder="-----BEGIN CERTIFICATE-----"
+                                                                      @bind="routeTlsCert" @bind:event="oninput"></textarea>
+                                                        </div>
+                                                    }
+                                                </div>
+                                                @if (routeTlsMode == "Manual")
+                                                {
+                                                    <div class="row g-2 mb-2">
+                                                        <div class="col-md-12">
+                                                            <label class="form-label small mb-0">Private Key (PEM, optional)</label>
+                                                            <textarea class="form-control form-control-sm font-monospace" rows="3"
+                                                                      placeholder="-----BEGIN PRIVATE KEY-----"
+                                                                      @bind="routeTlsKey" @bind:event="oninput"></textarea>
+                                                        </div>
+                                                    </div>
+                                                }
+                                                <button class="btn btn-sm btn-success" @onclick="() => AddRoute(comp.Id)"
+                                                        disabled="@(string.IsNullOrWhiteSpace(routeHostname))">
+                                                    <i class="bi bi-plus-lg me-1"></i>Expose
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        @if (!string.IsNullOrEmpty(routeError))
+                                        {
+                                            <div class="alert alert-danger py-1 small mb-2">
+                                                <i class="bi bi-exclamation-triangle me-1"></i>@routeError
+                                            </div>
+                                        }
+
+                                        @* ── Existing routes ── *@
+                                        @if (componentRoutes is null)
+                                        {
+                                            <div class="text-center py-2">
+                                                <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                                            </div>
+                                        }
+                                        else if (componentRoutes.Count == 0)
+                                        {
+                                            <p class="text-muted small mb-0">No external routes configured yet.</p>
+                                        }
+                                        else
+                                        {
+                                            <div class="table-responsive">
+                                                <table class="table table-sm table-hover align-middle mb-0">
+                                                    <thead class="table-light">
+                                                        <tr>
+                                                            <th>Hostname</th>
+                                                            <th>Service</th>
+                                                            <th>TLS</th>
+                                                            <th>Health</th>
+                                                            <th class="text-end" style="width: 140px;">Actions</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        @foreach (ExternalRoute route in componentRoutes)
+                                                        {
+                                                            <tr>
+                                                                <td>
+                                                                    <a href="https://@route.Hostname" target="_blank" class="text-decoration-none">
+                                                                        <i class="bi bi-box-arrow-up-right me-1"></i>@route.Hostname
+                                                                    </a>
+                                                                </td>
+                                                                <td><code>@route.ServiceName:@route.ServicePort</code></td>
+                                                                <td>
+                                                                    @if (route.TlsMode == TlsMode.ClusterIssuer)
+                                                                    {
+                                                                        <span class="badge bg-success">
+                                                                            <i class="bi bi-shield-check me-1"></i>@route.ClusterIssuerName
+                                                                        </span>
+                                                                    }
+                                                                    else
+                                                                    {
+                                                                        <span class="badge bg-info text-dark">
+                                                                            <i class="bi bi-file-earmark-lock me-1"></i>Manual
+                                                                        </span>
+                                                                    }
+                                                                </td>
+                                                                <td>
+                                                                    @if (route.LastHealthCheckAt is null)
+                                                                    {
+                                                                        <span class="text-muted small">—</span>
+                                                                    }
+                                                                    else if (route.IsReachable == true)
+                                                                    {
+                                                                        <span class="badge bg-success" title="Last checked @route.LastHealthCheckAt.Value.ToLocalTime().ToString("HH:mm")">
+                                                                            <i class="bi bi-check-circle me-1"></i>@route.LastStatusCode
+                                                                        </span>
+                                                                    }
+                                                                    else
+                                                                    {
+                                                                        <span class="badge bg-danger" title="Last checked @route.LastHealthCheckAt.Value.ToLocalTime().ToString("HH:mm")">
+                                                                            <i class="bi bi-x-circle me-1"></i>@(route.LastStatusCode?.ToString() ?? "Unreachable")
+                                                                        </span>
+                                                                    }
+                                                                    @if (routeUptimes.TryGetValue(route.Id, out RouteUptimeSummary? uptimeSummary))
+                                                                    {
+                                                                        <div class="small text-muted mt-1">7d: @uptimeSummary.UptimeDisplay</div>
+                                                                    }
+                                                                </td>
+                                                                <td class="text-end">
+                                                                    <button class="btn btn-sm btn-outline-secondary me-1"
+                                                                            @onclick="() => ShowRouteYaml(route.Id)"
+                                                                            title="View HTTPRoute YAML">
+                                                                        <i class="bi bi-code-slash"></i>
+                                                                    </button>
+                                                                    <button class="btn btn-sm btn-outline-danger"
+                                                                            @onclick="() => DeleteRoute(route.Id, comp.Id)"
+                                                                            title="Remove route">
+                                                                        <i class="bi bi-trash"></i>
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        }
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        }
+
+                                        @* ── YAML preview ── *@
+                                        @if (routeYamlPreview is not null)
+                                        {
+                                            <div class="mt-3">
+                                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                                    <small class="fw-bold">HTTPRoute YAML</small>
+                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => routeYamlPreview = null">
+                                                        <i class="bi bi-x-lg"></i>
+                                                    </button>
+                                                </div>
+                                                <pre class="bg-dark text-light p-2 rounded small mb-0" style="max-height: 300px; overflow-y: auto;">@routeYamlPreview</pre>
+                                            </div>
+                                        }
+                                    </div>
+                                }
+
+                                @if (compDetailTab is "config" or "values")
+                                {
+                                    <div class="d-flex align-items-center gap-2 pt-2 mt-2 border-top">
+                                        <button class="btn btn-sm btn-primary" @onclick="() => SaveConfiguration(comp.Id)">
+                                            <i class="bi bi-check-lg me-1"></i>Save
+                                        </button>
+                                        @if (comp.Status == ComponentStatus.NotInstalled || comp.Status == ComponentStatus.Failed)
+                                        {
+                                            <button class="btn btn-sm btn-success" @onclick="() => SaveAndInstall(comp.Id)">
+                                                <i class="bi bi-play-fill me-1"></i>Save &amp; Install
+                                            </button>
+                                        }
+                                        else if (comp.Status == ComponentStatus.Installed)
+                                        {
+                                            <button class="btn btn-sm btn-success" @onclick="() => SaveAndApply(comp.Id)">
+                                                <i class="bi bi-arrow-clockwise me-1"></i>Save &amp; Apply
+                                            </button>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public required KubernetesCluster Cluster { get; set; }
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public EventCallback OnBack { get; set; }
+    [Parameter] public EventCallback OnDeleted { get; set; }
+
+    private string section = "monitoring";
+    private bool confirmDelete;
+
+    // Components
+    private List<ClusterComponent>? components;
+    private Dictionary<Guid, KeycloakComponentConfig> keycloakConfigsByComponentId = [];
+    private Dictionary<Guid, HarborComponentConfig> harborConfigsByComponentId = [];
+    private bool? gatewayApiCrdsPresent;
+    private bool? certManagerGatewayApiEnabled;
+    private string? componentError;
+    private Guid? confirmDeleteComponentId;
+    private Guid? selectedComponentId;
+    private string compDetailTab = "config";
+    private Guid? operationInProgress;
+    private string? operationOutput;
+    private Guid? operationComponentId;
+
+    // Scan
+    private bool scanning;
+    private List<DiscoveredHelmRelease>? discoveredReleases;
+
+    // Register form
+    private bool showRegisterForm;
+    private CatalogEntry? selectedCatalogEntry;
+    private bool showCustomForm;
+    private string regName = "";
+    private string regType = "HelmChart";
+    private string regNamespace = "";
+    private string regRepoUrl = "";
+    private string regChartName = "";
+    private string regChartVersion = "";
+    private string regReleaseName = "";
+    private string regValues = "";
+
+    // Form fields (registration and edit)
+    private bool showAdvancedYaml;
+    private bool showHelmDetails;
+    private Dictionary<string, string> regFormFieldValues = new();
+    private Dictionary<string, string> editFormFieldValues = new();
+    private List<CnpgDatabase>? keycloakDatabases;
+    private List<string>? keycloakAvailableIssuers;
+    private List<StorageLink>? harborStorageLinks;
+
+    // Config editor
+    private string editRepoUrl = "";
+    private string editChartName = "";
+    private string editChartVersion = "";
+    private string editNamespace = "";
+    private string editReleaseName = "";
+    private string editValues = "";
+
+    // Secrets
+    private List<VaultSecret>? componentSecrets;
+    private string newSecretName = "";
+    private string newSecretValue = "";
+    private Guid? syncConfigSecretId;
+    private string syncSecretName = "";
+    private string syncNamespace = "";
+    private bool secretSyncInProgress;
+    private string? secretSyncOutput;
+
+    // External Routes
+    private List<ExternalRoute>? componentRoutes;
+    private Dictionary<Guid, RouteUptimeSummary> routeUptimes = new();
+    private string routeHostname = "";
+    private string routeServiceName = "";
+    private int routeServicePort = 80;
+    private string routeTlsMode = "ClusterIssuer";
+    private string routeIssuerName = "letsencrypt-prod";
+    private string routeTlsCert = "";
+    private string routeTlsKey = "";
+    private string? routeError;
+    private string? routeYamlPreview;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadComponents();
+    }
+
+    // ──────── Cluster ────────
+
+    private async Task DeleteCluster()
+    {
+        await TenantService.DeleteClusterAsync(Cluster.Id);
+        await OnDeleted.InvokeAsync();
+    }
+
+    // ──────── Components ────────
+
+    private async Task LoadComponents()
+    {
+        components = await VaultService.GetComponentsAsync(Cluster.Id);
+        List<KeycloakComponentConfig> kcConfigs = await KeycloakService.GetConfigsForClusterAsync(TenantId, Cluster.Id);
+        keycloakConfigsByComponentId = kcConfigs
+            .Where(c => c.ClusterComponentId.HasValue)
+            .ToDictionary(c => c.ClusterComponentId!.Value);
+        List<HarborComponentConfig> harborConfigs = await HarborService.GetConfigsForClusterAsync(TenantId, Cluster.Id);
+        harborConfigsByComponentId = harborConfigs.ToDictionary(c => c.ClusterComponentId);
+        await CheckGatewayApiCrdsIfNeededAsync();
+        await CheckCertManagerGatewayApiIfNeededAsync();
+    }
+
+    private async Task CheckGatewayApiCrdsIfNeededAsync()
+    {
+        if (components is null) return;
+
+        // Only probe the cluster if at least one installed component needs Gateway API CRDs
+        // and they are not already tracked as a ClusterComponent.
+        bool crdComponentTracked = components.Any(c =>
+            (c.Name == "gateway-api-crds" || c.ReleaseName == "gateway-api-crds" || c.HelmChartName == "gateway-api")
+            && c.Status == ComponentStatus.Installed);
+
+        if (crdComponentTracked)
+        {
+            gatewayApiCrdsPresent = true;
+            return;
+        }
+
+        bool anyNeedsCrds = components.Any(c =>
+            c.Status == ComponentStatus.Installed &&
+            ComponentCatalog.GetByKey(c.Name)?.Dependencies.Contains("gateway-api-crds") == true);
+
+        if (!anyNeedsCrds)
+        {
+            gatewayApiCrdsPresent = null;
+            return;
+        }
+
+        gatewayApiCrdsPresent = await ScanService.CheckGatewayApiCrdsAsync(Cluster);
+    }
+
+    private Task CheckCertManagerGatewayApiIfNeededAsync()
+    {
+        if (components is null) return Task.CompletedTask;
+
+        ClusterComponent? certManager = components.FirstOrDefault(c =>
+            (c.Name == "cert-manager" || c.HelmChartName == "cert-manager")
+            && c.Status == ComponentStatus.Installed);
+
+        if (certManager is null)
+        {
+            certManagerGatewayApiEnabled = null;
+            return Task.CompletedTask;
+        }
+
+        // cert-manager v1.15+ uses config.enableGatewayAPI: true.
+        // The old ExperimentalGatewayAPISupport=true feature gate no longer works.
+        string values = certManager.HelmValues ?? "";
+        bool hasNewConfig = values.Contains("enableGatewayAPI: true", StringComparison.OrdinalIgnoreCase);
+        certManagerGatewayApiEnabled = hasNewConfig;
+
+        return Task.CompletedTask;
+    }
+
+    // ──────── Scan ────────
+
+    private async Task ScanClusterComponents()
+    {
+        scanning = true;
+        componentError = null;
+
+        try
+        {
+            discoveredReleases = await ScanService.ScanHelmReleasesAsync(Cluster);
+        }
+        catch (Exception ex)
+        {
+            componentError = $"Scan failed: {ex.Message}";
+        }
+        finally
+        {
+            scanning = false;
+        }
+    }
+
+    private async Task ImportSingleRelease(DiscoveredHelmRelease release)
+    {
+        try
+        {
+            await ScanService.ImportReleaseAsync(Cluster, release);
+            release.AlreadyTracked = true;
+            await LoadComponents();
+        }
+        catch (Exception ex)
+        {
+            componentError = $"Import failed: {ex.Message}";
+        }
+    }
+
+    private async Task ImportAllDiscovered()
+    {
+        if (discoveredReleases is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await ScanService.ImportAllNewReleasesAsync(Cluster, discoveredReleases);
+            await LoadComponents();
+        }
+        catch (Exception ex)
+        {
+            // ImportAllNewReleasesAsync throws with a detailed message including
+            // inner exception details and which specific releases failed.
+            componentError = $"Import failed: {ex.Message}";
+            await LoadComponents();
+        }
+    }
+
+    private IEnumerable<DiscoveredHelmRelease> GetSubchartsFor(DiscoveredHelmRelease parent)
+    {
+        if (discoveredReleases is null)
+        {
+            return [];
+        }
+
+        string? parentKey = ComponentCatalog.FindByRelease(parent.Name, parent.ChartName)?.Key;
+
+        if (parentKey is null)
+        {
+            return [];
+        }
+
+        return discoveredReleases.Where(r =>
+            r.ParentComponentKey is not null
+            && string.Equals(r.ParentComponentKey, parentKey, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void ResetRegisterForm()
+    {
+        selectedCatalogEntry = null;
+        showCustomForm = false;
+        regName = "";
+        regType = "HelmChart";
+        regNamespace = "";
+        regRepoUrl = "";
+        regChartName = "";
+        regChartVersion = "";
+        regReleaseName = "";
+        regValues = "";
+        regFormFieldValues = new();
+        showAdvancedYaml = false;
+    }
+
+    private DependencyCheckResult GetDependencyCheck(CatalogEntry entry)
+    {
+        List<string> installedKeys = ComponentCatalog.ResolveInstalledKeys(
+            components?.Select(c => (c.Name, c.HelmChartName, c.ReleaseName)) ?? []);
+        return ComponentCatalog.CheckDependencies(entry, installedKeys);
+    }
+
+    private async Task SelectCatalogEntry(CatalogEntry entry)
+    {
+        // Pre-fill the form fields from the catalog entry so the operator
+        // only needs to tweak values, not enter everything from scratch.
+
+        selectedCatalogEntry = entry;
+        regNamespace = entry.DefaultNamespace;
+        regReleaseName = entry.DefaultReleaseName ?? entry.Key;
+        regValues = entry.DefaultValues ?? "";
+        showAdvancedYaml = false;
+
+        // Initialize form field values from their defaults.
+
+        regFormFieldValues = new();
+
+        foreach (ComponentFormField field in entry.FormFields)
+        {
+            if (field.DefaultValue is not null)
+            {
+                regFormFieldValues[field.Key] = field.DefaultValue;
+            }
+        }
+
+        // Load available CNPG databases and ClusterIssuers if this component type needs them.
+
+        keycloakDatabases = entry.FormFields.Any(f => f.Type == FormFieldType.CnpgDatabase)
+            ? await KeycloakService.GetDatabasesForClusterAsync(TenantId, Cluster.Id)
+            : null;
+
+        keycloakAvailableIssuers = entry.FormFields.Any(f => f.Type == FormFieldType.ClusterIssuer)
+            ? await LifecycleService.ListClusterIssuersAsync(Cluster.Id)
+            : null;
+
+        harborStorageLinks = entry.FormFields.Any(f => f.Type == FormFieldType.StorageLink)
+            ? await StorageService.GetStorageLinksAsync(TenantId)
+            : null;
+    }
+
+    private async Task RegisterCatalogComponent()
+    {
+        // Build a registration from the selected catalog entry, applying
+        // any overrides the operator made via form fields or raw YAML.
+        // Secret-marked fields are stored in the vault after registration.
+
+        componentError = null;
+
+        try
+        {
+            ComponentRegistration registration = ComponentCatalog.ToRegistration(selectedCatalogEntry!);
+            registration.Namespace = string.IsNullOrWhiteSpace(regNamespace) ? null : regNamespace.Trim();
+            registration.ReleaseName = string.IsNullOrWhiteSpace(regReleaseName) ? null : regReleaseName.Trim();
+
+            // Merge form field values into the YAML before saving.
+            // Form fields map to specific YAML paths via dot-notation.
+            // Secret fields are excluded from the YAML (they go to vault).
+
+            string mergedValues = MergeRegFormFields();
+            registration.HelmValues = string.IsNullOrWhiteSpace(mergedValues) ? null : mergedValues;
+
+            ClusterComponent created = await LifecycleService.RegisterComponentAsync(Cluster.Id, registration);
+
+            // Store any secret-marked form fields in the vault.
+
+            await SaveRegSecretFieldsToVault(created.Id);
+
+            // Configure Keycloak (or other components with CnpgDatabase fields) if credentials were provided.
+
+            await SaveKeycloakConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
+
+            // Configure Harbor (CNPG database, S3 storage, admin password) if this is Harbor.
+
+            await SaveHarborConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
+
+            // Configure Loki S3 chunk storage if a storage link was selected.
+
+            await SaveLokiConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
+
+            showRegisterForm = false;
+            ResetRegisterForm();
+            await LoadComponents();
+        }
+        catch (InvalidOperationException ex)
+        {
+            componentError = ex.Message;
+        }
+    }
+
+    private async Task RegisterCustomComponent()
+    {
+        // For custom charts the operator fills in everything manually.
+
+        componentError = null;
+
+        try
+        {
+            ComponentRegistration registration = new()
+            {
+                Name = regName.Trim(),
+                ComponentType = regType,
+                Namespace = string.IsNullOrWhiteSpace(regNamespace) ? null : regNamespace.Trim(),
+                HelmRepoUrl = string.IsNullOrWhiteSpace(regRepoUrl) ? null : regRepoUrl.Trim(),
+                HelmChartName = string.IsNullOrWhiteSpace(regChartName) ? null : regChartName.Trim(),
+                HelmChartVersion = string.IsNullOrWhiteSpace(regChartVersion) ? null : regChartVersion.Trim(),
+                HelmValues = string.IsNullOrWhiteSpace(regValues) ? null : regValues
+            };
+
+            await LifecycleService.RegisterComponentAsync(Cluster.Id, registration);
+            showRegisterForm = false;
+            ResetRegisterForm();
+            await LoadComponents();
+        }
+        catch (InvalidOperationException ex)
+        {
+            componentError = ex.Message;
+        }
+    }
+
+    private async Task ToggleComponentDetail(Guid componentId)
+    {
+        if (selectedComponentId == componentId)
+        {
+            selectedComponentId = null;
+            return;
+        }
+
+        selectedComponentId = componentId;
+        compDetailTab = "config";
+        componentSecrets = null;
+        showAdvancedYaml = false;
+        showHelmDetails = false;
+
+        // Populate the config editor fields from the component.
+
+        ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == componentId);
+        if (comp is not null)
+        {
+            editRepoUrl = comp.HelmRepoUrl ?? "";
+            editChartName = comp.HelmChartName ?? "";
+            editChartVersion = comp.HelmChartVersion ?? "";
+            editNamespace = comp.Namespace ?? "";
+            editReleaseName = comp.ReleaseName ?? comp.Name;
+            editValues = comp.HelmValues ?? "";
+
+            // Initialize edit form fields from the catalog entry defaults,
+            // then override with any values that exist in the current YAML.
+
+            InitEditFormFields(comp);
+
+            // For components with a CnpgDatabase field (e.g. Keycloak), load available
+            // databases and pre-populate config fields from the existing KeycloakComponentConfig.
+
+            CatalogEntry? catalogMatch = ComponentCatalog.GetByKey(comp.Name);
+            bool hasCnpgField = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.CnpgDatabase) == true;
+            bool hasIssuerField = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.ClusterIssuer) == true;
+            bool hasStorageLinkField = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.StorageLink) == true;
+
+            if (catalogMatch is not null && (hasCnpgField || hasIssuerField || hasStorageLinkField))
+            {
+                keycloakDatabases = hasCnpgField
+                    ? await KeycloakService.GetDatabasesForClusterAsync(TenantId, Cluster.Id)
+                    : null;
+                keycloakAvailableIssuers = hasIssuerField
+                    ? await LifecycleService.ListClusterIssuersAsync(Cluster.Id)
+                    : null;
+                harborStorageLinks = hasStorageLinkField
+                    ? await StorageService.GetStorageLinksAsync(TenantId)
+                    : null;
+
+                KeycloakComponentConfig? kcConfig = await KeycloakService.GetConfigForComponentAsync(TenantId, componentId);
+                if (kcConfig is not null)
+                {
+                    if (kcConfig.CnpgDatabaseId.HasValue)
+                    {
+                        editFormFieldValues["cnpg-database"] = kcConfig.CnpgDatabaseId.Value.ToString();
+                    }
+                    if (!string.IsNullOrEmpty(kcConfig.AdminUrl))
+                    {
+                        editFormFieldValues["admin-url"] = kcConfig.AdminUrl;
+                    }
+                    editFormFieldValues["admin-username"] = kcConfig.AdminUsername;
+                }
+
+                HarborComponentConfig? harborConfig = await HarborService.GetConfigForComponentAsync(TenantId, componentId);
+                if (harborConfig is not null)
+                {
+                    if (harborConfig.CnpgDatabaseId.HasValue)
+                    {
+                        editFormFieldValues["cnpg-database"] = harborConfig.CnpgDatabaseId.Value.ToString();
+                    }
+                    if (harborConfig.StorageLinkId.HasValue)
+                    {
+                        editFormFieldValues["storage-link"] = harborConfig.StorageLinkId.Value.ToString();
+                    }
+                    editFormFieldValues["admin-username"] = harborConfig.AdminUsername;
+                }
+
+                // Load Loki storage link ID from the component's Configuration JSON.
+                if (catalogMatch?.Key == "loki")
+                {
+                    Guid? lokiStorageLinkId = await LokiService.GetStorageLinkIdForComponentAsync(TenantId, componentId);
+                    if (lokiStorageLinkId.HasValue)
+                    {
+                        editFormFieldValues["storage-link"] = lokiStorageLinkId.Value.ToString();
+                    }
+                }
+
+                // Pre-populate hostname and TLS fields from the existing external route.
+                List<ExternalRoute> routes = await RouteService.GetRoutesAsync(componentId);
+                ExternalRoute? route = routes.FirstOrDefault();
+                if (route is not null)
+                {
+                    editFormFieldValues["hostname"] = route.Hostname;
+                    editFormFieldValues["tls-mode"] = route.TlsMode == TlsMode.Manual ? "Manual" : "ClusterIssuer";
+                    if (!string.IsNullOrEmpty(route.ClusterIssuerName))
+                    {
+                        editFormFieldValues["cluster-issuer"] = route.ClusterIssuerName;
+                    }
+                }
+            }
+            else
+            {
+                keycloakDatabases = null;
+                keycloakAvailableIssuers = null;
+                harborStorageLinks = null;
+            }
+        }
+    }
+
+    private async Task SaveConfiguration(Guid componentId)
+    {
+        componentError = null;
+
+        try
+        {
+            // Update the component with the edited configuration.
+            // Form field values are merged into the YAML before saving.
+            // Secret-marked fields are stored in the vault instead of plain YAML.
+
+            ClusterComponent comp = components!.First(c => c.Id == componentId);
+            comp.HelmRepoUrl = string.IsNullOrWhiteSpace(editRepoUrl) ? null : editRepoUrl.Trim();
+            comp.HelmChartName = string.IsNullOrWhiteSpace(editChartName) ? null : editChartName.Trim();
+            comp.HelmChartVersion = string.IsNullOrWhiteSpace(editChartVersion) ? null : editChartVersion.Trim();
+            comp.Namespace = string.IsNullOrWhiteSpace(editNamespace) ? null : editNamespace.Trim();
+            comp.ReleaseName = string.IsNullOrWhiteSpace(editReleaseName) ? null : editReleaseName.Trim();
+
+            string mergedValues = MergeEditFormFields();
+            comp.HelmValues = string.IsNullOrWhiteSpace(mergedValues) ? null : mergedValues;
+
+            await LifecycleService.UpdateConfigurationAsync(
+                componentId,
+                helmValues: comp.HelmValues,
+                chartVersion: comp.HelmChartVersion,
+                helmRepoUrl: comp.HelmRepoUrl);
+
+            // Store any secret-marked form field values in the vault.
+
+            await SaveSecretFieldsToVault(componentId);
+
+            // Configure Keycloak (or other components with CnpgDatabase fields) if credentials were provided.
+
+            await SaveKeycloakConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
+
+            // Configure Harbor if this is a Harbor component.
+
+            await SaveHarborConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
+
+            // Configure Loki S3 chunk storage if a storage link was selected.
+
+            await SaveLokiConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
+
+            await LoadComponents();
+        }
+        catch (InvalidOperationException ex)
+        {
+            componentError = ex.Message;
+        }
+    }
+
+    private async Task InstallComponent(Guid componentId)
+    {
+        componentError = null;
+        operationInProgress = componentId;
+        StateHasChanged();
+
+        try
+        {
+            await LifecycleService.PrepareInstallAsync(componentId);
+
+            // Refresh Keycloak DB config into HelmValues from the stored config (if any).
+            await KeycloakService.RefreshDatabaseHelmValuesIfConfiguredAsync(TenantId, componentId);
+            // Grant all schema privileges to the database owner so Liquibase can run on install.
+            await KeycloakService.GrantDatabaseOwnerPermissionsIfConfiguredAsync(TenantId, componentId);
+            // Release any stuck Liquibase lock so migrations can proceed on startup.
+            await KeycloakService.ReleaseLiquibaseLockIfConfiguredAsync(TenantId, componentId);
+            // Update realm frontendUrl to match the configured admin URL (fixes restored-database URL mismatch).
+            await KeycloakService.FixRealmUrlsIfConfiguredAsync(TenantId, componentId);
+            // Refresh Harbor CNPG + S3 credentials in Helm values before install/upgrade.
+            await HarborService.RefreshHelmValuesIfConfiguredAsync(TenantId, componentId);
+
+            HelmCommand command = await LifecycleService.GetInstallCommandAsync(componentId);
+
+            // Pre-sync component secrets so they exist in K8s before the pod starts.
+            // Components like Keycloak reference secrets via extraEnvFrom at pod startup,
+            // which happens during Helm's --wait phase, so the secret must exist first.
+            HelmExecutionResult preSyncResult = await LifecycleService.SyncComponentSecretsAsync(componentId);
+
+            HelmExecutionResult result = await LifecycleService.ExecuteHelmAsync(componentId, command);
+
+            // Prepend pre-sync output so the user can see exactly how many keys were synced.
+            if (!string.IsNullOrWhiteSpace(preSyncResult.Output))
+            {
+                result = new HelmExecutionResult
+                {
+                    Success = result.Success,
+                    ExitCode = result.ExitCode,
+                    Output = $"--- Pre-install Secret Sync ---\n{preSyncResult.Output}\n\n{result.Output}"
+                };
+            }
+
+            if (result.Success)
+            {
+                HelmExecutionResult subchartResult = await LifecycleService.InstallSubchartsAsync(componentId);
+
+                if (!string.IsNullOrWhiteSpace(subchartResult.Output))
+                {
+                    result = new HelmExecutionResult
+                    {
+                        Success = result.Success && subchartResult.Success,
+                        Output = result.Output + "\n" + subchartResult.Output
+                    };
+                }
+            }
+
+            await LifecycleService.MarkInstallResultAsync(componentId, result.Success, result.Success ? null : result.Output);
+
+            // After successful install, sync any secrets marked for K8s sync.
+
+            if (result.Success)
+            {
+                HelmExecutionResult syncResult = await LifecycleService.SyncComponentSecretsAsync(componentId);
+
+                if (!string.IsNullOrWhiteSpace(syncResult.Output))
+                {
+                    result = new HelmExecutionResult
+                    {
+                        Success = result.Success,
+                        Output = result.Output + "\n\n--- Secret Sync ---\n" + syncResult.Output
+                    };
+                }
+
+                // Apply HTTPRoute + Certificate manifests for any configured external routes.
+                HelmExecutionResult routeResult = await LifecycleService.ApplyExternalRoutesAsync(componentId);
+                if (!string.IsNullOrWhiteSpace(routeResult.Output))
+                {
+                    result = new HelmExecutionResult
+                    {
+                        Success = result.Success && routeResult.Success,
+                        Output = result.Output + "\n\n--- Route Apply ---\n" + routeResult.Output
+                    };
+                }
+            }
+
+            operationOutput = result.Output;
+            operationComponentId = componentId;
+        }
+        catch (InvalidOperationException ex)
+        {
+            componentError = ex.Message;
+        }
+        finally
+        {
+            operationInProgress = null;
+            await LoadComponents();
+        }
+    }
+
+    private async Task UpgradeComponent(Guid componentId, bool noWait = false)
+    {
+        componentError = null;
+        operationInProgress = componentId;
+        StateHasChanged();
+
+        try
+        {
+            // For upgrade, we use the same install command (upgrade --install is idempotent).
+            // But first reset status to allow the operation.
+
+            ClusterComponent comp = components!.First(c => c.Id == componentId);
+            comp.Status = ComponentStatus.Installing;
+            await LifecycleService.MarkInstallResultAsync(componentId, false, "Upgrading...");
+
+            await LifecycleService.PrepareInstallAsync(componentId);
+
+            // Refresh Keycloak DB config into HelmValues from the stored config (if any).
+            await KeycloakService.RefreshDatabaseHelmValuesIfConfiguredAsync(TenantId, componentId);
+            // Grant all schema privileges to the database owner so Liquibase can run on install.
+            await KeycloakService.GrantDatabaseOwnerPermissionsIfConfiguredAsync(TenantId, componentId);
+            // Release any stuck Liquibase lock so migrations can proceed on startup.
+            await KeycloakService.ReleaseLiquibaseLockIfConfiguredAsync(TenantId, componentId);
+            // Update realm frontendUrl to match the configured admin URL (fixes restored-database URL mismatch).
+            await KeycloakService.FixRealmUrlsIfConfiguredAsync(TenantId, componentId);
+            // Refresh Harbor CNPG + S3 credentials in Helm values before install/upgrade.
+            await HarborService.RefreshHelmValuesIfConfiguredAsync(TenantId, componentId);
+
+            HelmCommand command = await LifecycleService.GetInstallCommandAsync(componentId);
+            command.NoWait = noWait;
+
+            // Pre-sync component secrets so they exist in K8s before the pod starts.
+            HelmExecutionResult preSyncResult = await LifecycleService.SyncComponentSecretsAsync(componentId);
+
+            HelmExecutionResult result = await LifecycleService.ExecuteHelmAsync(componentId, command);
+
+            if (!string.IsNullOrWhiteSpace(preSyncResult.Output))
+            {
+                result = new HelmExecutionResult
+                {
+                    Success = result.Success,
+                    ExitCode = result.ExitCode,
+                    Output = $"--- Pre-install Secret Sync ---\n{preSyncResult.Output}\n\n{result.Output}"
+                };
+            }
+
+            if (result.Success)
+            {
+                HelmExecutionResult subchartResult = await LifecycleService.InstallSubchartsAsync(componentId);
+
+                if (!string.IsNullOrWhiteSpace(subchartResult.Output))
+                {
+                    result = new HelmExecutionResult
+                    {
+                        Success = result.Success && subchartResult.Success,
+                        Output = result.Output + "\n" + subchartResult.Output
+                    };
+                }
+            }
+
+            await LifecycleService.MarkInstallResultAsync(componentId, result.Success, result.Success ? null : result.Output);
+
+            // After successful upgrade, sync secrets then apply external routes.
+
+            if (result.Success)
+            {
+                HelmExecutionResult syncResult = await LifecycleService.SyncComponentSecretsAsync(componentId);
+
+                if (!string.IsNullOrWhiteSpace(syncResult.Output))
+                {
+                    result = new HelmExecutionResult
+                    {
+                        Success = result.Success,
+                        Output = result.Output + "\n\n--- Secret Sync ---\n" + syncResult.Output
+                    };
+                }
+
+                HelmExecutionResult routeResult = await LifecycleService.ApplyExternalRoutesAsync(componentId);
+                if (!string.IsNullOrWhiteSpace(routeResult.Output))
+                {
+                    result = new HelmExecutionResult
+                    {
+                        Success = result.Success && routeResult.Success,
+                        Output = result.Output + "\n\n--- Route Apply ---\n" + routeResult.Output
+                    };
+                }
+            }
+
+            operationOutput = result.Output;
+            operationComponentId = componentId;
+        }
+        catch (InvalidOperationException ex)
+        {
+            componentError = ex.Message;
+        }
+        finally
+        {
+            operationInProgress = null;
+            await LoadComponents();
+        }
+    }
+
+    private async Task UninstallComponent(Guid componentId)
+    {
+        componentError = null;
+        operationInProgress = componentId;
+        StateHasChanged();
+
+        try
+        {
+            await LifecycleService.PrepareUninstallAsync(componentId);
+
+            // Uninstall any subcharts (e.g. Barman Cloud Plugin) before the parent.
+
+            HelmExecutionResult subResult = await LifecycleService.UninstallSubchartsAsync(componentId);
+
+            HelmCommand command = await LifecycleService.GetUninstallCommandAsync(componentId);
+            HelmExecutionResult result = await LifecycleService.ExecuteHelmAsync(componentId, command);
+
+            string combinedOutput = string.IsNullOrWhiteSpace(subResult.Output)
+                ? result.Output
+                : subResult.Output + "\n" + result.Output;
+
+            bool success = result.Success && subResult.Success;
+
+            await LifecycleService.MarkUninstallResultAsync(componentId, success, success ? null : combinedOutput);
+
+            operationOutput = combinedOutput;
+            operationComponentId = componentId;
+        }
+        catch (InvalidOperationException ex)
+        {
+            componentError = ex.Message;
+        }
+        finally
+        {
+            operationInProgress = null;
+            await LoadComponents();
+        }
+    }
+
+    private async Task SaveAndInstall(Guid componentId)
+    {
+        // Save the configuration first, then immediately install.
+        // This is the "one-click" flow for new components.
+
+        await SaveConfiguration(componentId);
+
+        if (componentError is null)
+        {
+            await InstallComponent(componentId);
+        }
+    }
+
+    private async Task SaveAndApply(Guid componentId)
+    {
+        // Save the configuration, then run a helm upgrade to apply
+        // the changes to the live deployment.
+
+        await SaveConfiguration(componentId);
+
+        if (componentError is null)
+        {
+            await UpgradeComponent(componentId);
+        }
+    }
+
+    private async Task ClearError(Guid componentId)
+    {
+        // Clear the LastError without changing the component's status.
+
+        await LifecycleService.ClearErrorAsync(componentId);
+        await LoadComponents();
+    }
+
+    private async Task DeleteComponent(Guid componentId)
+    {
+        confirmDeleteComponentId = null;
+
+        if (selectedComponentId == componentId)
+        {
+            selectedComponentId = null;
+        }
+
+        await VaultService.DeleteComponentAsync(componentId);
+        await LoadComponents();
+    }
+
+    private static RenderFragment GetStatusBadge(ComponentStatus status) => status switch
+    {
+        ComponentStatus.NotInstalled => __builder =>
+        {
+            <span class="badge bg-secondary">Not Installed</span>
+        },
+        ComponentStatus.Installing => __builder =>
+        {
+            <span class="badge bg-info text-dark"><i class="bi bi-arrow-repeat me-1"></i>Installing</span>
+        },
+        ComponentStatus.Installed => __builder =>
+        {
+            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Installed</span>
+        },
+        ComponentStatus.Failed => __builder =>
+        {
+            <span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>
+        },
+        ComponentStatus.Uninstalling => __builder =>
+        {
+            <span class="badge bg-warning text-dark"><i class="bi bi-arrow-repeat me-1"></i>Uninstalling</span>
+        },
+        _ => __builder =>
+        {
+            <span class="badge bg-secondary">Unknown</span>
+        }
+    };
+
+    // ──────── Secrets ────────
+
+    private async Task ShowSecrets(Guid componentId)
+    {
+        compDetailTab = "secrets";
+        newSecretName = "";
+        newSecretValue = "";
+
+        await VaultService.InitializeVaultAsync(TenantId);
+        componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, componentId);
+    }
+
+    private async Task AddSecret(Guid componentId)
+    {
+        await VaultService.SetComponentSecretAsync(TenantId, componentId, newSecretName.Trim(), newSecretValue.Trim());
+        newSecretName = "";
+        newSecretValue = "";
+        componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, componentId);
+    }
+
+    private async Task DeleteSecret(Guid secretId, Guid componentId)
+    {
+        await VaultService.DeleteSecretAsync(secretId);
+        componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, componentId);
+    }
+
+    private void ToggleSecretSync(VaultSecret secret)
+    {
+        if (secret.SyncToKubernetes)
+        {
+            _ = DisableSync(secret);
+        }
+        else
+        {
+            syncConfigSecretId = secret.Id;
+            syncSecretName = secret.KubernetesSecretName ?? "";
+            syncNamespace = secret.KubernetesNamespace ?? "";
+        }
+    }
+
+    private async Task DisableSync(VaultSecret secret)
+    {
+        await VaultService.ConfigureKubernetesSyncAsync(secret.Id, syncEnabled: false, secretName: null, ns: null);
+        componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, selectedComponentId!.Value);
+    }
+
+    private async Task SaveSync(Guid componentId)
+    {
+        if (syncConfigSecretId is null)
+        {
+            return;
+        }
+
+        await VaultService.ConfigureKubernetesSyncAsync(
+            syncConfigSecretId.Value, syncEnabled: true, secretName: syncSecretName.Trim(), ns: syncNamespace.Trim());
+
+        syncConfigSecretId = null;
+        componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, componentId);
+    }
+
+    private async Task SyncSecretsToCluster(Guid componentId)
+    {
+        // Manually trigger a sync of all K8s-marked secrets to the cluster.
+
+        secretSyncInProgress = true;
+        secretSyncOutput = null;
+        StateHasChanged();
+
+        try
+        {
+            HelmExecutionResult result = await LifecycleService.SyncComponentSecretsAsync(componentId);
+            secretSyncOutput = result.Success ? "Synced successfully" : result.Output;
+        }
+        catch (Exception ex)
+        {
+            secretSyncOutput = $"Sync failed: {ex.Message}";
+        }
+        finally
+        {
+            secretSyncInProgress = false;
+        }
+    }
+
+    // ──────── Gateway Selector ────────
+
+    private IEnumerable<ClusterComponent> GetInstalledGateways()
+        => components?.Where(c =>
+               c.Name is "istio" or "istio-internal"
+               && c.Status == ComponentStatus.Installed)
+           ?? [];
+
+    private async Task OnRegGatewaySelected(string fieldKey, ChangeEventArgs e)
+    {
+        string releaseName = e.Value?.ToString() ?? "";
+        regFormFieldValues[fieldKey] = releaseName;
+
+        if (!string.IsNullOrEmpty(releaseName))
+            await AutoDetectAndFillHostReg(releaseName);
+    }
+
+    private async Task OnEditGatewaySelected(string fieldKey, ChangeEventArgs e)
+    {
+        string releaseName = e.Value?.ToString() ?? "";
+        editFormFieldValues[fieldKey] = releaseName;
+
+        if (!string.IsNullOrEmpty(releaseName))
+            await AutoDetectAndFillHostEdit(releaseName);
+    }
+
+    private async Task AutoDetectAndFillHostReg(string gatewayReleaseName)
+    {
+        string? ip = await LifecycleService.GetServiceExternalIpAsync(
+            Cluster.Id, gatewayReleaseName, "istio-system");
+        if (!string.IsNullOrEmpty(ip))
+            regFormFieldValues["wg-host"] = ip;
+    }
+
+    private async Task AutoDetectAndFillHostEdit(string gatewayReleaseName)
+    {
+        string? ip = await LifecycleService.GetServiceExternalIpAsync(
+            Cluster.Id, gatewayReleaseName, "istio-system");
+        if (!string.IsNullOrEmpty(ip))
+            editFormFieldValues["wg-host"] = ip;
+    }
+
+    // ──────── Form Field Helpers ────────
+
+    private string GetFormFieldValue(string key)
+    {
+        return regFormFieldValues.TryGetValue(key, out string? value) ? value : "";
+    }
+
+    private bool IsFormFieldTrue(string key)
+    {
+        return GetFormFieldValue(key) == "true";
+    }
+
+    private void SetFormFieldValue(string key, string value)
+    {
+        regFormFieldValues[key] = value;
+    }
+
+    private string GetEditFormFieldValue(string key)
+    {
+        return editFormFieldValues.TryGetValue(key, out string? value) ? value : "";
+    }
+
+    private bool IsEditFormFieldTrue(string key)
+    {
+        return GetEditFormFieldValue(key) == "true";
+    }
+
+    private void SetEditFormFieldValue(string key, string value)
+    {
+        editFormFieldValues[key] = value;
+    }
+
+    private void OnRegToggleChanged(string key, ChangeEventArgs e)
+    {
+        string val = e.Value?.ToString() == "True" ? "true" : "false";
+        SetFormFieldValue(key, val);
+    }
+
+    private void OnRegFieldChanged(string key, ChangeEventArgs e)
+    {
+        SetFormFieldValue(key, e.Value?.ToString() ?? string.Empty);
+    }
+
+    private void OnEditToggleChanged(string key, ChangeEventArgs e)
+    {
+        string val = e.Value?.ToString() == "True" ? "true" : "false";
+        SetEditFormFieldValue(key, val);
+    }
+
+    private void OnEditFieldChanged(string key, ChangeEventArgs e)
+    {
+        SetEditFormFieldValue(key, e.Value?.ToString() ?? string.Empty);
+    }
+
+    private CatalogEntry? GetCatalogMatchForSelected()
+    {
+        ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == selectedComponentId);
+        return comp is not null ? ComponentCatalog.GetByKey(comp.Name) : null;
+    }
+
+    private string MergeRegFormFields()
+    {
+        // Build a path-to-value dictionary from form fields, then merge into YAML.
+        // Secret fields are excluded — they live in the vault, not in plain YAML.
+        // Subchart fields are stored as comment markers, not as YAML values.
+
+        if (selectedCatalogEntry is null)
+        {
+            return regValues;
+        }
+
+        Dictionary<string, string> pathValues = new();
+        List<string> subchartMarkers = [];
+
+        foreach (ComponentFormField field in selectedCatalogEntry.FormFields)
+        {
+            if (field.StoreAsSecret)
+            {
+                continue;
+            }
+
+            if (field.YamlPath.StartsWith("subchart:", StringComparison.Ordinal))
+            {
+                string val = regFormFieldValues.TryGetValue(field.Key, out string? v) ? v : field.DefaultValue ?? "true";
+                subchartMarkers.Add($"# {field.YamlPath}={val}");
+                continue;
+            }
+
+            if (field.YamlPath.StartsWith("cnpg:", StringComparison.Ordinal)
+                || field.YamlPath.StartsWith("harbor:", StringComparison.Ordinal)
+                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (regFormFieldValues.TryGetValue(field.Key, out string? fieldVal) && !string.IsNullOrEmpty(fieldVal))
+            {
+                pathValues[field.YamlPath] = fieldVal;
+            }
+        }
+
+        string result = pathValues.Count == 0 ? regValues : YamlFormMerger.MergeFormValues(regValues, pathValues);
+
+        if (subchartMarkers.Count > 0)
+        {
+            result = string.Join("\n", subchartMarkers) + "\n" + result;
+        }
+
+        // For letsencrypt-issuer, auto-detect the Gateway and inject parentRefs for HTTP-01,
+        // and conditionally inject the DNS-01 clientSecretSecretRef when an Azure DNS zone is configured.
+        if (selectedCatalogEntry.Key == "letsencrypt-issuer" && components is not null)
+        {
+            (string gwName, string gwNamespace) = ExternalRouteService.ResolveGateway(components);
+            result = YamlFormMerger.MergeFormValues(result, new Dictionary<string, string>
+            {
+                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.name"] = gwName,
+                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.namespace"] = gwNamespace,
+                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.kind"] = "Gateway"
+            });
+
+            if (regFormFieldValues.TryGetValue("dns-zone", out string? zone) && !string.IsNullOrWhiteSpace(zone))
+            {
+                result = YamlFormMerger.MergeFormValues(result, new Dictionary<string, string>
+                {
+                    ["spec.acme.solvers.1.dns01.azureDNS.clientSecretSecretRef.name"] = "azuredns-config",
+                    ["spec.acme.solvers.1.dns01.azureDNS.clientSecretSecretRef.key"] = "azuredns-client-secret"
+                });
+            }
+        }
+
+        return result;
+    }
+
+    private string MergeEditFormFields()
+    {
+        // Same as MergeRegFormFields but for the edit form (installed components).
+        // Secret fields are excluded — they live in the vault, not in plain YAML.
+        // Subchart fields are stored as comment markers, not as YAML values.
+
+        ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == selectedComponentId);
+        CatalogEntry? catalogMatch = comp is not null ? ComponentCatalog.GetByKey(comp.Name) : null;
+
+        if (catalogMatch is null || catalogMatch.FormFields.Count == 0)
+        {
+            return editValues;
+        }
+
+        Dictionary<string, string> pathValues = new();
+        List<string> subchartMarkers = [];
+
+        foreach (ComponentFormField field in catalogMatch.FormFields)
+        {
+            if (field.StoreAsSecret)
+            {
+                continue;
+            }
+
+            if (field.YamlPath.StartsWith("subchart:", StringComparison.Ordinal))
+            {
+                string val = editFormFieldValues.TryGetValue(field.Key, out string? v) ? v : field.DefaultValue ?? "true";
+                subchartMarkers.Add($"# {field.YamlPath}={val}");
+                continue;
+            }
+
+            if (field.YamlPath.StartsWith("cnpg:", StringComparison.Ordinal)
+                || field.YamlPath.StartsWith("harbor:", StringComparison.Ordinal)
+                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (editFormFieldValues.TryGetValue(field.Key, out string? fieldVal) && !string.IsNullOrEmpty(fieldVal))
+            {
+                pathValues[field.YamlPath] = fieldVal;
+            }
+        }
+
+        // Strip existing subchart markers from the base values before re-adding.
+
+        string baseValues = StripSubchartMarkers(editValues);
+        string result = pathValues.Count == 0 ? baseValues : YamlFormMerger.MergeFormValues(baseValues, pathValues);
+
+        if (subchartMarkers.Count > 0)
+        {
+            result = string.Join("\n", subchartMarkers) + "\n" + result;
+        }
+
+        // For letsencrypt-issuer, auto-detect the Gateway and inject parentRefs for HTTP-01,
+        // and conditionally inject the DNS-01 clientSecretSecretRef when an Azure DNS zone is configured.
+        if (catalogMatch.Key == "letsencrypt-issuer" && components is not null)
+        {
+            (string gwName, string gwNamespace) = ExternalRouteService.ResolveGateway(components);
+            result = YamlFormMerger.MergeFormValues(result, new Dictionary<string, string>
+            {
+                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.name"] = gwName,
+                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.namespace"] = gwNamespace,
+                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.kind"] = "Gateway"
+            });
+
+            if (editFormFieldValues.TryGetValue("dns-zone", out string? zone) && !string.IsNullOrWhiteSpace(zone))
+            {
+                result = YamlFormMerger.MergeFormValues(result, new Dictionary<string, string>
+                {
+                    ["spec.acme.solvers.1.dns01.azureDNS.clientSecretSecretRef.name"] = "azuredns-config",
+                    ["spec.acme.solvers.1.dns01.azureDNS.clientSecretSecretRef.key"] = "azuredns-client-secret"
+                });
+            }
+        }
+
+        return result;
+    }
+
+    private static string StripSubchartMarkers(string yaml)
+    {
+        if (string.IsNullOrWhiteSpace(yaml))
+        {
+            return yaml;
+        }
+
+        List<string> lines = [];
+
+        foreach (string line in yaml.Split('\n'))
+        {
+            if (!line.TrimStart().StartsWith("# subchart:", StringComparison.Ordinal))
+            {
+                lines.Add(line);
+            }
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    /// <summary>
+    /// Stores secret-marked form fields from the edit form into the vault.
+    /// Called during SaveConfiguration for already-registered components.
+    /// </summary>
+    private async Task SaveSecretFieldsToVault(Guid componentId)
+    {
+        ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == componentId);
+        CatalogEntry? catalogMatch = comp is not null ? ComponentCatalog.GetByKey(comp.Name) : null;
+
+        if (catalogMatch is null)
+        {
+            return;
+        }
+
+        await VaultService.InitializeVaultAsync(TenantId);
+
+        foreach (ComponentFormField field in catalogMatch.FormFields)
+        {
+            if (!field.StoreAsSecret)
+            {
+                continue;
+            }
+
+            if (editFormFieldValues.TryGetValue(field.Key, out string? val) && !string.IsNullOrEmpty(val))
+            {
+                string secretName = field.SecretName ?? field.Key;
+                string? k8sNs = field.KubernetesSecretNamespace ?? comp?.Namespace;
+                await VaultService.SetComponentSecretAsync(TenantId, componentId, secretName, val,
+                    k8sSecretName: field.KubernetesSecretName, k8sNamespace: k8sNs);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Stores secret-marked form fields from the registration form into the vault.
+    /// Called after initial component registration.
+    /// </summary>
+    private async Task SaveRegSecretFieldsToVault(Guid componentId)
+    {
+        if (selectedCatalogEntry is null)
+        {
+            return;
+        }
+
+        await VaultService.InitializeVaultAsync(TenantId);
+
+        ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == componentId);
+
+        foreach (ComponentFormField field in selectedCatalogEntry.FormFields)
+        {
+            if (!field.StoreAsSecret)
+            {
+                continue;
+            }
+
+            if (regFormFieldValues.TryGetValue(field.Key, out string? val) && !string.IsNullOrEmpty(val))
+            {
+                string secretName = field.SecretName ?? field.Key;
+                string? k8sNs = field.KubernetesSecretNamespace ?? comp?.Namespace;
+                await VaultService.SetComponentSecretAsync(TenantId, componentId, secretName, val,
+                    k8sSecretName: field.KubernetesSecretName, k8sNamespace: k8sNs);
+            }
+        }
+    }
+
+    private void InitEditFormFields(ClusterComponent comp)
+    {
+        // Look up the catalog entry to get form field definitions,
+        // then initialize from defaults (or extract from existing YAML).
+
+        editFormFieldValues = new();
+        CatalogEntry? catalogMatch = ComponentCatalog.GetByKey(comp.Name);
+
+        if (catalogMatch is null)
+        {
+            return;
+        }
+
+        foreach (ComponentFormField field in catalogMatch.FormFields)
+        {
+            editFormFieldValues[field.Key] = field.DefaultValue ?? "";
+        }
+
+        // Try to extract current values from the component's YAML.
+        // If the YAML has the value, it overrides the default.
+
+        if (!string.IsNullOrWhiteSpace(comp.HelmValues))
+        {
+            foreach (ComponentFormField field in catalogMatch.FormFields)
+            {
+                // Subchart toggles are stored as comment markers, not YAML paths.
+
+                if (field.YamlPath.StartsWith("subchart:", StringComparison.Ordinal))
+                {
+                    string marker = $"# {field.YamlPath}=";
+
+                    foreach (string line in comp.HelmValues.Split('\n'))
+                    {
+                        if (line.TrimStart().StartsWith(marker, StringComparison.Ordinal))
+                        {
+                            editFormFieldValues[field.Key] = line.TrimStart()[marker.Length..].Trim();
+                            break;
+                        }
+                    }
+
+                    continue;
+                }
+
+                // cnpg:/harbor:/loki: fields are not in YAML — loaded from component configs in ToggleComponentDetail.
+
+                if (field.YamlPath.StartsWith("cnpg:", StringComparison.Ordinal)
+                    || field.YamlPath.StartsWith("harbor:", StringComparison.Ordinal)
+                    || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                string? extracted = YamlFormMerger.ExtractValue(comp.HelmValues, field.YamlPath);
+
+                if (extracted is not null)
+                {
+                    editFormFieldValues[field.Key] = extracted;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// If the component has a CnpgDatabase field, writes DB connection details into HelmValues
+    /// immediately (no admin password needed). If admin password is also provided, calls
+    /// ConfigureAsync to set up the full vault/secret config and the KeycloakComponentConfig record.
+    /// </summary>
+    private async Task SaveKeycloakConfigIfNeeded(
+        Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
+    {
+        // Skip if no CnpgDatabase field, or if this is a Harbor component (has StorageLink field).
+        // Harbor has its own SaveHarborConfigIfNeeded that handles the database and route.
+        if (catalogEntry is null
+            || !catalogEntry.FormFields.Any(f => f.Type == FormFieldType.CnpgDatabase)
+            || catalogEntry.FormFields.Any(f => f.Type == FormFieldType.StorageLink))
+        {
+            return;
+        }
+
+        // Write DB hostname/port/name/username into HelmValues and vault as soon as a database
+        // is selected — admin password is NOT required for this. This ensures the Helm chart
+        // always has KC_DB_URL_HOST etc. even on first install before IdentityTab Configure runs.
+        if (fieldValues.TryGetValue("cnpg-database", out string? dbIdStr)
+            && Guid.TryParse(dbIdStr, out Guid parsedDbId)
+            && parsedDbId != Guid.Empty)
+        {
+            await KeycloakService.WriteDatabaseHelmValuesAsync(TenantId, componentId, parsedDbId);
+        }
+
+        if (!fieldValues.TryGetValue("admin-password", out string? adminPassword)
+            || string.IsNullOrWhiteSpace(adminPassword))
+        {
+            return;
+        }
+
+        Guid? cnpgDatabaseId = null;
+        if (fieldValues.TryGetValue("cnpg-database", out string? dbIdStr2)
+            && Guid.TryParse(dbIdStr2, out Guid parsedDbId2)
+            && parsedDbId2 != Guid.Empty)
+        {
+            cnpgDatabaseId = parsedDbId2;
+        }
+
+        string hostname = fieldValues.TryGetValue("hostname", out string? h) ? h.Trim() : "";
+        string httpPath = fieldValues.TryGetValue("http-path", out string? p) && !string.IsNullOrWhiteSpace(p) ? p : "/auth";
+
+        // Derive admin URL from hostname if not explicitly provided.
+        string adminUrl = fieldValues.TryGetValue("admin-url", out string? u) && !string.IsNullOrWhiteSpace(u)
+            ? u
+            : string.IsNullOrEmpty(hostname) ? "" : $"https://{hostname}{httpPath}";
+
+        string adminUsername = fieldValues.TryGetValue("admin-username", out string? n) && !string.IsNullOrWhiteSpace(n) ? n : "admin";
+
+        await KeycloakService.ConfigureAsync(TenantId, componentId, cnpgDatabaseId, adminUsername, adminPassword, adminUrl);
+
+        // Create the HTTPRoute + Certificate if a hostname was provided.
+        if (!string.IsNullOrEmpty(hostname))
+        {
+            await EnsureKeycloakRouteAsync(componentId, fieldValues, hostname);
+        }
+    }
+
+    private async Task EnsureKeycloakRouteAsync(
+        Guid componentId, Dictionary<string, string> fieldValues, string hostname)
+    {
+        // Skip if a route for this hostname already exists on the component.
+        List<ExternalRoute> existing = await RouteService.GetRoutesAsync(componentId);
+        if (existing.Any(r => r.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        string tlsMode = fieldValues.TryGetValue("tls-mode", out string? t) ? t : "ClusterIssuer";
+        string issuerName = fieldValues.TryGetValue("cluster-issuer", out string? i) && !string.IsNullOrWhiteSpace(i) ? i : "letsencrypt-prod";
+        string tlsCert = fieldValues.TryGetValue("tls-cert", out string? c) ? c : "";
+        string tlsKey = fieldValues.TryGetValue("tls-key", out string? k) ? k : "";
+
+        bool isManual = string.Equals(tlsMode, "Manual", StringComparison.Ordinal);
+
+        // keycloakx chart creates {releaseName}-keycloakx-http (ClusterIP, ports 80/8443/9000).
+        ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == componentId);
+        string releaseName = comp?.ReleaseName ?? comp?.Name ?? "keycloak";
+        string serviceName = $"{releaseName}-keycloakx-http";
+
+        ExternalRouteRequest routeRequest = new()
+        {
+            Hostname = hostname,
+            ServiceName = serviceName,
+            ServicePort = 80,
+            PathPrefix = "/",
+            TlsMode = isManual ? TlsMode.Manual : TlsMode.ClusterIssuer,
+            ClusterIssuerName = isManual ? null : issuerName,
+            TlsCertificate = isManual ? tlsCert : null,
+            TlsPrivateKey = isManual && !string.IsNullOrWhiteSpace(tlsKey) ? tlsKey : null
+        };
+
+        await RouteService.AddRouteAsync(componentId, routeRequest);
+    }
+
+    private async Task RepairMissingGatewayApiCrds()
+    {
+        componentError = null;
+
+        CatalogEntry? entry = ComponentCatalog.GetByKey("gateway-api-crds");
+        if (entry is null) return;
+
+        ComponentRegistration registration = ComponentCatalog.ToRegistration(entry);
+        ClusterComponent created = await LifecycleService.RegisterComponentAsync(Cluster.Id, registration);
+        await LoadComponents();
+        await InstallComponent(created.Id);
+        await CheckGatewayApiCrdsIfNeededAsync();
+    }
+
+    private async Task RepairCertManagerGatewayApi()
+    {
+        componentError = null;
+
+        ClusterComponent? certManager = components?.FirstOrDefault(c =>
+            (c.Name == "cert-manager" || c.HelmChartName == "cert-manager")
+            && c.Status == ComponentStatus.Installed);
+        if (certManager is null) return;
+
+        // cert-manager v1.15+ uses config.enableGatewayAPI: true instead of feature gates.
+        // A Helm upgrade with this value also restarts the pod, which is needed when
+        // Gateway API CRDs were installed after cert-manager (cert-manager checks for CRDs on startup).
+        string currentValues = certManager.HelmValues ?? "";
+        string updatedValues = YamlFormMerger.MergeFormValues(currentValues,
+            new Dictionary<string, string> { ["config.enableGatewayAPI"] = "true" });
+
+        await LifecycleService.UpdateConfigurationAsync(certManager.Id, updatedValues);
+
+        // Refresh the in-memory component so UpgradeComponent picks up the new values.
+        // Use noWait=true so Helm applies the values and returns immediately;
+        // cert-manager's rollout can be slow and we don't need to block on readiness.
+        await LoadComponents();
+        await UpgradeComponent(certManager.Id, noWait: true);
+    }
+
+    private static bool IsKeycloakComponent(ClusterComponent comp) =>
+        comp.Name == "keycloak"
+        || comp.ReleaseName == "keycloak"
+        || comp.HelmChartName == "keycloakx"
+        || comp.HelmChartName == "keycloak";
+
+    private static bool IsHarborComponent(ClusterComponent comp) =>
+        comp.Name == "harbor"
+        || comp.HelmChartName == "harbor";
+
+    /// <summary>
+    /// Saves Harbor config (CNPG database, S3 storage link, admin credentials) when the
+    /// component has a StorageLink or CnpgDatabase form field (i.e. it is Harbor). Also
+    /// creates an HTTPRoute for the configured hostname if one was provided.
+    /// </summary>
+    private async Task SaveLokiConfigIfNeeded(
+        Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
+    {
+        if (catalogEntry?.Key != "loki") return;
+
+        if (!fieldValues.TryGetValue("storage-link", out string? slIdStr)
+            || !Guid.TryParse(slIdStr, out Guid storageLinkId)
+            || storageLinkId == Guid.Empty)
+        {
+            return;
+        }
+
+        await LokiService.WriteStorageHelmValuesAsync(TenantId, componentId, storageLinkId);
+    }
+
+    private async Task SaveHarborConfigIfNeeded(
+        Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
+    {
+        if (catalogEntry?.Key != "harbor")
+        {
+            return;
+        }
+
+        Guid? cnpgDatabaseId = null;
+        if (fieldValues.TryGetValue("cnpg-database", out string? dbIdStr)
+            && Guid.TryParse(dbIdStr, out Guid parsedDbId)
+            && parsedDbId != Guid.Empty)
+        {
+            cnpgDatabaseId = parsedDbId;
+        }
+
+        Guid? storageLinkId = null;
+        if (fieldValues.TryGetValue("storage-link", out string? slIdStr)
+            && Guid.TryParse(slIdStr, out Guid parsedSlId)
+            && parsedSlId != Guid.Empty)
+        {
+            storageLinkId = parsedSlId;
+        }
+
+        fieldValues.TryGetValue("admin-password", out string? adminPassword);
+        fieldValues.TryGetValue("admin-username", out string? adminUsername);
+        string hostname = fieldValues.TryGetValue("hostname", out string? h) ? h.Trim() : "";
+        string registryUrl = string.IsNullOrEmpty(hostname) ? "" : $"https://{hostname}";
+
+        await HarborService.ConfigureAsync(
+            TenantId, componentId,
+            cnpgDatabaseId, storageLinkId,
+            string.IsNullOrWhiteSpace(adminUsername) ? "admin" : adminUsername,
+            string.IsNullOrWhiteSpace(adminPassword) ? null : adminPassword,
+            string.IsNullOrWhiteSpace(registryUrl) ? null : registryUrl);
+
+        // Inject externalURL and keep expose.clusterIP.name aligned with the release name so the
+        // Gateway API route always targets the correct service (HarborService sets expose.clusterIP.name
+        // to releaseName; EnsureHarborRouteAsync routes to releaseName as the backend service).
+        if (!string.IsNullOrEmpty(registryUrl))
+        {
+            ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == componentId);
+            if (comp is not null)
+            {
+                string harborReleaseName = comp.ReleaseName ?? comp.Name;
+                comp.HelmValues = YamlFormMerger.MergeFormValues(
+                    comp.HelmValues ?? "",
+                    new Dictionary<string, string>
+                    {
+                        ["externalURL"] = registryUrl,
+                        ["expose.clusterIP.name"] = harborReleaseName
+                    });
+                await LifecycleService.UpdateConfigurationAsync(componentId, comp.HelmValues);
+            }
+
+            await EnsureHarborRouteAsync(componentId, fieldValues, hostname);
+        }
+    }
+
+    private async Task EnsureHarborRouteAsync(
+        Guid componentId, Dictionary<string, string> fieldValues, string hostname)
+    {
+        List<ExternalRoute> existing = await RouteService.GetRoutesAsync(componentId);
+        if (existing.Any(r => r.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        string tlsMode = fieldValues.TryGetValue("tls-mode", out string? t) ? t : "ClusterIssuer";
+        string issuerName = fieldValues.TryGetValue("cluster-issuer", out string? i) && !string.IsNullOrWhiteSpace(i) ? i : "letsencrypt-prod";
+        string tlsCert = fieldValues.TryGetValue("tls-cert", out string? c) ? c : "";
+        string tlsKey = fieldValues.TryGetValue("tls-key", out string? k) ? k : "";
+        bool isManual = string.Equals(tlsMode, "Manual", StringComparison.Ordinal);
+
+        // Harbor's expose ClusterIP service is named by expose.clusterIP.name.
+        // HarborService sets this to the release name so they always align.
+        ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == componentId);
+        string releaseName = comp?.ReleaseName ?? comp?.Name ?? "harbor";
+        string serviceName = releaseName;
+
+        ExternalRouteRequest routeRequest = new()
+        {
+            Hostname = hostname,
+            ServiceName = serviceName,
+            ServicePort = 80,
+            PathPrefix = "/",
+            TlsMode = isManual ? TlsMode.Manual : TlsMode.ClusterIssuer,
+            ClusterIssuerName = isManual ? null : issuerName,
+            TlsCertificate = isManual ? tlsCert : null,
+            TlsPrivateKey = isManual && !string.IsNullOrWhiteSpace(tlsKey) ? tlsKey : null
+        };
+
+        await RouteService.AddRouteAsync(componentId, routeRequest);
+    }
+
+    private bool IsFieldVisible(ComponentFormField field, Dictionary<string, string> fieldValues)
+    {
+        if (field.DependsOnKey is null)
+        {
+            return true;
+        }
+
+        fieldValues.TryGetValue(field.DependsOnKey, out string? actual);
+
+        // When DependsOnValue is null, show the field whenever the dependency key is non-empty.
+        if (field.DependsOnValue is null)
+        {
+            return !string.IsNullOrWhiteSpace(actual);
+        }
+
+        return string.Equals(actual, field.DependsOnValue, StringComparison.Ordinal);
+    }
+
+    // ──────── External Routes ────────
+
+    private async Task ShowRoutes(Guid componentId)
+    {
+        compDetailTab = "expose";
+        routeError = null;
+        routeYamlPreview = null;
+        componentRoutes = await RouteService.GetRoutesAsync(componentId);
+        await LoadRouteUptimes();
+    }
+
+    private async Task LoadRouteUptimes()
+    {
+        if (componentRoutes is null) return;
+        routeUptimes = new();
+        foreach (ExternalRoute route in componentRoutes)
+        {
+            RouteUptimeSummary summary = await RouteService.GetRouteUptimeAsync(route.Id);
+            routeUptimes[route.Id] = summary;
+        }
+    }
+
+    private async Task AddRoute(Guid componentId)
+    {
+        routeError = null;
+
+        try
+        {
+            ExternalRouteRequest request = new()
+            {
+                Hostname = routeHostname.Trim(),
+                ServiceName = string.IsNullOrWhiteSpace(routeServiceName) ? null : routeServiceName.Trim(),
+                ServicePort = routeServicePort,
+                TlsMode = routeTlsMode == "Manual" ? TlsMode.Manual : TlsMode.ClusterIssuer,
+                ClusterIssuerName = routeTlsMode == "ClusterIssuer" ? routeIssuerName.Trim() : null,
+                TlsCertificate = routeTlsMode == "Manual" ? routeTlsCert : null,
+                TlsPrivateKey = routeTlsMode == "Manual" && !string.IsNullOrWhiteSpace(routeTlsKey) ? routeTlsKey : null
+            };
+
+            await RouteService.AddRouteAsync(componentId, request);
+
+            // Reset form fields after successful add.
+
+            routeHostname = "";
+            routeServiceName = "";
+            routeServicePort = 80;
+            routeTlsCert = "";
+            routeTlsKey = "";
+
+            componentRoutes = await RouteService.GetRoutesAsync(componentId);
+            await LifecycleService.ApplyExternalRoutesAsync(componentId);
+        }
+        catch (InvalidOperationException ex)
+        {
+            routeError = ex.Message;
+        }
+    }
+
+    private async Task DeleteRoute(Guid routeId, Guid componentId)
+    {
+        await RouteService.DeleteRouteAsync(routeId);
+        componentRoutes = await RouteService.GetRoutesAsync(componentId);
+        routeYamlPreview = null;
+    }
+
+    private async Task ShowRouteYaml(Guid routeId)
+    {
+        routeYamlPreview = await RouteService.GenerateFullManifestYamlAsync(routeId);
+    }
+}

@@ -1,0 +1,365 @@
+@page "/admin/roles"
+@using Microsoft.AspNetCore.Authorization
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = "Admin")]
+
+@inject TenantRoleService RoleService
+@inject TenantService TenantService
+
+<PageTitle>Role Management</PageTitle>
+
+<div class="d-flex align-items-center justify-content-between mb-4">
+    <div>
+        <h1 class="mb-0"><i class="bi bi-shield-lock me-2 text-primary"></i>Role Management</h1>
+        <p class="text-muted small mb-0 mt-1">Define roles and their feature permissions per tenant.</p>
+    </div>
+</div>
+
+@* ── Tenant selector ── *@
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body py-2">
+        <div class="d-flex align-items-center gap-3">
+            <label class="text-muted small fw-semibold text-nowrap mb-0">Tenant</label>
+            <select class="form-select" @onchange="OnTenantChanged">
+                <option value="">Select a tenant…</option>
+                @foreach (Tenant t in allTenants)
+                {
+                    <option value="@t.Id" selected="@(t.Id == selectedTenantId)">@t.Name</option>
+                }
+            </select>
+        </div>
+    </div>
+</div>
+
+@if (selectedTenantId != Guid.Empty)
+{
+    @* ── Create role ── *@
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-body py-2">
+            <div class="input-group">
+                <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-plus-circle"></i></span>
+                <input type="text" class="form-control border-start-0" placeholder="New role name (e.g. DevOps)"
+                       @bind="newRoleName" @bind:event="oninput"
+                       @onkeydown="@(async e => { if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(newRoleName)) await CreateRole(); })" />
+                <button class="btn btn-primary" @onclick="CreateRole" disabled="@string.IsNullOrWhiteSpace(newRoleName)">
+                    <i class="bi bi-plus-lg me-1"></i>Add Role
+                </button>
+            </div>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(errorMessage))
+    {
+        <div class="alert alert-danger alert-dismissible py-2 mb-3">
+            <i class="bi bi-exclamation-triangle me-1"></i>@errorMessage
+            <button type="button" class="btn-close btn-close-sm" @onclick="() => errorMessage = null"></button>
+        </div>
+    }
+
+    <LoadingPanel Loading="@(roles is null)" LoadingText="Loading roles…">
+        @if (roles is not null && roles.Count == 0)
+        {
+            <EmptyState Icon="bi-shield-lock"
+                        Title="No roles yet"
+                        Message="Create a role above to define what users in this tenant can access." />
+        }
+        else if (roles is not null)
+        {
+            <div class="d-flex flex-column gap-3">
+                @foreach (TenantRole role in roles)
+                {
+                    bool isExpanded = expandedRoleId == role.Id;
+                    Dictionary<TenantFeature, AccessLevel> perms = TenantRoleService.DecodePermissions(role.PermissionsJson);
+
+                    <div class="card border-0 shadow-sm">
+                        @* ── Role header ── *@
+                        <div class="card-body py-3 d-flex align-items-center justify-content-between"
+                             style="cursor:pointer" @onclick="() => ToggleExpand(role.Id)">
+                            <div class="d-flex align-items-center gap-2">
+                                <i class="bi bi-chevron-@(isExpanded ? "up" : "down") text-muted"></i>
+                                @if (editingNameId == role.Id)
+                                {
+                                    <input type="text" class="form-control form-control-sm" style="width:220px"
+                                           value="@editingName"
+                                           @oninput="e => editingName = e.Value?.ToString() ?? string.Empty"
+                                           @onkeydown="@(async e => { if (e.Key == "Enter") await SaveRename(role.Id); else if (e.Key == "Escape") CancelRename(); })"
+                                           @onclick:stopPropagation="true" />
+                                    <button class="btn btn-sm btn-success" @onclick:stopPropagation="true" @onclick="() => SaveRename(role.Id)">
+                                        <i class="bi bi-check"></i>
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick:stopPropagation="true" @onclick="CancelRename">
+                                        <i class="bi bi-x"></i>
+                                    </button>
+                                }
+                                else
+                                {
+                                    <span class="fw-semibold">@role.Name</span>
+                                    <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">
+                                        @role.Memberships.Count members
+                                    </span>
+                                }
+                            </div>
+                            <div class="d-flex gap-2" @onclick:stopPropagation="true">
+                                <button class="btn btn-sm btn-outline-secondary" title="Rename"
+                                        @onclick="() => StartRename(role.Id, role.Name)">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                @if (confirmDeleteId == role.Id)
+                                {
+                                    <span class="text-danger small align-self-center me-1">Delete?</span>
+                                    <button class="btn btn-sm btn-danger" @onclick="() => DeleteRole(role.Id)">Yes</button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDeleteId = null">No</button>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-outline-danger" title="Delete role"
+                                            @onclick="() => confirmDeleteId = role.Id">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                }
+                            </div>
+                        </div>
+
+                        @* ── Permission matrix ── *@
+                        @if (isExpanded)
+                        {
+                            Dictionary<TenantFeature, AccessLevel> draft = GetDraft(role.Id, perms);
+                            bool isDirty = savedMessages.ContainsKey(role.Id) || IsDirty(role.Id, perms);
+
+                            <div class="card-body border-top pt-3 pb-3">
+                                <div class="table-responsive">
+                                    <table class="table table-sm table-borderless mb-3" style="max-width:700px">
+                                        <thead>
+                                            <tr class="text-muted small">
+                                                <th style="width:40%">Feature</th>
+                                                <th class="text-center">None</th>
+                                                <th class="text-center">View</th>
+                                                <th class="text-center">Edit</th>
+                                                <th class="text-center">Manage</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach ((TenantFeature feature, string label, string icon) in TenantRoleService.Features)
+                                            {
+                                                AccessLevel current = TenantRoleService.GetPermission(draft, feature);
+                                                <tr>
+                                                    <td class="align-middle">
+                                                        <i class="bi @icon me-2 text-muted"></i>@label
+                                                    </td>
+                                                    @foreach (AccessLevel level in Enum.GetValues<AccessLevel>())
+                                                    {
+                                                        <td class="text-center align-middle">
+                                                            <input type="radio"
+                                                                   class="form-check-input"
+                                                                   name="@($"perm-{role.Id}-{feature}")"
+                                                                   checked="@(current == level)"
+                                                                   @onchange="() => SetDraft(role.Id, feature, level)" />
+                                                        </td>
+                                                    }
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <div class="d-flex align-items-center gap-3">
+                                    <button class="btn btn-primary btn-sm" @onclick="() => SavePermissions(role.Id)">
+                                        <i class="bi bi-floppy me-1"></i>Save Permissions
+                                    </button>
+                                    <button class="btn btn-outline-secondary btn-sm" @onclick="() => ResetDraft(role.Id, perms)">
+                                        Reset
+                                    </button>
+                                    @if (savedMessages.TryGetValue(role.Id, out string? msg))
+                                    {
+                                        <span class="text-success small"><i class="bi bi-check-circle me-1"></i>@msg</span>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        }
+    </LoadingPanel>
+}
+
+@code {
+    private List<Tenant> allTenants = [];
+    private Guid selectedTenantId;
+    private List<TenantRole>? roles;
+    private string newRoleName = "";
+    private string? errorMessage;
+
+    // Expand/collapse
+    private Guid? expandedRoleId;
+
+    // Inline rename
+    private Guid? editingNameId;
+    private string editingName = "";
+
+    // Delete confirm
+    private Guid? confirmDeleteId;
+
+    // Permission drafts: roleId → working copy of permissions
+    private Dictionary<Guid, Dictionary<TenantFeature, AccessLevel>> drafts = [];
+
+    // Save confirmation messages
+    private Dictionary<Guid, string> savedMessages = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        allTenants = await TenantService.GetAllTenantsAsync();
+    }
+
+    private async Task OnTenantChanged(ChangeEventArgs e)
+    {
+        selectedTenantId = Guid.TryParse(e.Value?.ToString(), out Guid id) ? id : Guid.Empty;
+        roles = null;
+        drafts.Clear();
+        savedMessages.Clear();
+        expandedRoleId = null;
+        errorMessage = null;
+
+        if (selectedTenantId != Guid.Empty)
+            await LoadRoles();
+    }
+
+    private async Task LoadRoles()
+    {
+        roles = await RoleService.GetRolesAsync(selectedTenantId);
+        // Prune drafts for roles that no longer exist.
+        HashSet<Guid> ids = roles.Select(r => r.Id).ToHashSet();
+        foreach (Guid gone in drafts.Keys.Except(ids).ToList())
+            drafts.Remove(gone);
+    }
+
+    private async Task CreateRole()
+    {
+        if (string.IsNullOrWhiteSpace(newRoleName)) return;
+        errorMessage = null;
+
+        try
+        {
+            TenantRole created = await RoleService.CreateRoleAsync(selectedTenantId, newRoleName.Trim());
+            newRoleName = "";
+            await LoadRoles();
+            expandedRoleId = created.Id;
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Could not create role: {ex.Message}";
+        }
+    }
+
+    private async Task DeleteRole(Guid roleId)
+    {
+        confirmDeleteId = null;
+        errorMessage = null;
+
+        bool ok = await RoleService.DeleteRoleAsync(roleId);
+        if (!ok) errorMessage = "Role not found.";
+
+        drafts.Remove(roleId);
+        savedMessages.Remove(roleId);
+        if (expandedRoleId == roleId) expandedRoleId = null;
+
+        await LoadRoles();
+    }
+
+    private void ToggleExpand(Guid roleId)
+    {
+        expandedRoleId = expandedRoleId == roleId ? null : roleId;
+    }
+
+    // ── Rename ──
+
+    private void StartRename(Guid roleId, string currentName)
+    {
+        editingNameId = roleId;
+        editingName = currentName;
+    }
+
+    private void CancelRename()
+    {
+        editingNameId = null;
+        editingName = "";
+    }
+
+    private async Task SaveRename(Guid roleId)
+    {
+        if (string.IsNullOrWhiteSpace(editingName)) return;
+        errorMessage = null;
+
+        try
+        {
+            await RoleService.RenameRoleAsync(roleId, editingName.Trim());
+            CancelRename();
+            await LoadRoles();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Could not rename role: {ex.Message}";
+        }
+    }
+
+    // ── Permission draft management ──
+
+    private Dictionary<TenantFeature, AccessLevel> GetDraft(Guid roleId, Dictionary<TenantFeature, AccessLevel> saved)
+    {
+        if (!drafts.TryGetValue(roleId, out Dictionary<TenantFeature, AccessLevel>? draft))
+        {
+            draft = new Dictionary<TenantFeature, AccessLevel>(saved);
+            drafts[roleId] = draft;
+        }
+        return draft;
+    }
+
+    private void SetDraft(Guid roleId, TenantFeature feature, AccessLevel level)
+    {
+        if (!drafts.TryGetValue(roleId, out Dictionary<TenantFeature, AccessLevel>? draft))
+        {
+            draft = [];
+            drafts[roleId] = draft;
+        }
+        draft[feature] = level;
+        savedMessages.Remove(roleId);
+    }
+
+    private void ResetDraft(Guid roleId, Dictionary<TenantFeature, AccessLevel> saved)
+    {
+        drafts[roleId] = new Dictionary<TenantFeature, AccessLevel>(saved);
+        savedMessages.Remove(roleId);
+    }
+
+    private bool IsDirty(Guid roleId, Dictionary<TenantFeature, AccessLevel> saved)
+    {
+        if (!drafts.TryGetValue(roleId, out Dictionary<TenantFeature, AccessLevel>? draft)) return false;
+        foreach (TenantFeature f in Enum.GetValues<TenantFeature>())
+        {
+            AccessLevel savedLevel = TenantRoleService.GetPermission(saved, f);
+            AccessLevel draftLevel = TenantRoleService.GetPermission(draft, f);
+            if (savedLevel != draftLevel) return true;
+        }
+        return false;
+    }
+
+    private async Task SavePermissions(Guid roleId)
+    {
+        if (!drafts.TryGetValue(roleId, out Dictionary<TenantFeature, AccessLevel>? draft)) return;
+        errorMessage = null;
+
+        await RoleService.SavePermissionsAsync(roleId, draft);
+
+        savedMessages[roleId] = "Saved";
+        await LoadRoles();
+
+        // Clear the saved message after 3 seconds.
+        _ = Task.Delay(3000).ContinueWith(_ =>
+        {
+            savedMessages.Remove(roleId);
+            InvokeAsync(StateHasChanged);
+        });
+    }
+}

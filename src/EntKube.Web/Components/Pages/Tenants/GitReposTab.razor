@@ -1,0 +1,459 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject GitRepositoryService GitRepoService
+@inject VaultService VaultService
+
+<div class="card shadow-sm">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <div>
+            <i class="bi bi-git me-2 text-primary"></i>
+            <strong>Git Repositories</strong>
+        </div>
+        <button class="btn btn-sm btn-outline-primary" @onclick="() => showAddForm = !showAddForm">
+            <i class="bi bi-plus me-1"></i>Add Repository
+        </button>
+    </div>
+    <div class="card-body">
+
+        @* ── Add repo form ── *@
+        @if (showAddForm)
+        {
+            <div class="card border-primary mb-3">
+                <div class="card-body">
+                    <h6 class="mb-3"><i class="bi bi-plus-circle me-1"></i>Register Git Repository</h6>
+
+                    @if (addError is not null)
+                    {
+                        <div class="alert alert-danger py-1 small mb-2">
+                            <i class="bi bi-exclamation-triangle me-1"></i>@addError
+                        </div>
+                    }
+
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-4">
+                            <label class="form-label small">Name</label>
+                            <input class="form-control form-control-sm" @bind="newName" placeholder="e.g. prod-gitops" />
+                        </div>
+                        <div class="col-md-5">
+                            <label class="form-label small">URL</label>
+                            <input class="form-control form-control-sm" @bind="newUrl"
+                                   placeholder="https://github.com/org/repo or git@github.com:org/repo.git" />
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">Default branch</label>
+                            <input class="form-control form-control-sm" @bind="newBranch" placeholder="main" />
+                        </div>
+                    </div>
+
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-4">
+                            <label class="form-label small">Authentication</label>
+                            <select class="form-select form-select-sm" @bind="newAuthType">
+                                <option value="@GitAuthType.None">None (public)</option>
+                                <option value="@GitAuthType.HttpsPat">HTTPS — Personal Access Token</option>
+                                <option value="@GitAuthType.HttpsPassword">HTTPS — Username + Password</option>
+                                <option value="@GitAuthType.SshKey">SSH — Private Key</option>
+                            </select>
+                        </div>
+                        @if (newAuthType == GitAuthType.HttpsPassword)
+                        {
+                            <div class="col-md-4">
+                                <label class="form-label small">Username</label>
+                                <input class="form-control form-control-sm" @bind="newUsername" placeholder="e.g. git-user" />
+                            </div>
+                        }
+                    </div>
+
+                    <div class="d-flex gap-1">
+                        <button class="btn btn-sm btn-primary" @onclick="AddRepository"
+                                disabled="@(string.IsNullOrWhiteSpace(newName) || string.IsNullOrWhiteSpace(newUrl) || adding)">
+                            @if (adding) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Save
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelAdd">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @* ── Repo list ── *@
+        <LoadingPanel Loading="@(repos is null)">
+        @if (repos is not null && repos.Count == 0 && !showAddForm)
+        {
+            <EmptyState Icon="bi-git"
+                        Message="No repositories registered. Add one to enable Git-sourced deployments." />
+        }
+        else if (repos is not null && (repos.Count > 0 || showAddForm))
+        {
+            <div class="table-responsive">
+            <table class="table table-sm mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th class="small">Name</th>
+                        <th class="small">URL</th>
+                        <th class="small">Auth</th>
+                        <th class="small">Branch</th>
+                        <th class="small">Connection</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (GitRepository repo in repos)
+                    {
+                        <tr>
+                            <td class="small fw-medium align-middle">@repo.Name</td>
+                            <td class="small align-middle">
+                                <code class="text-muted" style="font-size:0.75rem;">@TruncateUrl(repo.Url)</code>
+                            </td>
+                            <td class="small align-middle">@AuthLabel(repo.AuthType)</td>
+                            <td class="small align-middle text-muted">@repo.DefaultBranch</td>
+                            <td class="small align-middle">
+                                @if (testingRepoId == repo.Id)
+                                {
+                                    <span class="spinner-border spinner-border-sm text-primary" style="width:0.8rem;height:0.8rem;"></span>
+                                }
+                                else if (testResults.TryGetValue(repo.Id, out var result))
+                                {
+                                    @if (result.Success)
+                                    {
+                                        <span class="badge bg-success-subtle text-success border border-success-subtle">
+                                            <i class="bi bi-check-circle me-1"></i>@result.Message
+                                        </span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-danger-subtle text-danger border border-danger-subtle"
+                                              title="@result.Message">
+                                            <i class="bi bi-x-circle me-1"></i>Failed
+                                        </span>
+                                    }
+                                }
+                                else
+                                {
+                                    <span class="text-muted small">—</span>
+                                }
+                            </td>
+                            <td class="text-end align-middle">
+                                <div class="d-flex gap-1 justify-content-end">
+                                    <button class="btn btn-sm btn-outline-secondary" title="Test connection"
+                                            @onclick="() => TestConnection(repo.Id)"
+                                            disabled="@(testingRepoId == repo.Id)">
+                                        <i class="bi bi-plug"></i>
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-primary" title="Manage credentials"
+                                            @onclick="() => ToggleCredentials(repo.Id)">
+                                        <i class="bi bi-key"></i>
+                                    </button>
+                                    @if (confirmDeleteRepoId != repo.Id)
+                                    {
+                                        <button class="btn btn-sm btn-outline-danger" title="Delete"
+                                                @onclick="() => confirmDeleteRepoId = repo.Id">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    }
+                                    else
+                                    {
+                                        <button class="btn btn-sm btn-danger" @onclick="() => DeleteRepo(repo.Id)">Yes</button>
+                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDeleteRepoId = null">No</button>
+                                    }
+                                </div>
+                            </td>
+                        </tr>
+
+                        @* ── Credential entry panel (expanded inline) ── *@
+                        @if (credentialRepoId == repo.Id)
+                        {
+                            <tr>
+                                <td colspan="6" class="p-0">
+                                    <div class="p-3 bg-light border-top">
+                                        <h6 class="mb-2 small text-muted text-uppercase fw-bold">
+                                            <i class="bi bi-shield-lock me-1"></i>Credentials — <em>@repo.Name</em>
+                                        </h6>
+
+                                        @if (credError is not null)
+                                        {
+                                            <div class="alert alert-danger py-1 small mb-2">@credError</div>
+                                        }
+                                        @if (credSuccess is not null)
+                                        {
+                                            <div class="alert alert-success py-1 small mb-2">
+                                                <i class="bi bi-check-circle me-1"></i>@credSuccess
+                                            </div>
+                                        }
+
+                                        @if (repo.AuthType == GitAuthType.HttpsPat)
+                                        {
+                                            <div class="row g-2 mb-2">
+                                                <div class="col-md-6">
+                                                    <label class="form-label small">Personal Access Token</label>
+                                                    <input type="password" class="form-control form-control-sm"
+                                                           @bind="credValue" placeholder="ghp_... or similar" autocomplete="new-password" />
+                                                    <div class="form-text">Stored encrypted in the tenant vault.</div>
+                                                </div>
+                                            </div>
+                                        }
+                                        else if (repo.AuthType == GitAuthType.HttpsPassword)
+                                        {
+                                            <div class="row g-2 mb-2">
+                                                <div class="col-md-6">
+                                                    <label class="form-label small">Password</label>
+                                                    <input type="password" class="form-control form-control-sm"
+                                                           @bind="credValue" placeholder="Password" autocomplete="new-password" />
+                                                    <div class="form-text">Username: <code>@repo.Username</code> — stored encrypted in the tenant vault.</div>
+                                                </div>
+                                            </div>
+                                        }
+                                        else if (repo.AuthType == GitAuthType.SshKey)
+                                        {
+                                            <div class="row g-2 mb-2">
+                                                <div class="col-12">
+                                                    <label class="form-label small">SSH Private Key (PEM format)</label>
+                                                    <textarea class="form-control form-control-sm font-monospace" rows="6"
+                                                              @bind="credValue"
+                                                              placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----" />
+                                                    <div class="form-text">Stored encrypted in the tenant vault. The public key for the deploy key must be added to the repository.</div>
+                                                </div>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <p class="text-muted small mb-2">This repository uses no authentication (public). No credentials needed.</p>
+                                        }
+
+                                        @if (repo.AuthType != GitAuthType.None)
+                                        {
+                                            <div class="d-flex gap-1">
+                                                <button class="btn btn-sm btn-primary" @onclick="() => SaveCredential(repo)"
+                                                        disabled="@(string.IsNullOrWhiteSpace(credValue) || savingCred)">
+                                                    @if (savingCred) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Save to Vault
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="CloseCredentials">Close</button>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="CloseCredentials">Close</button>
+                                        }
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+            </div>
+        }
+        </LoadingPanel>
+    </div>
+</div>
+
+@* ── Known Hosts section ── *@
+@if (knownHosts is not null && knownHosts.Count > 0)
+{
+    <div class="card shadow-sm mt-3">
+        <div class="card-header bg-white py-2">
+            <i class="bi bi-shield-check me-2 text-success"></i>
+            <strong>Trusted SSH Hosts</strong>
+            <small class="text-muted ms-2">Auto-trusted on first connection. Remove to force re-verification.</small>
+        </div>
+        <div class="card-body p-0">
+            <table class="table table-sm mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th class="small px-3">Hostname</th>
+                        <th class="small">Key type</th>
+                        <th class="small">Fingerprint</th>
+                        <th class="small">Trusted</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (GitKnownHost host in knownHosts)
+                    {
+                        <tr>
+                            <td class="small px-3 align-middle"><code>@host.Hostname</code></td>
+                            <td class="small align-middle text-muted">@host.KeyType</td>
+                            <td class="small align-middle">
+                                <code style="font-size:0.7rem;">@host.Fingerprint</code>
+                            </td>
+                            <td class="small align-middle text-muted">@host.TrustedAt.ToString("yyyy-MM-dd")</td>
+                            <td class="text-end align-middle pe-3">
+                                @if (confirmDeleteHostId != host.Id)
+                                {
+                                    <button class="btn btn-sm btn-outline-danger" title="Remove trust"
+                                            @onclick="() => confirmDeleteHostId = host.Id">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-danger" @onclick="() => DeleteKnownHost(host.Id)">Yes</button>
+                                    <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="() => confirmDeleteHostId = null">No</button>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private List<GitRepository>? repos;
+    private List<GitKnownHost>? knownHosts;
+
+    // Add form
+    private bool showAddForm;
+    private bool adding;
+    private string newName = "";
+    private string newUrl = "";
+    private string newBranch = "main";
+    private GitAuthType newAuthType = GitAuthType.None;
+    private string newUsername = "";
+    private string? addError;
+
+    // Test connection
+    private Guid? testingRepoId;
+    private Dictionary<Guid, (bool Success, string Message)> testResults = [];
+
+    // Credentials panel
+    private Guid? credentialRepoId;
+    private string credValue = "";
+    private bool savingCred;
+    private string? credError;
+    private string? credSuccess;
+
+    // Delete repo
+    private Guid? confirmDeleteRepoId;
+
+    // Delete known host
+    private Guid? confirmDeleteHostId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        repos = await GitRepoService.GetRepositoriesAsync(TenantId);
+        knownHosts = await GitRepoService.GetKnownHostsAsync(TenantId);
+    }
+
+    private async Task AddRepository()
+    {
+        addError = null;
+        adding = true;
+        try
+        {
+            await GitRepoService.CreateRepositoryAsync(
+                TenantId, newName, newUrl, newAuthType,
+                string.IsNullOrWhiteSpace(newUsername) ? null : newUsername,
+                string.IsNullOrWhiteSpace(newBranch) ? "main" : newBranch);
+
+            showAddForm = false;
+            newName = ""; newUrl = ""; newBranch = "main";
+            newAuthType = GitAuthType.None; newUsername = "";
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            addError = ex.Message;
+        }
+        finally { adding = false; }
+    }
+
+    private void CancelAdd()
+    {
+        showAddForm = false;
+        addError = null;
+        newName = ""; newUrl = ""; newBranch = "main";
+        newAuthType = GitAuthType.None; newUsername = "";
+    }
+
+    private async Task TestConnection(Guid repoId)
+    {
+        testingRepoId = repoId;
+        testResults.Remove(repoId);
+        StateHasChanged();
+
+        var (success, message) = await GitRepoService.ValidateConnectionAsync(TenantId, repoId);
+        testResults[repoId] = (success, message);
+        testingRepoId = null;
+    }
+
+    private void ToggleCredentials(Guid repoId)
+    {
+        if (credentialRepoId == repoId)
+        {
+            CloseCredentials();
+        }
+        else
+        {
+            credentialRepoId = repoId;
+            credValue = ""; credError = null; credSuccess = null;
+        }
+    }
+
+    private void CloseCredentials()
+    {
+        credentialRepoId = null;
+        credValue = ""; credError = null; credSuccess = null;
+    }
+
+    private async Task SaveCredential(GitRepository repo)
+    {
+        credError = null; credSuccess = null;
+        savingCred = true;
+        try
+        {
+            switch (repo.AuthType)
+            {
+                case GitAuthType.HttpsPat:
+                    await GitRepoService.SetPatAsync(TenantId, repo.Id, credValue);
+                    break;
+                case GitAuthType.HttpsPassword:
+                    await GitRepoService.SetPasswordAsync(TenantId, repo.Id, credValue);
+                    break;
+                case GitAuthType.SshKey:
+                    await GitRepoService.SetSshKeyAsync(TenantId, repo.Id, credValue);
+                    break;
+            }
+            credSuccess = "Saved to vault.";
+            credValue = "";
+        }
+        catch (Exception ex) { credError = ex.Message; }
+        finally { savingCred = false; }
+    }
+
+    private async Task DeleteRepo(Guid repoId)
+    {
+        await GitRepoService.DeleteRepositoryAsync(TenantId, repoId);
+        confirmDeleteRepoId = null;
+        testResults.Remove(repoId);
+        if (credentialRepoId == repoId) CloseCredentials();
+        await LoadAsync();
+    }
+
+    private async Task DeleteKnownHost(Guid hostId)
+    {
+        await GitRepoService.RemoveKnownHostAsync(TenantId, hostId);
+        confirmDeleteHostId = null;
+        await LoadAsync();
+    }
+
+    private static string AuthLabel(GitAuthType t) => t switch
+    {
+        GitAuthType.HttpsPat => "PAT",
+        GitAuthType.HttpsPassword => "User/Pass",
+        GitAuthType.SshKey => "SSH Key",
+        _ => "None"
+    };
+
+    private static string TruncateUrl(string url) =>
+        url.Length > 55 ? url[..52] + "…" : url;
+}

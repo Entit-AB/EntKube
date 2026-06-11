@@ -1,0 +1,312 @@
+@using EntKube.Web.Services
+
+@* ═══════════════════════════════════════════════════════════════════════════
+   AlertPanel — shows active alerts from Alertmanager, allows creating silences,
+   and displays existing silences. The central tool for operations teams to
+   monitor and manage alert noise.
+   ═══════════════════════════════════════════════════════════════════════════ *@
+
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <span class="fw-medium">
+            <i class="bi bi-bell me-2 text-warning"></i>Alerts
+            @if (alerts is not null && alerts.Count > 0)
+            {
+                <span class="badge bg-danger ms-1">@alerts.Count</span>
+            }
+        </span>
+        <div class="d-flex gap-1">
+            <button class="btn btn-sm @(view == "alerts" ? "btn-primary" : "btn-outline-primary")"
+                    @onclick='() => view = "alerts"'>
+                <i class="bi bi-bell me-1"></i>Active
+            </button>
+            <button class="btn btn-sm @(view == "silences" ? "btn-primary" : "btn-outline-primary")"
+                    @onclick="LoadSilences">
+                <i class="bi bi-bell-slash me-1"></i>Silences
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="RefreshAlerts" disabled="@loading">
+                <i class="bi bi-arrow-clockwise"></i>
+            </button>
+        </div>
+    </div>
+    <div class="card-body p-0">
+        <LoadingPanel Loading="@loading" Error="@errorMessage">
+        @if (!loading && string.IsNullOrEmpty(errorMessage) && view == "alerts")
+        {
+            @* ── Active Alerts ── *@
+            @if (alerts is null || alerts.Count == 0)
+            {
+                <EmptyState Icon="bi-check-circle"
+                            Title="All clear!"
+                            Message="No active alerts right now." />
+            }
+            else
+            {
+                <div class="list-group list-group-flush">
+                    @foreach (AlertInfo alert in alerts.OrderByDescending(a => a.Severity == "critical")
+                        .ThenByDescending(a => a.Severity == "warning"))
+                    {
+                        <div class="list-group-item px-3 py-2">
+                            <div class="d-flex align-items-start justify-content-between">
+                                <div class="flex-grow-1">
+                                    <div class="d-flex align-items-center gap-2 mb-1">
+                                        <span class="badge @GetSeverityBadgeClass(alert.Severity)">@alert.Severity</span>
+                                        <strong class="small">@alert.Name</strong>
+                                        <span class="badge bg-light text-dark border">@alert.State</span>
+                                    </div>
+                                    @if (!string.IsNullOrEmpty(alert.Summary))
+                                    {
+                                        <p class="mb-1 small text-muted">@alert.Summary</p>
+                                    }
+                                    <div class="d-flex flex-wrap gap-1">
+                                        @foreach (KeyValuePair<string, string> label in alert.Labels
+                                            .Where(l => l.Key != "alertname" && l.Key != "severity"))
+                                        {
+                                            <span class="badge bg-light text-dark border-0 small">
+                                                <code>@label.Key</code>=@label.Value
+                                            </span>
+                                        }
+                                    </div>
+                                    <small class="text-muted">
+                                        <i class="bi bi-clock me-1"></i>Started @FormatTimeAgo(alert.StartsAt)
+                                    </small>
+                                </div>
+                                <button class="btn btn-sm btn-outline-warning" title="Silence this alert"
+                                        @onclick="() => StartSilence(alert)">
+                                    <i class="bi bi-bell-slash"></i>
+                                </button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        }
+        else if (!loading && string.IsNullOrEmpty(errorMessage) && view == "silences")
+        {
+            @* ── Silences ── *@
+            @if (silences is null || silences.Count == 0)
+            {
+                <EmptyState Icon="bi-bell-slash" Message="No silences configured." />
+            }
+            else
+            {
+                <div class="list-group list-group-flush">
+                    @foreach (SilenceInfo silence in silences.Where(s => s.State == "active"))
+                    {
+                        <div class="list-group-item px-3 py-2">
+                            <div class="d-flex align-items-start justify-content-between">
+                                <div>
+                                    <div class="d-flex align-items-center gap-2 mb-1">
+                                        <span class="badge bg-warning text-dark">active</span>
+                                        <small class="fw-medium">@silence.Comment</small>
+                                    </div>
+                                    <div class="d-flex flex-wrap gap-1 mb-1">
+                                        @foreach (SilenceMatcher matcher in silence.Matchers)
+                                        {
+                                            <span class="badge bg-light text-dark border small">
+                                                @matcher.Name @(matcher.IsEqual ? "=" : "!=") @(matcher.IsRegex ? "~" : "")@matcher.Value
+                                            </span>
+                                        }
+                                    </div>
+                                    <small class="text-muted">
+                                        By @silence.CreatedBy · Expires @silence.EndsAt.ToString("g")
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        }
+
+        </LoadingPanel>
+
+        @* ── Create Silence Form ── *@
+        @if (showCreateSilence)
+        {
+            <div class="border-top p-3">
+                <h6 class="small fw-bold mb-2"><i class="bi bi-bell-slash me-1"></i>Create Silence</h6>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-4">
+                        <label class="form-label small mb-0">Matcher (label=value)</label>
+                        <input type="text" class="form-control form-control-sm" placeholder="alertname=HighCPU"
+                               @bind="silenceMatcherInput" @bind:event="oninput" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small mb-0">Duration</label>
+                        <select class="form-select form-select-sm" @bind="silenceDurationHours">
+                            <option value="1">1 hour</option>
+                            <option value="2">2 hours</option>
+                            <option value="4">4 hours</option>
+                            <option value="8">8 hours</option>
+                            <option value="24">24 hours</option>
+                            <option value="72">3 days</option>
+                            <option value="168">7 days</option>
+                        </select>
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label small mb-0">Comment</label>
+                        <input type="text" class="form-control form-control-sm" placeholder="Reason for silence"
+                               @bind="silenceComment" @bind:event="oninput" />
+                    </div>
+                </div>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-sm btn-warning" @onclick="SubmitSilence"
+                            disabled="@(string.IsNullOrWhiteSpace(silenceMatcherInput) || string.IsNullOrWhiteSpace(silenceComment))">
+                        <i class="bi bi-bell-slash me-1"></i>Create Silence
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="CancelSilence">Cancel</button>
+                </div>
+                @if (!string.IsNullOrEmpty(silenceError))
+                {
+                    <div class="text-danger small mt-1">@silenceError</div>
+                }
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Guid ClusterId { get; set; }
+    [Parameter] public PrometheusService PrometheusService { get; set; } = null!;
+
+    private List<AlertInfo>? alerts;
+    private List<SilenceInfo>? silences;
+    private string view = "alerts";
+    private bool loading;
+    private string? errorMessage;
+
+    // Silence form
+    private bool showCreateSilence;
+    private string silenceMatcherInput = "";
+    private int silenceDurationHours = 2;
+    private string silenceComment = "";
+    private string? silenceError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshAlerts();
+    }
+
+    private async Task RefreshAlerts()
+    {
+        loading = true;
+        errorMessage = null;
+        StateHasChanged();
+
+        KubernetesOperationResult<List<AlertInfo>> result =
+            await PrometheusService.GetAlertsAsync(ClusterId);
+
+        if (result.IsSuccess)
+        {
+            alerts = result.Data;
+        }
+        else
+        {
+            errorMessage = result.Error;
+        }
+
+        loading = false;
+    }
+
+    private async Task LoadSilences()
+    {
+        view = "silences";
+        loading = true;
+        errorMessage = null;
+        StateHasChanged();
+
+        KubernetesOperationResult<List<SilenceInfo>> result =
+            await PrometheusService.GetSilencesAsync(ClusterId);
+
+        if (result.IsSuccess)
+        {
+            silences = result.Data;
+        }
+        else
+        {
+            errorMessage = result.Error;
+        }
+
+        loading = false;
+    }
+
+    private void StartSilence(AlertInfo alert)
+    {
+        showCreateSilence = true;
+        silenceMatcherInput = $"alertname={alert.Name}";
+        silenceComment = "";
+        silenceError = null;
+    }
+
+    private void CancelSilence()
+    {
+        showCreateSilence = false;
+        silenceMatcherInput = "";
+        silenceComment = "";
+        silenceError = null;
+    }
+
+    private async Task SubmitSilence()
+    {
+        silenceError = null;
+
+        // Parse matcher input "label=value" into a SilenceMatcher.
+
+        string[] parts = silenceMatcherInput.Split('=', 2);
+        if (parts.Length != 2 || string.IsNullOrWhiteSpace(parts[0]))
+        {
+            silenceError = "Matcher format: label=value";
+            return;
+        }
+
+        List<SilenceMatcher> matchers =
+        [
+            new SilenceMatcher { Name = parts[0].Trim(), Value = parts[1].Trim(), IsEqual = true }
+        ];
+
+        KubernetesOperationResult result = await PrometheusService.CreateSilenceAsync(
+            ClusterId,
+            silenceComment,
+            "entkube-user",
+            TimeSpan.FromHours(silenceDurationHours),
+            matchers);
+
+        if (result.IsSuccess)
+        {
+            showCreateSilence = false;
+            silenceMatcherInput = "";
+            silenceComment = "";
+            await LoadSilences();
+        }
+        else
+        {
+            silenceError = result.Error;
+        }
+    }
+
+    private static string GetSeverityBadgeClass(string severity) => severity switch
+    {
+        "critical" => "bg-danger",
+        "warning" => "bg-warning text-dark",
+        "info" => "bg-info text-dark",
+        _ => "bg-secondary"
+    };
+
+    private static string FormatTimeAgo(DateTime time)
+    {
+        if (time == DateTime.MinValue)
+        {
+            return "unknown";
+        }
+
+        TimeSpan ago = DateTime.UtcNow - time;
+        return ago switch
+        {
+            { TotalMinutes: < 1 } => "just now",
+            { TotalMinutes: < 60 } => $"{(int)ago.TotalMinutes}m ago",
+            { TotalHours: < 24 } => $"{(int)ago.TotalHours}h ago",
+            _ => $"{(int)ago.TotalDays}d ago"
+        };
+    }
+}

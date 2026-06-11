@@ -1,0 +1,628 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject AppRouteService AppRouteService
+@inject DeploymentService DeploymentService
+@inject KubernetesOperationsService K8sOps
+
+@* ═══════════════════════════════════════════════════════════════════
+   Portal URL Management — customers configure which paths under
+   their ops-assigned hostnames route to which services.
+
+   Ops owns: hostname + TLS (AppRoute)
+   Customer owns: path prefixes + target services (AppDeploymentRoute)
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex align-items-center mb-3">
+    <i class="bi bi-globe fs-4 me-2 text-primary"></i>
+    <div>
+        <h5 class="mb-0">URL Configuration — @App.Name</h5>
+        <small class="text-muted">Manage which paths route to which services for each hostname.</small>
+    </div>
+</div>
+
+@if (loadError is not null)
+{
+    <div class="alert alert-danger py-2 small">
+        <i class="bi bi-exclamation-triangle me-1"></i>
+        Failed to load URL configuration: @loadError
+    </div>
+}
+else if (routes is null)
+{
+    <div class="text-center py-4">
+        <div class="spinner-border spinner-border-sm text-primary"></div>
+    </div>
+}
+else if (routes.Count == 0)
+{
+    <EmptyState Icon="bi-globe2"
+                Title="No URLs configured"
+                Message="No hostnames have been configured for this app yet. Contact your operations team to set up a hostname and TLS certificate." />
+}
+else
+{
+    @foreach (AppRoute route in routes)
+    {
+        <div class="card shadow-sm mb-3">
+            @* ── Hostname header (ops-managed, read-only) ── *@
+            <div class="card-header bg-white py-2">
+                <div class="d-flex align-items-center gap-2">
+                    <i class="bi bi-globe2 text-primary"></i>
+                    <a href="https://@route.Hostname" target="_blank" rel="noopener noreferrer"
+                       class="fw-medium text-decoration-none">
+                        @route.Hostname
+                    </a>
+                    @TlsBadge(route)
+                    @if (!route.IsEnabled)
+                    {
+                        <span class="badge bg-secondary">Disabled by ops</span>
+                    }
+                    <span class="badge bg-light text-muted border ms-auto small">ops-managed</span>
+                </div>
+            </div>
+
+            <div class="card-body p-0">
+                @* ── Existing deployment routes ── *@
+                @if (route.DeploymentRoutes.Count > 0)
+                {
+                    <table class="table table-sm mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th class="small ps-3">Path</th>
+                                <th class="small">Deployment</th>
+                                <th class="small">Env</th>
+                                <th class="small">Service</th>
+                                <th class="small">Status</th>
+                                @if (AccessRole >= CustomerAccessRole.Operator)
+                                {
+                                    <th></th>
+                                }
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (AppDeploymentRoute dr in route.DeploymentRoutes.OrderBy(r => r.PathPrefix))
+                            {
+                                bool isEditing = editingDrId == dr.Id;
+
+                                <tr>
+                                    @if (isEditing)
+                                    {
+                                        <td colspan="@(AccessRole >= CustomerAccessRole.Operator ? 6 : 5)" class="px-3 py-2">
+                                            @if (editError is not null)
+                                            {
+                                                <div class="alert alert-danger py-1 small mb-2">@editError</div>
+                                            }
+                                            <div class="row g-2">
+                                                <div class="col-md-2">
+                                                    <label class="form-label small">Path Prefix</label>
+                                                    <input class="form-control form-control-sm" @bind="editPath" placeholder="/" />
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <label class="form-label small">
+                                                        Service
+                                                        @if (editLoadingServices)
+                                                        {
+                                                            <span class="spinner-border spinner-border-sm ms-1" style="width:.7rem;height:.7rem;"></span>
+                                                        }
+                                                    </label>
+                                                    @if (editAvailableServices.Count > 0)
+                                                    {
+                                                        <select class="form-select form-select-sm"
+                                                                value="@editService"
+                                                                @onchange="OnEditServiceSelected">
+                                                            <option value="">— select —</option>
+                                                            @foreach (KubeServiceInfo svc in editAvailableServices)
+                                                            {
+                                                                <option value="@svc.Name">@svc.Name (@svc.Type)</option>
+                                                            }
+                                                        </select>
+                                                    }
+                                                    else
+                                                    {
+                                                        <input class="form-control form-control-sm" @bind="editService" />
+                                                    }
+                                                </div>
+                                                <div class="col-md-2">
+                                                    <label class="form-label small">Port</label>
+                                                    @if (editAvailablePorts.Count > 0)
+                                                    {
+                                                        <select class="form-select form-select-sm" @bind="editPort">
+                                                            @foreach (KubeServicePort p in editAvailablePorts)
+                                                            {
+                                                                <option value="@p.Port">@p.Port@(p.Name is not null ? $" ({p.Name})" : "")</option>
+                                                            }
+                                                        </select>
+                                                    }
+                                                    else
+                                                    {
+                                                        <input type="number" class="form-control form-control-sm" @bind="editPort" />
+                                                    }
+                                                </div>
+                                            </div>
+                                            @* Endpoint health for edit *@
+                                            @if (editEndpointSummary is not null && editEndpointSummary.HasEndpoints)
+                                            {
+                                                <div class="mt-1 small">
+                                                    <span class="text-success me-2">
+                                                        <i class="bi bi-circle-fill me-1" style="font-size:.5rem;vertical-align:middle;"></i>
+                                                        @editEndpointSummary.TotalReady ready
+                                                    </span>
+                                                    @if (editEndpointSummary.TotalNotReady > 0)
+                                                    {
+                                                        <span class="text-warning">
+                                                            <i class="bi bi-circle-fill me-1" style="font-size:.5rem;vertical-align:middle;"></i>
+                                                            @editEndpointSummary.TotalNotReady not ready
+                                                        </span>
+                                                    }
+                                                </div>
+                                            }
+                                            else if (editEndpointSummary is not null && !editEndpointSummary.HasEndpoints && !string.IsNullOrEmpty(editService))
+                                            {
+                                                <div class="mt-1 small text-warning">
+                                                    <i class="bi bi-exclamation-triangle me-1"></i>No endpoints — service has no ready pods.
+                                                </div>
+                                            }
+                                            <div class="d-flex gap-1 mt-2">
+                                                <button class="btn btn-sm btn-primary" @onclick="() => SaveEdit(dr.Id)"
+                                                        disabled="@(string.IsNullOrWhiteSpace(editService) || saving)">
+                                                    @if (saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Save
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelEdit">Cancel</button>
+                                            </div>
+                                        </td>
+                                    }
+                                    else
+                                    {
+                                        <td class="small align-middle ps-3"><code class="small">@dr.PathPrefix</code></td>
+                                        <td class="small align-middle">@dr.AppDeployment?.Name</td>
+                                        <td class="small align-middle text-muted">@dr.AppDeployment?.Environment?.Name</td>
+                                        <td class="small align-middle text-muted">@dr.ServiceName<span class="text-muted">:@dr.ServicePort</span></td>
+                                        <td class="small align-middle">@HealthBadge(dr)</td>
+                                        @if (AccessRole >= CustomerAccessRole.Operator)
+                                        {
+                                            <td class="text-end align-middle pe-2" style="white-space: nowrap;">
+                                                <button class="btn btn-sm btn-outline-secondary py-0"
+                                                        @onclick="() => StartEdit(dr)">
+                                                    <i class="bi bi-pencil"></i>
+                                                </button>
+                                                @if (deleteConfirmId == dr.Id)
+                                                {
+                                                    <button class="btn btn-sm btn-danger py-0 ms-1"
+                                                            @onclick="() => DeleteDeploymentRoute(dr.Id)">Confirm</button>
+                                                    <button class="btn btn-sm btn-outline-secondary py-0 ms-1"
+                                                            @onclick="() => deleteConfirmId = null">Cancel</button>
+                                                }
+                                                else
+                                                {
+                                                    <button class="btn btn-sm btn-outline-danger py-0 ms-1"
+                                                            title="Remove this path"
+                                                            @onclick="() => deleteConfirmId = dr.Id">
+                                                        <i class="bi bi-x-lg"></i>
+                                                    </button>
+                                                }
+                                            </td>
+                                        }
+                                    }
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+                else if (AccessRole < CustomerAccessRole.Operator)
+                {
+                    <div class="p-3 text-muted small">No paths configured yet.</div>
+                }
+
+                @* ── Add path form ── *@
+                @if (AccessRole >= CustomerAccessRole.Operator)
+                {
+                    @if (addingToRouteId == route.Id)
+                    {
+                        <div class="px-3 py-2 border-top bg-light">
+                            @if (addError is not null)
+                            {
+                                <div class="alert alert-danger py-1 small mb-2">@addError</div>
+                            }
+                            <div class="row g-2">
+                                <div class="col-md-3">
+                                    <label class="form-label small">Deployment</label>
+                                    <select class="form-select form-select-sm"
+                                            value="@newDrDeploymentId"
+                                            @onchange="OnAddDeploymentSelected">
+                                        <option value="">— select —</option>
+                                        @foreach (AppDeployment d in (deployments ?? []))
+                                        {
+                                            <option value="@d.Id">@d.Name (@d.Environment?.Name)</option>
+                                        }
+                                    </select>
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label small">Path Prefix</label>
+                                    <input class="form-control form-control-sm" placeholder="/" @bind="newDrPath" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">
+                                        Service
+                                        @if (addLoadingServices)
+                                        {
+                                            <span class="spinner-border spinner-border-sm ms-1" style="width:.7rem;height:.7rem;"></span>
+                                        }
+                                    </label>
+                                    @if (addAvailableServices.Count > 0)
+                                    {
+                                        <select class="form-select form-select-sm"
+                                                value="@newDrService"
+                                                @onchange="OnAddServiceSelected">
+                                            <option value="">— select —</option>
+                                            @foreach (KubeServiceInfo svc in addAvailableServices)
+                                            {
+                                                <option value="@svc.Name">@svc.Name (@svc.Type)</option>
+                                            }
+                                        </select>
+                                    }
+                                    else
+                                    {
+                                        <input class="form-control form-control-sm" placeholder="my-service"
+                                               @bind="newDrService" />
+                                    }
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label small">Port</label>
+                                    @if (addAvailablePorts.Count > 0)
+                                    {
+                                        <select class="form-select form-select-sm" @bind="newDrPort">
+                                            @foreach (KubeServicePort p in addAvailablePorts)
+                                            {
+                                                <option value="@p.Port">@p.Port@(p.Name is not null ? $" ({p.Name})" : "")</option>
+                                            }
+                                        </select>
+                                    }
+                                    else
+                                    {
+                                        <input type="number" class="form-control form-control-sm" @bind="newDrPort" />
+                                    }
+                                </div>
+                            </div>
+
+                            @* Endpoint health preview *@
+                            @if (addEndpointSummary is not null && addEndpointSummary.HasEndpoints)
+                            {
+                                <div class="mt-1 small">
+                                    <span class="text-success me-2">
+                                        <i class="bi bi-circle-fill me-1" style="font-size:.5rem;vertical-align:middle;"></i>
+                                        @addEndpointSummary.TotalReady ready
+                                    </span>
+                                    @if (addEndpointSummary.TotalNotReady > 0)
+                                    {
+                                        <span class="text-warning">
+                                            <i class="bi bi-circle-fill me-1" style="font-size:.5rem;vertical-align:middle;"></i>
+                                            @addEndpointSummary.TotalNotReady not ready
+                                        </span>
+                                    }
+                                </div>
+                            }
+                            else if (addEndpointSummary is not null && !addEndpointSummary.HasEndpoints && !string.IsNullOrEmpty(newDrService))
+                            {
+                                <div class="mt-1 small text-warning">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>No endpoints — service has no ready pods.
+                                </div>
+                            }
+
+                            <div class="d-flex gap-1 mt-2">
+                                <button class="btn btn-sm btn-primary"
+                                        disabled="@(newDrDeploymentId == Guid.Empty || string.IsNullOrWhiteSpace(newDrService) || adding)"
+                                        @onclick="() => AddPath(route.Id)">
+                                    @if (adding) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Add Path
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelAdd">Cancel</button>
+                            </div>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="px-3 py-2 border-top">
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => StartAdd(route.Id)">
+                                <i class="bi bi-plus me-1"></i>Add Path
+                            </button>
+                        </div>
+                    }
+                }
+            </div>
+        </div>
+    }
+
+    <div class="alert alert-info small py-2">
+        <i class="bi bi-info-circle me-1"></i>
+        Path changes update the routing configuration. Your platform team will apply the updated HTTPRoute to the cluster.
+    </div>
+}
+
+@code {
+    [Parameter] public required Data.App App { get; set; }
+    [Parameter] public CustomerAccessRole AccessRole { get; set; }
+
+    private List<AppRoute>? routes;
+    private List<AppDeployment>? deployments;
+
+    // Add form
+    private Guid? addingToRouteId;
+    private Guid newDrDeploymentId;
+    private string newDrPath = "/";
+    private string newDrService = "";
+    private int newDrPort = 80;
+    private string? addError;
+    private bool adding;
+    private bool addLoadingServices;
+    private List<KubeServiceInfo> addAvailableServices = [];
+    private List<KubeServicePort> addAvailablePorts = [];
+    private KubeEndpointSummary? addEndpointSummary;
+
+    // Edit form
+    private Guid? editingDrId;
+    private AppDeployment? editingDeployment;
+    private string editPath = "/";
+    private string editService = "";
+    private int editPort = 80;
+    private string? editError;
+    private bool saving;
+    private bool editLoadingServices;
+    private List<KubeServiceInfo> editAvailableServices = [];
+    private List<KubeServicePort> editAvailablePorts = [];
+    private KubeEndpointSummary? editEndpointSummary;
+
+    // Delete confirm
+    private Guid? deleteConfirmId;
+    private string? loadError;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        loadError = null;
+        try
+        {
+            routes = await AppRouteService.GetRoutesForAppAsync(App.Id);
+            deployments = await DeploymentService.GetDeploymentsAsync(App.Id);
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+            routes = [];
+        }
+    }
+
+    // ── Add flow ──
+
+    private async Task StartAdd(Guid routeId)
+    {
+        addingToRouteId = routeId;
+        newDrDeploymentId = Guid.Empty;
+        newDrPath = "/";
+        newDrService = "";
+        newDrPort = 80;
+        addError = null;
+        addAvailableServices = [];
+        addAvailablePorts = [];
+        addEndpointSummary = null;
+        editingDrId = null;
+
+        if (deployments?.Count == 1)
+            await LoadAddServices(deployments[0]);
+    }
+
+    private void CancelAdd()
+    {
+        addingToRouteId = null;
+        addError = null;
+        addAvailableServices = [];
+        addAvailablePorts = [];
+        addEndpointSummary = null;
+    }
+
+    private async Task OnAddDeploymentSelected(ChangeEventArgs e)
+    {
+        addAvailableServices = [];
+        addAvailablePorts = [];
+        addEndpointSummary = null;
+        newDrService = "";
+
+        if (!Guid.TryParse(e.Value?.ToString(), out Guid id) || id == Guid.Empty)
+        {
+            newDrDeploymentId = Guid.Empty;
+            return;
+        }
+
+        newDrDeploymentId = id;
+        AppDeployment? d = deployments?.FirstOrDefault(d => d.Id == id);
+        if (d is not null) await LoadAddServices(d);
+    }
+
+    private async Task LoadAddServices(AppDeployment d)
+    {
+        if (d.Cluster is null) return;
+        newDrDeploymentId = d.Id;
+        addLoadingServices = true;
+        addAvailableServices = await K8sOps.GetServicesInNamespaceAsync(d.Cluster.Id, d.Namespace);
+        addLoadingServices = false;
+        if (addAvailableServices.Count == 1)
+            await SelectAddService(addAvailableServices[0].Name, d);
+    }
+
+    private async Task OnAddServiceSelected(ChangeEventArgs e)
+    {
+        string name = e.Value?.ToString() ?? "";
+        newDrService = name;
+        addAvailablePorts = [];
+        addEndpointSummary = null;
+        if (string.IsNullOrEmpty(name)) return;
+        AppDeployment? d = deployments?.FirstOrDefault(d => d.Id == newDrDeploymentId);
+        if (d is not null) await SelectAddService(name, d);
+    }
+
+    private async Task SelectAddService(string name, AppDeployment d)
+    {
+        newDrService = name;
+        KubeServiceInfo? svc = addAvailableServices.FirstOrDefault(s => s.Name == name);
+        addAvailablePorts = svc?.Ports ?? [];
+        if (addAvailablePorts.Count > 0) newDrPort = addAvailablePorts[0].Port;
+        if (d.Cluster is not null)
+            addEndpointSummary = await K8sOps.GetEndpointsForServiceAsync(d.Cluster.Id, d.Namespace, name);
+    }
+
+    private async Task AddPath(Guid routeId)
+    {
+        addError = null;
+        adding = true;
+        try
+        {
+            await AppRouteService.AddDeploymentRouteAsync(routeId, newDrDeploymentId, new AppDeploymentRouteRequest
+            {
+                ServiceName = newDrService,
+                ServicePort = newDrPort,
+                PathPrefix = newDrPath
+            });
+            CancelAdd();
+            routes = await AppRouteService.GetRoutesForAppAsync(App.Id);
+        }
+        catch (Exception ex)
+        {
+            addError = ex.Message;
+        }
+        finally
+        {
+            adding = false;
+        }
+    }
+
+    // ── Edit flow ──
+
+    private async Task StartEdit(AppDeploymentRoute dr)
+    {
+        editingDrId = dr.Id;
+        editPath = dr.PathPrefix;
+        editService = dr.ServiceName;
+        editPort = dr.ServicePort;
+        editError = null;
+        editAvailableServices = [];
+        editAvailablePorts = [];
+        editEndpointSummary = null;
+        addingToRouteId = null;
+
+        editingDeployment = deployments?.FirstOrDefault(d => d.Id == dr.AppDeploymentId);
+        if (editingDeployment?.Cluster is not null)
+        {
+            editLoadingServices = true;
+            editAvailableServices = await K8sOps.GetServicesInNamespaceAsync(
+                editingDeployment.Cluster.Id, editingDeployment.Namespace);
+            editLoadingServices = false;
+
+            KubeServiceInfo? svc = editAvailableServices.FirstOrDefault(s => s.Name == editService);
+            editAvailablePorts = svc?.Ports ?? [];
+            editEndpointSummary = await K8sOps.GetEndpointsForServiceAsync(
+                editingDeployment.Cluster.Id, editingDeployment.Namespace, editService);
+        }
+    }
+
+    private void CancelEdit()
+    {
+        editingDrId = null;
+        editingDeployment = null;
+        editError = null;
+        editAvailableServices = [];
+        editAvailablePorts = [];
+        editEndpointSummary = null;
+    }
+
+    private async Task OnEditServiceSelected(ChangeEventArgs e)
+    {
+        string name = e.Value?.ToString() ?? "";
+        editService = name;
+        editAvailablePorts = [];
+        editEndpointSummary = null;
+        if (string.IsNullOrEmpty(name) || editingDeployment?.Cluster is null) return;
+
+        KubeServiceInfo? svc = editAvailableServices.FirstOrDefault(s => s.Name == name);
+        editAvailablePorts = svc?.Ports ?? [];
+        if (editAvailablePorts.Count > 0) editPort = editAvailablePorts[0].Port;
+        editEndpointSummary = await K8sOps.GetEndpointsForServiceAsync(
+            editingDeployment.Cluster.Id, editingDeployment.Namespace, name);
+    }
+
+    private async Task SaveEdit(Guid drId)
+    {
+        editError = null;
+        saving = true;
+        try
+        {
+            await AppRouteService.UpdateDeploymentRouteAsync(drId, new AppDeploymentRouteRequest
+            {
+                ServiceName = editService,
+                ServicePort = editPort,
+                PathPrefix = editPath
+            });
+            CancelEdit();
+            routes = await AppRouteService.GetRoutesForAppAsync(App.Id);
+        }
+        catch (Exception ex)
+        {
+            editError = ex.Message;
+        }
+        finally
+        {
+            saving = false;
+        }
+    }
+
+    private async Task DeleteDeploymentRoute(Guid drId)
+    {
+        await AppRouteService.DeleteDeploymentRouteAsync(drId);
+        deleteConfirmId = null;
+        routes = await AppRouteService.GetRoutesForAppAsync(App.Id);
+    }
+
+    private static RenderFragment TlsBadge(AppRoute route) => __builder =>
+    {
+        if (route.TlsMode == TlsMode.ClusterIssuer)
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-success bg-opacity-75 small");
+            __builder.AddAttribute(2, "title", $"Auto TLS — {route.ClusterIssuerName}");
+            __builder.AddContent(3, $"TLS auto · {route.ClusterIssuerName}");
+            __builder.CloseElement();
+        }
+        else
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-warning text-dark small");
+            __builder.AddAttribute(2, "title", "Manual TLS certificate");
+            __builder.AddContent(3, "TLS manual");
+            __builder.CloseElement();
+        }
+    };
+
+    private static RenderFragment HealthBadge(AppDeploymentRoute dr) => __builder =>
+    {
+        if (dr.IsReachable == true)
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-success bg-opacity-75 small");
+            __builder.AddContent(2, $"✓ {dr.LastStatusCode}");
+            __builder.CloseElement();
+        }
+        else if (dr.IsReachable == false)
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-danger bg-opacity-75 small");
+            __builder.AddContent(2, dr.LastStatusCode.HasValue ? $"✗ {dr.LastStatusCode}" : "✗ unreachable");
+            __builder.CloseElement();
+        }
+        else
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-secondary bg-opacity-50 small");
+            __builder.AddContent(2, "not checked");
+            __builder.CloseElement();
+        }
+    };
+}

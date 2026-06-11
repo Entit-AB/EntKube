@@ -1,0 +1,216 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject PrometheusService PrometheusService
+
+<div class="card border-0 shadow-sm">
+    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-heart-pulse me-2"></i>Cluster Health — Prometheus</span>
+        <div>
+            @if (loading)
+            {
+                <span class="spinner-border spinner-border-sm text-light me-2"></span>
+            }
+
+            <button class="btn btn-sm btn-outline-light" @onclick="RefreshHealth" disabled="@loading">
+                <i class="bi bi-arrow-clockwise"></i> Refresh
+            </button>
+            <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="OnClose">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+    </div>
+    <div class="card-body">
+        @if (!string.IsNullOrEmpty(errorMessage))
+        {
+            <div class="alert alert-warning">
+                <i class="bi bi-exclamation-triangle me-1"></i>@errorMessage
+            </div>
+        }
+        else if (health is null && loading)
+        {
+            <p class="text-muted"><em>Querying Prometheus...</em></p>
+        }
+        else if (health is not null)
+        {
+            @* ── Overview cards ── *@
+            <div class="row g-3 mb-4">
+                <div class="col-md-3">
+                    <div class="card text-center @(health.ReadyNodes == health.TotalNodes ? "border-success" : "border-danger")">
+                        <div class="card-body py-2">
+                            <div class="fs-3 fw-bold @(health.ReadyNodes == health.TotalNodes ? "text-success" : "text-danger")">
+                                @health.ReadyNodes / @health.TotalNodes
+                            </div>
+                            <small class="text-muted">Nodes Ready</small>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card text-center border-primary">
+                        <div class="card-body py-2">
+                            <div class="fs-3 fw-bold text-primary">@health.RunningPods</div>
+                            <small class="text-muted">Running Pods</small>
+                            @if (health.PendingPods > 0 || health.FailedPods > 0)
+                            {
+                                <div class="mt-1">
+                                    @if (health.PendingPods > 0)
+                                    {
+                                        <span class="badge bg-warning text-dark me-1">@health.PendingPods pending</span>
+                                    }
+
+                                    @if (health.FailedPods > 0)
+                                    {
+                                        <span class="badge bg-danger">@health.FailedPods failed</span>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card text-center @GetUsageBorderClass(health.CpuUsagePercent)">
+                        <div class="card-body py-2">
+                            <div class="fs-3 fw-bold @GetUsageTextClass(health.CpuUsagePercent)">
+                                @health.CpuUsagePercent.ToString("F1")%
+                            </div>
+                            <small class="text-muted">CPU Usage</small>
+                            <div class="progress mt-1" style="height: 4px;">
+                                <div class="progress-bar @GetProgressBarClass(health.CpuUsagePercent)"
+                                     style="width: @health.CpuUsagePercent%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card text-center @GetUsageBorderClass(health.MemoryUsagePercent)">
+                        <div class="card-body py-2">
+                            <div class="fs-3 fw-bold @GetUsageTextClass(health.MemoryUsagePercent)">
+                                @health.MemoryUsagePercent.ToString("F1")%
+                            </div>
+                            <small class="text-muted">Memory Usage</small>
+                            <div class="progress mt-1" style="height: 4px;">
+                                <div class="progress-bar @GetProgressBarClass(health.MemoryUsagePercent)"
+                                     style="width: @health.MemoryUsagePercent%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            @* ── Per-node table ── *@
+            @if (health.Nodes.Count > 0)
+            {
+                <h6 class="mt-3"><i class="bi bi-hdd-rack me-1"></i>Nodes</h6>
+                <table class="table table-sm table-hover">
+                    <thead>
+                        <tr>
+                            <th>Node</th>
+                            <th>Status</th>
+                            <th>CPU</th>
+                            <th>Memory</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (NodeHealthInfo node in health.Nodes)
+                        {
+                            <tr>
+                                <td><code>@node.Name</code></td>
+                                <td>
+                                    @if (node.Ready)
+                                    {
+                                        <span class="badge bg-success">Ready</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-danger">NotReady</span>
+                                    }
+                                </td>
+                                <td>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <div class="progress flex-grow-1" style="height: 6px; min-width: 60px;">
+                                            <div class="progress-bar @GetProgressBarClass(node.CpuUsagePercent)"
+                                                 style="width: @node.CpuUsagePercent%"></div>
+                                        </div>
+                                        <small>@node.CpuUsagePercent.ToString("F1")%</small>
+                                    </div>
+                                </td>
+                                <td>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <div class="progress flex-grow-1" style="height: 6px; min-width: 60px;">
+                                            <div class="progress-bar @GetProgressBarClass(node.MemoryUsagePercent)"
+                                                 style="width: @node.MemoryUsagePercent%"></div>
+                                        </div>
+                                        <small>@node.MemoryUsagePercent.ToString("F1")%</small>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+
+            <div class="text-muted small mt-2">
+                <i class="bi bi-clock me-1"></i>Last queried: @health.QueriedAt.ToString("HH:mm:ss UTC")
+            </div>
+        }
+        else
+        {
+            <p class="text-muted">No health data available. Click Refresh to query Prometheus.</p>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Guid ClusterId { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private ClusterHealthSummary? health;
+    private bool loading;
+    private string? errorMessage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshHealth();
+    }
+
+    private async Task RefreshHealth()
+    {
+        loading = true;
+        errorMessage = null;
+        StateHasChanged();
+
+        KubernetesOperationResult<ClusterHealthSummary> result =
+            await PrometheusService.GetClusterHealthAsync(ClusterId);
+
+        if (result.IsSuccess)
+        {
+            health = result.Data;
+        }
+        else
+        {
+            errorMessage = result.Error;
+        }
+
+        loading = false;
+    }
+
+    private static string GetUsageBorderClass(double percent) => percent switch
+    {
+        >= 90 => "border-danger",
+        >= 70 => "border-warning",
+        _ => "border-success"
+    };
+
+    private static string GetUsageTextClass(double percent) => percent switch
+    {
+        >= 90 => "text-danger",
+        >= 70 => "text-warning",
+        _ => "text-success"
+    };
+
+    private static string GetProgressBarClass(double percent) => percent switch
+    {
+        >= 90 => "bg-danger",
+        >= 70 => "bg-warning",
+        _ => "bg-success"
+    };
+}

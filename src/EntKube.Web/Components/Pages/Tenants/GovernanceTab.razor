@@ -1,0 +1,1137 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject AppGovernanceService GovernanceService
+@inject TenantService TenantService
+@inject DeploymentService DeploymentService
+@inject StorageService StorageService
+
+@* ═══════════════════════════════════════════════════════════════════
+   GovernanceTab — per-environment governance: resource quotas,
+   network policies, and RBAC for this app in this specific environment.
+   Namespace is derived from each deployment (not stored here).
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+    <div>
+        <h5 class="mb-0"><i class="bi bi-shield-check me-2 text-primary"></i>Governance</h5>
+        <small class="text-muted">Quota, network policies, and RBAC for this environment. Applied to each deployment's namespace on its cluster.</small>
+    </div>
+    <div class="d-flex gap-2 align-items-center">
+        <button class="btn btn-sm btn-outline-secondary" @onclick="OpenCopyFrom">
+            <i class="bi bi-copy me-1"></i>Copy from env
+        </button>
+        <button class="btn btn-sm btn-success" @onclick="ApplyToEnvironmentClusters" disabled="@applying">
+            @if (applying) { <span class="spinner-border spinner-border-sm me-1"></span> }
+            else { <i class="bi bi-cloud-upload me-1"></i> }
+            Apply to clusters
+        </button>
+    </div>
+</div>
+
+@* ── Copy from environment ── *@
+@if (showCopyFrom)
+{
+    <div class="card border-info mb-3">
+        <div class="card-body py-2">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <i class="bi bi-copy text-info"></i>
+                <span class="small fw-medium">Copy governance from:</span>
+                <select class="form-select form-select-sm w-auto" @bind="copyFromEnvId">
+                    <option value="@Guid.Empty">Select source environment…</option>
+                    @if (otherEnvironments is not null)
+                    {
+                        @foreach (Data.Environment env in otherEnvironments)
+                        {
+                            <option value="@env.Id">@env.Name</option>
+                        }
+                    }
+                </select>
+                @if (!confirmCopy)
+                {
+                    <button class="btn btn-sm btn-info" @onclick="() => confirmCopy = true"
+                            disabled="@(copyFromEnvId == Guid.Empty)">
+                        Copy
+                    </button>
+                }
+                else
+                {
+                    <span class="small text-info">This will overwrite all governance in <strong>this environment</strong>.</span>
+                    <button class="btn btn-sm btn-danger" @onclick="DoCopyFrom" disabled="@copying">
+                        @if (copying) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Yes, overwrite
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmCopy = false">Cancel</button>
+                }
+                <button class="btn btn-sm btn-link text-muted p-0 ms-auto" @onclick="() => showCopyFrom = false">
+                    <i class="bi bi-x"></i>
+                </button>
+            </div>
+            @if (copyMessage is not null)
+            {
+                <div class="mt-1 small @(copyOk ? "text-success" : "text-danger")">
+                    <i class="bi @(copyOk ? "bi-check-circle" : "bi-x-circle") me-1"></i>@copyMessage
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@if (applyOutput is not null)
+{
+    <div class="alert @(applySuccess ? "alert-success" : "alert-danger") py-2 small mb-3 d-flex align-items-start justify-content-between">
+        <div>
+            <i class="bi @(applySuccess ? "bi-check-circle" : "bi-exclamation-triangle") me-1"></i>
+            <strong>@(applySuccess ? "Applied successfully" : "Apply had errors")</strong>
+            <pre class="mb-0 mt-1 small" style="white-space:pre-wrap;max-height:200px;overflow-y:auto;">@applyOutput</pre>
+        </div>
+        <button class="btn-close btn-close-sm ms-2 flex-shrink-0" @onclick="() => applyOutput = null"></button>
+    </div>
+}
+
+@if (loading)
+{
+    <div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+}
+else
+{
+    @* ── 0. Namespace ─────────────────────────────────────────────── *@
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-white py-2">
+            <i class="bi bi-box me-2 text-primary"></i>
+            <strong>Namespace</strong>
+            <span class="text-muted small ms-2">Locks the Kubernetes namespace for all deployments of this app in this environment.</span>
+        </div>
+        <div class="card-body">
+            @if (nsMessage is not null)
+            {
+                <div class="alert @(nsOk ? "alert-success" : "alert-danger") py-1 small mb-2">
+                    <i class="bi @(nsOk ? "bi-check-circle" : "bi-x-circle") me-1"></i>@nsMessage
+                </div>
+            }
+            <div class="d-flex gap-2 align-items-center flex-wrap">
+                <input class="form-control form-control-sm font-monospace" style="max-width:280px"
+                       @bind="nsValue" placeholder="e.g. customer-prod" />
+                <button class="btn btn-sm btn-primary" @onclick="SaveNamespace" disabled="@savingNs">
+                    @if (savingNs) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                    Save
+                </button>
+                @if (!string.IsNullOrWhiteSpace(nsValue))
+                {
+                    <button class="btn btn-sm btn-outline-danger" @onclick="ClearNamespace">
+                        <i class="bi bi-x me-1"></i>Remove lock
+                    </button>
+                }
+            </div>
+            @if (!string.IsNullOrWhiteSpace(nsValue))
+            {
+                <div class="form-text mt-1">
+                    <i class="bi bi-lock-fill text-warning me-1"></i>
+                    Deployments in this environment will be locked to namespace <code>@nsValue</code>.
+                </div>
+            }
+            else
+            {
+                <div class="form-text mt-1">No namespace lock — deployments may use any namespace.</div>
+            }
+        </div>
+    </div>
+
+    @* ── 1. Resource Quota ─────────────────────────────────────────── *@
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+            <div>
+                <i class="bi bi-speedometer me-2 text-warning"></i>
+                <strong>Resource Quota</strong>
+                <span class="text-muted small ms-2">Applied as a Kubernetes ResourceQuota in each deployment's namespace.</span>
+            </div>
+            @if (quota is not null)
+            {
+                <button class="btn btn-sm btn-outline-danger" @onclick="DeleteQuota">
+                    <i class="bi bi-trash me-1"></i>Remove quota
+                </button>
+            }
+        </div>
+        <div class="card-body">
+            @if (quotaMessage is not null)
+            {
+                <div class="alert @(quotaOk ? "alert-success" : "alert-danger") py-1 small mb-2">
+                    <i class="bi @(quotaOk ? "bi-check-circle" : "bi-x-circle") me-1"></i>@quotaMessage
+                </div>
+            }
+            <div class="mb-2 d-flex align-items-center gap-2 flex-wrap">
+                <span class="text-muted small">Presets:</span>
+                <button class="btn btn-sm btn-outline-secondary py-0" title="1–2 pods · single service · no autoscaling"
+                        @onclick='() => ApplyQuotaPreset("100m", "500m", "128Mi", "512Mi", 5, 2)'>Micro</button>
+                <button class="btn btn-sm btn-outline-secondary py-0" title="~5 services · light autoscaling · up to 20 pods"
+                        @onclick='() => ApplyQuotaPreset("500m", "2", "512Mi", "2Gi", 20, 5)'>Small</button>
+                <button class="btn btn-sm btn-outline-secondary py-0" title="~15 services · moderate autoscaling · up to 60 pods"
+                        @onclick='() => ApplyQuotaPreset("4", "16", "4Gi", "16Gi", 60, 20)'>Medium</button>
+                <button class="btn btn-sm btn-outline-secondary py-0" title="~30 services · active autoscaling · up to 150 pods"
+                        @onclick='() => ApplyQuotaPreset("8", "32", "16Gi", "64Gi", 150, 50)'>Large</button>
+                <button class="btn btn-sm btn-outline-secondary py-0" title="70+ microservices + frontend · heavy autoscaling · up to 500 pods"
+                        @onclick='() => ApplyQuotaPreset("32", "128", "64Gi", "256Gi", 500, 100)'>XLarge</button>
+            </div>
+            <div class="row g-2 mb-2">
+                <div class="col-md-3">
+                    <label class="form-label small">CPU request</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="qCpuReq" placeholder="e.g. 250m" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">CPU limit</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="qCpuLim" placeholder="e.g. 2" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">Memory request</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="qMemReq" placeholder="e.g. 128Mi" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">Memory limit</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="qMemLim" placeholder="e.g. 512Mi" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">Max pods</label>
+                    <input type="number" class="form-control form-control-sm" @bind="qMaxPods" placeholder="e.g. 10" min="1" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">Max PVCs</label>
+                    <input type="number" class="form-control form-control-sm" @bind="qMaxPvcs" placeholder="e.g. 5" min="1" />
+                </div>
+            </div>
+            <button class="btn btn-sm btn-primary" @onclick="SaveQuota" disabled="@savingQuota">
+                @if (savingQuota) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                Save quota
+            </button>
+        </div>
+    </div>
+
+    @* ── 2. Network Policies ───────────────────────────────────────── *@
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+            <div>
+                <i class="bi bi-diagram-2 me-2 text-info"></i>
+                <strong>Network Policies</strong>
+                <span class="text-muted small ms-2">Applied as Kubernetes NetworkPolicy resources.</span>
+            </div>
+            <button class="btn btn-sm btn-outline-info" @onclick="() => showAddNp = !showAddNp">
+                <i class="bi bi-plus me-1"></i>Add policy
+            </button>
+        </div>
+        <div class="card-body">
+            @if (npMessage is not null)
+            {
+                <div class="alert alert-danger py-1 small mb-2">@npMessage</div>
+            }
+
+            @if (showAddNp)
+            {
+                <div class="card border-info mb-3">
+                    <div class="card-body">
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-4">
+                                <label class="form-label small">Policy name (K8s resource name)</label>
+                                <input class="form-control form-control-sm font-monospace" @bind="newNpName"
+                                       placeholder="e.g. deny-all" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Type</label>
+                                <select class="form-select form-select-sm" @bind="newNpType">
+                                    <option value="@AppNetworkPolicyType.DenyAll">Deny all (ingress + egress)</option>
+                                    <option value="@AppNetworkPolicyType.AllowFromIngress">Allow from ingress controller</option>
+                                    <option value="@AppNetworkPolicyType.AllowFromSameNamespace">Allow from same namespace</option>
+                                    <option value="@AppNetworkPolicyType.AllowFromNamespace">Allow from specific namespace</option>
+                                    <option value="@AppNetworkPolicyType.Custom">Custom YAML</option>
+                                </select>
+                            </div>
+                            @if (newNpType == AppNetworkPolicyType.AllowFromNamespace)
+                            {
+                                <div class="col-md-4">
+                                    <label class="form-label small">Source namespace</label>
+                                    <input class="form-control form-control-sm font-monospace" @bind="newNpAllowNs"
+                                           placeholder="e.g. monitoring" />
+                                </div>
+                            }
+                        </div>
+                        @if (newNpType == AppNetworkPolicyType.Custom)
+                        {
+                            <div class="mb-2">
+                                <label class="form-label small">Custom NetworkPolicy YAML</label>
+                                <YamlEditor @bind-Value="newNpCustomYaml" />
+                            </div>
+                        }
+                        <div class="d-flex gap-1">
+                            <button class="btn btn-sm btn-info" @onclick="AddNetworkPolicy"
+                                    disabled="@(string.IsNullOrWhiteSpace(newNpName) || addingNp)">
+                                @if (addingNp) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Add
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddNp = false">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @if (networkPolicies.Count == 0 && !showAddNp)
+            {
+                <div class="text-center py-3">
+                    <i class="bi bi-diagram-2 text-muted" style="font-size: 1.5rem;"></i>
+                    <p class="text-muted small mt-2 mb-0">No network policies. The namespace inherits the cluster's defaults.</p>
+                </div>
+            }
+            else if (networkPolicies.Count > 0)
+            {
+                <table class="table table-sm mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th class="small">Name</th>
+                            <th class="small">Type</th>
+                            <th class="small">Detail</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (AppNetworkPolicy np in networkPolicies)
+                        {
+                            <tr>
+                                <td class="small align-middle"><code>@np.Name</code></td>
+                                <td class="small align-middle">@NpTypeLabel(np.PolicyType)</td>
+                                <td class="small align-middle text-muted">
+                                    @if (np.PolicyType == AppNetworkPolicyType.AllowFromNamespace)
+                                    {
+                                        <code>@np.AllowFromNamespace</code>
+                                    }
+                                    else if (np.PolicyType == AppNetworkPolicyType.Custom)
+                                    {
+                                        <span>Custom YAML</span>
+                                    }
+                                </td>
+                                <td class="text-end align-middle">
+                                    @if (confirmDeleteNpId != np.Id)
+                                    {
+                                        <button class="btn btn-sm btn-outline-danger"
+                                                @onclick="() => confirmDeleteNpId = np.Id">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    }
+                                    else
+                                    {
+                                        <button class="btn btn-sm btn-danger" @onclick="() => DeleteNetworkPolicy(np.Id)">Yes</button>
+                                        <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="() => confirmDeleteNpId = null">No</button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+    </div>
+
+    @* ── 3. RBAC ───────────────────────────────────────────────────── *@
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-white py-2">
+            <i class="bi bi-person-badge me-2 text-success"></i>
+            <strong>RBAC</strong>
+            <span class="text-muted small ms-2">ServiceAccount, Role, and RoleBinding applied to the namespace.</span>
+        </div>
+        <div class="card-body">
+            @if (rbacMessage is not null)
+            {
+                <div class="alert @(rbacOk ? "alert-success" : "alert-danger") py-1 small mb-2">
+                    <i class="bi @(rbacOk ? "bi-check-circle" : "bi-x-circle") me-1"></i>@rbacMessage
+                </div>
+            }
+
+            <div class="row g-2 mb-3 align-items-end">
+                <div class="col-md-4">
+                    <label class="form-label small">Service account name</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="rbacSaName"
+                           placeholder="e.g. my-app" />
+                </div>
+                <div class="col-auto d-flex align-items-center gap-2" style="padding-bottom: 0.25rem;">
+                    <div class="form-check mb-0">
+                        <input class="form-check-input" type="checkbox" id="rbacAutoMountEnv" @bind="rbacAutoMount" />
+                        <label class="form-check-label small" for="rbacAutoMountEnv">Auto-mount token</label>
+                    </div>
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-sm btn-success" @onclick="SaveRbac"
+                            disabled="@(string.IsNullOrWhiteSpace(rbacSaName) || savingRbac)">
+                        @if (savingRbac) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Save
+                    </button>
+                    @if (rbacPolicy is not null)
+                    {
+                        <button class="btn btn-sm btn-outline-danger ms-1" @onclick="DeleteRbac">Remove RBAC</button>
+                    }
+                </div>
+            </div>
+
+            @if (rbacPolicy is not null)
+            {
+                <div class="mb-2 d-flex align-items-center justify-content-between">
+                    <span class="small fw-medium text-muted">Role rules</span>
+                    <div class="d-flex gap-1">
+                        <button class="btn btn-sm btn-outline-secondary" @onclick='() => AddPreset("", "pods,services,configmaps,secrets", "get,list,watch")'>
+                            + Read namespace
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick='() => AddPreset("apps", "deployments", "get,list,watch,patch,update")'>
+                            + Manage deployments
+                        </button>
+                        <button class="btn btn-sm btn-outline-primary" @onclick="() => showAddRule = !showAddRule">
+                            <i class="bi bi-plus"></i>Custom
+                        </button>
+                    </div>
+                </div>
+
+                @if (showAddRule)
+                {
+                    <div class="card border-success mb-2">
+                        <div class="card-body py-2">
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-3">
+                                    <label class="form-label small">API groups</label>
+                                    <input class="form-control form-control-sm font-monospace" @bind="newRuleApiGroups"
+                                           placeholder='e.g. "" or "apps"' />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Resources</label>
+                                    <input class="form-control form-control-sm font-monospace" @bind="newRuleResources"
+                                           placeholder="e.g. pods,services" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Verbs</label>
+                                    <input class="form-control form-control-sm font-monospace" @bind="newRuleVerbs"
+                                           placeholder="e.g. get,list,watch" />
+                                </div>
+                            </div>
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm btn-success" @onclick="AddRbacRule"
+                                        disabled="@(string.IsNullOrWhiteSpace(newRuleResources) || string.IsNullOrWhiteSpace(newRuleVerbs))">
+                                    Add rule
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddRule = false">Cancel</button>
+                            </div>
+                        </div>
+                    </div>
+                }
+
+                @if (rbacPolicy.Rules.Count == 0)
+                {
+                    <p class="text-muted small mb-0">No rules yet. Add preset rules or a custom rule above.</p>
+                }
+                else
+                {
+                    <table class="table table-sm mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th class="small">API groups</th>
+                                <th class="small">Resources</th>
+                                <th class="small">Verbs</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (AppRbacRule rule in rbacPolicy.Rules)
+                            {
+                                <tr>
+                                    <td class="small align-middle"><code>@(string.IsNullOrEmpty(rule.ApiGroups) ? "\"\"" : rule.ApiGroups)</code></td>
+                                    <td class="small align-middle"><code>@rule.Resources</code></td>
+                                    <td class="small align-middle"><code>@rule.Verbs</code></td>
+                                    <td class="text-end align-middle">
+                                        <button class="btn btn-sm btn-outline-danger p-0 px-1"
+                                                @onclick="() => DeleteRbacRule(rule.Id)">
+                                            <i class="bi bi-x" style="font-size:.8rem;"></i>
+                                        </button>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+            }
+        </div>
+    </div>
+
+    @* ── 4. Allowed Services ───────────────────────────────────────── *@
+    <div class="card shadow-sm mt-3">
+        <div class="card-header bg-white py-2">
+            <i class="bi bi-shield-lock me-2 text-secondary"></i>
+            <strong>Allowed Services</strong>
+            <span class="text-muted small ms-2">Restrict which databases, cache clusters, and storage buckets this app may link to. Empty = no restriction.</span>
+        </div>
+        <div class="card-body">
+
+            @* ── Allowed Databases ── *@
+            <div class="mb-4">
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                    <span class="small fw-medium"><i class="bi bi-database me-1 text-primary"></i>Allowed Databases</span>
+                    <button class="btn btn-sm btn-outline-primary" @onclick="OpenAddDb">
+                        <i class="bi bi-plus me-1"></i>Add
+                    </button>
+                </div>
+                @if (allowedDbMessage is not null)
+                {
+                    <div class="alert alert-danger py-1 small mb-2">@allowedDbMessage</div>
+                }
+                @if (showAddDb)
+                {
+                    <div class="card border-primary mb-2">
+                        <div class="card-body py-2">
+                            @if (availableDbs is null)
+                            {
+                                <div class="spinner-border spinner-border-sm text-primary me-2"></div>
+                                <span class="small text-muted">Loading databases…</span>
+                            }
+                            else if (availableDbs.Count == 0)
+                            {
+                                <span class="text-muted small">No databases found in this environment.</span>
+                            }
+                            else
+                            {
+                                <div class="d-flex gap-2 align-items-center flex-wrap">
+                                    <select class="form-select form-select-sm w-auto" @bind="newDbOptionId">
+                                        <option value="@Guid.Empty">Select database…</option>
+                                        @foreach (AvailableDatabaseOption opt in availableDbs)
+                                        {
+                                            <option value="@opt.Id">@opt.TypeLabel — @opt.DisplayName</option>
+                                        }
+                                    </select>
+                                    <button class="btn btn-sm btn-primary" @onclick="AddAllowedDatabase"
+                                            disabled="@(newDbOptionId == Guid.Empty || addingDb)">
+                                        @if (addingDb) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        Add
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddDb = false">Cancel</button>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+                @if (allowedDatabases.Count == 0 && !showAddDb)
+                {
+                    <p class="text-muted small mb-0">No restrictions — all databases are available.</p>
+                }
+                else if (allowedDatabases.Count > 0)
+                {
+                    <div class="list-group list-group-flush">
+                        @foreach (AppAllowedDatabase entry in allowedDatabases)
+                        {
+                            <div class="list-group-item d-flex align-items-center justify-content-between px-0 py-1">
+                                <div class="small">
+                                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle me-2">@DbTypeLabel(entry)</span>
+                                    <span class="fw-medium">@DbAllowedName(entry)</span>
+                                </div>
+                                @if (confirmDeleteDbId != entry.Id)
+                                {
+                                    <button class="btn btn-sm btn-outline-danger p-0 px-1"
+                                            @onclick="() => confirmDeleteDbId = entry.Id">
+                                        <i class="bi bi-x" style="font-size:.8rem;"></i>
+                                    </button>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-danger" @onclick="() => DeleteAllowedDatabase(entry.Id)">Yes</button>
+                                    <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="() => confirmDeleteDbId = null">No</button>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+
+            @* ── Allowed Cache Services ── *@
+            <div class="mb-4">
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                    <span class="small fw-medium"><i class="bi bi-lightning me-1 text-warning"></i>Allowed Cache Services</span>
+                    <button class="btn btn-sm btn-outline-warning" @onclick="OpenAddCache">
+                        <i class="bi bi-plus me-1"></i>Add
+                    </button>
+                </div>
+                @if (allowedCacheMessage is not null)
+                {
+                    <div class="alert alert-danger py-1 small mb-2">@allowedCacheMessage</div>
+                }
+                @if (showAddCache)
+                {
+                    <div class="card border-warning mb-2">
+                        <div class="card-body py-2">
+                            @if (availableCaches is null)
+                            {
+                                <div class="spinner-border spinner-border-sm text-warning me-2"></div>
+                                <span class="small text-muted">Loading Redis clusters…</span>
+                            }
+                            else if (availableCaches.Count == 0)
+                            {
+                                <span class="text-muted small">No Redis clusters found for this tenant.</span>
+                            }
+                            else
+                            {
+                                <div class="d-flex gap-2 align-items-center flex-wrap">
+                                    <select class="form-select form-select-sm w-auto" @bind="newCacheId">
+                                        <option value="@Guid.Empty">Select Redis cluster…</option>
+                                        @foreach (RedisCluster c in availableCaches)
+                                        {
+                                            <option value="@c.Id">@c.Name</option>
+                                        }
+                                    </select>
+                                    <button class="btn btn-sm btn-warning" @onclick="AddAllowedCache"
+                                            disabled="@(newCacheId == Guid.Empty || addingCache)">
+                                        @if (addingCache) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        Add
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddCache = false">Cancel</button>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+                @if (allowedCaches.Count == 0 && !showAddCache)
+                {
+                    <p class="text-muted small mb-0">No restrictions — all Redis clusters are available.</p>
+                }
+                else if (allowedCaches.Count > 0)
+                {
+                    <div class="list-group list-group-flush">
+                        @foreach (AppAllowedCache entry in allowedCaches)
+                        {
+                            <div class="list-group-item d-flex align-items-center justify-content-between px-0 py-1">
+                                <div class="small">
+                                    <i class="bi bi-lightning text-warning me-1"></i>
+                                    <span class="fw-medium">@entry.RedisCluster.Name</span>
+                                </div>
+                                @if (confirmDeleteCacheId != entry.Id)
+                                {
+                                    <button class="btn btn-sm btn-outline-danger p-0 px-1"
+                                            @onclick="() => confirmDeleteCacheId = entry.Id">
+                                        <i class="bi bi-x" style="font-size:.8rem;"></i>
+                                    </button>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-danger" @onclick="() => DeleteAllowedCache(entry.Id)">Yes</button>
+                                    <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="() => confirmDeleteCacheId = null">No</button>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+
+            @* ── Allowed S3 Storage ── *@
+            <div>
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                    <span class="small fw-medium"><i class="bi bi-bucket me-1 text-info"></i>Allowed S3 Storage</span>
+                    <button class="btn btn-sm btn-outline-info" @onclick="OpenAddStorage">
+                        <i class="bi bi-plus me-1"></i>Add
+                    </button>
+                </div>
+                @if (allowedStorageMessage is not null)
+                {
+                    <div class="alert alert-danger py-1 small mb-2">@allowedStorageMessage</div>
+                }
+                @if (showAddStorage)
+                {
+                    <div class="card border-info mb-2">
+                        <div class="card-body py-2">
+                            @if (availableStorages is null)
+                            {
+                                <div class="spinner-border spinner-border-sm text-info me-2"></div>
+                                <span class="small text-muted">Loading storage buckets…</span>
+                            }
+                            else if (availableStorages.Count == 0)
+                            {
+                                <span class="text-muted small">No storage buckets found in this environment.</span>
+                            }
+                            else
+                            {
+                                <div class="d-flex gap-2 align-items-center flex-wrap">
+                                    <select class="form-select form-select-sm w-auto" @bind="newStorageId">
+                                        <option value="@Guid.Empty">Select storage bucket…</option>
+                                        @foreach (StorageLink s in availableStorages)
+                                        {
+                                            <option value="@s.Id">@s.Name (@s.Provider@(s.BucketName is not null ? $" · {s.BucketName}" : ""))</option>
+                                        }
+                                    </select>
+                                    <button class="btn btn-sm btn-info" @onclick="AddAllowedStorage"
+                                            disabled="@(newStorageId == Guid.Empty || addingStorage)">
+                                        @if (addingStorage) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        Add
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddStorage = false">Cancel</button>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+                @if (allowedStorages.Count == 0 && !showAddStorage)
+                {
+                    <p class="text-muted small mb-0">No restrictions — all storage buckets are available.</p>
+                }
+                else if (allowedStorages.Count > 0)
+                {
+                    <div class="list-group list-group-flush">
+                        @foreach (AppAllowedStorage entry in allowedStorages)
+                        {
+                            <div class="list-group-item d-flex align-items-center justify-content-between px-0 py-1">
+                                <div class="small">
+                                    <span class="badge bg-info-subtle text-info border border-info-subtle me-2">@entry.StorageLink.Provider</span>
+                                    <span class="fw-medium">@entry.StorageLink.Name</span>
+                                    @if (!string.IsNullOrWhiteSpace(entry.StorageLink.BucketName))
+                                    {
+                                        <code class="ms-1 text-muted">@entry.StorageLink.BucketName</code>
+                                    }
+                                </div>
+                                @if (confirmDeleteStorageId != entry.Id)
+                                {
+                                    <button class="btn btn-sm btn-outline-danger p-0 px-1"
+                                            @onclick="() => confirmDeleteStorageId = entry.Id">
+                                        <i class="bi bi-x" style="font-size:.8rem;"></i>
+                                    </button>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-danger" @onclick="() => DeleteAllowedStorage(entry.Id)">Yes</button>
+                                    <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="() => confirmDeleteStorageId = null">No</button>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid AppId { get; set; }
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter, EditorRequired] public Guid EnvironmentId { get; set; }
+
+    private bool loading = true;
+
+    // Namespace
+    private string nsValue = "";
+    private bool savingNs;
+    private string? nsMessage;
+    private bool nsOk;
+
+    // Copy from environment
+    private bool showCopyFrom;
+    private List<Data.Environment>? otherEnvironments;
+    private Guid copyFromEnvId;
+    private bool confirmCopy, copying;
+    private string? copyMessage;
+    private bool copyOk;
+
+    // Quota
+    private AppQuota? quota;
+    private string qCpuReq = "", qCpuLim = "", qMemReq = "", qMemLim = "";
+    private int? qMaxPods, qMaxPvcs;
+    private bool savingQuota;
+    private string? quotaMessage;
+    private bool quotaOk;
+
+    // Network policies
+    private List<AppNetworkPolicy> networkPolicies = [];
+    private bool showAddNp;
+    private bool addingNp;
+    private string newNpName = "";
+    private AppNetworkPolicyType newNpType = AppNetworkPolicyType.DenyAll;
+    private string newNpAllowNs = "";
+    private string newNpCustomYaml = "";
+    private Guid? confirmDeleteNpId;
+    private string? npMessage;
+
+    // RBAC
+    private AppRbacPolicy? rbacPolicy;
+    private string rbacSaName = "";
+    private bool rbacAutoMount;
+    private bool savingRbac;
+    private bool showAddRule;
+    private string newRuleApiGroups = "";
+    private string newRuleResources = "";
+    private string newRuleVerbs = "";
+    private string? rbacMessage;
+    private bool rbacOk;
+
+    // Apply
+    private bool applying;
+    private string? applyOutput;
+    private bool applySuccess;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        loading = false;
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (showCopyFrom && otherEnvironments is null)
+            await LoadOtherEnvironments();
+    }
+
+    private async Task LoadAsync()
+    {
+        AppGovernanceData data = await GovernanceService.LoadAsync(AppId, EnvironmentId);
+
+        nsValue = data.Namespace ?? "";
+
+        quota = data.Quota;
+        if (quota is not null)
+        {
+            qCpuReq = quota.CpuRequest ?? "";
+            qCpuLim = quota.CpuLimit ?? "";
+            qMemReq = quota.MemoryRequest ?? "";
+            qMemLim = quota.MemoryLimit ?? "";
+            qMaxPods = quota.MaxPods;
+            qMaxPvcs = quota.MaxPvcs;
+        }
+
+        networkPolicies = data.NetworkPolicies;
+
+        rbacPolicy = data.RbacPolicy;
+        if (rbacPolicy is not null)
+        {
+            rbacSaName = rbacPolicy.ServiceAccountName;
+            rbacAutoMount = rbacPolicy.AutoMountToken;
+        }
+
+        allowedDatabases = data.AllowedDatabases;
+        allowedCaches    = data.AllowedCaches;
+        allowedStorages  = data.AllowedStorages;
+    }
+
+    private async Task LoadOtherEnvironments()
+    {
+        List<Data.Environment> all = await TenantService.GetEnvironmentsAsync(TenantId);
+        otherEnvironments = all.Where(e => e.Id != EnvironmentId).ToList();
+    }
+
+    // ── Copy from environment ──────────────────────────────────────────────────
+
+    private async Task DoCopyFrom()
+    {
+        copying = true; copyMessage = null;
+        try
+        {
+            await GovernanceService.CopyFromEnvironmentAsync(AppId, copyFromEnvId, EnvironmentId);
+            await LoadAsync();
+            copyOk = true;
+            copyMessage = "Governance copied and loaded.";
+            showCopyFrom = false;
+            confirmCopy = false;
+        }
+        catch (Exception ex) { copyOk = false; copyMessage = ex.Message; }
+        finally { copying = false; }
+    }
+
+    // ── Namespace ──────────────────────────────────────────────────────────────
+
+    private async Task SaveNamespace()
+    {
+        savingNs = true; nsMessage = null;
+        await GovernanceService.SaveNamespaceAsync(AppId, EnvironmentId, nsValue);
+        nsValue = nsValue.Trim().ToLowerInvariant();
+        savingNs = false; nsOk = true; nsMessage = "Namespace saved.";
+    }
+
+    private async Task ClearNamespace()
+    {
+        await GovernanceService.SaveNamespaceAsync(AppId, EnvironmentId, null);
+        nsValue = ""; nsMessage = null;
+    }
+
+    // ── Quota ──────────────────────────────────────────────────────────────────
+
+    private void ApplyQuotaPreset(string cpuReq, string cpuLim, string memReq, string memLim, int maxPods, int maxPvcs)
+    {
+        qCpuReq = cpuReq; qCpuLim = cpuLim;
+        qMemReq = memReq; qMemLim = memLim;
+        qMaxPods = maxPods; qMaxPvcs = maxPvcs;
+        quotaMessage = null;
+    }
+
+    private async Task SaveQuota()
+    {
+        savingQuota = true; quotaMessage = null;
+        quota = await GovernanceService.SaveQuotaAsync(AppId, EnvironmentId,
+            qCpuReq, qCpuLim, qMemReq, qMemLim, qMaxPods, qMaxPvcs);
+        savingQuota = false; quotaOk = true;
+        quotaMessage = "Quota saved.";
+    }
+
+    private async Task DeleteQuota()
+    {
+        await GovernanceService.DeleteQuotaAsync(AppId, EnvironmentId);
+        quota = null;
+        qCpuReq = qCpuLim = qMemReq = qMemLim = "";
+        qMaxPods = qMaxPvcs = null;
+    }
+
+    // ── Network policies ───────────────────────────────────────────────────────
+
+    private async Task AddNetworkPolicy()
+    {
+        addingNp = true; npMessage = null;
+        try
+        {
+            AppNetworkPolicy p = await GovernanceService.AddNetworkPolicyAsync(
+                AppId, EnvironmentId, newNpName, newNpType,
+                newNpAllowNs, newNpCustomYaml);
+            networkPolicies.Add(p);
+            showAddNp = false;
+            newNpName = ""; newNpAllowNs = ""; newNpCustomYaml = "";
+            newNpType = AppNetworkPolicyType.DenyAll;
+        }
+        catch (Exception ex) { npMessage = ex.Message; }
+        finally { addingNp = false; }
+    }
+
+    private async Task DeleteNetworkPolicy(Guid id)
+    {
+        await GovernanceService.DeleteNetworkPolicyAsync(id);
+        networkPolicies.RemoveAll(p => p.Id == id);
+        confirmDeleteNpId = null;
+    }
+
+    // ── RBAC ───────────────────────────────────────────────────────────────────
+
+    private async Task SaveRbac()
+    {
+        savingRbac = true; rbacMessage = null;
+        rbacPolicy = await GovernanceService.SaveRbacPolicyAsync(AppId, EnvironmentId, rbacSaName, rbacAutoMount);
+        savingRbac = false; rbacOk = true;
+        rbacMessage = "Saved.";
+    }
+
+    private async Task DeleteRbac()
+    {
+        await GovernanceService.DeleteRbacPolicyAsync(AppId, EnvironmentId);
+        rbacPolicy = null; rbacSaName = ""; rbacAutoMount = false;
+    }
+
+    private async Task AddPreset(string apiGroups, string resources, string verbs)
+    {
+        if (rbacPolicy is null) return;
+        AppRbacRule rule = await GovernanceService.AddRbacRuleAsync(
+            rbacPolicy.Id, apiGroups, resources, verbs);
+        rbacPolicy.Rules.Add(rule);
+    }
+
+    private async Task AddRbacRule()
+    {
+        if (rbacPolicy is null) return;
+        AppRbacRule rule = await GovernanceService.AddRbacRuleAsync(
+            rbacPolicy.Id, newRuleApiGroups, newRuleResources, newRuleVerbs);
+        rbacPolicy.Rules.Add(rule);
+        showAddRule = false;
+        newRuleApiGroups = newRuleResources = newRuleVerbs = "";
+    }
+
+    private async Task DeleteRbacRule(Guid id)
+    {
+        await GovernanceService.DeleteRbacRuleAsync(id);
+        rbacPolicy?.Rules.Remove(rbacPolicy.Rules.First(r => r.Id == id));
+    }
+
+    // ── Apply ──────────────────────────────────────────────────────────────────
+
+    private async Task ApplyToEnvironmentClusters()
+    {
+        applying = true; applyOutput = null;
+        var sb = new System.Text.StringBuilder();
+
+        // Only apply to clusters that have a deployment for this app+environment.
+        List<AppDeployment> envDeployments = (await DeploymentService.GetDeploymentsAsync(AppId))
+            .Where(d => d.EnvironmentId == EnvironmentId && d.Cluster is not null)
+            .DistinctBy(d => d.ClusterId)
+            .ToList();
+
+        if (envDeployments.Count == 0)
+        {
+            applyOutput = "No deployments found for this environment. Create a deployment first.";
+            applySuccess = false;
+            applying = false;
+            return;
+        }
+
+        bool anyFail = false;
+        foreach (AppDeployment deploy in envDeployments)
+        {
+            (bool ok, string output) = await GovernanceService.ApplyToClusterAsync(
+                AppId, EnvironmentId, deploy.Cluster!);
+            sb.AppendLine($"── {deploy.Cluster!.Name} ({deploy.Namespace}) ──");
+            sb.AppendLine(ok ? "✓ Applied" : $"✗ {output}");
+            if (!ok) anyFail = true;
+        }
+
+        applySuccess = !anyFail;
+        applyOutput = sb.ToString().TrimEnd();
+        applying = false;
+    }
+
+    // ── Lazy load copy panel ───────────────────────────────────────────────────
+
+    private async Task OpenCopyFrom()
+    {
+        showCopyFrom = !showCopyFrom;
+        if (showCopyFrom && otherEnvironments is null)
+            await LoadOtherEnvironments();
+    }
+
+    private static string NpTypeLabel(AppNetworkPolicyType t) => t switch
+    {
+        AppNetworkPolicyType.DenyAll               => "Deny all",
+        AppNetworkPolicyType.AllowFromIngress       => "Allow from ingress",
+        AppNetworkPolicyType.AllowFromSameNamespace => "Allow same namespace",
+        AppNetworkPolicyType.AllowFromNamespace     => "Allow from namespace",
+        AppNetworkPolicyType.Custom                 => "Custom YAML",
+        _                                           => t.ToString()
+    };
+
+    // ── Allowed databases ──────────────────────────────────────────────────────
+
+    private List<AppAllowedDatabase> allowedDatabases = [];
+    private List<AvailableDatabaseOption>? availableDbs;
+    private bool showAddDb;
+    private bool addingDb;
+    private Guid newDbOptionId;
+    private Guid? confirmDeleteDbId;
+    private string? allowedDbMessage;
+
+    private async Task OpenAddDb()
+    {
+        showAddDb = true;
+        if (availableDbs is null)
+            availableDbs = await GovernanceService.GetAvailableDatabasesAsync(TenantId, EnvironmentId);
+    }
+
+    private async Task AddAllowedDatabase()
+    {
+        allowedDbMessage = null;
+        AvailableDatabaseOption? opt = availableDbs?.FirstOrDefault(o => o.Id == newDbOptionId);
+        if (opt is null) return;
+
+        addingDb = true;
+        try
+        {
+            AppAllowedDatabase entry = await GovernanceService.AddAllowedDatabaseAsync(
+                AppId, EnvironmentId, opt.CnpgId, opt.MongoId, opt.RegPostgresId);
+            allowedDatabases.Add(entry);
+            showAddDb = false;
+            newDbOptionId = Guid.Empty;
+        }
+        catch (Exception ex) { allowedDbMessage = ex.Message; }
+        finally { addingDb = false; }
+    }
+
+    private async Task DeleteAllowedDatabase(Guid id)
+    {
+        await GovernanceService.DeleteAllowedDatabaseAsync(id);
+        allowedDatabases.RemoveAll(a => a.Id == id);
+        confirmDeleteDbId = null;
+    }
+
+    private static string DbTypeLabel(AppAllowedDatabase entry)
+    {
+        if (entry.CnpgDatabase is not null) return "PostgreSQL";
+        if (entry.MongoDatabase is not null) return "MongoDB";
+        if (entry.RegisteredPostgresDatabase is not null) return "Postgres (registered)";
+        return "Database";
+    }
+
+    private static string DbAllowedName(AppAllowedDatabase entry)
+    {
+        if (entry.CnpgDatabase is not null)
+            return entry.CnpgDatabase.CnpgCluster is not null
+                ? $"{entry.CnpgDatabase.Name} ({entry.CnpgDatabase.CnpgCluster.Name})"
+                : entry.CnpgDatabase.Name;
+        if (entry.MongoDatabase is not null)
+            return entry.MongoDatabase.MongoCluster is not null
+                ? $"{entry.MongoDatabase.Name} ({entry.MongoDatabase.MongoCluster.Name})"
+                : entry.MongoDatabase.Name;
+        if (entry.RegisteredPostgresDatabase is not null)
+            return entry.RegisteredPostgresDatabase.Name;
+        return "—";
+    }
+
+    // ── Allowed caches ─────────────────────────────────────────────────────────
+
+    private List<AppAllowedCache> allowedCaches = [];
+    private List<RedisCluster>? availableCaches;
+    private bool showAddCache;
+    private bool addingCache;
+    private Guid newCacheId;
+    private Guid? confirmDeleteCacheId;
+    private string? allowedCacheMessage;
+
+    private async Task OpenAddCache()
+    {
+        showAddCache = true;
+        if (availableCaches is null)
+            availableCaches = await GovernanceService.GetAvailableCachesAsync(TenantId);
+    }
+
+    private async Task AddAllowedCache()
+    {
+        allowedCacheMessage = null;
+        addingCache = true;
+        try
+        {
+            AppAllowedCache entry = await GovernanceService.AddAllowedCacheAsync(AppId, EnvironmentId, newCacheId);
+            allowedCaches.Add(entry);
+            showAddCache = false;
+            newCacheId = Guid.Empty;
+        }
+        catch (Exception ex) { allowedCacheMessage = ex.Message; }
+        finally { addingCache = false; }
+    }
+
+    private async Task DeleteAllowedCache(Guid id)
+    {
+        await GovernanceService.DeleteAllowedCacheAsync(id);
+        allowedCaches.RemoveAll(a => a.Id == id);
+        confirmDeleteCacheId = null;
+    }
+
+    // ── Allowed storages ───────────────────────────────────────────────────────
+
+    private List<AppAllowedStorage> allowedStorages = [];
+    private List<StorageLink>? availableStorages;
+    private bool showAddStorage;
+    private bool addingStorage;
+    private Guid newStorageId;
+    private Guid? confirmDeleteStorageId;
+    private string? allowedStorageMessage;
+
+    private async Task OpenAddStorage()
+    {
+        showAddStorage = true;
+        if (availableStorages is null)
+            availableStorages = await GovernanceService.GetAvailableStoragesAsync(TenantId, EnvironmentId);
+    }
+
+    private async Task AddAllowedStorage()
+    {
+        allowedStorageMessage = null;
+        addingStorage = true;
+        try
+        {
+            AppAllowedStorage entry = await GovernanceService.AddAllowedStorageAsync(AppId, EnvironmentId, newStorageId);
+            allowedStorages.Add(entry);
+            showAddStorage = false;
+            newStorageId = Guid.Empty;
+        }
+        catch (Exception ex) { allowedStorageMessage = ex.Message; }
+        finally { addingStorage = false; }
+    }
+
+    private async Task DeleteAllowedStorage(Guid id)
+    {
+        await GovernanceService.DeleteAllowedStorageAsync(id);
+        allowedStorages.RemoveAll(a => a.Id == id);
+        confirmDeleteStorageId = null;
+    }
+}

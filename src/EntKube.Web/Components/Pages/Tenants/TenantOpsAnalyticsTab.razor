@@ -1,0 +1,301 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject IncidentService IncidentService
+
+@if (isLoading)
+{
+    <div class="text-center py-5">
+        <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+        <p class="text-muted small mt-2">Loading analytics…</p>
+    </div>
+}
+else if (loadError is not null)
+{
+    <div class="alert alert-danger small">
+        <strong>Failed to load analytics.</strong> @loadError
+    </div>
+}
+else if (stats is null)
+{
+    <EmptyState Icon="bi-bar-chart" Title="No data" Message="No incidents in the selected window." />
+}
+else
+{
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div class="d-flex gap-2 align-items-center">
+            <label class="form-label small text-muted mb-0">Window</label>
+            <select class="form-select form-select-sm" style="width:auto" @bind="windowDays" @bind:after="Load">
+                <option value="7">Last 7 days</option>
+                <option value="30">Last 30 days</option>
+                <option value="90">Last 90 days</option>
+            </select>
+        </div>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="Load">
+            <span class="bi bi-arrow-clockwise"></span> Refresh
+        </button>
+    </div>
+
+    @* ── Summary strip ── *@
+    <div class="d-flex flex-wrap gap-2 mb-4">
+        <div class="card border-0 bg-light text-center px-3 py-2">
+            <div class="fw-bold fs-4">@stats.Total</div>
+            <div class="text-muted small">Total incidents</div>
+        </div>
+        <div class="card border-0 bg-danger-subtle text-center px-3 py-2">
+            <div class="fw-bold fs-4 text-danger">@stats.Critical</div>
+            <div class="text-muted small">Critical</div>
+        </div>
+        <div class="card border-0 bg-warning-subtle text-center px-3 py-2">
+            <div class="fw-bold fs-4 text-warning">@stats.Warning</div>
+            <div class="text-muted small">Warning</div>
+        </div>
+        <div class="card border-0 bg-light text-center px-3 py-2">
+            <div class="fw-bold fs-4">@stats.FormatMttr()</div>
+            <div class="text-muted small">Avg MTTR</div>
+        </div>
+        <div class="card border-0 bg-light text-center px-3 py-2">
+            <div class="fw-bold fs-4">@stats.FormatMtta()</div>
+            <div class="text-muted small">Avg MTTA</div>
+        </div>
+        <div class="card border-0 bg-light text-center px-3 py-2">
+            <div class="fw-bold fs-4 @(stats.Active > 0 ? "text-danger" : "text-success")">@stats.Active</div>
+            <div class="text-muted small">Still active</div>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        @* ── Daily volume sparkline ── *@
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header py-2 small fw-semibold">
+                    <span class="bi bi-bar-chart me-1"></span>Alert volume — last @windowDays days
+                </div>
+                <div class="card-body py-3">
+                    @{
+                        int maxDaily = stats.Daily.Count > 0 ? Math.Max(1, stats.Daily.Max(d => d.Count)) : 1;
+                    }
+                    <div class="d-flex align-items-end gap-px" style="height:80px;gap:3px;overflow:hidden">
+                        @foreach (DailyAlertCount day in stats.Daily)
+                        {
+                            int h = (int)Math.Max(4, day.Count * 76.0 / maxDaily);
+                            string color = day.Count == 0 ? "#dee2e6"
+                                : day.Count >= maxDaily * 0.8 ? "#dc3545"
+                                : day.Count >= maxDaily * 0.5 ? "#fd7e14"
+                                : "#0d6efd";
+                            <div style="flex:1;min-width:4px;height:@(h)px;background:@color;border-radius:2px 2px 0 0"
+                                 title="@day.Date.ToString("MMM d"): @day.Count incident@(day.Count == 1 ? "" : "s")">
+                            </div>
+                        }
+                    </div>
+                    <div class="d-flex justify-content-between mt-1">
+                        @if (stats.Daily.Count > 0)
+                        {
+                            <span class="text-muted" style="font-size:.72rem">@stats.Daily.First().Date.ToString("MMM d")</span>
+                            <span class="text-muted" style="font-size:.72rem">@stats.Daily.Last().Date.ToString("MMM d")</span>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @* ── Top alerts ── *@
+        <div class="col-12 col-lg-6">
+            <div class="card h-100">
+                <div class="card-header py-2 small fw-semibold">
+                    <span class="bi bi-list-ol me-1"></span>Most frequent alerts
+                </div>
+                <div class="card-body py-2">
+                    @if (topAlerts.Count == 0)
+                    {
+                        <p class="text-muted small mb-0">No data.</p>
+                    }
+                    else
+                    {
+                        int maxCount = topAlerts.Max(a => a.Count);
+                        @foreach (AlertFrequency alert in topAlerts)
+                        {
+                            int pct = maxCount > 0 ? (int)(alert.Count * 100.0 / maxCount) : 0;
+                            string barColor = alert.Severity == "critical" ? "#dc3545"
+                                : alert.Severity == "warning" ? "#fd7e14"
+                                : "#0d6efd";
+                            <div class="mb-2">
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="small text-truncate me-2" style="max-width:200px"
+                                          title="@alert.Name">@alert.Name</span>
+                                    <span class="small fw-semibold text-muted">@alert.Count</span>
+                                </div>
+                                <div class="progress" style="height:6px">
+                                    <div class="progress-bar" role="progressbar"
+                                         style="width:@(pct)%;background:@barColor"></div>
+                                </div>
+                            </div>
+                        }
+                    }
+                </div>
+            </div>
+        </div>
+
+        @* ── Top namespaces ── *@
+        <div class="col-12 col-lg-6">
+            <div class="card h-100">
+                <div class="card-header py-2 small fw-semibold">
+                    <span class="bi bi-diagram-2 me-1"></span>Alerts by namespace
+                </div>
+                <div class="card-body py-2">
+                    @if (topNamespaces.Count == 0)
+                    {
+                        <p class="text-muted small mb-0">No namespace data.</p>
+                    }
+                    else
+                    {
+                        int maxCount = topNamespaces.Max(n => n.Count);
+                        @foreach (AlertFrequency ns in topNamespaces)
+                        {
+                            int pct = maxCount > 0 ? (int)(ns.Count * 100.0 / maxCount) : 0;
+                            <div class="mb-2">
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="small font-monospace text-truncate me-2">@ns.Name</span>
+                                    <span class="small fw-semibold text-muted">@ns.Count</span>
+                                </div>
+                                <div class="progress" style="height:6px">
+                                    <div class="progress-bar bg-primary" role="progressbar"
+                                         style="width:@(pct)%"></div>
+                                </div>
+                            </div>
+                        }
+                    }
+                </div>
+            </div>
+        </div>
+
+        @* ── Alerts by cluster ── *@
+        @if (byCluster.Count > 1)
+        {
+            <div class="col-12 col-lg-6">
+                <div class="card">
+                    <div class="card-header py-2 small fw-semibold">
+                        <span class="bi bi-hdd-rack me-1"></span>Alerts by cluster
+                    </div>
+                    <div class="card-body py-2">
+                        @{
+                            int maxCluster = byCluster.Max(c => c.Count);
+                        }
+                        @foreach (AlertFrequency cluster in byCluster)
+                        {
+                            int pct = maxCluster > 0 ? (int)(cluster.Count * 100.0 / maxCluster) : 0;
+                            <div class="mb-2">
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="small text-truncate me-2">@cluster.Name</span>
+                                    <span class="small fw-semibold text-muted">@cluster.Count</span>
+                                </div>
+                                <div class="progress" style="height:6px">
+                                    <div class="progress-bar bg-secondary" role="progressbar"
+                                         style="width:@(pct)%"></div>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        }
+
+        @* ── Severity breakdown ── *@
+        <div class="col-12 col-lg-@(byCluster.Count > 1 ? "6" : "12")">
+            <div class="card">
+                <div class="card-header py-2 small fw-semibold">
+                    <span class="bi bi-pie-chart me-1"></span>Severity breakdown
+                </div>
+                <div class="card-body py-2">
+                    @if (stats.Total > 0)
+                    {
+                        int critPct = (int)(stats.Critical * 100.0 / stats.Total);
+                        int warnPct = (int)(stats.Warning * 100.0 / stats.Total);
+                        int otherPct = 100 - critPct - warnPct;
+                        <div class="d-flex rounded overflow-hidden mb-2" style="height:24px">
+                            @if (critPct > 0)
+                            {
+                                <div class="bg-danger d-flex align-items-center justify-content-center text-white"
+                                     style="width:@(critPct)%;font-size:.7rem" title="Critical: @stats.Critical">
+                                    @if (critPct > 10) { <span>@(critPct)%</span> }
+                                </div>
+                            }
+                            @if (warnPct > 0)
+                            {
+                                <div class="bg-warning d-flex align-items-center justify-content-center text-dark"
+                                     style="width:@(warnPct)%;font-size:.7rem" title="Warning: @stats.Warning">
+                                    @if (warnPct > 10) { <span>@(warnPct)%</span> }
+                                </div>
+                            }
+                            @if (otherPct > 0)
+                            {
+                                <div class="bg-info d-flex align-items-center justify-content-center text-white"
+                                     style="width:@(otherPct)%;font-size:.7rem" title="Other: @(stats.Total - stats.Critical - stats.Warning)">
+                                    @if (otherPct > 10) { <span>@(otherPct)%</span> }
+                                </div>
+                            }
+                        </div>
+                        <div class="d-flex gap-3 small">
+                            <span><span class="badge bg-danger me-1">@stats.Critical</span>Critical</span>
+                            <span><span class="badge bg-warning text-dark me-1">@stats.Warning</span>Warning</span>
+                            <span><span class="badge bg-info me-1">@(stats.Total - stats.Critical - stats.Warning)</span>Other</span>
+                        </div>
+                    }
+                    else
+                    {
+                        <p class="text-muted small mb-0">No incidents in window.</p>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private AlertStats? stats;
+    private List<AlertFrequency> topAlerts = [];
+    private List<AlertFrequency> topNamespaces = [];
+    private List<AlertFrequency> byCluster = [];
+    private int windowDays = 30;
+    private bool isLoading = true;
+    private string? loadError;
+
+    protected override async Task OnInitializedAsync() => await Load();
+
+    private async Task Load()
+    {
+        isLoading = true;
+        loadError = null;
+        StateHasChanged();
+
+        try
+        {
+            await Task.WhenAll(
+                LoadStats(),
+                LoadTopAlerts(),
+                LoadTopNamespaces(),
+                LoadByCluster());
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task LoadStats()
+        => stats = await IncidentService.GetStatsForTenantAsync(TenantId, windowDays);
+
+    private async Task LoadTopAlerts()
+        => topAlerts = await IncidentService.GetTopAlertsAsync(TenantId, windowDays);
+
+    private async Task LoadTopNamespaces()
+        => topNamespaces = await IncidentService.GetTopNamespacesAsync(TenantId, windowDays);
+
+    private async Task LoadByCluster()
+        => byCluster = await IncidentService.GetAlertsByClusterAsync(TenantId, windowDays);
+}

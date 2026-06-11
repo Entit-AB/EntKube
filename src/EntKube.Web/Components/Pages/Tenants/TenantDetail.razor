@@ -1,0 +1,334 @@
+@page "/tenants/{Slug}"
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@rendermode InteractiveServer
+@inject TenantService TenantService
+@inject UserAccessService UserAccessService
+@inject AuthenticationStateProvider AuthStateProvider
+@inject NavigationManager Navigation
+
+<PageTitle>@(tenant?.Name ?? "Tenant")</PageTitle>
+
+@if (tenant is null)
+{
+    <div class="text-center py-5">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="text-muted mt-2">Loading tenant...</p>
+    </div>
+}
+else
+{
+    <nav aria-label="breadcrumb" class="mb-3">
+        <ol class="breadcrumb small">
+            <li class="breadcrumb-item"><a href="/tenants" class="text-decoration-none"><i class="bi bi-building me-1"></i>Tenants</a></li>
+            <li class="breadcrumb-item active">@tenant.Name</li>
+        </ol>
+    </nav>
+
+    <div class="d-flex align-items-center mb-4">
+        <i class="bi bi-building fs-3 me-2 text-primary"></i>
+        <div>
+            <h2 class="mb-0">@tenant.Name</h2>
+            <small class="text-muted"><code>@tenant.Slug</code></small>
+        </div>
+    </div>
+
+    @* ── Category (top-level) nav ── *@
+    <ul class="nav nav-pills mb-2 gap-1 tenant-category-nav">
+        <li class="nav-item">
+            <button class="nav-link @(activeCategory == "apps" ? "active" : "")" @onclick='() => SetCategory("apps")' disabled="@tabLoading">
+                <i class="bi bi-people me-1"></i>Applications
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link @(activeCategory == "infra" ? "active" : "")" @onclick='() => SetCategory("infra")' disabled="@tabLoading">
+                <i class="bi bi-layers me-1"></i>Infrastructure
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link @(activeCategory == "services" ? "active" : "")" @onclick='() => SetCategory("services")' disabled="@tabLoading">
+                <i class="bi bi-box-seam me-1"></i>Services
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link @(activeCategory == "ops" ? "active" : "")" @onclick='() => SetCategory("ops")' disabled="@tabLoading">
+                <i class="bi bi-speedometer2 me-1"></i>Operations
+            </button>
+        </li>
+    </ul>
+
+    @* ── Sub-tab strip for the active category ── *@
+    <ul class="nav nav-tabs mb-4">
+        @if (activeCategory == "apps")
+        {
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "customers" ? "active" : "")" @onclick='() => SetTab("customers")'>
+                    <i class="bi bi-people me-1"></i>Customers
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "groups" ? "active" : "")" @onclick='() => SetTab("groups")'>
+                    <i class="bi bi-diagram-3 me-1"></i>Groups
+                </button>
+            </li>
+        }
+        else if (activeCategory == "infra")
+        {
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "environments" ? "active" : "")" @onclick='() => SetTab("environments")'>
+                    <i class="bi bi-layers me-1"></i>Environments
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "networking" ? "active" : "")" @onclick='() => SetTab("networking")'>
+                    <i class="bi bi-diagram-2 me-1"></i>Networking
+                </button>
+            </li>
+        }
+        else if (activeCategory == "services")
+        {
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "databases" ? "active" : "")" @onclick='() => SetTab("databases")'>
+                    <i class="bi bi-database me-1"></i>Databases
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "storage" ? "active" : "")" @onclick='() => SetTab("storage")'>
+                    <i class="bi bi-bucket me-1"></i>Storage
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "messaging" ? "active" : "")" @onclick='() => SetTab("messaging")'>
+                    <i class="bi bi-collection me-1"></i>Messaging
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "cache" ? "active" : "")" @onclick='() => SetTab("cache")'>
+                    <i class="bi bi-lightning-charge me-1"></i>Cache
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "identity" ? "active" : "")" @onclick='() => SetTab("identity")'>
+                    <i class="bi bi-person-badge me-1"></i>Identity
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "registry" ? "active" : "")" @onclick='() => SetTab("registry")'>
+                    <i class="bi bi-archive me-1"></i>Registry
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "vault" ? "active" : "")" @onclick='() => SetTab("vault")'>
+                    <i class="bi bi-shield-lock me-1"></i>Vault
+                </button>
+            </li>
+        }
+        else if (activeCategory == "ops")
+        {
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "overview" ? "active" : "")" @onclick='() => SetTab("overview")'>
+                    <i class="bi bi-speedometer2 me-1"></i>Overview
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "alerts" ? "active" : "")" @onclick='() => SetTab("alerts")'>
+                    <i class="bi bi-bell me-1"></i>Alerts
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "alert-rules" ? "active" : "")" @onclick='() => SetTab("alert-rules")'>
+                    <i class="bi bi-list-check me-1"></i>Alert Rules
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "logs" ? "active" : "")" @onclick='() => SetTab("logs")'>
+                    <i class="bi bi-journal-text me-1"></i>Logs
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "incidents" ? "active" : "")" @onclick='() => SetTab("incidents")'>
+                    <i class="bi bi-bell-fill me-1"></i>Incidents
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "notifications" ? "active" : "")" @onclick='() => SetTab("notifications")'>
+                    <i class="bi bi-send-fill me-1"></i>Notifications
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "maintenance" ? "active" : "")" @onclick='() => SetTab("maintenance")'>
+                    <i class="bi bi-tools me-1"></i>Maintenance
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "on-call" ? "active" : "")" @onclick='() => SetTab("on-call")'>
+                    <i class="bi bi-person-badge me-1"></i>On-Call
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "alert-routing" ? "active" : "")" @onclick='() => SetTab("alert-routing")'>
+                    <i class="bi bi-funnel me-1"></i>Alert Routing
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "analytics" ? "active" : "")" @onclick='() => SetTab("analytics")'>
+                    <i class="bi bi-bar-chart-line me-1"></i>Analytics
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "sla" ? "active" : "")" @onclick='() => SetTab("sla")'>
+                    <i class="bi bi-shield-check me-1"></i>SLA
+                </button>
+            </li>
+        }
+    </ul>
+
+    <div class="tab-content">
+        @if (tabLoading)
+        {
+            <div class="text-center py-5">
+                <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+            </div>
+        }
+        else @switch (activeTab)
+        {
+            case "environments":
+                <EnvironmentTab TenantId="tenant.Id" />
+                break;
+            case "customers":
+                <CustomerTab TenantId="tenant.Id" />
+                break;
+            case "vault":
+                <VaultTab TenantId="tenant.Id" />
+                break;
+            case "groups":
+                <GroupTab TenantId="tenant.Id" />
+                break;
+            case "databases":
+                <DatabaseTab TenantId="tenant.Id" />
+                break;
+            case "storage":
+                <StorageTab TenantId="tenant.Id" />
+                break;
+            case "identity":
+                <IdentityTab TenantId="tenant.Id" />
+                break;
+            case "registry":
+                <RegistryTab TenantId="tenant.Id" />
+                break;
+            case "messaging":
+                <MessagingTab TenantId="tenant.Id" />
+                break;
+            case "cache":
+                <CacheTab TenantId="tenant.Id" />
+                break;
+            case "overview":
+                <TenantMonitoringOverview TenantId="tenant.Id" TenantSlug="tenant.Slug" OnNavigateTab="SetTab" />
+                break;
+            case "alerts":
+                <TenantAlertsTab TenantId="tenant.Id" />
+                break;
+            case "alert-rules":
+                <TenantAlertRulesTab TenantId="tenant.Id" />
+                break;
+            case "logs":
+                <TenantLogsTab TenantId="tenant.Id" />
+                break;
+            case "incidents":
+                <IncidentManagement TenantId="tenant.Id" />
+                break;
+            case "notifications":
+                <NotificationChannels TenantId="tenant.Id" />
+                break;
+            case "maintenance":
+                <MaintenanceWindows TenantId="tenant.Id" />
+                break;
+            case "on-call":
+                <OnCallTab TenantId="tenant.Id" />
+                break;
+            case "alert-routing":
+                <AlertRoutingTab TenantId="tenant.Id" />
+                break;
+            case "analytics":
+                <TenantOpsAnalyticsTab TenantId="tenant.Id" />
+                break;
+            case "sla":
+                <SlaTargetManager TenantId="tenant.Id" />
+                break;
+            case "networking":
+                <NetworkingTab TenantId="tenant.Id" />
+                break;
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public string Slug { get; set; } = "";
+
+    private Tenant? tenant;
+    private string activeCategory = "apps";
+    private string activeTab = "customers";
+    private bool tabLoading;
+
+    private static readonly Dictionary<string, string> CategoryDefaults = new()
+    {
+        ["apps"] = "customers",
+        ["infra"] = "environments",
+        ["services"] = "databases",
+        ["ops"] = "overview",
+    };
+
+    private async Task SetCategory(string category)
+    {
+        tabLoading = true;
+        activeCategory = category;
+        activeTab = CategoryDefaults[category];
+        StateHasChanged();
+        await Task.Yield();
+        tabLoading = false;
+    }
+
+    private async Task SetTab(string tab)
+    {
+        tabLoading = true;
+        activeTab = tab;
+        StateHasChanged();
+        await Task.Yield();
+        tabLoading = false;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        System.Security.Claims.ClaimsPrincipal user = authState.User;
+
+        if (user.Identity?.IsAuthenticated != true)
+        {
+            Navigation.NavigateTo("/Account/Login", forceLoad: true);
+            return;
+        }
+
+        string? userId = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        if (userId is null)
+        {
+            Navigation.NavigateTo("/Account/Login", forceLoad: true);
+            return;
+        }
+
+        tenant = await TenantService.GetTenantBySlugAsync(Slug);
+
+        if (tenant is null)
+        {
+            Navigation.NavigateTo("/tenants");
+            return;
+        }
+
+        bool canAccess = await UserAccessService.HasTenantAccessAsync(userId, tenant.Id);
+        if (!canAccess)
+        {
+            bool hasMembership = await UserAccessService.HasAnyTenantMembershipAsync(userId);
+            Navigation.NavigateTo(hasMembership ? "/tenants" : "/portal");
+        }
+    }
+}

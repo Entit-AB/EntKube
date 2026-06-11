@@ -1,0 +1,679 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject PrometheusService PrometheusService
+@inject RemediationService RemediationService
+@inject IncidentService IncidentService
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject AuthenticationStateProvider AuthStateProvider
+@implements IAsyncDisposable
+
+@* ── Toolbar ── *@
+<div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+    <select class="form-select form-select-sm" style="width:auto" @bind="filterClusterId">
+        <option value="">All clusters</option>
+        @foreach (ClusterAlertVm vm in clusterAlerts)
+        {
+            int count = vm.Alerts?.Count(a => a.State == "active") ?? 0;
+            <option value="@vm.Cluster.Id">@vm.Cluster.Name @(count > 0 ? $"({count})" : "")</option>
+        }
+    </select>
+    <select class="form-select form-select-sm" style="width:auto" @bind="filterSeverity">
+        <option value="">All severities</option>
+        <option value="critical">Critical</option>
+        <option value="warning">Warning</option>
+        <option value="info">Info</option>
+    </select>
+    @if (selectedKeys.Count > 0)
+    {
+        <span class="text-muted small">@selectedKeys.Count selected</span>
+        <button class="btn btn-sm btn-outline-warning" @onclick="BulkAcknowledge">
+            <span class="bi bi-check-all me-1"></span>Ack
+        </button>
+        <button class="btn btn-sm btn-outline-warning" @onclick="StartBulkSilence">
+            <span class="bi bi-bell-slash me-1"></span>Silence
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="() => selectedKeys.Clear()">
+            Clear
+        </button>
+    }
+    <div class="ms-auto d-flex align-items-center gap-2">
+        @if (lastRefreshed.HasValue)
+        {
+            <span class="text-muted small">Refreshed @lastRefreshed.Value.ToLocalTime().ToString("HH:mm:ss")</span>
+        }
+        <button class="btn btn-sm btn-outline-secondary" @onclick="Refresh" disabled="@isLoading">
+            <span class="bi bi-arrow-clockwise @(isLoading ? "spin" : "")"></span> Refresh
+        </button>
+    </div>
+</div>
+
+@* ── Summary strip ── *@
+@{
+    int totalFiring   = Filtered.Count(a => a.Alert.State == "active");
+    int totalWarning  = Filtered.Count(a => a.Alert.Severity == "warning");
+    int withRemediation = Filtered.Count(a => a.Remediation is not null);
+}
+@if (clusterAlerts.Any(vm => vm.Alerts is not null))
+{
+    <div class="d-flex gap-2 flex-wrap mb-3">
+        <div class="card border-0 bg-light text-center px-3 py-2">
+            <div class="fw-bold fs-5 @(totalFiring > 0 ? "text-danger" : "text-success")">@totalFiring</div>
+            <div class="text-muted small">Firing</div>
+        </div>
+        <div class="card border-0 bg-light text-center px-3 py-2">
+            <div class="fw-bold fs-5 @(totalWarning > 0 ? "text-warning" : "")">@totalWarning</div>
+            <div class="text-muted small">Warning</div>
+        </div>
+        <div class="card border-0 bg-light text-center px-3 py-2">
+            <div class="fw-bold fs-5 @(withRemediation > 0 ? "text-primary" : "")">@withRemediation</div>
+            <div class="text-muted small">Auto-fixable</div>
+        </div>
+        @foreach (ClusterAlertVm vm in clusterAlerts.Where(v => v.Error is not null))
+        {
+            <div class="card border-warning text-center px-3 py-2">
+                <div class="text-muted small"><span class="bi bi-exclamation-triangle me-1 text-warning"></span>@vm.Cluster.Name unavailable</div>
+            </div>
+        }
+    </div>
+}
+
+@if (isLoading && !clusterAlerts.Any())
+{
+    <div class="text-center py-5">
+        <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+        <p class="text-muted small mt-2">Loading alerts from clusters…</p>
+    </div>
+}
+else if (!Filtered.Any())
+{
+    <EmptyState Icon="bi-check-circle"
+                Title="No alerts"
+                Message="@(clusterAlerts.Any() ? "All clusters healthy — no active alerts match the filter." : "No clusters with Prometheus found.")" />
+}
+else
+{
+    <div class="table-responsive">
+        <table class="table table-hover align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th style="width:32px">
+                        <input type="checkbox" class="form-check-input"
+                               @onchange="e => ToggleSelectAll((bool)(e.Value ?? false))" />
+                    </th>
+                    <th style="width:90px">Severity</th>
+                    <th>Alert</th>
+                    <th>Cluster</th>
+                    <th>Namespace</th>
+                    <th>Started</th>
+                    <th style="width:180px">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (AlertRow row in Filtered.OrderByDescending(r => r.Alert.Severity == "critical")
+                                                   .ThenByDescending(r => r.Alert.Severity == "warning")
+                                                   .ThenBy(r => r.Alert.StartsAt))
+                {
+                    bool expanded = expandedKey == row.Key;
+                    bool confirming = confirmKey == row.Key;
+                    bool selected = selectedKeys.Contains(row.Key);
+
+                    <tr class="@(expanded || confirming ? "table-active" : selected ? "table-warning" : "")"
+                        style="cursor:pointer" @onclick="() => Toggle(row.Key)">
+                        <td @onclick:stopPropagation="true">
+                            <input type="checkbox" class="form-check-input" checked="@selected"
+                                   @onchange="() => ToggleSelect(row.Key)" />
+                        </td>
+                        <td>@SeverityBadge(row.Alert.Severity)</td>
+                        <td>
+                            <div class="fw-semibold small">@row.Alert.Name</div>
+                            @if (!string.IsNullOrEmpty(row.Alert.Summary))
+                            {
+                                <div class="text-muted" style="font-size:0.77rem">@row.Alert.Summary</div>
+                            }
+                            @if (!string.IsNullOrEmpty(row.Alert.RunbookUrl))
+                            {
+                                <a href="@row.Alert.RunbookUrl" target="_blank" rel="noopener noreferrer"
+                                   class="small text-decoration-none" style="font-size:0.73rem"
+                                   @onclick:stopPropagation="true">
+                                    <span class="bi bi-book me-1"></span>Runbook
+                                </a>
+                            }
+                        </td>
+                        <td class="small text-muted">@row.ClusterName</td>
+                        <td class="small text-muted font-monospace">
+                            @row.Alert.Labels.GetValueOrDefault("namespace", "—")
+                        </td>
+                        <td class="small text-muted">@FormatAge(row.Alert.StartsAt)</td>
+                        <td @onclick:stopPropagation="true">
+                            <div class="d-flex gap-1 flex-wrap align-items-center">
+                                @* DB incident status badge *@
+                                @if (row.Incident is not null)
+                                {
+                                    @if (row.Incident.Status == IncidentStatus.Active)
+                                    {
+                                        <button class="btn btn-sm btn-outline-warning"
+                                                @onclick="() => AcknowledgeIncident(row.Incident)"
+                                                title="Acknowledge incident">
+                                            Ack
+                                        </button>
+                                    }
+                                    else if (row.Incident.Status == IncidentStatus.Acknowledged)
+                                    {
+                                        <span class="badge bg-warning text-dark">Acked</span>
+                                        <button class="btn btn-sm btn-outline-success"
+                                                @onclick="() => ResolveIncident(row.Incident)"
+                                                title="Resolve incident">
+                                            Resolve
+                                        </button>
+                                    }
+                                }
+                                @if (row.Remediation is not null)
+                                {
+                                    <button class="btn btn-sm @(confirming ? "btn-primary" : "btn-outline-primary")"
+                                            @onclick="() => StartConfirm(row.Key)"
+                                            title="Auto-fix available">
+                                        <span class="bi bi-lightning-charge me-1"></span>Fix
+                                    </button>
+                                }
+                                <button class="btn btn-sm btn-outline-warning"
+                                        @onclick="() => StartSilence(row)"
+                                        title="Silence this alert">
+                                    <span class="bi bi-bell-slash"></span>
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary"
+                                        @onclick="() => Toggle(row.Key)"
+                                        title="Show labels">
+                                    <span class="bi bi-tags"></span>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+
+                    @* ── Confirm remediation ── *@
+                    @if (confirming && row.Remediation is not null)
+                    {
+                        <tr>
+                            <td colspan="7" class="px-4 py-3 bg-primary-subtle border-start border-primary border-3">
+                                <div class="d-flex align-items-start gap-3">
+                                    <span class="bi bi-lightning-charge-fill text-primary fs-4 mt-1"></span>
+                                    <div class="flex-grow-1">
+                                        <div class="fw-semibold mb-1">Auto-fix: @row.Remediation.ResourceKind/@row.Remediation.ResourceName</div>
+                                        <div class="text-muted small mb-3">@row.Remediation.Description</div>
+                                        @if (remediationResults.TryGetValue(row.Key, out string? result))
+                                        {
+                                            <div class="alert @(result.StartsWith("✓") ? "alert-success" : "alert-danger") py-2 px-3 small mb-2">
+                                                @result
+                                            </div>
+                                        }
+                                        <div class="d-flex gap-2">
+                                            <button class="btn btn-sm btn-primary"
+                                                    @onclick="() => ExecuteRemediation(row)"
+                                                    disabled="@(executingKey == row.Key)">
+                                                @if (executingKey == row.Key)
+                                                {
+                                                    <span class="spinner-border spinner-border-sm me-1"></span>
+                                                }
+                                                Confirm Fix
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary"
+                                                    @onclick="() => confirmKey = null">
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                    }
+
+                    @* ── Labels / details expand ── *@
+                    @if (expanded)
+                    {
+                        <tr>
+                            <td colspan="7" class="px-4 py-3 bg-light">
+                                @if (!string.IsNullOrEmpty(row.Alert.Description))
+                                {
+                                    <p class="mb-2 text-muted small">@row.Alert.Description</p>
+                                }
+                                <div class="d-flex flex-wrap gap-1 mb-2">
+                                    @foreach (KeyValuePair<string, string> label in row.Alert.Labels
+                                        .Where(l => l.Key != "alertname" && l.Key != "severity"))
+                                    {
+                                        <span class="badge bg-light text-dark border small font-monospace">
+                                            @label.Key=@label.Value
+                                        </span>
+                                    }
+                                </div>
+                                <div class="small text-muted">
+                                    Fingerprint: <code>@row.Alert.Fingerprint</code>
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@* ── Bulk silence form ── *@
+@if (showBulkSilenceForm)
+{
+    <div class="card mt-3 border-warning">
+        <div class="card-header d-flex justify-content-between align-items-center py-2">
+            <h6 class="mb-0"><span class="bi bi-bell-slash me-1"></span>Silence @selectedKeys.Count selected alert@(selectedKeys.Count == 1 ? "" : "s")</h6>
+            <button class="btn-close btn-sm" @onclick="() => showBulkSilenceForm = false"></button>
+        </div>
+        <div class="card-body">
+            <div class="row g-2 mb-2">
+                <div class="col-md-3">
+                    <label class="form-label small">Duration</label>
+                    <select class="form-select form-select-sm" @bind="bulkSilenceHours">
+                        <option value="1">1 hour</option>
+                        <option value="2">2 hours</option>
+                        <option value="4">4 hours</option>
+                        <option value="8">8 hours</option>
+                        <option value="24">24 hours</option>
+                        <option value="72">3 days</option>
+                    </select>
+                </div>
+                <div class="col-md-9">
+                    <label class="form-label small">Comment</label>
+                    <input class="form-control form-control-sm" @bind="bulkSilenceComment"
+                           placeholder="Reason for silence" />
+                </div>
+            </div>
+            @if (!string.IsNullOrEmpty(bulkSilenceError))
+            {
+                <div class="alert alert-danger py-1 small mb-2">@bulkSilenceError</div>
+            }
+            @if (!string.IsNullOrEmpty(bulkSilenceResult))
+            {
+                <div class="alert alert-success py-1 small mb-2">@bulkSilenceResult</div>
+            }
+            <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-warning" @onclick="SubmitBulkSilence"
+                        disabled="@(string.IsNullOrWhiteSpace(bulkSilenceComment) || isBulkSilencing)">
+                    @if (isBulkSilencing) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                    <span class="bi bi-bell-slash me-1"></span>Create Silences
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showBulkSilenceForm = false">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@* ── Create silence form ── *@
+@if (showSilenceForm && silenceTarget is not null)
+{
+    <div class="card mt-3 border-warning">
+        <div class="card-header d-flex justify-content-between align-items-center py-2">
+            <h6 class="mb-0"><span class="bi bi-bell-slash me-1"></span>Silence — @silenceTarget.Alert.Name</h6>
+            <button class="btn-close btn-sm" @onclick="CancelSilence"></button>
+        </div>
+        <div class="card-body">
+            <div class="row g-2 mb-2">
+                <div class="col-md-4">
+                    <label class="form-label small">Matcher (label=value)</label>
+                    <input class="form-control form-control-sm font-monospace"
+                           @bind="silenceMatcher" placeholder="alertname=…" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">Duration</label>
+                    <select class="form-select form-select-sm" @bind="silenceHours">
+                        <option value="1">1 hour</option>
+                        <option value="2">2 hours</option>
+                        <option value="4">4 hours</option>
+                        <option value="8">8 hours</option>
+                        <option value="24">24 hours</option>
+                        <option value="72">3 days</option>
+                    </select>
+                </div>
+                <div class="col-md-5">
+                    <label class="form-label small">Comment</label>
+                    <input class="form-control form-control-sm" @bind="silenceComment"
+                           placeholder="Reason for silence" />
+                </div>
+            </div>
+            @if (!string.IsNullOrEmpty(silenceError))
+            {
+                <div class="alert alert-danger py-1 small mb-2">@silenceError</div>
+            }
+            <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-warning" @onclick="SubmitSilence"
+                        disabled="@(string.IsNullOrWhiteSpace(silenceMatcher) || string.IsNullOrWhiteSpace(silenceComment) || isSilencing)">
+                    @if (isSilencing) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                    <span class="bi bi-bell-slash me-1"></span>Create Silence
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelSilence">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<ClusterAlertVm> clusterAlerts = [];
+    private Dictionary<string, AlertIncident> incidentsByFingerprint = new();
+    private string filterClusterId = "";
+    private string filterSeverity = "";
+    private string? expandedKey;
+    private string? confirmKey;
+    private string? executingKey;
+    private Dictionary<string, string> remediationResults = new();
+    private bool isLoading = true;
+    private DateTime? lastRefreshed;
+    private string? currentUser;
+    private Timer? refreshTimer;
+
+    // Silence form
+    private bool showSilenceForm;
+    private AlertRow? silenceTarget;
+    private string silenceMatcher = "";
+    private int silenceHours = 2;
+    private string silenceComment = "";
+    private string? silenceError;
+    private bool isSilencing;
+
+    // Bulk silence form
+    private bool showBulkSilenceForm;
+    private int bulkSilenceHours = 2;
+    private string bulkSilenceComment = "";
+    private string? bulkSilenceError;
+    private string? bulkSilenceResult;
+    private bool isBulkSilencing;
+
+    private HashSet<string> selectedKeys = [];
+
+    private IEnumerable<AlertRow> Filtered => clusterAlerts
+        .Where(vm => vm.Alerts is not null)
+        .SelectMany(vm => vm.Alerts!.Select(a =>
+        {
+            string key = $"{vm.Cluster.Id}:{a.Fingerprint}";
+            incidentsByFingerprint.TryGetValue(key, out AlertIncident? incident);
+            return new AlertRow(
+                Key: key,
+                ClusterId: vm.Cluster.Id,
+                ClusterName: vm.Cluster.Name,
+                Alert: a,
+                Remediation: RemediationService.TryGetRemediation(a),
+                Incident: incident);
+        }))
+        .Where(r =>
+            (string.IsNullOrEmpty(filterClusterId) || r.ClusterId.ToString() == filterClusterId) &&
+            (string.IsNullOrEmpty(filterSeverity) || r.Alert.Severity == filterSeverity));
+
+    protected override async Task OnInitializedAsync()
+    {
+        AuthenticationState auth = await AuthStateProvider.GetAuthenticationStateAsync();
+        currentUser = auth.User.Identity?.Name ?? "Unknown";
+        await Refresh();
+        refreshTimer = new Timer(_ => InvokeAsync(async () =>
+        {
+            await Refresh();
+            StateHasChanged();
+        }), null, TimeSpan.FromMinutes(2), TimeSpan.FromMinutes(2));
+    }
+
+    private async Task Refresh()
+    {
+        isLoading = true;
+        StateHasChanged();
+
+        List<KubernetesCluster> clusters;
+        using (ApplicationDbContext db = DbFactory.CreateDbContext())
+        {
+            clusters = await db.KubernetesClusters
+                .Include(c => c.Components)
+                .Where(c => c.TenantId == TenantId)
+                .OrderBy(c => c.Name)
+                .ToListAsync();
+        }
+
+        // Only query clusters that have Prometheus installed
+        List<KubernetesCluster> prometheusEnabled = clusters
+            .Where(c => c.Components.Any(comp =>
+                comp.HelmChartName == "kube-prometheus-stack" &&
+                comp.Status == ComponentStatus.Installed))
+            .ToList();
+
+        List<Task<ClusterAlertVm>> tasks = prometheusEnabled
+            .Select(c => LoadClusterAlertsAsync(c))
+            .ToList();
+
+        clusterAlerts = [.. await Task.WhenAll(tasks)];
+
+        // Build fingerprint → incident lookup keyed by "clusterId:fingerprint"
+        List<AlertIncident> activeIncidents =
+            await IncidentService.GetActiveIncidentsForTenantAsync(TenantId);
+        incidentsByFingerprint = activeIncidents
+            .Where(i => !string.IsNullOrEmpty(i.Fingerprint))
+            .ToDictionary(i => $"{i.ClusterId}:{i.Fingerprint}");
+
+        lastRefreshed = DateTime.UtcNow;
+        isLoading = false;
+    }
+
+    private async Task<ClusterAlertVm> LoadClusterAlertsAsync(KubernetesCluster cluster)
+    {
+        KubernetesOperationResult<List<AlertInfo>> result =
+            await PrometheusService.GetAlertsAsync(cluster.Id);
+
+        return result.IsSuccess
+            ? new ClusterAlertVm(cluster, result.Data ?? [], null)
+            : new ClusterAlertVm(cluster, null, result.Error);
+    }
+
+    private void Toggle(string key)
+    {
+        if (expandedKey == key) expandedKey = null;
+        else { expandedKey = key; confirmKey = null; }
+    }
+
+    private void StartConfirm(string key)
+    {
+        confirmKey = confirmKey == key ? null : key;
+        expandedKey = null;
+        remediationResults.Remove(key);
+    }
+
+    private async Task ExecuteRemediation(AlertRow row)
+    {
+        if (row.Remediation is null) return;
+        executingKey = row.Key;
+        StateHasChanged();
+
+        KubernetesOperationResult result =
+            await RemediationService.ExecuteAsync(row.ClusterId, row.Remediation, currentUser);
+
+        remediationResults[row.Key] = result.IsSuccess
+            ? "✓ Remediation executed successfully. The alert should clear shortly."
+            : $"✗ {result.Error}";
+
+        executingKey = null;
+
+        if (result.IsSuccess)
+        {
+            // Wait a moment then refresh alerts
+            await Task.Delay(2000);
+            await Refresh();
+        }
+    }
+
+    private void StartSilence(AlertRow row)
+    {
+        silenceTarget = row;
+        silenceMatcher = $"alertname={row.Alert.Name}";
+        silenceComment = "";
+        silenceError = null;
+        showSilenceForm = true;
+        expandedKey = null;
+        confirmKey = null;
+    }
+
+    private async Task AcknowledgeIncident(AlertIncident incident)
+    {
+        await IncidentService.AcknowledgeAsync(incident.Id, currentUser!);
+        await Refresh();
+    }
+
+    private async Task ResolveIncident(AlertIncident incident)
+    {
+        await IncidentService.ResolveAsync(incident.Id, currentUser!);
+        await Refresh();
+    }
+
+    private void ToggleSelect(string key)
+    {
+        if (!selectedKeys.Remove(key))
+            selectedKeys.Add(key);
+    }
+
+    private void ToggleSelectAll(bool select)
+    {
+        selectedKeys.Clear();
+        if (select)
+        {
+            foreach (AlertRow row in Filtered)
+                selectedKeys.Add(row.Key);
+        }
+    }
+
+    private async Task BulkAcknowledge()
+    {
+        List<Guid> incidentIds = Filtered
+            .Where(r => selectedKeys.Contains(r.Key)
+                     && r.Incident?.Status == IncidentStatus.Active)
+            .Select(r => r.Incident!.Id)
+            .ToList();
+
+        if (incidentIds.Count > 0)
+            await IncidentService.BulkAcknowledgeAsync(incidentIds, currentUser!);
+
+        selectedKeys.Clear();
+        await Refresh();
+    }
+
+    private void StartBulkSilence()
+    {
+        bulkSilenceComment = "";
+        bulkSilenceError = null;
+        bulkSilenceResult = null;
+        showBulkSilenceForm = true;
+    }
+
+    private async Task SubmitBulkSilence()
+    {
+        if (string.IsNullOrWhiteSpace(bulkSilenceComment)) return;
+
+        bulkSilenceError = null;
+        bulkSilenceResult = null;
+        isBulkSilencing = true;
+        StateHasChanged();
+
+        List<AlertRow> selected = Filtered
+            .Where(r => selectedKeys.Contains(r.Key))
+            .ToList();
+
+        int ok = 0, fail = 0;
+        foreach (AlertRow row in selected)
+        {
+            KubernetesOperationResult result = await PrometheusService.CreateSilenceAsync(
+                row.ClusterId,
+                bulkSilenceComment,
+                currentUser ?? "entkube-user",
+                TimeSpan.FromHours(bulkSilenceHours),
+                [new SilenceMatcher { Name = "alertname", Value = row.Alert.Name, IsEqual = true }]);
+
+            if (result.IsSuccess) ok++; else fail++;
+        }
+
+        isBulkSilencing = false;
+        selectedKeys.Clear();
+
+        if (fail == 0)
+        {
+            bulkSilenceResult = $"✓ Created {ok} silence{(ok == 1 ? "" : "s")} successfully.";
+            await Task.Delay(1500);
+            showBulkSilenceForm = false;
+            await Refresh();
+        }
+        else
+        {
+            bulkSilenceError = $"{ok} silence{(ok == 1 ? "" : "s")} created, {fail} failed.";
+        }
+    }
+
+    private void CancelSilence()
+    {
+        showSilenceForm = false;
+        silenceTarget = null;
+    }
+
+    private async Task SubmitSilence()
+    {
+        if (silenceTarget is null) return;
+        silenceError = null;
+
+        string[] parts = silenceMatcher.Split('=', 2);
+        if (parts.Length != 2 || string.IsNullOrWhiteSpace(parts[0]))
+        {
+            silenceError = "Format: label=value";
+            return;
+        }
+
+        isSilencing = true;
+        StateHasChanged();
+
+        KubernetesOperationResult result = await PrometheusService.CreateSilenceAsync(
+            silenceTarget.ClusterId,
+            silenceComment,
+            currentUser ?? "entkube-user",
+            TimeSpan.FromHours(silenceHours),
+            [new SilenceMatcher { Name = parts[0].Trim(), Value = parts[1].Trim(), IsEqual = true }]);
+
+        isSilencing = false;
+
+        if (result.IsSuccess)
+        {
+            showSilenceForm = false;
+            silenceTarget = null;
+            await Refresh();
+        }
+        else
+        {
+            silenceError = result.Error;
+        }
+    }
+
+    private static string FormatAge(DateTime startsAt)
+    {
+        TimeSpan age = DateTime.UtcNow - startsAt;
+        return age switch
+        {
+            { TotalMinutes: < 1 }  => "just now",
+            { TotalMinutes: < 60 } => $"{(int)age.TotalMinutes}m ago",
+            { TotalHours: < 24 }   => $"{(int)age.TotalHours}h ago",
+            _                      => $"{(int)age.TotalDays}d ago"
+        };
+    }
+
+    private static RenderFragment SeverityBadge(string severity) => severity switch
+    {
+        "critical" => @<span class="badge bg-danger">Critical</span>,
+        "warning"  => @<span class="badge bg-warning text-dark">Warning</span>,
+        "info"     => @<span class="badge bg-info text-dark">Info</span>,
+        _          => @<span class="badge bg-secondary">@severity</span>
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        if (refreshTimer is not null)
+            await refreshTimer.DisposeAsync();
+    }
+
+    private record ClusterAlertVm(KubernetesCluster Cluster, List<AlertInfo>? Alerts, string? Error);
+    private record AlertRow(string Key, Guid ClusterId, string ClusterName, AlertInfo Alert, AlertRemediation? Remediation, AlertIncident? Incident);
+}

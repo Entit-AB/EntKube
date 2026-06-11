@@ -1,0 +1,98 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+@* Cluster picker — required because LogBrowser is cluster-scoped *@
+<div class="d-flex align-items-center gap-3 mb-4">
+    <div class="d-flex align-items-center gap-2">
+        <label class="form-label small text-muted mb-0 text-nowrap">Cluster</label>
+        <select class="form-select form-select-sm" style="min-width:220px"
+                @bind="selectedClusterId" @bind:after="OnClusterChanged">
+            <option value="">— select a cluster —</option>
+            @foreach (ClusterOption opt in clusterOptions)
+            {
+                <option value="@opt.Id" disabled="@(!opt.HasLoki && !opt.HasPrometheus)">
+                    @opt.Name
+                    @if (!opt.HasLoki) { @(" (Loki not installed)") }
+                </option>
+            }
+        </select>
+    </div>
+
+    @if (selectedCluster is not null)
+    {
+        <div class="d-flex gap-2 small">
+            <span class="badge @(selectedCluster.HasLoki ? "bg-success" : "bg-secondary")">
+                <span class="bi bi-journal me-1"></span>Loki @(selectedCluster.HasLoki ? "installed" : "not installed")
+            </span>
+        </div>
+    }
+</div>
+
+@if (string.IsNullOrEmpty(selectedClusterId) && clusterOptions.Count == 0 && !isLoading)
+{
+    <EmptyState Icon="bi-hdd-rack"
+                Title="No clusters"
+                Message="No clusters are registered for this tenant." />
+}
+else if (string.IsNullOrEmpty(selectedClusterId))
+{
+    @if (clusterOptions.Count > 0)
+    {
+        <div class="text-center py-5 text-muted">
+            <span class="bi bi-journal display-4 d-block mb-2 opacity-25"></span>
+            Select a cluster above to browse logs.
+        </div>
+    }
+}
+else
+{
+    <LogBrowser ClusterId="@(Guid.Parse(selectedClusterId))" />
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<ClusterOption> clusterOptions = [];
+    private ClusterOption? selectedCluster;
+    private string selectedClusterId = "";
+    private bool isLoading = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        List<KubernetesCluster> clusters = await db.KubernetesClusters
+            .Include(c => c.Components)
+            .Where(c => c.TenantId == TenantId)
+            .OrderBy(c => c.Name)
+            .ToListAsync();
+
+        clusterOptions = clusters.Select(c => new ClusterOption(
+            c.Id.ToString(),
+            c.Name,
+            HasLoki: c.Components.Any(comp =>
+                (comp.HelmChartName ?? "").Contains("loki", StringComparison.OrdinalIgnoreCase) &&
+                comp.Status == ComponentStatus.Installed),
+            HasPrometheus: c.Components.Any(comp => comp.HelmChartName == "kube-prometheus-stack" && comp.Status == ComponentStatus.Installed)
+        )).ToList();
+
+        // Auto-select the first cluster that has Loki, then any cluster
+        ClusterOption? best = clusterOptions.FirstOrDefault(c => c.HasLoki)
+                           ?? clusterOptions.FirstOrDefault();
+        if (best is not null)
+        {
+            selectedClusterId = best.Id;
+            selectedCluster = best;
+        }
+
+        isLoading = false;
+    }
+
+    private void OnClusterChanged()
+    {
+        selectedCluster = clusterOptions.FirstOrDefault(c => c.Id == selectedClusterId);
+    }
+
+    private record ClusterOption(string Id, string Name, bool HasLoki, bool HasPrometheus);
+}

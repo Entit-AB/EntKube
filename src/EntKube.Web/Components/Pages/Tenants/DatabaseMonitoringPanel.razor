@@ -1,0 +1,103 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject PrometheusService PrometheusService
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+@if (summaries.Count == 0 && !isLoading)
+{
+    <div class="text-muted small text-center py-3">
+        <span class="bi bi-bar-chart me-1"></span>
+        No CNPG clusters found, or Prometheus is not available for this cluster.
+    </div>
+}
+else if (isLoading)
+{
+    <div class="text-muted small text-center py-2">
+        <span class="bi bi-hourglass-split me-1"></span> Loading database metrics…
+    </div>
+}
+else
+{
+    @foreach (CnpgMetricsSummary summary in summaries)
+    {
+        <div class="card mb-3">
+            <div class="card-header py-2 d-flex align-items-center gap-2">
+                <span class="bi bi-database-fill-gear text-info"></span>
+                <strong>@summary.ClusterName</strong>
+                <span class="ms-auto text-muted small">@summary.QueriedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+            </div>
+            <div class="card-body py-2">
+                <div class="row g-3 mb-3">
+                    <div class="col-auto">
+                        <div class="small text-muted">Replication Lag</div>
+                        <div class="fw-semibold @(summary.ReplicationLagSeconds > 5 ? "text-danger" : summary.ReplicationLagSeconds > 1 ? "text-warning" : "text-success")">
+                            @summary.ReplicationLagSeconds.ToString("F1")s
+                        </div>
+                    </div>
+                    <div class="col-auto">
+                        <div class="small text-muted">Backends</div>
+                        <div class="fw-semibold">@summary.TotalBackends</div>
+                    </div>
+                    <div class="col-auto">
+                        <div class="small text-muted">Active Queries</div>
+                        <div class="fw-semibold">@summary.ActiveQueries</div>
+                    </div>
+                </div>
+
+                @if (summary.DatabaseSizes.Count > 0)
+                {
+                    <div class="small text-muted mb-1">Database Sizes</div>
+                    <table class="table table-sm mb-0">
+                        <tbody>
+                            @foreach (CnpgDatabaseSize db in summary.DatabaseSizes)
+                            {
+                                <tr>
+                                    <td class="py-1">@db.DatabaseName</td>
+                                    <td class="py-1 text-end text-muted">@db.SizeMiB.ToString("F1") MiB</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public required Guid ClusterId { get; set; }
+
+    private List<CnpgMetricsSummary> summaries = [];
+    private bool isLoading = true;
+
+    protected override async Task OnParametersSetAsync() => await LoadMetrics();
+
+    private async Task LoadMetrics()
+    {
+        isLoading = true;
+        StateHasChanged();
+
+        List<string> cnpgNames;
+        using (ApplicationDbContext db = DbFactory.CreateDbContext())
+        {
+            cnpgNames = await db.CnpgClusters
+                .Where(c => c.KubernetesClusterId == ClusterId)
+                .Select(c => c.Name)
+                .ToListAsync();
+        }
+
+        List<CnpgMetricsSummary> results = [];
+        foreach (string name in cnpgNames)
+        {
+            KubernetesOperationResult<CnpgMetricsSummary> result =
+                await PrometheusService.GetCnpgClusterMetricsAsync(ClusterId, name);
+
+            if (result.IsSuccess && result.Data is not null)
+                results.Add(result.Data);
+        }
+
+        summaries = results;
+        isLoading = false;
+    }
+}

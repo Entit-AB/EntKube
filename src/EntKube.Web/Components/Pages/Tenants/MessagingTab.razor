@@ -1,0 +1,1504 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject RabbitMQService RabbitMQService
+@inject StorageService StorageService
+@inject TenantService TenantService
+
+@* ===========================================================================
+   Messaging Tab — RabbitMQ cluster management and topology.
+   Full lifecycle for clusters plus topology management via the K8s Topology
+   Operator (vhosts, queues, exchanges, routing bindings, users, permissions).
+   App linkage syncs AMQP connection details into app namespace K8s Secrets.
+   =========================================================================== *@
+
+<LoadingPanel Loading="@loading" LoadingText="Loading RabbitMQ clusters…">
+@if (!loading)
+{
+    @* ── Operator availability badges ── *@
+    <div class="d-flex gap-2 mb-4 flex-wrap">
+        @if (clusterOperatorAvailable)
+        {
+            <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2">
+                <i class="bi bi-collection me-1"></i>RabbitMQ Cluster Operator
+                @if (operatorStatus?.ClusterOperatorClusterName is not null)
+                {
+                    <small class="ms-1 opacity-75">on @operatorStatus.ClusterOperatorClusterName</small>
+                }
+            </span>
+        }
+        else
+        {
+            <span class="badge bg-secondary-subtle text-secondary border px-3 py-2">
+                <i class="bi bi-collection me-1"></i>RabbitMQ Cluster Operator — not installed
+            </span>
+        }
+
+        @if (topologyOperatorAvailable)
+        {
+            <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2">
+                <i class="bi bi-diagram-3 me-1"></i>Topology Operator
+                @if (operatorStatus?.TopologyOperatorClusterName is not null)
+                {
+                    <small class="ms-1 opacity-75">on @operatorStatus.TopologyOperatorClusterName</small>
+                }
+            </span>
+        }
+        else
+        {
+            <span class="badge bg-secondary-subtle text-secondary border px-3 py-2">
+                <i class="bi bi-diagram-3 me-1"></i>Topology Operator — not installed
+            </span>
+        }
+    </div>
+
+    @* ── Cluster list ── *@
+    <div class="mb-4">
+        <h5 class="d-flex align-items-center gap-2 mb-3">
+            <i class="bi bi-collection text-primary"></i>RabbitMQ Clusters
+            <span class="badge bg-secondary rounded-pill">@clusters.Count</span>
+            <button class="btn btn-sm btn-secondary ms-auto" @onclick="ShowCreateForm" disabled="@showCreateForm">
+                <i class="bi bi-plus-lg me-1"></i>Create Cluster
+            </button>
+        </h5>
+
+        @if (showCreateForm)
+        {
+            <div class="card shadow-sm mb-3 border-secondary">
+                <div class="card-header bg-secondary bg-opacity-10 d-flex align-items-center justify-content-between">
+                    <h6 class="mb-0"><i class="bi bi-plus-circle me-2"></i>New RabbitMQ Cluster</h6>
+                    <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CancelCreate"><i class="bi bi-x-lg"></i></button>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label small">Cluster Name</label>
+                            <input class="form-control form-control-sm" @bind="createName" placeholder="rabbitmq-prod" />
+                            <div class="form-text small">DNS-safe, max 63 chars.</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">Kubernetes Cluster</label>
+                            <select class="form-select form-select-sm" @bind="createK8sClusterId">
+                                <option value="@Guid.Empty">Select cluster...</option>
+                                @foreach (KubernetesCluster k in allK8sClusters)
+                                {
+                                    <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">Namespace</label>
+                            <input class="form-control form-control-sm" @bind="createNamespace" placeholder="rabbitmq" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">RabbitMQ Version</label>
+                            <input class="form-control form-control-sm" @bind="createVersion" placeholder="3.13" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Replicas</label>
+                            <input type="number" class="form-control form-control-sm" @bind="createReplicas" min="1" max="9" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Storage Size</label>
+                            <input class="form-control form-control-sm" @bind="createStorageSize" placeholder="10Gi" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Storage Class <span class="text-muted">(optional)</span></label>
+                            <input class="form-control form-control-sm" @bind="createStorageClass" placeholder="default" />
+                        </div>
+                        <div class="col-md-8">
+                            <label class="form-label small">S3 Storage Link <span class="text-muted">(optional, for backups)</span></label>
+                            <select class="form-select form-select-sm" @bind="createStorageLinkId">
+                                <option value="@Guid.Empty">No backup storage</option>
+                                @foreach (StorageLink sl in storageLinks)
+                                {
+                                    <option value="@sl.Id">@sl.Name (@sl.BucketName)</option>
+                                }
+                            </select>
+                        </div>
+                    </div>
+                    @if (!string.IsNullOrEmpty(createError))
+                    {
+                        <div class="alert alert-danger mt-3 mb-0 py-2 small">@createError</div>
+                    }
+                    <div class="mt-3 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="CreateCluster" disabled="@creating">
+                            @if (creating) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Create
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelCreate">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (clusters.Count == 0)
+        {
+            <div class="text-muted small py-3 ps-1">No RabbitMQ clusters provisioned for this tenant.</div>
+        }
+        else
+        {
+            @foreach (RabbitMQCluster cluster in clusters)
+            {
+                bool expanded = expandedClusterId == cluster.Id;
+
+                <div class="card shadow-sm mb-3 @(expanded ? "border-primary" : "")">
+                    <div class="card-header d-flex align-items-center gap-2 @(expanded ? "bg-primary bg-opacity-10" : "bg-light")"
+                         style="cursor:pointer" @onclick="() => ToggleCluster(cluster.Id)">
+                        <i class="bi bi-collection @(expanded ? "text-primary" : "text-secondary")"></i>
+                        <span class="fw-semibold">@cluster.Name</span>
+                        <small class="text-muted">@cluster.Namespace</small>
+                        <span class="badge @StatusBadgeClass(cluster.Status) ms-1">@cluster.Status</span>
+                        <small class="text-muted ms-2">
+                            <i class="bi bi-server me-1"></i>@cluster.KubernetesCluster.Name
+                            <span class="ms-2"><i class="bi bi-layers me-1"></i>@cluster.KubernetesCluster.Environment.Name</span>
+                        </small>
+                        <small class="text-muted ms-2">v@cluster.RabbitMQVersion &bull; @cluster.Replicas nodes &bull; @cluster.StorageSize</small>
+                        @if (cluster.StorageLinkId.HasValue)
+                        {
+                            <span class="badge bg-info-subtle text-info border border-info-subtle ms-1">
+                                <i class="bi bi-cloud me-1"></i>Backups
+                            </span>
+                        }
+                        <i class="bi @(expanded ? "bi-chevron-up" : "bi-chevron-down") ms-auto text-muted"></i>
+                    </div>
+
+                    @if (!string.IsNullOrEmpty(cluster.LastError) && cluster.Status == RabbitMQClusterStatus.Failed)
+                    {
+                        <div class="px-3 py-2 bg-danger-subtle text-danger small border-bottom">
+                            <i class="bi bi-exclamation-triangle me-1"></i>@cluster.LastError
+                        </div>
+                    }
+
+                    @if (expanded)
+                    {
+                        <div class="card-body pt-3">
+                            <ul class="nav nav-pills mb-3 gap-1 flex-wrap">
+                                @foreach (string tab in new[] { "vhosts", "queues", "exchanges", "routing", "users", "app-links", "backup", "credentials", "metrics" })
+                                {
+                                    <li class="nav-item">
+                                        <button class="nav-link @(clusterTab == tab ? "active" : "")"
+                                                @onclick="() => SetClusterTab(tab, cluster.Id)">
+                                            @TabLabel(tab)
+                                        </button>
+                                    </li>
+                                }
+                            </ul>
+
+                            @if (!string.IsNullOrEmpty(topologyError))
+                            {
+                                <div class="alert alert-danger py-2 small mb-3">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>@topologyError
+                                    <button type="button" class="btn-close float-end" @onclick="() => topologyError = null"></button>
+                                </div>
+                            }
+
+                            @* ── Vhosts ── *@
+                            @if (clusterTab == "vhosts")
+                            {
+                                <div class="d-flex align-items-center mb-2">
+                                    <h6 class="mb-0 me-2"><i class="bi bi-hdd-rack me-1 text-primary"></i>Virtual Hosts</h6>
+                                    <button class="btn btn-sm btn-secondary ms-auto" @onclick="() => showVhostForm = !showVhostForm">
+                                        <i class="bi bi-plus-lg me-1"></i>Add Vhost
+                                    </button>
+                                </div>
+
+                                @if (showVhostForm)
+                                {
+                                    <div class="card border-secondary mb-3">
+                                        <div class="card-body py-2">
+                                            <div class="row g-2 align-items-end">
+                                                <div class="col">
+                                                    <label class="form-label small">Vhost Path</label>
+                                                    <input class="form-control form-control-sm" @bind="newVhostName" placeholder="/my-app" />
+                                                    <div class="form-text small">Use "/" for the default vhost or "/path" for a named vhost.</div>
+                                                </div>
+                                                <div class="col-auto">
+                                                    <button class="btn btn-sm btn-primary" @onclick="() => CreateVhost(cluster)" disabled="@submitting">
+                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="() => showVhostForm = false">Cancel</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (loadingTopology)
+                                {
+                                    <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div>
+                                }
+                                else if (vhosts.Count == 0)
+                                {
+                                    <p class="text-muted small">No vhosts managed via topology operator yet.</p>
+                                }
+                                else
+                                {
+                                    <table class="table table-sm table-hover small">
+                                        <thead><tr><th>Vhost</th><th>K8s Name</th><th></th></tr></thead>
+                                        <tbody>
+                                            @foreach (RabbitMQVhostInfo v in vhosts)
+                                            {
+                                                <tr>
+                                                    <td class="align-middle fw-semibold">@v.VhostName</td>
+                                                    <td class="align-middle text-muted font-monospace">@v.K8sName</td>
+                                                    <td class="align-middle text-end">
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteVhost(cluster, v.K8sName)">
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            }
+
+                            @* ── Queues ── *@
+                            @if (clusterTab == "queues")
+                            {
+                                <div class="d-flex align-items-center mb-2">
+                                    <h6 class="mb-0"><i class="bi bi-stack me-1 text-primary"></i>Queues</h6>
+                                    <button class="btn btn-sm btn-secondary ms-auto" @onclick="() => showQueueForm = !showQueueForm">
+                                        <i class="bi bi-plus-lg me-1"></i>Add Queue
+                                    </button>
+                                </div>
+
+                                @if (showQueueForm)
+                                {
+                                    <div class="card border-secondary mb-3">
+                                        <div class="card-body py-2">
+                                            <div class="row g-2">
+                                                <div class="col-md-5">
+                                                    <label class="form-label small">Queue Name</label>
+                                                    <input class="form-control form-control-sm" @bind="newQueueName" placeholder="orders.created" />
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <label class="form-label small">Vhost</label>
+                                                    <input class="form-control form-control-sm" @bind="newQueueVhost" placeholder="/" />
+                                                </div>
+                                                <div class="col-md-2">
+                                                    <label class="form-label small">Type</label>
+                                                    <select class="form-select form-select-sm" @bind="newQueueType">
+                                                        <option value="quorum">Quorum</option>
+                                                        <option value="classic">Classic</option>
+                                                        <option value="stream">Stream</option>
+                                                    </select>
+                                                </div>
+                                                <div class="col-md-2 d-flex align-items-end gap-2">
+                                                    <div class="form-check form-check-inline">
+                                                        <input class="form-check-input" type="checkbox" @bind="newQueueDurable" />
+                                                        <label class="form-check-label small">Durable</label>
+                                                    </div>
+                                                </div>
+                                                <div class="col-12 d-flex gap-2">
+                                                    <button class="btn btn-sm btn-primary" @onclick="() => CreateQueue(cluster)" disabled="@submitting">
+                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showQueueForm = false">Cancel</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (loadingTopology) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
+                                else if (queues.Count == 0) { <p class="text-muted small">No queues yet.</p> }
+                                else
+                                {
+                                    <table class="table table-sm table-hover small">
+                                        <thead><tr><th>Name</th><th>Vhost</th><th>Type</th><th>Durable</th><th></th></tr></thead>
+                                        <tbody>
+                                            @foreach (RabbitMQQueueInfo q in queues)
+                                            {
+                                                <tr>
+                                                    <td class="align-middle fw-semibold">@q.QueueName</td>
+                                                    <td class="align-middle text-muted">@q.Vhost</td>
+                                                    <td class="align-middle"><span class="badge bg-secondary-subtle text-secondary border">@q.QueueType</span></td>
+                                                    <td class="align-middle">@(q.Durable ? "✓" : "—")</td>
+                                                    <td class="align-middle text-end">
+                                                        <button class="btn btn-sm btn-outline-info me-1"
+                                                                @onclick="() => PrepareAppLink(cluster, q.QueueName, null, q.Vhost)">
+                                                            <i class="bi bi-link-45deg me-1"></i>Link to App
+                                                        </button>
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteQueue(cluster, q.K8sName)">
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            }
+
+                            @* ── Exchanges ── *@
+                            @if (clusterTab == "exchanges")
+                            {
+                                <div class="d-flex align-items-center mb-2">
+                                    <h6 class="mb-0"><i class="bi bi-arrow-left-right me-1 text-primary"></i>Exchanges</h6>
+                                    <button class="btn btn-sm btn-secondary ms-auto" @onclick="() => showExchangeForm = !showExchangeForm">
+                                        <i class="bi bi-plus-lg me-1"></i>Add Exchange
+                                    </button>
+                                </div>
+
+                                @if (showExchangeForm)
+                                {
+                                    <div class="card border-secondary mb-3">
+                                        <div class="card-body py-2">
+                                            <div class="row g-2">
+                                                <div class="col-md-5">
+                                                    <label class="form-label small">Exchange Name</label>
+                                                    <input class="form-control form-control-sm" @bind="newExchangeName" placeholder="orders" />
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <label class="form-label small">Vhost</label>
+                                                    <input class="form-control form-control-sm" @bind="newExchangeVhost" placeholder="/" />
+                                                </div>
+                                                <div class="col-md-2">
+                                                    <label class="form-label small">Type</label>
+                                                    <select class="form-select form-select-sm" @bind="newExchangeType">
+                                                        <option value="direct">Direct</option>
+                                                        <option value="fanout">Fanout</option>
+                                                        <option value="topic">Topic</option>
+                                                        <option value="headers">Headers</option>
+                                                    </select>
+                                                </div>
+                                                <div class="col-md-2 d-flex align-items-end">
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="checkbox" @bind="newExchangeDurable" />
+                                                        <label class="form-check-label small">Durable</label>
+                                                    </div>
+                                                </div>
+                                                <div class="col-12 d-flex gap-2">
+                                                    <button class="btn btn-sm btn-primary" @onclick="() => CreateExchange(cluster)" disabled="@submitting">
+                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showExchangeForm = false">Cancel</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (loadingTopology) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
+                                else if (exchanges.Count == 0) { <p class="text-muted small">No exchanges yet.</p> }
+                                else
+                                {
+                                    <table class="table table-sm table-hover small">
+                                        <thead><tr><th>Name</th><th>Vhost</th><th>Type</th><th>Durable</th><th></th></tr></thead>
+                                        <tbody>
+                                            @foreach (RabbitMQExchangeInfo ex in exchanges)
+                                            {
+                                                <tr>
+                                                    <td class="align-middle fw-semibold">@ex.ExchangeName</td>
+                                                    <td class="align-middle text-muted">@ex.Vhost</td>
+                                                    <td class="align-middle"><span class="badge bg-secondary-subtle text-secondary border">@ex.ExchangeType</span></td>
+                                                    <td class="align-middle">@(ex.Durable ? "✓" : "—")</td>
+                                                    <td class="align-middle text-end">
+                                                        <button class="btn btn-sm btn-outline-info me-1"
+                                                                @onclick="() => PrepareAppLink(cluster, null, ex.ExchangeName, ex.Vhost)">
+                                                            <i class="bi bi-link-45deg me-1"></i>Link to App
+                                                        </button>
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteExchange(cluster, ex.K8sName)">
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            }
+
+                            @* ── Routing Bindings ── *@
+                            @if (clusterTab == "routing")
+                            {
+                                <div class="d-flex align-items-center mb-2">
+                                    <h6 class="mb-0"><i class="bi bi-signpost-split me-1 text-primary"></i>Routing Bindings</h6>
+                                    <button class="btn btn-sm btn-secondary ms-auto" @onclick="() => showRoutingForm = !showRoutingForm">
+                                        <i class="bi bi-plus-lg me-1"></i>Add Binding
+                                    </button>
+                                </div>
+
+                                @if (showRoutingForm)
+                                {
+                                    <div class="card border-secondary mb-3">
+                                        <div class="card-body py-2">
+                                            <div class="row g-2">
+                                                <div class="col-md-3">
+                                                    <label class="form-label small">Vhost</label>
+                                                    <input class="form-control form-control-sm" @bind="newBindingVhost" placeholder="/" />
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <label class="form-label small">Source Exchange</label>
+                                                    <input class="form-control form-control-sm" @bind="newBindingSource" placeholder="orders" />
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <label class="form-label small">Destination</label>
+                                                    <input class="form-control form-control-sm" @bind="newBindingDest" placeholder="orders.created" />
+                                                </div>
+                                                <div class="col-md-1">
+                                                    <label class="form-label small">Type</label>
+                                                    <select class="form-select form-select-sm" @bind="newBindingDestType">
+                                                        <option value="queue">Queue</option>
+                                                        <option value="exchange">Exchange</option>
+                                                    </select>
+                                                </div>
+                                                <div class="col-md-2">
+                                                    <label class="form-label small">Routing Key</label>
+                                                    <input class="form-control form-control-sm" @bind="newBindingRoutingKey" placeholder="created" />
+                                                </div>
+                                                <div class="col-12 d-flex gap-2">
+                                                    <button class="btn btn-sm btn-primary" @onclick="() => CreateRoutingBinding(cluster)" disabled="@submitting">
+                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showRoutingForm = false">Cancel</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (loadingTopology) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
+                                else if (routingBindings.Count == 0) { <p class="text-muted small">No routing bindings yet.</p> }
+                                else
+                                {
+                                    <table class="table table-sm table-hover small">
+                                        <thead><tr><th>Source</th><th>→</th><th>Destination</th><th>Type</th><th>Routing Key</th><th>Vhost</th><th></th></tr></thead>
+                                        <tbody>
+                                            @foreach (RabbitMQRoutingBindingInfo rb in routingBindings)
+                                            {
+                                                <tr>
+                                                    <td class="align-middle">@rb.Source</td>
+                                                    <td class="align-middle text-muted">→</td>
+                                                    <td class="align-middle fw-semibold">@rb.Destination</td>
+                                                    <td class="align-middle"><span class="badge bg-secondary-subtle text-secondary border">@rb.DestinationType</span></td>
+                                                    <td class="align-middle font-monospace text-muted">@rb.RoutingKey</td>
+                                                    <td class="align-middle text-muted">@rb.Vhost</td>
+                                                    <td class="align-middle text-end">
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteRoutingBinding(cluster, rb.K8sName)">
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            }
+
+                            @* ── Users ── *@
+                            @if (clusterTab == "users")
+                            {
+                                <div class="d-flex align-items-center mb-2">
+                                    <h6 class="mb-0"><i class="bi bi-person-badge me-1 text-primary"></i>Users</h6>
+                                    <button class="btn btn-sm btn-secondary ms-auto" @onclick="() => showUserForm = !showUserForm">
+                                        <i class="bi bi-plus-lg me-1"></i>Add User
+                                    </button>
+                                </div>
+
+                                @if (showUserForm)
+                                {
+                                    <div class="card border-secondary mb-3">
+                                        <div class="card-body py-2">
+                                            <div class="row g-2">
+                                                <div class="col-md-4">
+                                                    <label class="form-label small">Username</label>
+                                                    <input class="form-control form-control-sm" @bind="newUsername" placeholder="app-user" />
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <label class="form-label small">Password</label>
+                                                    <input type="password" class="form-control form-control-sm" @bind="newUserPassword" />
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <label class="form-label small">Tags (comma-separated)</label>
+                                                    <input class="form-control form-control-sm" @bind="newUserTags" placeholder="monitoring,management" />
+                                                    <div class="form-text small">management, monitoring, administrator, policymaker</div>
+                                                </div>
+                                                <div class="col-12 d-flex gap-2">
+                                                    <button class="btn btn-sm btn-primary" @onclick="() => CreateUser(cluster)" disabled="@submitting">
+                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showUserForm = false">Cancel</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (loadingTopology) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
+                                else if (users.Count == 0) { <p class="text-muted small">No topology-managed users yet.</p> }
+                                else
+                                {
+                                    <table class="table table-sm table-hover small">
+                                        <thead><tr><th>Username</th><th>Tags</th><th>K8s Name</th><th></th></tr></thead>
+                                        <tbody>
+                                            @foreach (RabbitMQUserInfo u in users)
+                                            {
+                                                <tr>
+                                                    <td class="align-middle fw-semibold">@u.Username</td>
+                                                    <td class="align-middle">
+                                                        @foreach (string tag in u.Tags)
+                                                        {
+                                                            <span class="badge bg-secondary-subtle text-secondary border me-1">@tag</span>
+                                                        }
+                                                    </td>
+                                                    <td class="align-middle text-muted font-monospace">@u.K8sName</td>
+                                                    <td class="align-middle text-end">
+                                                        <button class="btn btn-sm btn-outline-warning me-1"
+                                                                @onclick="() => PreparePermission(u.Username)">
+                                                            <i class="bi bi-shield-check me-1"></i>Permissions
+                                                        </button>
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteUser(cluster, u.K8sName)">
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+
+                                @if (showPermissionForm && permissionTargetUser is not null)
+                                {
+                                    <div class="card border-warning mt-3">
+                                        <div class="card-header bg-warning bg-opacity-10 small fw-semibold">
+                                            <i class="bi bi-shield-check me-1"></i>Set Permissions — @permissionTargetUser
+                                        </div>
+                                        <div class="card-body py-2">
+                                            <div class="row g-2">
+                                                <div class="col-md-3">
+                                                    <label class="form-label small">Vhost</label>
+                                                    <input class="form-control form-control-sm" @bind="permVhost" placeholder="/" />
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <label class="form-label small">Configure (regex)</label>
+                                                    <input class="form-control form-control-sm" @bind="permConfigure" placeholder=".*" />
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <label class="form-label small">Write (regex)</label>
+                                                    <input class="form-control form-control-sm" @bind="permWrite" placeholder=".*" />
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <label class="form-label small">Read (regex)</label>
+                                                    <input class="form-control form-control-sm" @bind="permRead" placeholder=".*" />
+                                                </div>
+                                                <div class="col-12 d-flex gap-2">
+                                                    <button class="btn btn-sm btn-warning" @onclick="() => SetPermission(cluster)" disabled="@submitting">
+                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Apply
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => { showPermissionForm = false; }">Cancel</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+                            }
+
+                            @* ── App Links ── *@
+                            @if (clusterTab == "app-links")
+                            {
+                                <div class="d-flex align-items-center mb-2">
+                                    <h6 class="mb-0"><i class="bi bi-link-45deg me-1 text-primary"></i>App Links</h6>
+                                    <button class="btn btn-sm btn-secondary ms-auto" @onclick="() => showAppLinkForm = !showAppLinkForm">
+                                        <i class="bi bi-plus-lg me-1"></i>Link App
+                                    </button>
+                                </div>
+
+                                <p class="text-muted small mb-3">
+                                    Each link provisions a dedicated RabbitMQ user for the app and syncs the connection details
+                                    (host, port, vhost, credentials, queue/exchange) into a Kubernetes Secret in the app's namespace.
+                                </p>
+
+                                @if (showAppLinkForm)
+                                {
+                                    <div class="card border-secondary mb-3">
+                                        <div class="card-body py-2">
+                                            <div class="alert alert-info py-2 small mb-3">
+                                                <i class="bi bi-person-plus me-1"></i>
+                                                A dedicated RabbitMQ user with full access to the chosen vhost will be automatically
+                                                created and its credentials stored in the vault, then synced into the K8s secret below.
+                                            </div>
+                                            <div class="row g-2">
+                                                <div class="col-md-4">
+                                                    <label class="form-label small">App Deployment</label>
+                                                    <select class="form-select form-select-sm" @bind="linkAppDeploymentId">
+                                                        <option value="@Guid.Empty">Select deployment...</option>
+                                                        @foreach (AppDeployment dep in allDeployments)
+                                                        {
+                                                            <option value="@dep.Id">@dep.App.Customer.Name / @dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
+                                                        }
+                                                    </select>
+                                                </div>
+                                                <div class="col-md-2">
+                                                    <label class="form-label small">Vhost</label>
+                                                    <input class="form-control form-control-sm" @bind="linkVhost" placeholder="/" />
+                                                </div>
+                                                <div class="col-md-2">
+                                                    <label class="form-label small">Queue <span class="text-muted">(optional)</span></label>
+                                                    <input class="form-control form-control-sm" @bind="linkQueue" placeholder="orders.created" />
+                                                </div>
+                                                <div class="col-md-2">
+                                                    <label class="form-label small">Exchange <span class="text-muted">(optional)</span></label>
+                                                    <input class="form-control form-control-sm" @bind="linkExchange" placeholder="orders" />
+                                                </div>
+                                                <div class="col-md-2">
+                                                    <label class="form-label small">K8s Secret Name</label>
+                                                    <input class="form-control form-control-sm" @bind="linkSecretName" placeholder="rabbitmq" />
+                                                </div>
+                                                <div class="col-12 d-flex gap-2">
+                                                    <button class="btn btn-sm btn-primary" @onclick="() => CreateAppLink(cluster)" disabled="@submitting">
+                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Link &amp; Sync
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAppLinkForm = false">Cancel</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (loadingTopology) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
+                                else if (messagingBindings.Count == 0) { <p class="text-muted small">No app links yet.</p> }
+                                else
+                                {
+                                    <table class="table table-sm table-hover small">
+                                        <thead>
+                                            <tr><th>App / Deployment</th><th>Vhost</th><th>Queue</th><th>Exchange</th><th>Secret</th><th>Last Synced</th><th></th></tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (MessagingBinding mb in messagingBindings)
+                                            {
+                                                <tr>
+                                                    <td class="align-middle">
+                                                        <div class="fw-semibold">@mb.AppDeployment.App.Customer.Name / @mb.AppDeployment.App.Name</div>
+                                                        <small class="text-muted">@mb.AppDeployment.Name (@mb.AppDeployment.Cluster.Name)</small>
+                                                    </td>
+                                                    <td class="align-middle">@mb.Vhost</td>
+                                                    <td class="align-middle text-muted">@(mb.QueueName ?? "—")</td>
+                                                    <td class="align-middle text-muted">@(mb.ExchangeName ?? "—")</td>
+                                                    <td class="align-middle font-monospace">@mb.KubernetesSecretName</td>
+                                                    <td class="align-middle text-muted">
+                                                        @if (mb.LastSyncedAt.HasValue)
+                                                        {
+                                                            @mb.LastSyncedAt.Value.ToLocalTime().ToString("MM-dd HH:mm")
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="text-warning">Not synced</span>
+                                                        }
+                                                    </td>
+                                                    <td class="align-middle text-end">
+                                                        <button class="btn btn-sm btn-outline-primary me-1"
+                                                                @onclick="() => SyncAppLink(mb)" disabled="@(syncingLinkId == mb.Id)">
+                                                            @if (syncingLinkId == mb.Id)
+                                                            {
+                                                                <span class="spinner-border spinner-border-sm"></span>
+                                                            }
+                                                            else
+                                                            {
+                                                                <i class="bi bi-arrow-clockwise"></i>
+                                                            }
+                                                        </button>
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteAppLink(cluster, mb)">
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            }
+
+                            @* ── Backup & Restore ── *@
+                            @if (clusterTab == "backup")
+                            {
+                                @if (!cluster.StorageLinkId.HasValue)
+                                {
+                                    <div class="alert alert-secondary py-2 small">
+                                        <i class="bi bi-info-circle me-1"></i>
+                                        No S3 storage link is attached to this cluster. Edit the cluster to add one before creating backups.
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="d-flex align-items-center gap-2 mb-3">
+                                        <span class="small text-muted">
+                                            Definitions exported via <code>rabbitmqctl export_definitions</code> and stored as JSON in S3.
+                                        </span>
+                                        <button class="btn btn-sm btn-primary ms-auto" @onclick="() => TriggerBackup(cluster)"
+                                                disabled="@(backingUp == cluster.Id)">
+                                            @if (backingUp == cluster.Id) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            <i class="bi bi-cloud-arrow-up me-1"></i>Export Now
+                                        </button>
+                                    </div>
+                                }
+
+                                @if (!string.IsNullOrEmpty(backupError))
+                                {
+                                    <div class="alert alert-danger py-2 small mb-3">@backupError</div>
+                                }
+
+                                @if (showRestoreForm && restoreBackupId.HasValue)
+                                {
+                                    <div class="card border-warning mb-3">
+                                        <div class="card-header bg-warning bg-opacity-10 small fw-semibold">
+                                            <i class="bi bi-cloud-arrow-down me-1"></i>Restore Definitions
+                                        </div>
+                                        <div class="card-body py-2">
+                                            <div class="mb-2">
+                                                <label class="form-label small">Target Cluster</label>
+                                                <select class="form-select form-select-sm" @bind="restoreTargetClusterId">
+                                                    <option value="@cluster.Id">This cluster — @cluster.Name</option>
+                                                    @foreach (RabbitMQCluster other in clusters.Where(c => c.Id != cluster.Id))
+                                                    {
+                                                        <option value="@other.Id">@other.Name (@other.KubernetesCluster.Name)</option>
+                                                    }
+                                                </select>
+                                            </div>
+                                            <div class="d-flex gap-2">
+                                                <button class="btn btn-sm btn-warning" @onclick="ExecuteRestore" disabled="@restoring">
+                                                    @if (restoring) { <span class="spinner-border spinner-border-sm me-1"></span> }Restore
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary"
+                                                        @onclick="() => { showRestoreForm = false; restoreBackupId = null; }">Cancel</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (loadingBackups) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
+                                else if (clusterBackups.Count == 0) { <p class="text-muted small">No backups yet.</p> }
+                                else
+                                {
+                                    <table class="table table-sm table-hover small">
+                                        <thead><tr><th>Created</th><th>Size</th><th>Status</th><th></th></tr></thead>
+                                        <tbody>
+                                            @foreach (RabbitMQBackup backup in clusterBackups)
+                                            {
+                                                <tr>
+                                                    <td class="align-middle">@backup.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
+                                                    <td class="align-middle text-muted">@FormatBytes(backup.SizeBytes)</td>
+                                                    <td class="align-middle">
+                                                        <span class="badge @BackupBadgeClass(backup.Status)">@backup.Status</span>
+                                                    </td>
+                                                    <td class="align-middle text-end">
+                                                        @if (backup.Status == RabbitMQBackupStatus.Ready)
+                                                        {
+                                                            <button class="btn btn-sm btn-outline-warning me-1" @onclick="() => PrepareRestore(backup)">
+                                                                <i class="bi bi-cloud-arrow-down me-1"></i>Restore
+                                                            </button>
+                                                        }
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteBackup(backup)">
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            }
+
+                            @* ── Credentials ── *@
+                            @if (clusterTab == "credentials")
+                            {
+                                <p class="small text-muted mb-2">
+                                    Admin credentials generated by the Cluster Operator, stored encrypted in the tenant vault.
+                                    Source: K8s Secret <code>@(cluster.Name)-default-user</code> in <code>@cluster.Namespace</code>.
+                                </p>
+
+                                @if (loadingCredentials) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
+                                else if (adminUsername is not null)
+                                {
+                                    <div class="row g-2 mb-2">
+                                        <div class="col-md-6">
+                                            <label class="form-label small text-muted">Username</label>
+                                            <input type="text" class="form-control form-control-sm font-monospace" value="@adminUsername" readonly />
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small text-muted">Password</label>
+                                            <div class="input-group input-group-sm">
+                                                <input type="@(showPassword ? "text" : "password")"
+                                                       class="form-control form-control-sm font-monospace" value="@adminPassword" readonly />
+                                                <button class="btn btn-outline-secondary" @onclick="() => showPassword = !showPassword">
+                                                    <i class="bi @(showPassword ? "bi-eye-slash" : "bi-eye")"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <span class="badge bg-success-subtle text-success border border-success-subtle">
+                                        <i class="bi bi-shield-lock me-1"></i>Stored in vault
+                                    </span>
+                                }
+                                else
+                                {
+                                    <div class="alert alert-secondary py-2 small">
+                                        <i class="bi bi-info-circle me-1"></i>
+                                        Credentials not yet in vault. Click <strong>Sync from K8s</strong> once the cluster is running.
+                                    </div>
+                                }
+
+                                @if (!string.IsNullOrEmpty(credentialError))
+                                {
+                                    <div class="alert alert-danger py-2 small mt-2">@credentialError</div>
+                                }
+
+                                <div class="mt-2 d-flex gap-2">
+                                    <button class="btn btn-sm btn-primary" @onclick="() => SyncCredentials(cluster)" disabled="@syncingCredentials">
+                                        @if (syncingCredentials) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        <i class="bi bi-cloud-download me-1"></i>Sync from K8s
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => LoadCredentials(cluster)">
+                                        <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                                    </button>
+                                </div>
+
+                                <hr class="my-3" />
+
+                                <div class="d-flex justify-content-end">
+                                    <button class="btn btn-sm btn-outline-danger" @onclick="() => ConfirmDeleteCluster(cluster)">
+                                        <i class="bi bi-trash me-1"></i>Delete Cluster
+                                    </button>
+                                </div>
+                            }
+
+                            @if (clusterTab == "metrics")
+                            {
+                                <RabbitMQMonitoringPanel ClusterId="cluster.KubernetesClusterId" />
+                            }
+                        </div>
+                    }
+                </div>
+            }
+        }
+    </div>
+
+    @* ── Delete confirmation modal ── *@
+    @if (deleteTarget is not null)
+    {
+        <div class="modal fade show d-block" tabindex="-1" style="background:rgba(0,0,0,0.5)">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title text-danger"><i class="bi bi-trash me-2"></i>Delete RabbitMQ Cluster</h5>
+                    </div>
+                    <div class="modal-body">
+                        <p>Delete <strong>@deleteTarget.Name</strong> from Kubernetes?</p>
+                        <p class="text-danger small">
+                            <i class="bi bi-exclamation-triangle me-1"></i>
+                            This deletes the RabbitmqCluster CRD and associated PVCs. Messages in non-durable queues are lost.
+                            S3 backups are not affected.
+                        </p>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-outline-secondary" @onclick="() => deleteTarget = null">Cancel</button>
+                        <button class="btn btn-danger" @onclick="DeleteCluster" disabled="@deleting">
+                            @if (deleting) { <span class="spinner-border spinner-border-sm me-1"></span> }Delete
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    // ── State ──────────────────────────────────────────────────────────────────
+
+    private bool loading = true;
+    private List<RabbitMQCluster> clusters = [];
+    private List<KubernetesCluster> allK8sClusters = [];
+    private List<StorageLink> storageLinks = [];
+    private List<AppDeployment> allDeployments = [];
+    private bool clusterOperatorAvailable;
+    private bool topologyOperatorAvailable;
+    private RabbitMQOperatorStatus? operatorStatus;
+
+    // Create cluster form
+    private bool showCreateForm;
+    private bool creating;
+    private string createName = "";
+    private string createNamespace = "rabbitmq";
+    private string createVersion = "3.13";
+    private int createReplicas = 3;
+    private string createStorageSize = "10Gi";
+    private string createStorageClass = "";
+    private Guid createK8sClusterId = Guid.Empty;
+    private Guid createStorageLinkId = Guid.Empty;
+    private string? createError;
+
+    // Cluster detail
+    private Guid? expandedClusterId;
+    private string clusterTab = "vhosts";
+    private bool loadingTopology;
+    private string? topologyError;
+    private bool submitting;
+
+    // Topology state
+    private List<RabbitMQVhostInfo> vhosts = [];
+    private List<RabbitMQQueueInfo> queues = [];
+    private List<RabbitMQExchangeInfo> exchanges = [];
+    private List<RabbitMQRoutingBindingInfo> routingBindings = [];
+    private List<RabbitMQUserInfo> users = [];
+    private List<MessagingBinding> messagingBindings = [];
+
+    // Vhost form
+    private bool showVhostForm;
+    private string newVhostName = "/";
+
+    // Queue form
+    private bool showQueueForm;
+    private string newQueueName = "";
+    private string newQueueVhost = "/";
+    private string newQueueType = "quorum";
+    private bool newQueueDurable = true;
+
+    // Exchange form
+    private bool showExchangeForm;
+    private string newExchangeName = "";
+    private string newExchangeVhost = "/";
+    private string newExchangeType = "direct";
+    private bool newExchangeDurable = true;
+
+    // Routing binding form
+    private bool showRoutingForm;
+    private string newBindingVhost = "/";
+    private string newBindingSource = "";
+    private string newBindingDest = "";
+    private string newBindingDestType = "queue";
+    private string newBindingRoutingKey = "";
+
+    // User form
+    private bool showUserForm;
+    private string newUsername = "";
+    private string newUserPassword = "";
+    private string newUserTags = "";
+
+    // Permission form
+    private bool showPermissionForm;
+    private string? permissionTargetUser;
+    private string permVhost = "/";
+    private string permConfigure = ".*";
+    private string permWrite = ".*";
+    private string permRead = ".*";
+
+    // App link form
+    private bool showAppLinkForm;
+    private Guid linkAppDeploymentId = Guid.Empty;
+    private string linkVhost = "/";
+    private string linkQueue = "";
+    private string linkExchange = "";
+    private string linkSecretName = "rabbitmq";
+    private Guid? syncingLinkId;
+
+    // Backup
+    private bool loadingBackups;
+    private List<RabbitMQBackup> clusterBackups = [];
+    private Guid? backingUp;
+    private string? backupError;
+    private bool showRestoreForm;
+    private Guid? restoreBackupId;
+    private Guid restoreTargetClusterId;
+    private bool restoring;
+
+    // Credentials
+    private bool loadingCredentials;
+    private bool syncingCredentials;
+    private string? adminUsername;
+    private string? adminPassword;
+    private bool showPassword;
+    private string? credentialError;
+
+    // Delete cluster
+    private RabbitMQCluster? deleteTarget;
+    private bool deleting;
+
+    // ── Lifecycle ──────────────────────────────────────────────────────────────
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+
+        Task<List<RabbitMQCluster>> clustersTask = RabbitMQService.GetClustersAsync(TenantId);
+        Task<List<KubernetesCluster>> k8sTask = TenantService.GetClustersAsync(TenantId);
+        Task<List<StorageLink>> storageTask = StorageService.GetStorageLinksAsync(TenantId);
+        Task<RabbitMQOperatorStatus> operatorTask = RabbitMQService.GetOperatorStatusAsync(TenantId);
+        Task<List<AppDeployment>> deploymentsTask = RabbitMQService.GetTenantDeploymentsAsync(TenantId);
+
+        await Task.WhenAll(clustersTask, k8sTask, storageTask, operatorTask, deploymentsTask);
+
+        clusters = clustersTask.Result;
+        allK8sClusters = k8sTask.Result;
+        storageLinks = storageTask.Result;
+        allDeployments = deploymentsTask.Result;
+
+        operatorStatus = operatorTask.Result;
+        clusterOperatorAvailable = operatorStatus.ClusterOperatorAvailable;
+        topologyOperatorAvailable = operatorStatus.TopologyOperatorAvailable;
+
+        loading = false;
+    }
+
+    // ── Cluster create / delete ────────────────────────────────────────────────
+
+    private void ShowCreateForm() { showCreateForm = true; createError = null; }
+    private void CancelCreate() { showCreateForm = false; createError = null; }
+
+    private async Task CreateCluster()
+    {
+        createError = null;
+        if (string.IsNullOrWhiteSpace(createName)) { createError = "Name is required."; return; }
+        if (createK8sClusterId == Guid.Empty) { createError = "Select a Kubernetes cluster."; return; }
+        if (string.IsNullOrWhiteSpace(createStorageSize)) { createError = "Storage size is required."; return; }
+
+        creating = true;
+        try
+        {
+            await RabbitMQService.CreateClusterAsync(
+                TenantId, createK8sClusterId,
+                createName.Trim().ToLowerInvariant(),
+                string.IsNullOrWhiteSpace(createNamespace) ? "rabbitmq" : createNamespace.Trim(),
+                string.IsNullOrWhiteSpace(createVersion) ? "3.13" : createVersion.Trim(),
+                createReplicas, createStorageSize.Trim(),
+                string.IsNullOrWhiteSpace(createStorageClass) ? null : createStorageClass.Trim(),
+                createStorageLinkId == Guid.Empty ? null : createStorageLinkId);
+            showCreateForm = false;
+            createName = "";
+            await LoadAsync();
+        }
+        catch (Exception ex) { createError = ex.Message; }
+        finally { creating = false; }
+    }
+
+    private void ConfirmDeleteCluster(RabbitMQCluster cluster) => deleteTarget = cluster;
+
+    private async Task DeleteCluster()
+    {
+        if (deleteTarget is null) return;
+        deleting = true;
+        try
+        {
+            await RabbitMQService.DeleteClusterAsync(TenantId, deleteTarget.Id);
+            expandedClusterId = null;
+            deleteTarget = null;
+            await LoadAsync();
+        }
+        catch (Exception ex) { createError = ex.Message; }
+        finally { deleting = false; }
+    }
+
+    // ── Cluster expand / tab switch ────────────────────────────────────────────
+
+    private async Task ToggleCluster(Guid clusterId)
+    {
+        if (expandedClusterId == clusterId) { expandedClusterId = null; return; }
+        expandedClusterId = clusterId;
+        clusterTab = "vhosts";
+        await LoadTopologyTab(clusterId);
+    }
+
+    private async Task SetClusterTab(string tab, Guid clusterId)
+    {
+        clusterTab = tab;
+        topologyError = null;
+        showVhostForm = showQueueForm = showExchangeForm = showRoutingForm = showUserForm = showPermissionForm = showAppLinkForm = false;
+
+        switch (tab)
+        {
+            case "vhosts": case "queues": case "exchanges": case "routing": case "users":
+                await LoadTopologyTab(clusterId);
+                break;
+            case "app-links":
+                await LoadAppLinks(clusterId);
+                break;
+            case "backup":
+                await LoadBackupsAsync(clusters.First(c => c.Id == clusterId));
+                break;
+            case "credentials":
+                await LoadCredentials(clusters.First(c => c.Id == clusterId));
+                break;
+        }
+    }
+
+    private async Task LoadTopologyTab(Guid clusterId)
+    {
+        loadingTopology = true;
+        topologyError = null;
+        vhosts = []; queues = []; exchanges = []; routingBindings = []; users = [];
+
+        try
+        {
+            switch (clusterTab)
+            {
+                case "vhosts":
+                    vhosts = await RabbitMQService.GetVhostsAsync(TenantId, clusterId);
+                    break;
+                case "queues":
+                    queues = await RabbitMQService.GetQueuesAsync(TenantId, clusterId);
+                    break;
+                case "exchanges":
+                    exchanges = await RabbitMQService.GetExchangesAsync(TenantId, clusterId);
+                    break;
+                case "routing":
+                    routingBindings = await RabbitMQService.GetRoutingBindingsAsync(TenantId, clusterId);
+                    break;
+                case "users":
+                    users = await RabbitMQService.GetUsersAsync(TenantId, clusterId);
+                    break;
+            }
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+        finally { loadingTopology = false; }
+    }
+
+    // ── Vhosts ────────────────────────────────────────────────────────────────
+
+    private async Task CreateVhost(RabbitMQCluster cluster)
+    {
+        if (string.IsNullOrWhiteSpace(newVhostName)) return;
+        submitting = true; topologyError = null;
+        try
+        {
+            await RabbitMQService.CreateVhostAsync(TenantId, cluster.Id, newVhostName.Trim());
+            showVhostForm = false; newVhostName = "/";
+            vhosts = await RabbitMQService.GetVhostsAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+        finally { submitting = false; }
+    }
+
+    private async Task DeleteVhost(RabbitMQCluster cluster, string k8sName)
+    {
+        topologyError = null;
+        try
+        {
+            await RabbitMQService.DeleteVhostAsync(TenantId, cluster.Id, k8sName);
+            vhosts = await RabbitMQService.GetVhostsAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+    }
+
+    // ── Queues ────────────────────────────────────────────────────────────────
+
+    private async Task CreateQueue(RabbitMQCluster cluster)
+    {
+        if (string.IsNullOrWhiteSpace(newQueueName)) return;
+        submitting = true; topologyError = null;
+        try
+        {
+            await RabbitMQService.CreateQueueAsync(TenantId, cluster.Id,
+                newQueueVhost, newQueueName.Trim(), newQueueType, newQueueDurable, false);
+            showQueueForm = false; newQueueName = "";
+            queues = await RabbitMQService.GetQueuesAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+        finally { submitting = false; }
+    }
+
+    private async Task DeleteQueue(RabbitMQCluster cluster, string k8sName)
+    {
+        topologyError = null;
+        try
+        {
+            await RabbitMQService.DeleteQueueAsync(TenantId, cluster.Id, k8sName);
+            queues = await RabbitMQService.GetQueuesAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+    }
+
+    // ── Exchanges ─────────────────────────────────────────────────────────────
+
+    private async Task CreateExchange(RabbitMQCluster cluster)
+    {
+        if (string.IsNullOrWhiteSpace(newExchangeName)) return;
+        submitting = true; topologyError = null;
+        try
+        {
+            await RabbitMQService.CreateExchangeAsync(TenantId, cluster.Id,
+                newExchangeVhost, newExchangeName.Trim(), newExchangeType, newExchangeDurable, false);
+            showExchangeForm = false; newExchangeName = "";
+            exchanges = await RabbitMQService.GetExchangesAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+        finally { submitting = false; }
+    }
+
+    private async Task DeleteExchange(RabbitMQCluster cluster, string k8sName)
+    {
+        topologyError = null;
+        try
+        {
+            await RabbitMQService.DeleteExchangeAsync(TenantId, cluster.Id, k8sName);
+            exchanges = await RabbitMQService.GetExchangesAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+    }
+
+    // ── Routing bindings ──────────────────────────────────────────────────────
+
+    private async Task CreateRoutingBinding(RabbitMQCluster cluster)
+    {
+        if (string.IsNullOrWhiteSpace(newBindingSource) || string.IsNullOrWhiteSpace(newBindingDest)) return;
+        submitting = true; topologyError = null;
+        try
+        {
+            await RabbitMQService.CreateRoutingBindingAsync(TenantId, cluster.Id,
+                newBindingVhost, newBindingSource, newBindingDest, newBindingDestType, newBindingRoutingKey);
+            showRoutingForm = false; newBindingSource = ""; newBindingDest = ""; newBindingRoutingKey = "";
+            routingBindings = await RabbitMQService.GetRoutingBindingsAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+        finally { submitting = false; }
+    }
+
+    private async Task DeleteRoutingBinding(RabbitMQCluster cluster, string k8sName)
+    {
+        topologyError = null;
+        try
+        {
+            await RabbitMQService.DeleteRoutingBindingAsync(TenantId, cluster.Id, k8sName);
+            routingBindings = await RabbitMQService.GetRoutingBindingsAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+    }
+
+    // ── Users ─────────────────────────────────────────────────────────────────
+
+    private async Task CreateUser(RabbitMQCluster cluster)
+    {
+        if (string.IsNullOrWhiteSpace(newUsername) || string.IsNullOrWhiteSpace(newUserPassword)) return;
+        submitting = true; topologyError = null;
+        try
+        {
+            IEnumerable<string> tags = newUserTags
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            await RabbitMQService.CreateUserAsync(TenantId, cluster.Id, newUsername.Trim(), newUserPassword, tags);
+            showUserForm = false; newUsername = ""; newUserPassword = ""; newUserTags = "";
+            users = await RabbitMQService.GetUsersAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+        finally { submitting = false; }
+    }
+
+    private async Task DeleteUser(RabbitMQCluster cluster, string k8sName)
+    {
+        topologyError = null;
+        try
+        {
+            await RabbitMQService.DeleteUserAsync(TenantId, cluster.Id, k8sName);
+            users = await RabbitMQService.GetUsersAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+    }
+
+    private void PreparePermission(string username)
+    {
+        permissionTargetUser = username;
+        permVhost = "/"; permConfigure = ".*"; permWrite = ".*"; permRead = ".*";
+        showPermissionForm = true;
+    }
+
+    private async Task SetPermission(RabbitMQCluster cluster)
+    {
+        if (permissionTargetUser is null) return;
+        submitting = true; topologyError = null;
+        try
+        {
+            await RabbitMQService.SetPermissionAsync(TenantId, cluster.Id,
+                permVhost, permissionTargetUser, permConfigure, permWrite, permRead);
+            showPermissionForm = false;
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+        finally { submitting = false; }
+    }
+
+    // ── App links ─────────────────────────────────────────────────────────────
+
+    private void PrepareAppLink(RabbitMQCluster cluster, string? queueName, string? exchangeName, string vhost)
+    {
+        clusterTab = "app-links";
+        showAppLinkForm = true;
+        linkVhost = vhost;
+        linkQueue = queueName ?? "";
+        linkExchange = exchangeName ?? "";
+        linkSecretName = "rabbitmq";
+        _ = LoadAppLinks(cluster.Id);
+    }
+
+    private async Task LoadAppLinks(Guid clusterId)
+    {
+        loadingTopology = true;
+        try { messagingBindings = await RabbitMQService.GetMessagingBindingsAsync(TenantId, clusterId); }
+        catch (Exception ex) { topologyError = ex.Message; }
+        finally { loadingTopology = false; }
+    }
+
+    private async Task CreateAppLink(RabbitMQCluster cluster)
+    {
+        if (linkAppDeploymentId == Guid.Empty || string.IsNullOrWhiteSpace(linkSecretName)) return;
+        submitting = true; topologyError = null;
+        try
+        {
+            await RabbitMQService.CreateMessagingBindingAsync(
+                TenantId, cluster.Id, linkAppDeploymentId,
+                linkVhost,
+                string.IsNullOrWhiteSpace(linkQueue) ? null : linkQueue.Trim(),
+                string.IsNullOrWhiteSpace(linkExchange) ? null : linkExchange.Trim(),
+                linkSecretName.Trim());
+            showAppLinkForm = false;
+            linkAppDeploymentId = Guid.Empty; linkQueue = ""; linkExchange = ""; linkSecretName = "rabbitmq";
+            messagingBindings = await RabbitMQService.GetMessagingBindingsAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+        finally { submitting = false; }
+    }
+
+    private async Task SyncAppLink(MessagingBinding mb)
+    {
+        syncingLinkId = mb.Id; topologyError = null;
+        try
+        {
+            await RabbitMQService.SyncMessagingBindingAsync(TenantId, mb.Id);
+            messagingBindings = await RabbitMQService.GetMessagingBindingsAsync(TenantId, mb.RabbitMQClusterId);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+        finally { syncingLinkId = null; }
+    }
+
+    private async Task DeleteAppLink(RabbitMQCluster cluster, MessagingBinding mb)
+    {
+        topologyError = null;
+        try
+        {
+            await RabbitMQService.DeleteMessagingBindingAsync(TenantId, mb.Id);
+            messagingBindings = await RabbitMQService.GetMessagingBindingsAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { topologyError = ex.Message; }
+    }
+
+    // ── Backups ────────────────────────────────────────────────────────────────
+
+    private async Task LoadBackupsAsync(RabbitMQCluster cluster)
+    {
+        loadingBackups = true; backupError = null;
+        try { clusterBackups = await RabbitMQService.GetBackupsAsync(TenantId, cluster.Id); }
+        catch (Exception ex) { backupError = ex.Message; }
+        finally { loadingBackups = false; }
+    }
+
+    private async Task TriggerBackup(RabbitMQCluster cluster)
+    {
+        backupError = null; backingUp = cluster.Id;
+        try
+        {
+            if (!cluster.StorageLinkId.HasValue) { backupError = "No storage link attached."; return; }
+            await RabbitMQService.CreateBackupAsync(TenantId, cluster.Id, cluster.StorageLinkId.Value);
+            await LoadBackupsAsync(cluster);
+        }
+        catch (Exception ex) { backupError = ex.Message; }
+        finally { backingUp = null; }
+    }
+
+    private void PrepareRestore(RabbitMQBackup backup)
+    {
+        restoreBackupId = backup.Id;
+        restoreTargetClusterId = expandedClusterId!.Value;
+        showRestoreForm = true;
+    }
+
+    private async Task ExecuteRestore()
+    {
+        if (!restoreBackupId.HasValue) return;
+        restoring = true; backupError = null;
+        try
+        {
+            await RabbitMQService.RestoreBackupAsync(TenantId, restoreBackupId.Value, restoreTargetClusterId);
+            showRestoreForm = false; restoreBackupId = null;
+        }
+        catch (Exception ex) { backupError = ex.Message; }
+        finally { restoring = false; }
+    }
+
+    private async Task DeleteBackup(RabbitMQBackup backup)
+    {
+        try
+        {
+            await RabbitMQService.DeleteBackupAsync(TenantId, backup.Id);
+            RabbitMQCluster? cluster = clusters.FirstOrDefault(c => c.Id == backup.RabbitMQClusterId);
+            if (cluster is not null) await LoadBackupsAsync(cluster);
+        }
+        catch (Exception ex) { backupError = ex.Message; }
+    }
+
+    // ── Credentials ────────────────────────────────────────────────────────────
+
+    private async Task LoadCredentials(RabbitMQCluster cluster)
+    {
+        loadingCredentials = true; adminUsername = null; adminPassword = null; credentialError = null; showPassword = false;
+        try
+        {
+            (string Username, string Password)? creds = await RabbitMQService.GetVaultCredentialsAsync(TenantId, cluster.Id);
+            if (creds.HasValue) { adminUsername = creds.Value.Username; adminPassword = creds.Value.Password; }
+        }
+        catch (Exception ex) { credentialError = ex.Message; }
+        finally { loadingCredentials = false; }
+    }
+
+    private async Task SyncCredentials(RabbitMQCluster cluster)
+    {
+        syncingCredentials = true; credentialError = null;
+        try
+        {
+            await RabbitMQService.SyncCredentialsToVaultAsync(TenantId, cluster.Id);
+            await LoadCredentials(cluster);
+        }
+        catch (Exception ex) { credentialError = ex.Message; }
+        finally { syncingCredentials = false; }
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
+    private static string TabLabel(string tab) => tab switch
+    {
+        "vhosts" => "Vhosts",
+        "queues" => "Queues",
+        "exchanges" => "Exchanges",
+        "routing" => "Routing",
+        "users" => "Users",
+        "app-links" => "App Links",
+        "backup" => "Backup & Restore",
+        "credentials" => "Credentials",
+        "metrics" => "Metrics",
+        _ => tab
+    };
+
+    private static string StatusBadgeClass(RabbitMQClusterStatus status) => status switch
+    {
+        RabbitMQClusterStatus.Running => "bg-success-subtle text-success border border-success-subtle",
+        RabbitMQClusterStatus.Creating => "bg-primary-subtle text-primary border border-primary-subtle",
+        RabbitMQClusterStatus.Failed => "bg-danger-subtle text-danger border border-danger-subtle",
+        RabbitMQClusterStatus.Deleting => "bg-warning-subtle text-warning border border-warning-subtle",
+        _ => "bg-secondary-subtle text-secondary border"
+    };
+
+    private static string BackupBadgeClass(RabbitMQBackupStatus status) => status switch
+    {
+        RabbitMQBackupStatus.Ready => "bg-success-subtle text-success border border-success-subtle",
+        RabbitMQBackupStatus.Creating => "bg-primary-subtle text-primary border border-primary-subtle",
+        RabbitMQBackupStatus.Failed => "bg-danger-subtle text-danger border border-danger-subtle",
+        _ => "bg-secondary-subtle text-secondary border"
+    };
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        return $"{bytes / (1024.0 * 1024):F1} MB";
+    }
+}

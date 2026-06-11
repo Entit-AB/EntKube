@@ -1,0 +1,1955 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+@inject IncidentService IncidentService
+@inject LokiService LokiService
+@inject GitSyncService GitSyncService
+@inject CustomerGitService CustomerGitService
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject DeploymentStatusNotifier StatusNotifier
+
+@* ═══════════════════════════════════════════════════════════════════
+   Deployment operations view — the heart of the customer portal.
+   Shows deployment info, live pods, pod logs, and allows restart/
+   delete/scale operations. Access is role-gated: Viewers can only
+   browse and read logs; Operators can restart and delete pods;
+   Admins have full control.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+@* --- Deployment header --- *@
+<div class="card shadow-sm mb-3">
+    <div class="card-body">
+        <div class="d-flex align-items-start justify-content-between">
+            <div>
+                <h5 class="mb-1">
+                    <i class="bi bi-rocket-takeoff me-2 text-primary"></i>@Deployment.Name
+                </h5>
+                <div class="d-flex flex-wrap gap-2 text-muted small">
+                    @TypeBadge(Deployment.Type)
+                    <span><i class="bi bi-layers me-1"></i>@Deployment.Environment?.Name</span>
+                    <span><i class="bi bi-hdd-network me-1"></i>@Deployment.Cluster?.Name</span>
+                    <span><i class="bi bi-box me-1"></i>@Deployment.Namespace</span>
+                </div>
+            </div>
+            <div class="d-flex gap-1 align-items-start">
+                @SyncBadge(Deployment.SyncStatus)
+                @HealthBadge(Deployment.HealthStatus)
+                @if (AccessRole >= CustomerAccessRole.Admin)
+                {
+                    <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="StartEditDeployment" title="Edit">
+                        <i class="bi bi-pencil"></i>
+                    </button>
+                    @if (!confirmDeleteDeployment)
+                    {
+                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteDeployment = true" title="Delete">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    }
+                }
+            </div>
+        </div>
+
+        @if (AccessRole >= CustomerAccessRole.Admin && showEditDeployment)
+        {
+            <div class="mt-3 p-3 bg-light rounded">
+                @if (editDeployError is not null)
+                {
+                    <div class="alert alert-danger py-1 small mb-2">@editDeployError</div>
+                }
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6">
+                        <label class="form-label small">Name</label>
+                        <input class="form-control form-control-sm" @bind="editDeployName" />
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">Namespace</label>
+                        @if (!string.IsNullOrWhiteSpace(GovernanceNamespace))
+                        {
+                            <input class="form-control form-control-sm font-monospace" value="@GovernanceNamespace" disabled />
+                            <div class="form-text small text-warning"><i class="bi bi-lock me-1"></i>Locked by governance policy.</div>
+                        }
+                        else
+                        {
+                            <input class="form-control form-control-sm" @bind="editDeployNamespace" />
+                        }
+                    </div>
+                    @if (Deployment.Type == DeploymentType.HelmChart)
+                    {
+                        <div class="col-md-4">
+                            <label class="form-label small">Helm Repo URL</label>
+                            <input class="form-control form-control-sm" @bind="editHelmRepoUrl" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Chart Name</label>
+                            <input class="form-control form-control-sm" @bind="editHelmChartName" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Chart Version</label>
+                            <input class="form-control form-control-sm" @bind="editHelmChartVersion" />
+                        </div>
+                    }
+                </div>
+                <div class="d-flex gap-1">
+                    <button class="btn btn-sm btn-primary" @onclick="SaveDeployment"
+                            disabled="@(string.IsNullOrWhiteSpace(editDeployName) || string.IsNullOrWhiteSpace(editDeployNamespace) || savingEdit)">
+                        @if (savingEdit) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Save
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showEditDeployment = false">Cancel</button>
+                </div>
+            </div>
+        }
+
+        @if (AccessRole >= CustomerAccessRole.Admin && confirmDeleteDeployment)
+        {
+            <div class="mt-3 p-3 bg-danger bg-opacity-10 rounded">
+                <div class="text-danger small mb-2">
+                    <i class="bi bi-exclamation-triangle me-1"></i>
+                    What would you like to do with <strong>@Deployment.Name</strong>?
+                </div>
+                @if (deleteError is not null)
+                {
+                    <div class="alert alert-danger py-1 small mb-2">@deleteError</div>
+                }
+                <div class="d-flex flex-wrap gap-2">
+                    <button class="btn btn-sm btn-danger" @onclick="() => DeleteDeployment(true)" disabled="@deletingDeployment">
+                        @if (deletingDeployment && deleteFromCluster) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        <i class="bi bi-trash me-1"></i>Delete (remove cluster resources + DB)
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteDeployment(false)" disabled="@deletingDeployment">
+                        @if (deletingDeployment && !deleteFromCluster) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        <i class="bi bi-database-x me-1"></i>Unregister (DB only, keep cluster resources)
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => { confirmDeleteDeployment = false; deleteError = null; }">Cancel</button>
+                </div>
+            </div>
+        }
+
+        @if (!showEditDeployment && Deployment.Type == DeploymentType.HelmChart)
+        {
+            <div class="mt-2 p-2 bg-light rounded small">
+                <i class="bi bi-box-seam me-1"></i>
+                @Deployment.HelmChartName <span class="text-muted">@Deployment.HelmChartVersion</span>
+                <span class="text-muted ms-1">from @Deployment.HelmRepoUrl</span>
+            </div>
+        }
+
+        @if (!showEditDeployment && Deployment.GitUrl is not null)
+        {
+            <div class="mt-2 p-2 bg-light rounded d-flex align-items-center justify-content-between flex-wrap gap-2">
+                <div class="small text-muted">
+                    <i class="bi bi-git me-1"></i>
+                    <strong class="font-monospace">@Deployment.GitUrl</strong>
+                    <span class="ms-1">@(Deployment.GitRevision ?? "main")</span>
+                    @if (!string.IsNullOrEmpty(Deployment.GitPath) && Deployment.GitPath != ".")
+                    {
+                        <span class="ms-1">→ <code>@Deployment.GitPath</code></span>
+                    }
+                    @if (Deployment.GitLastSyncedCommit is not null)
+                    {
+                        <span class="ms-2 badge bg-secondary">@Deployment.GitLastSyncedCommit[..7]</span>
+                    }
+                    @if (Deployment.GitLastSyncedAt is not null)
+                    {
+                        <span class="ms-1">· synced @Deployment.GitLastSyncedAt.Value.ToString("yyyy-MM-dd HH:mm")</span>
+                    }
+                </div>
+                @if (AccessRole >= CustomerAccessRole.Operator)
+                {
+                    <button class="btn btn-sm btn-outline-primary" @onclick="TriggerGitSync" disabled="@syncingGit">
+                        @if (syncingGit) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        else { <i class="bi bi-arrow-repeat me-1"></i> }
+                        Sync
+                    </button>
+                }
+            </div>
+            @if (gitSyncMessage is not null)
+            {
+                <div class="mt-1 alert @(gitSyncSuccess ? "alert-success" : "alert-danger") py-1 small">
+                    <i class="bi @(gitSyncSuccess ? "bi-check-circle" : "bi-exclamation-triangle") me-1"></i>@gitSyncMessage
+                </div>
+            }
+        }
+
+        @if (!string.IsNullOrEmpty(Deployment.StatusMessage))
+        {
+            <div class="mt-2 text-muted small">@Deployment.StatusMessage</div>
+        }
+
+        @if (Deployment.LastSyncedAt.HasValue)
+        {
+            <div class="mt-1 text-muted small">
+                <i class="bi bi-clock me-1"></i>Last synced @Deployment.LastSyncedAt.Value.ToString("g")
+            </div>
+        }
+    </div>
+</div>
+
+@* --- Tabs: Pods / Manifests / Values / Resources --- *@
+<ul class="nav nav-tabs mb-3">
+    <li class="nav-item">
+        <button class="nav-link @(activeTab == "pods" ? "active" : "")" @onclick="LoadPods">
+            <i class="bi bi-cpu me-1"></i>Pods
+            @if (pods is not null)
+            {
+                <span class="badge bg-primary ms-1">@pods.Count</span>
+            }
+        </button>
+    </li>
+    @if (Deployment.Type != DeploymentType.HelmChart)
+    {
+        <li class="nav-item">
+            <button class="nav-link @(activeTab == "manifests" ? "active" : "")" @onclick="LoadManifests">
+                <i class="bi bi-file-earmark-code me-1"></i>Manifests
+            </button>
+        </li>
+    }
+    @if (Deployment.Type == DeploymentType.HelmChart)
+    {
+        <li class="nav-item">
+            <button class="nav-link @(activeTab == "values" ? "active" : "")" @onclick="LoadValues">
+                <i class="bi bi-sliders me-1"></i>Values
+            </button>
+        </li>
+    }
+    <li class="nav-item">
+        <button class="nav-link @(activeTab == "resources" ? "active" : "")" @onclick="LoadResources">
+            <i class="bi bi-diagram-3 me-1"></i>Resources
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(activeTab == "metrics" ? "active" : "")" @onclick="LoadMetrics">
+            <i class="bi bi-bar-chart-line me-1"></i>Metrics
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(activeTab == "activity" ? "active" : "")" @onclick="LoadActivity">
+            <i class="bi bi-clock-history me-1"></i>Activity
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(activeTab == "monitoring" ? "active" : "")" @onclick="LoadMonitoring">
+            <i class="bi bi-heart-pulse me-1"></i>Monitoring
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(activeTab == "logs" ? "active" : "")" @onclick='() => activeTab = "logs"'>
+            <i class="bi bi-journal-text me-1"></i>Logs
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(activeTab == "git" ? "active" : "")" @onclick="LoadGitTab">
+            <i class="bi bi-git me-1"></i>Git
+        </button>
+    </li>
+</ul>
+
+@* ══════════════════════════════════════════════════════════════
+   Pods Tab — live pod list from the cluster
+   ══════════════════════════════════════════════════════════════ *@
+@if (activeTab == "pods")
+{
+    @if (!string.IsNullOrEmpty(operationMessage))
+    {
+        <div class="alert @(operationSuccess ? "alert-success" : "alert-danger") alert-dismissible py-2 small mb-3">
+            @operationMessage
+            <button type="button" class="btn-close btn-close-sm" @onclick="() => operationMessage = null"></button>
+        </div>
+    }
+
+    @* --- Operation bar (refresh always visible; destructive ops gated to Operator+) --- *@
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        @if (AccessRole >= CustomerAccessRole.Operator)
+        {
+            <button class="btn btn-sm btn-outline-warning" @onclick="RestartAllDeployments" disabled="@operationInProgress">
+                @if (operationInProgress) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                else { <i class="bi bi-arrow-repeat me-1"></i> }
+                Restart
+            </button>
+            @if (AccessRole >= CustomerAccessRole.Admin)
+            {
+                <div class="d-flex align-items-center gap-1">
+                    <button class="btn btn-sm btn-outline-secondary" title="Decrease replicas"
+                            @onclick="() => _scaleReplicas = Math.Max(0, _scaleReplicas - 1)"
+                            disabled="@operationInProgress">
+                        <i class="bi bi-dash"></i>
+                    </button>
+                    <input type="number" class="form-control form-control-sm text-center" style="width: 58px;"
+                           min="0" max="99" @bind="_scaleReplicas" disabled="@operationInProgress" />
+                    <button class="btn btn-sm btn-outline-secondary" title="Increase replicas"
+                            @onclick="() => _scaleReplicas++"
+                            disabled="@operationInProgress">
+                        <i class="bi bi-plus"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-primary" @onclick="ScaleMainDeployment"
+                            disabled="@operationInProgress" title="Scale workloads">
+                        <i class="bi bi-sliders me-1"></i>Scale
+                    </button>
+                    @if (pods is not null)
+                    {
+                        int running = pods.Count(p => p.Status == "Running");
+                        <span class="text-muted small" title="Currently running pods">
+                            (@running running)
+                        </span>
+                    }
+                </div>
+            }
+        }
+        <button class="btn btn-sm btn-outline-secondary @(AccessRole >= CustomerAccessRole.Operator ? "ms-auto" : "")"
+                title="Refresh pods" @onclick="LoadPodsInternal" disabled="@podsLoading">
+            <i class="bi bi-arrow-clockwise @(podsLoading ? "rg-spin" : "")"></i>
+        </button>
+    </div>
+
+    <LoadingPanel Loading="@podsLoading" LoadingText="Loading pods from cluster…" Error="@podsError">
+    @if (!podsLoading && string.IsNullOrEmpty(podsError) && (pods is null || pods.Count == 0))
+    {
+        <EmptyState Icon="bi-cpu"
+                    Message="@($"No pods found in namespace {Deployment.Namespace}.")" />
+    }
+    else if (!podsLoading && string.IsNullOrEmpty(podsError) && pods is not null && pods.Count > 0)
+    {
+        @* --- Pod log viewer (shown above pods when active) --- *@
+        @if (showLogViewer)
+        {
+            <div class="card border-dark mb-3">
+                <div class="card-header bg-dark text-white py-2 d-flex align-items-center gap-2">
+                    <div>
+                        <i class="bi bi-terminal me-1"></i>
+                        Logs: <strong>@logPodName</strong>
+                        @if (!string.IsNullOrEmpty(logContainerName))
+                        {
+                            <span class="text-muted ms-1">(@logContainerName)</span>
+                        }
+                    </div>
+                    <div class="d-flex gap-1 ms-auto align-items-center">
+                        @foreach (int tl in new[] { 100, 500, 1000 })
+                        {
+                            int tlCopy = tl;
+                            <button class="btn btn-sm py-0 px-2 @(_logTailLines == tlCopy ? "btn-light" : "btn-outline-secondary")"
+                                    style="font-size:.72rem;" title="@(tlCopy) lines"
+                                    @onclick="() => { _logTailLines = tlCopy; _ = ViewLogs(logPodName, logContainerName); }">@tlCopy</button>
+                        }
+                        <div class="vr opacity-50 mx-1"></div>
+                        <button class="btn btn-sm btn-outline-light" title="Refresh logs"
+                                @onclick="() => ViewLogs(logPodName, logContainerName)"
+                                disabled="@logLoading">
+                            <i class="bi bi-arrow-clockwise @(logLoading ? "rg-spin" : "")"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-light" @onclick="CloseLogViewer">
+                            <i class="bi bi-x"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    @if (logLoading)
+                    {
+                        <div class="text-center py-3">
+                            <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                        </div>
+                    }
+                    else if (!string.IsNullOrEmpty(logError))
+                    {
+                        <div class="alert alert-warning m-2 py-1 small">@logError</div>
+                    }
+                    else
+                    {
+                        <pre @ref="_logPreRef" class="mb-0 p-2 small bg-dark text-light" style="max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;">@logContent</pre>
+                    }
+                </div>
+            </div>
+        }
+
+        @* --- Pod filter --- *@
+        <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+            <div class="input-group input-group-sm flex-nowrap" style="max-width:220px;">
+                <span class="input-group-text"><i class="bi bi-search"></i></span>
+                <input type="text" class="form-control" placeholder="Filter pods…"
+                       @bind="_podFilter" @bind:event="oninput" />
+                @if (!string.IsNullOrWhiteSpace(_podFilter))
+                {
+                    <button class="btn btn-outline-secondary" type="button" @onclick="() => _podFilter = string.Empty">
+                        <i class="bi bi-x"></i>
+                    </button>
+                }
+            </div>
+            @foreach (string st in new[] { "All", "Running", "Pending", "Failed" })
+            {
+                string stCopy = st;
+                int cnt = stCopy == "All" ? pods.Count : pods.Count(p => p.Status == stCopy);
+                <button class="btn btn-sm @(_podStatusFilter == stCopy ? "btn-secondary" : "btn-outline-secondary")"
+                        @onclick="() => _podStatusFilter = stCopy">
+                    @stCopy@(cnt > 0 ? $" ({cnt})" : "")
+                </button>
+            }
+        </div>
+
+        @* --- Pod cards --- *@
+        @if (!FilteredPods.Any())
+        {
+            <EmptyState Icon="bi-grid" Message="No pods match the current filter." />
+        }
+        @foreach (PodInfo pod in FilteredPods)
+        {
+            <div class="card mb-2">
+                <div class="card-body py-2">
+                    <div class="d-flex align-items-center justify-content-between">
+                        <div>
+                            <span class="fw-medium small">
+                                <i class="bi bi-cpu me-1 @GetPodStatusColor(pod.Status)"></i>@pod.Name
+                            </span>
+                            <span class="badge @GetPodStatusBadgeClass(pod.Status) ms-2">@pod.Status</span>
+                            <span class="text-muted small ms-2">@pod.ReadyContainers/@pod.TotalContainers ready</span>
+                            @if (pod.Restarts > 0)
+                            {
+                                <span class="badge @RestartBadgeClass(pod.Restarts) ms-1">@pod.Restarts restarts</span>
+                            }
+                            @if (pod.StartTime.HasValue)
+                            {
+                                <span class="text-muted small ms-2"
+                                      title="@pod.StartTime.Value.ToLocalTime().ToString("g")">
+                                    @PodAge(pod.StartTime.Value)
+                                </span>
+                            }
+                        </div>
+                        <div class="d-flex gap-1">
+                            @* --- Logs button (always available) --- *@
+                            @if (pod.Containers.Count <= 1)
+                            {
+                                <button class="btn btn-sm btn-outline-dark" title="View logs"
+                                        @onclick="() => ViewLogs(pod.Name, null)">
+                                    <i class="bi bi-terminal"></i>
+                                </button>
+                            }
+                            else
+                            {
+                                @* Multi-container: dropdown to pick container *@
+                                <div class="btn-group">
+                                    <button class="btn btn-sm btn-outline-dark dropdown-toggle" data-bs-toggle="dropdown"
+                                            title="View logs">
+                                        <i class="bi bi-terminal"></i>
+                                    </button>
+                                    <ul class="dropdown-menu dropdown-menu-end">
+                                        @foreach (ContainerInfo container in pod.Containers)
+                                        {
+                                            <li>
+                                                <button class="dropdown-item small"
+                                                        @onclick="() => ViewLogs(pod.Name, container.Name)">
+                                                    @container.Name
+                                                </button>
+                                            </li>
+                                        }
+                                    </ul>
+                                </div>
+                            }
+
+                            @* --- Delete pod (Operator+ only) --- *@
+                            @if (AccessRole >= CustomerAccessRole.Operator)
+                            {
+                                @if (confirmDeletePod == pod.Name)
+                                {
+                                    <button class="btn btn-sm btn-danger" @onclick="() => DeletePod(pod.Name)"
+                                            disabled="@operationInProgress">
+                                        Confirm
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary"
+                                            @onclick="() => confirmDeletePod = null">
+                                        Cancel
+                                    </button>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-outline-danger" title="Delete pod"
+                                            @onclick="() => confirmDeletePod = pod.Name">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                }
+                            }
+                        </div>
+                    </div>
+
+                    @* --- Container details (expanded) --- *@
+                    @if (pod.Containers.Count > 1)
+                    {
+                        <div class="mt-2 ms-4">
+                            @foreach (ContainerInfo container in pod.Containers)
+                            {
+                                <div class="d-flex align-items-center text-muted small mb-1">
+                                    <i class="bi bi-box me-1 @(container.Ready ? "text-success" : "text-warning")"></i>
+                                    <span class="fw-medium me-2">@container.Name</span>
+                                    <span class="me-2 font-monospace" title="@container.Image">@TruncateImage(container.Image)</span>
+                                    <span class="badge @(container.Ready ? "bg-success" : "bg-warning text-dark")">
+                                        @container.State
+                                    </span>
+                                    @if (container.RestartCount > 0)
+                                    {
+                                        <span class="badge bg-warning text-dark ms-1">@container.RestartCount restarts</span>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+
+                </div>
+            </div>
+        }
+    }
+    </LoadingPanel>
+}
+
+@* ══════════════════════════════════════════════════════════════
+   Manifests Tab
+   ══════════════════════════════════════════════════════════════ *@
+@if (activeTab == "manifests")
+{
+    @if (AccessRole >= CustomerAccessRole.Admin)
+    {
+        <div class="d-flex justify-content-end gap-1 mb-2">
+            <button class="btn btn-sm btn-success" @onclick="ApplyYamlDeployment"
+                    disabled="@(applyingYaml || manifests is null || manifests.Count == 0)">
+                @if (applyingYaml)
+                {
+                    <span class="spinner-border spinner-border-sm me-1"></span>
+                    <span>Applying…</span>
+                }
+                else
+                {
+                    <i class="bi bi-cloud-upload me-1"></i>
+                    <span>Apply to Cluster</span>
+                }
+            </button>
+            @if (!IsGitManaged)
+            {
+                <button class="btn btn-sm btn-outline-primary" @onclick="() => showAddManifest = !showAddManifest">
+                    <i class="bi bi-plus me-1"></i>Add Manifest
+                </button>
+            }
+        </div>
+
+        @if (showAddManifest && !IsGitManaged)
+        {
+            <div class="card border-primary mb-3">
+                <div class="card-body">
+                    <h6 class="mb-3"><i class="bi bi-plus-circle me-1"></i>Add YAML Manifest</h6>
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-4">
+                            <label class="form-label small">Kind</label>
+                            <input class="form-control form-control-sm" @bind="newManifestKind" placeholder="e.g. Deployment" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Name</label>
+                            <input class="form-control form-control-sm" @bind="newManifestName" placeholder="e.g. my-app" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Sort Order</label>
+                            <input class="form-control form-control-sm" type="number" @bind="newManifestSortOrder" />
+                        </div>
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small">YAML Content</label>
+                        <YamlEditor @bind-Value="newManifestYaml" />
+                    </div>
+                    <div class="d-flex gap-1">
+                        <button class="btn btn-sm btn-primary" @onclick="AddManifest"
+                                disabled="@(string.IsNullOrWhiteSpace(newManifestKind) || string.IsNullOrWhiteSpace(newManifestYaml) || savingManifest)">
+                            @if (savingManifest) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Add
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddManifest = false">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+    }
+
+    <LoadingPanel Loading="@(manifests is null)">
+    @if (manifests is not null && manifests.Count == 0)
+    {
+        <EmptyState Icon="bi-file-earmark-code" Message="No manifests defined for this deployment." />
+    }
+    else if (manifests is not null)
+    {
+        @foreach (DeploymentManifest manifest in manifests)
+        {
+            <div class="card mb-2">
+                <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+                    <div>
+                        <span class="badge bg-secondary me-1">@manifest.Kind</span>
+                        <span class="fw-medium">@manifest.Name</span>
+                        <span class="text-muted small ms-2">#@manifest.SortOrder</span>
+                    </div>
+                    @if (AccessRole >= CustomerAccessRole.Admin && !IsGitManaged)
+                    {
+                        <div class="d-flex gap-1">
+                            @if (editingManifestId == manifest.Id)
+                            {
+                                <button class="btn btn-sm btn-primary" @onclick="() => SaveManifest(manifest.Id)" disabled="@savingManifest">
+                                    @if (savingManifest) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Save
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => editingManifestId = null" disabled="@savingManifest">Cancel</button>
+                            }
+                            else
+                            {
+                                <button class="btn btn-sm btn-outline-primary" @onclick="() => StartEditManifest(manifest)">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteManifest(manifest.Id)">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            }
+                        </div>
+                    }
+                </div>
+                <div class="card-body p-2">
+                    @if (editingManifestId == manifest.Id)
+                    {
+                        <YamlEditor @bind-Value="editManifestYaml" />
+                    }
+                    else
+                    {
+                        <YamlEditor Value="@manifest.YamlContent" ReadOnly="true" />
+                    }
+                </div>
+            </div>
+        }
+    }
+    </LoadingPanel>
+
+    @if (yamlApplyOutput is not null)
+    {
+        <div class="mt-3">
+            <div class="d-flex align-items-center justify-content-between mb-1">
+                <span class="small fw-medium @(yamlApplySuccess == true ? "text-success" : "text-danger")">
+                    <i class="bi @(yamlApplySuccess == true ? "bi-check-circle" : "bi-x-circle") me-1"></i>
+                    @(yamlApplySuccess == true ? "Applied to cluster successfully" : "Apply failed")
+                </span>
+                <button class="btn btn-sm btn-link text-muted py-0" @onclick="() => yamlApplyOutput = null">
+                    <i class="bi bi-x"></i>
+                </button>
+            </div>
+            <pre class="bg-dark text-light p-2 rounded small mb-0"
+                 style="max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;">@yamlApplyOutput</pre>
+        </div>
+    }
+}
+
+@* ══════════════════════════════════════════════════════════════
+   Values Tab (Helm only)
+   ══════════════════════════════════════════════════════════════ *@
+@if (activeTab == "values")
+{
+    <p class="text-muted small mb-2">Override the chart's default values (YAML format).</p>
+    @if (valuesError is not null)
+    {
+        <div class="alert alert-danger py-1 small mb-2">@valuesError</div>
+    }
+    <YamlEditor @bind-Value="helmValuesYaml" ReadOnly="@(AccessRole < CustomerAccessRole.Admin)" />
+    @if (AccessRole >= CustomerAccessRole.Admin)
+    {
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+            <button class="btn btn-sm btn-primary" @onclick="SaveHelmValues" disabled="@(savingValues || installingHelm)">
+                @if (savingValues) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                <i class="bi bi-floppy me-1"></i>Save Values
+            </button>
+            <button class="btn btn-sm btn-success" @onclick="InstallOrUpgradeHelm" disabled="@(installingHelm || savingValues)">
+                @if (installingHelm)
+                {
+                    <span class="spinner-border spinner-border-sm me-1"></span>
+                    <span>Running helm upgrade…</span>
+                }
+                else
+                {
+                    <i class="bi bi-cloud-upload me-1"></i>
+                    <span>Install / Upgrade Release</span>
+                }
+            </button>
+            @if (valuesSaved)
+            {
+                <span class="text-success small"><i class="bi bi-check-circle me-1"></i>Saved</span>
+            }
+        </div>
+
+        @if (helmInstallOutput is not null)
+        {
+            <div class="mt-3">
+                <div class="d-flex align-items-center justify-content-between mb-1">
+                    <span class="small fw-medium @(helmInstallSuccess == true ? "text-success" : "text-danger")">
+                        <i class="bi @(helmInstallSuccess == true ? "bi-check-circle" : "bi-x-circle") me-1"></i>
+                        @(helmInstallSuccess == true ? "Release applied successfully" : "Helm operation failed")
+                    </span>
+                    <button class="btn btn-sm btn-link text-muted py-0" @onclick="() => helmInstallOutput = null">
+                        <i class="bi bi-x"></i>
+                    </button>
+                </div>
+                <pre class="bg-dark text-light p-2 rounded small mb-0"
+                     style="max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;">@helmInstallOutput</pre>
+            </div>
+        }
+    }
+}
+
+@* ══════════════════════════════════════════════════════════════
+   Resources Tab (ArgoCD-style ownership tree)
+   ══════════════════════════════════════════════════════════════ *@
+@if (activeTab == "resources")
+{
+    <ResourceTreePanel Loading="@(resourceTree is null)"
+                       Error="@resourcesError"
+                       Resources="@resourceTree"
+                       Namespace="@Deployment.Namespace"
+                       DeploymentId="@Deployment.Id"
+                       AccessRole="@AccessRole"
+                       OnRefresh="LoadResources"
+                       LastRefreshed="@_resourcesRefreshedAt" />
+}
+
+@* ══════════════════════════════════════════════════════════════
+   Metrics Tab — namespace-scoped resource usage from Prometheus
+   ══════════════════════════════════════════════════════════════ *@
+@if (activeTab == "metrics")
+{
+    @if (metricsLoading)
+    {
+        <div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+    }
+    else if (metricsError is not null)
+    {
+        <div class="alert alert-warning small py-2">
+            <i class="bi bi-exclamation-triangle me-1"></i>@metricsError
+        </div>
+    }
+    else if (metrics is not null)
+    {
+        <div class="row g-3">
+            <div class="col-sm-6 col-lg-3">
+                <div class="card border-0 bg-light text-center p-3">
+                    <div class="fs-3 fw-bold text-primary">@(metrics.CpuCores >= 1 ? $"{(int)Math.Round(metrics.CpuCores)} cores" : $"{(int)Math.Round(metrics.CpuCores * 1000)}m")</div>
+                    <div class="small text-muted">CPU cores</div>
+                </div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="card border-0 bg-light text-center p-3">
+                    <div class="fs-3 fw-bold text-info">@metrics.MemoryMiB.ToString("F0") <small class="fs-6">MiB</small></div>
+                    <div class="small text-muted">Memory (working set)</div>
+                </div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="card border-0 bg-light text-center p-3">
+                    <div class="fs-3 fw-bold text-success">@metrics.PodCount</div>
+                    <div class="small text-muted">Pods in namespace</div>
+                </div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="card border-0 bg-light text-center p-3">
+                    <div class="fs-3 fw-bold @(metrics.RestartCount > 0 ? "text-warning" : "text-success")">@metrics.RestartCount</div>
+                    <div class="small text-muted">Total restarts</div>
+                </div>
+            </div>
+        </div>
+        <div class="text-muted small mt-2">
+            <i class="bi bi-clock me-1"></i>Queried @metrics.QueriedAt.ToLocalTime().ToString("HH:mm:ss") &middot; namespace: @metrics.Namespace
+        </div>
+    }
+}
+
+@* ══════════════════════════════════════════════════════════════
+   Activity Tab — audit timeline of operations on this deployment
+   ══════════════════════════════════════════════════════════════ *@
+@if (activeTab == "activity")
+{
+    @if (activityLoading)
+    {
+        <div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+    }
+    else if (auditEvents is not null && auditEvents.Count == 0)
+    {
+        <EmptyState Icon="bi-clock-history" Message="No activity recorded yet." />
+    }
+    else if (auditEvents is not null)
+    {
+        <div class="list-group list-group-flush">
+            @foreach (AuditEvent ev in auditEvents)
+            {
+                <div class="list-group-item px-0 py-2">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <span class="badge bg-secondary me-2">@ev.ResourceKind</span>
+                            <strong>@ev.Action</strong>
+                            @if (!string.IsNullOrEmpty(ev.ResourceName))
+                            {
+                                <span class="text-muted ms-1 font-monospace small">@ev.ResourceName</span>
+                            }
+                            @if (!string.IsNullOrEmpty(ev.Details))
+                            {
+                                <span class="text-muted ms-2 small">— @ev.Details</span>
+                            }
+                        </div>
+                        <div class="text-end text-nowrap ms-3">
+                            <div class="small text-muted">@ev.OccurredAt.ToLocalTime().ToString("MMM d HH:mm")</div>
+                            @if (!string.IsNullOrEmpty(ev.PerformedBy))
+                            {
+                                <div class="small text-muted">@ev.PerformedBy</div>
+                            }
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+}
+
+@* ══════════════════════════════════════════════════════════════
+   Monitoring Tab — health timeline, uptime %, active alerts
+   ══════════════════════════════════════════════════════════════ *@
+@if (activeTab == "monitoring")
+{
+    @if (monitoringLoading)
+    {
+        <div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+    }
+    else
+    {
+        <div class="row g-3 mb-4">
+            <div class="col-sm-6 col-lg-3">
+                <div class="card border-0 bg-light text-center p-3">
+                    <div class="fs-3 fw-bold @(uptime7d?.Percent == null ? "text-muted" : uptime7d.Percent >= 99 ? "text-success" : uptime7d.Percent >= 95 ? "text-warning" : "text-danger")">
+                        @(uptime7d?.Display ?? "—")
+                    </div>
+                    <div class="small text-muted">Uptime (7 days)</div>
+                </div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="card border-0 bg-light text-center p-3">
+                    <div class="fs-3 fw-bold @(uptime30d?.Percent == null ? "text-muted" : uptime30d.Percent >= 99 ? "text-success" : uptime30d.Percent >= 95 ? "text-warning" : "text-danger")">
+                        @(uptime30d?.Display ?? "—")
+                    </div>
+                    <div class="small text-muted">Uptime (30 days)</div>
+                </div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="card border-0 bg-light text-center p-3">
+                    <div class="fs-3 fw-bold @(activeAlertCount > 0 ? "text-danger" : "text-success")">@activeAlertCount</div>
+                    <div class="small text-muted">Active Alerts</div>
+                </div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="card border-0 bg-light text-center p-3">
+                    <div class="fs-3 fw-bold">@healthSnapshots.Count</div>
+                    <div class="small text-muted">Health checks</div>
+                </div>
+            </div>
+        </div>
+
+        @if (healthSnapshots.Count > 0)
+        {
+            <h6 class="text-muted small mb-1">Health Timeline (last 7 days)</h6>
+            <div class="d-flex gap-px flex-wrap mb-3" style="gap:2px">
+                @foreach (DeploymentHealthSnapshot snap in healthSnapshots.TakeLast(336))
+                {
+                    string color = snap.HealthStatus switch
+                    {
+                        HealthStatus.Healthy    => "#28a745",
+                        HealthStatus.Progressing => "#007bff",
+                        HealthStatus.Degraded   => "#ffc107",
+                        HealthStatus.Suspended  => "#6c757d",
+                        _ => "#dc3545"
+                    };
+                    <div style="width:6px;height:20px;background:@color;border-radius:1px"
+                         title="@snap.SnapshotAt.ToLocalTime().ToString("MMM d HH:mm") — @snap.HealthStatus"></div>
+                }
+            </div>
+            <div class="d-flex gap-3 small text-muted mb-3">
+                <span><span style="display:inline-block;width:10px;height:10px;background:#28a745;border-radius:2px"></span> Healthy</span>
+                <span><span style="display:inline-block;width:10px;height:10px;background:#007bff;border-radius:2px"></span> Progressing</span>
+                <span><span style="display:inline-block;width:10px;height:10px;background:#ffc107;border-radius:2px"></span> Degraded</span>
+                <span><span style="display:inline-block;width:10px;height:10px;background:#dc3545;border-radius:2px"></span> Unhealthy</span>
+            </div>
+        }
+        else
+        {
+            <div class="text-muted small mb-3">No health history yet. Snapshots are collected every 5 minutes.</div>
+        }
+
+        @if (activeAlerts.Count > 0)
+        {
+            <h6 class="text-muted small mb-2">Active Alerts for this namespace</h6>
+            @foreach (AlertInfo alert in activeAlerts)
+            {
+                string badgeClass = alert.Severity switch
+                {
+                    "critical" => "bg-danger",
+                    "warning"  => "bg-warning text-dark",
+                    _          => "bg-info text-dark"
+                };
+                <div class="alert alert-light border py-2 mb-2 d-flex align-items-start gap-2">
+                    <span class="badge @badgeClass">@alert.Severity</span>
+                    <div>
+                        <strong>@alert.Name</strong>
+                        @if (!string.IsNullOrEmpty(alert.Summary))
+                        {
+                            <div class="small text-muted">@alert.Summary</div>
+                        }
+                        <div class="small text-muted">Started @alert.StartsAt.ToLocalTime().ToString("MMM d HH:mm")</div>
+                    </div>
+                </div>
+            }
+        }
+
+        @* ── Incident history (last 30 days) ── *@
+        <hr class="my-3" />
+        <h6 class="text-muted small mb-2">
+            <span class="bi bi-clock-history me-1"></span>Incident History (30 days)
+        </h6>
+        <CustomerIncidentHistory Deployments="new List<AppDeployment> { Deployment }" WindowDays="30" />
+    }
+}
+
+@* ══════════════════════════════════════════════════════════════
+   Logs Tab — Loki log browser pre-filtered to this deployment's namespace
+   ══════════════════════════════════════════════════════════════ *@
+@if (activeTab == "logs")
+{
+    <LogBrowser ClusterId="Deployment.ClusterId"
+                PresetNamespace="@Deployment.Namespace" />
+}
+
+@* ══════════════════════════════════════════════════════════════
+   Git Tab — per-deployment git source configuration
+   ══════════════════════════════════════════════════════════════ *@
+@if (activeTab == "git")
+{
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-white py-2 d-flex align-items-center gap-2">
+            <span class="bi bi-git text-primary"></span>
+            <strong>Git Source</strong>
+            @if (AccessRole >= CustomerAccessRole.Admin && !showGitEdit)
+            {
+                <button class="btn btn-sm btn-outline-secondary ms-auto" @onclick="StartGitEdit">
+                    <i class="bi bi-pencil"></i> Edit
+                </button>
+            }
+        </div>
+        <div class="card-body">
+
+            @* ── Credential notice ── *@
+            @if (gitTabCredentials.Count > 0)
+            {
+                <div class="alert alert-info py-2 small mb-3">
+                    <i class="bi bi-key-fill me-1"></i>
+                    <strong>Stored credentials on file:</strong>
+                    @string.Join(", ", gitTabCredentials.Select(c => c.Name)) —
+                    no need to enter credentials when setting a repository URL.
+                </div>
+            }
+
+            @* ── Policies (read-only) ── *@
+            @if (gitTabPolicies.Count > 0)
+            {
+                <div class="mb-3">
+                    <div class="text-muted small mb-1"><i class="bi bi-shield-check me-1"></i>Allowed repository URL patterns:</div>
+                    <div class="d-flex flex-wrap gap-2">
+                        @foreach (CustomerGitRepoPolicy p in gitTabPolicies)
+                        {
+                            <code class="small bg-light px-2 py-1 rounded">@p.UrlPattern</code>
+                        }
+                    </div>
+                </div>
+            }
+
+            @if (showGitEdit && AccessRole >= CustomerAccessRole.Admin)
+            {
+                @* ── Edit form ── *@
+                @if (gitEditError is not null)
+                {
+                    <div class="alert alert-danger py-1 small mb-2">@gitEditError</div>
+                }
+                <div class="row g-2 mb-3">
+                    <div class="col-12">
+                        <label class="form-label small">Repository URL</label>
+                        <input class="form-control form-control-sm font-monospace @(gitEditUrlError is not null ? "is-invalid" : "")"
+                               @bind="gitEditUrl" @bind:event="oninput" @onchange="ValidateGitEditUrl"
+                               placeholder="https://github.com/org/repo" />
+                        @if (gitEditUrlError is not null)
+                        {
+                            <div class="invalid-feedback">@gitEditUrlError</div>
+                        }
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">Path <span class="text-muted">(leave blank for root)</span></label>
+                        <input class="form-control form-control-sm font-monospace" @bind="gitEditPath" placeholder="." />
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">Branch / Revision <span class="text-muted">(leave blank for default)</span></label>
+                        <input class="form-control form-control-sm font-monospace" @bind="gitEditRevision" placeholder="main" />
+                    </div>
+                    <div class="col-12">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="gitAutoSync" @bind="gitEditAutoSync" />
+                            <label class="form-check-label small" for="gitAutoSync">Auto-sync (poll for changes every 3 minutes)</label>
+                        </div>
+                    </div>
+                </div>
+                <div class="d-flex gap-1">
+                    <button class="btn btn-sm btn-primary" @onclick="SaveGitSettings"
+                            disabled="@(savingGitSettings || gitEditUrlError is not null || string.IsNullOrWhiteSpace(gitEditUrl))">
+                        @if (savingGitSettings) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Save
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showGitEdit = false">Cancel</button>
+                </div>
+            }
+            else if (Deployment.GitUrl is not null)
+            {
+                @* ── Current settings (read) ── *@
+                <dl class="row small mb-0">
+                    <dt class="col-sm-3">Repository</dt>
+                    <dd class="col-sm-9 font-monospace">@Deployment.GitUrl</dd>
+
+                    <dt class="col-sm-3">Path</dt>
+                    <dd class="col-sm-9 font-monospace">@(Deployment.GitPath ?? ".")</dd>
+
+                    <dt class="col-sm-3">Revision</dt>
+                    <dd class="col-sm-9 font-monospace">@(Deployment.GitRevision ?? "main")</dd>
+
+                    <dt class="col-sm-3">Auto-sync</dt>
+                    <dd class="col-sm-9">
+                        @if (Deployment.GitAutoSync)
+                        {
+                            <span class="badge bg-success">Enabled</span>
+                        }
+                        else
+                        {
+                            <span class="badge bg-secondary">Disabled</span>
+                        }
+                    </dd>
+
+                    @if (Deployment.GitLastSyncedCommit is not null)
+                    {
+                        <dt class="col-sm-3">Last synced</dt>
+                        <dd class="col-sm-9">
+                            <code>@Deployment.GitLastSyncedCommit[..Math.Min(7, Deployment.GitLastSyncedCommit.Length)]</code>
+                            @if (Deployment.GitLastSyncedAt.HasValue)
+                            {
+                                <span class="text-muted ms-2">@Deployment.GitLastSyncedAt.Value.ToString("yyyy-MM-dd HH:mm")</span>
+                            }
+                        </dd>
+                    }
+                </dl>
+
+                @if (AccessRole >= CustomerAccessRole.Operator)
+                {
+                    <div class="mt-3">
+                        <button class="btn btn-sm btn-outline-primary" @onclick="TriggerGitSync" disabled="@syncingGit">
+                            @if (syncingGit) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            else { <i class="bi bi-arrow-repeat me-1"></i> }
+                            Sync now
+                        </button>
+                        @if (gitSyncMessage is not null)
+                        {
+                            <span class="ms-2 small @(gitSyncSuccess ? "text-success" : "text-danger")">
+                                <i class="bi @(gitSyncSuccess ? "bi-check-circle" : "bi-exclamation-triangle") me-1"></i>@gitSyncMessage
+                            </span>
+                        }
+                    </div>
+                }
+            }
+            else
+            {
+                @* ── Not configured ── *@
+                <div class="text-muted small">
+                    No git source configured for this deployment.
+                    @if (AccessRole >= CustomerAccessRole.Admin)
+                    {
+                        <button class="btn btn-sm btn-outline-primary ms-2" @onclick="StartGitEdit">
+                            <i class="bi bi-plus me-1"></i>Configure Git
+                        </button>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+}
+
+
+<style>
+    @@keyframes spin { to { transform: rotate(360deg); } }
+    .rg-spin { animation: spin .7s linear infinite; }
+</style>
+
+@code {
+    [Parameter] public required AppDeployment Deployment { get; set; }
+    [Parameter] public CustomerAccessRole AccessRole { get; set; }
+    [Parameter] public required KubernetesOperationsService K8sOps { get; set; }
+    [Parameter] public required DeploymentService DeploymentService { get; set; }
+    [Parameter] public required PrometheusService PrometheusService { get; set; }
+    [Parameter] public required AuditService AuditService { get; set; }
+    [Parameter] public Guid CustomerId { get; set; }
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public Guid EnvironmentId { get; set; }
+    [Parameter] public string? GovernanceNamespace { get; set; }
+    [Parameter] public EventCallback OnBack { get; set; }
+    [Parameter] public EventCallback OnDeleted { get; set; }
+
+    private bool IsGitManaged => Deployment.Type is
+        DeploymentType.GitYaml or DeploymentType.GitHelm or DeploymentType.GitAppOfApps;
+
+    private string activeTab = "pods";
+
+    // Git tab
+    private List<CustomerGitRepoPolicy> gitTabPolicies = [];
+    private List<CustomerGitCredential> gitTabCredentials = [];
+    private bool showGitEdit;
+    private bool savingGitSettings;
+    private string gitEditUrl = "", gitEditPath = "", gitEditRevision = "";
+    private bool gitEditAutoSync = true;
+    private string? gitEditUrlError;
+    private string? gitEditError;
+
+    // Git sync
+    private bool syncingGit;
+    private string? gitSyncMessage;
+    private bool gitSyncSuccess;
+
+    private async Task TriggerGitSync()
+    {
+        syncingGit = true;
+        gitSyncMessage = null;
+        StateHasChanged();
+        try
+        {
+            GitSyncResult result = await GitSyncService.SyncDeploymentAsync(Deployment.Id);
+            gitSyncSuccess = result.IsSuccess && result.ApplySuccess;
+            if (result.AlreadyCurrent)
+                gitSyncMessage = "Already up to date.";
+            else if (!result.IsSuccess)
+                gitSyncMessage = result.Error ?? "Sync failed.";
+            else if (!result.ApplySuccess)
+                gitSyncMessage = $"Synced to {result.CommitSha[..Math.Min(7, result.CommitSha.Length)]} but cluster apply failed: {result.ApplyOutput}";
+            else
+                gitSyncMessage = $"Synced and applied to cluster — {result.CommitSha[..Math.Min(7, result.CommitSha.Length)]} {result.CommitMessage}";
+            if (result.IsSuccess)
+            {
+                Deployment.GitLastSyncedCommit = result.CommitSha;
+                Deployment.GitLastSyncedAt = DateTime.UtcNow;
+                if (manifests is not null)
+                    manifests = await DeploymentService.GetManifestsAsync(Deployment.Id);
+            }
+        }
+        catch (Exception ex) { gitSyncSuccess = false; gitSyncMessage = ex.Message; }
+        finally { syncingGit = false; }
+    }
+
+    // ──────── Git tab ────────
+
+    private async Task LoadGitTab()
+    {
+        activeTab = "git";
+        if (gitTabPolicies.Count == 0 && CustomerId != Guid.Empty && EnvironmentId != Guid.Empty)
+        {
+            gitTabPolicies = await CustomerGitService.GetRepoPoliciesAsync(CustomerId, EnvironmentId);
+            gitTabCredentials = await CustomerGitService.GetCredentialsAsync(CustomerId, EnvironmentId);
+        }
+    }
+
+    private void StartGitEdit()
+    {
+        gitEditUrl = Deployment.GitUrl ?? "";
+        gitEditPath = Deployment.GitPath ?? "";
+        gitEditRevision = Deployment.GitRevision ?? "";
+        gitEditAutoSync = Deployment.GitAutoSync;
+        gitEditUrlError = null;
+        gitEditError = null;
+        showGitEdit = true;
+    }
+
+    private void ValidateGitEditUrl(ChangeEventArgs e)
+    {
+        gitEditUrl = e.Value?.ToString() ?? "";
+        if (string.IsNullOrWhiteSpace(gitEditUrl))
+        {
+            gitEditUrlError = null;
+            return;
+        }
+        gitEditUrlError = gitTabPolicies.Count == 0 || CustomerGitService.MatchesAnyPolicy(gitEditUrl, gitTabPolicies)
+            ? null
+            : "URL does not match any allowed policy pattern.";
+    }
+
+    private async Task SaveGitSettings()
+    {
+        savingGitSettings = true;
+        gitEditError = null;
+
+        try
+        {
+            if (gitTabPolicies.Count > 0 && !CustomerGitService.MatchesAnyPolicy(gitEditUrl, gitTabPolicies))
+            {
+                gitEditError = "The repository URL does not match any allowed policy pattern.";
+                return;
+            }
+
+            string? resolvedUrl = string.IsNullOrWhiteSpace(gitEditUrl) ? null : gitEditUrl.Trim();
+
+            await DeploymentService.UpdateGitSettingsAsync(
+                Deployment.Id, resolvedUrl,
+                string.IsNullOrWhiteSpace(gitEditPath) ? null : gitEditPath,
+                string.IsNullOrWhiteSpace(gitEditRevision) ? null : gitEditRevision,
+                gitEditAutoSync);
+
+            // Update local state so the UI reflects the change without reload.
+            Deployment.GitUrl = resolvedUrl;
+            Deployment.GitPath = string.IsNullOrWhiteSpace(gitEditPath) ? null : gitEditPath;
+            Deployment.GitRevision = string.IsNullOrWhiteSpace(gitEditRevision) ? null : gitEditRevision;
+            Deployment.GitAutoSync = gitEditAutoSync;
+            Deployment.GitLastSyncedCommit = null;
+            Deployment.GitLastSyncedAt = null;
+
+            showGitEdit = false;
+        }
+        catch (Exception ex)
+        {
+            gitEditError = ex.Message;
+        }
+        finally
+        {
+            savingGitSettings = false;
+        }
+    }
+
+    // Pods
+    private List<PodInfo>? pods;
+    private bool podsLoading;
+    private string? podsError;
+
+    // Operations
+    private bool operationInProgress;
+    private string? operationMessage;
+    private bool operationSuccess;
+    private string? confirmDeletePod;
+    private int _scaleReplicas = 1;
+    private bool _scaleInitialized;
+
+    // Logs
+    private bool showLogViewer;
+    private bool logLoading;
+    private string logPodName = "";
+    private string? logContainerName;
+    private string logContent = "";
+    private string? logError;
+    private int _logTailLines = 500;
+    private ElementReference _logPreRef;
+    private bool _pendingLogScroll;
+
+    private string _podFilter = "";
+    private string _podStatusFilter = "All";
+
+    private IEnumerable<PodInfo> FilteredPods
+    {
+        get
+        {
+            IEnumerable<PodInfo> result = pods ?? [];
+            if (!string.IsNullOrWhiteSpace(_podFilter))
+                result = result.Where(p => p.Name.Contains(_podFilter, StringComparison.OrdinalIgnoreCase));
+            if (_podStatusFilter != "All")
+                result = result.Where(p => p.Status == _podStatusFilter);
+            return result;
+        }
+    }
+
+    // Manifests
+    private List<DeploymentManifest>? manifests;
+    private bool showAddManifest;
+    private bool savingManifest;
+    private string newManifestKind = "", newManifestName = "", newManifestYaml = "";
+    private int newManifestSortOrder;
+    private Guid? editingManifestId;
+    private string editManifestYaml = "";
+
+    // Helm values
+    private string helmValuesYaml = "";
+    private bool savingValues;
+    private bool valuesSaved;
+    private string? valuesError;
+
+    // Helm install / upgrade
+    private bool installingHelm;
+    private bool? helmInstallSuccess;
+    private string? helmInstallOutput;
+
+    // YAML apply
+    private bool applyingYaml;
+    private bool? yamlApplySuccess;
+    private string? yamlApplyOutput;
+
+    // Edit deployment
+    private bool showEditDeployment;
+    private bool savingEdit;
+    private string editDeployName = "", editDeployNamespace = "";
+    private string editHelmRepoUrl = "", editHelmChartName = "", editHelmChartVersion = "";
+    private string? editDeployError;
+
+    // Delete deployment
+    private bool confirmDeleteDeployment;
+    private bool deletingDeployment;
+    private bool deleteFromCluster;
+    private string? deleteError;
+
+    // Resources
+    private List<DeploymentResource>? resourceTree;
+    private string? resourcesError;
+    private DateTime? _resourcesRefreshedAt;
+    private PeriodicTimer? _resourceTimer;
+    private CancellationTokenSource? _resourceTimerCts;
+
+    // Metrics
+    private DeploymentMetricsSummary? metrics;
+    private bool metricsLoading;
+    private string? metricsError;
+
+    // Activity (audit events)
+    private List<AuditEvent>? auditEvents;
+    private bool activityLoading;
+
+    // Monitoring tab
+    private List<DeploymentHealthSnapshot> healthSnapshots = [];
+    private List<AlertInfo> activeAlerts = [];
+    private UptimeResult? uptime7d;
+    private UptimeResult? uptime30d;
+    private int activeAlertCount;
+    private bool monitoringLoading;
+
+    protected override async Task OnInitializedAsync()
+    {
+        StatusNotifier.OnStatusChanged += HandleDeploymentStatusChanged;
+        await LoadPodsInternal();
+    }
+
+    private void HandleDeploymentStatusChanged(Guid deploymentId, SyncStatus sync, HealthStatus health)
+    {
+        if (deploymentId != Deployment.Id) return;
+        Deployment.SyncStatus = sync;
+        Deployment.HealthStatus = health;
+        InvokeAsync(StateHasChanged);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        StatusNotifier.OnStatusChanged -= HandleDeploymentStatusChanged;
+        StopResourceRefresh();
+        return ValueTask.CompletedTask;
+    }
+
+    private void StopResourceRefresh()
+    {
+        _resourceTimerCts?.Cancel();
+        _resourceTimerCts?.Dispose();
+        _resourceTimerCts = null;
+        _resourceTimer?.Dispose();
+        _resourceTimer = null;
+    }
+
+    // ──────── Pod operations ────────
+
+    private async Task LoadPods()
+    {
+        StopResourceRefresh();
+        activeTab = "pods";
+        await LoadPodsInternal();
+    }
+
+    private async Task LoadPodsInternal()
+    {
+        podsLoading = true;
+        podsError = null;
+        pods = null;
+        StateHasChanged();
+
+        KubernetesOperationResult<List<PodInfo>> result = await K8sOps.GetPodsAsync(Deployment.Id);
+
+        if (result.IsSuccess)
+        {
+            pods = result.Data ?? [];
+
+            if (!_scaleInitialized && pods.Count > 0)
+            {
+                _scaleReplicas = pods.Count;
+                _scaleInitialized = true;
+            }
+
+            // Derive and persist live status from the pod list so the badges
+            // reflect actual cluster state rather than the DB default (Unknown).
+            (SyncStatus sync, HealthStatus health) =
+                KubernetesOperationsService.ComputeStatusFromPods(pods);
+
+            await DeploymentService.UpdateDeploymentStatusAsync(Deployment.Id, sync, health);
+            Deployment.SyncStatus = sync;
+            Deployment.HealthStatus = health;
+        }
+        else
+        {
+            podsError = result.Error;
+        }
+
+        podsLoading = false;
+    }
+
+    private async Task ViewLogs(string podName, string? containerName)
+    {
+        showLogViewer = true;
+        logLoading = true;
+        logPodName = podName;
+        logContainerName = containerName;
+        logContent = "";
+        logError = null;
+        StateHasChanged();
+
+        KubernetesOperationResult<string> result = await K8sOps.GetPodLogsAsync(
+            Deployment.Id, podName, containerName, _logTailLines);
+
+        if (result.IsSuccess)
+        {
+            logContent = result.Data ?? "(empty)";
+            _pendingLogScroll = true;
+        }
+        else
+        {
+            logError = result.Error;
+        }
+
+        logLoading = false;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_pendingLogScroll)
+        {
+            _pendingLogScroll = false;
+            try { await JS.InvokeVoidAsync("scrollToBottom", _logPreRef); } catch { }
+        }
+    }
+
+    private void CloseLogViewer()
+    {
+        showLogViewer = false;
+    }
+
+    private async Task RestartAllDeployments()
+    {
+        operationInProgress = true;
+        operationMessage = null;
+        StateHasChanged();
+
+        // Find all Deployment-kind resources tracked for this deployment
+        // and restart each one. If none are tracked, try the deployment name.
+        List<DeploymentResource> tree = await DeploymentService.GetResourceTreeAsync(Deployment.Id);
+        List<string> deploymentNames = tree
+            .Where(r => r.Kind == "Deployment")
+            .Select(r => r.Name)
+            .ToList();
+
+        if (deploymentNames.Count == 0)
+        {
+            // Fallback: use the deployment name itself.
+            deploymentNames.Add(Deployment.Name);
+        }
+
+        List<string> failures = [];
+
+        foreach (string name in deploymentNames)
+        {
+            KubernetesOperationResult result = await K8sOps.RestartDeploymentAsync(Deployment.Id, name);
+
+            if (!result.IsSuccess)
+            {
+                failures.Add($"{name}: {result.Error}");
+            }
+        }
+
+        if (failures.Count == 0)
+        {
+            SetOperationMessage($"Rolling restart triggered for {deploymentNames.Count} deployment(s).", true);
+        }
+        else
+        {
+            SetOperationMessage($"Some restarts failed: {string.Join("; ", failures)}", false);
+        }
+
+        operationInProgress = false;
+
+        // Refresh pods after a short delay to show new status.
+        await Task.Delay(2000);
+        await LoadPodsInternal();
+    }
+
+    private async Task ScaleMainDeployment()
+    {
+        operationInProgress = true;
+        operationMessage = null;
+        StateHasChanged();
+
+        List<DeploymentResource> tree = await DeploymentService.GetResourceTreeAsync(Deployment.Id);
+        List<(string Kind, string Name)> targets = tree
+            .Where(r => r.Kind is "Deployment" or "StatefulSet" or "ReplicaSet")
+            .Select(r => (r.Kind, r.Name))
+            .ToList();
+
+        if (targets.Count == 0)
+            targets.Add(("Deployment", Deployment.Name));
+
+        List<string> failures = [];
+
+        foreach ((string kind, string name) in targets)
+        {
+            KubernetesOperationResult result = await K8sOps.ScaleWorkloadAsync(
+                Deployment.Id, kind, name, _scaleReplicas);
+            if (!result.IsSuccess)
+                failures.Add($"{name}: {result.Error}");
+        }
+
+        if (failures.Count == 0)
+            SetOperationMessage($"Scaled to {_scaleReplicas} replica{(_scaleReplicas == 1 ? "" : "s")}.", true);
+        else
+            SetOperationMessage($"Scale failed: {string.Join("; ", failures)}", false);
+
+        operationInProgress = false;
+        await Task.Delay(2000);
+        await LoadPodsInternal();
+    }
+
+    private async Task DeletePod(string podName)
+    {
+        operationInProgress = true;
+        confirmDeletePod = null;
+        StateHasChanged();
+
+        KubernetesOperationResult result = await K8sOps.DeletePodAsync(Deployment.Id, podName);
+
+        SetOperationMessage(
+            result.IsSuccess
+                ? $"Pod '{podName}' deleted. Kubernetes will create a replacement."
+                : result.Error,
+            result.IsSuccess);
+
+        operationInProgress = false;
+
+        // Refresh pods.
+        await Task.Delay(2000);
+        await LoadPodsInternal();
+    }
+
+    // ──────── Edit / Delete deployment ────────
+
+    private void StartEditDeployment()
+    {
+        editDeployName = Deployment.Name;
+        editDeployNamespace = !string.IsNullOrWhiteSpace(GovernanceNamespace) ? GovernanceNamespace : Deployment.Namespace;
+        editHelmRepoUrl = Deployment.HelmRepoUrl ?? "";
+        editHelmChartName = Deployment.HelmChartName ?? "";
+        editHelmChartVersion = Deployment.HelmChartVersion ?? "";
+        editDeployError = null;
+        showEditDeployment = true;
+        confirmDeleteDeployment = false;
+    }
+
+    private async Task SaveDeployment()
+    {
+        savingEdit = true;
+        editDeployError = null;
+        try
+        {
+            string ns = !string.IsNullOrWhiteSpace(GovernanceNamespace) ? GovernanceNamespace : editDeployNamespace;
+
+            await DeploymentService.UpdateDeploymentAsync(
+                Deployment.Id, editDeployName, ns,
+                Deployment.Type == DeploymentType.HelmChart ? editHelmRepoUrl : null,
+                Deployment.Type == DeploymentType.HelmChart ? editHelmChartName : null,
+                Deployment.Type == DeploymentType.HelmChart ? editHelmChartVersion : null);
+
+            Deployment.Name = editDeployName;
+            Deployment.Namespace = ns;
+            if (Deployment.Type == DeploymentType.HelmChart)
+            {
+                Deployment.HelmRepoUrl = editHelmRepoUrl;
+                Deployment.HelmChartName = editHelmChartName;
+                Deployment.HelmChartVersion = editHelmChartVersion;
+            }
+
+            showEditDeployment = false;
+        }
+        catch (Exception ex) { editDeployError = ex.Message; }
+        finally { savingEdit = false; }
+    }
+
+    private async Task DeleteDeployment(bool fromCluster)
+    {
+        deletingDeployment = true;
+        deleteFromCluster = fromCluster;
+        deleteError = null;
+        StateHasChanged();
+
+        try
+        {
+            if (fromCluster)
+            {
+                KubernetesOperationResult<string> clusterResult =
+                    await K8sOps.DeleteDeploymentFromClusterAsync(Deployment.Id);
+
+                if (!clusterResult.IsSuccess)
+                {
+                    deleteError = clusterResult.Error;
+                    deletingDeployment = false;
+                    return;
+                }
+            }
+
+            await DeploymentService.DeleteDeploymentAsync(Deployment.Id);
+            await OnDeleted.InvokeAsync();
+        }
+        catch (Exception ex)
+        {
+            deleteError = ex.Message;
+            deletingDeployment = false;
+        }
+    }
+
+    // ──────── Manifests ────────
+
+    private async Task LoadManifests()
+    {
+        StopResourceRefresh();
+        activeTab = "manifests";
+        yamlApplyOutput = null;
+        yamlApplySuccess = null;
+        manifests = await DeploymentService.GetManifestsAsync(Deployment.Id);
+    }
+
+    private async Task AddManifest()
+    {
+        savingManifest = true;
+        try
+        {
+            await DeploymentService.AddManifestAsync(
+                Deployment.Id, newManifestKind, newManifestName, newManifestYaml, newManifestSortOrder);
+            showAddManifest = false;
+            newManifestKind = newManifestName = newManifestYaml = "";
+            newManifestSortOrder = 0;
+            manifests = await DeploymentService.GetManifestsAsync(Deployment.Id);
+        }
+        finally { savingManifest = false; }
+    }
+
+    private void StartEditManifest(DeploymentManifest manifest)
+    {
+        editingManifestId = manifest.Id;
+        editManifestYaml = manifest.YamlContent;
+    }
+
+    private async Task SaveManifest(Guid manifestId)
+    {
+        savingManifest = true;
+        try
+        {
+            await DeploymentService.UpdateManifestAsync(manifestId, editManifestYaml);
+            editingManifestId = null;
+            manifests = await DeploymentService.GetManifestsAsync(Deployment.Id);
+        }
+        finally { savingManifest = false; }
+    }
+
+    private async Task DeleteManifest(Guid manifestId)
+    {
+        await DeploymentService.DeleteManifestAsync(manifestId);
+        manifests = await DeploymentService.GetManifestsAsync(Deployment.Id);
+    }
+
+    // ──────── YAML Apply ────────
+
+    private async Task ApplyYamlDeployment()
+    {
+        applyingYaml = true;
+        yamlApplyOutput = null;
+        yamlApplySuccess = null;
+
+        try
+        {
+            KubernetesOperationResult<string> result =
+                await K8sOps.ApplyYamlDeploymentAsync(Deployment.Id);
+
+            yamlApplySuccess = result.IsSuccess;
+            yamlApplyOutput = result.IsSuccess ? result.Data : result.Error;
+        }
+        finally { applyingYaml = false; }
+    }
+
+    // ──────── Helm Install / Upgrade ────────
+
+    private async Task InstallOrUpgradeHelm()
+    {
+        installingHelm = true;
+        helmInstallOutput = null;
+        helmInstallSuccess = null;
+
+        try
+        {
+            KubernetesOperationResult<string> result =
+                await K8sOps.HelmInstallOrUpgradeAsync(Deployment.Id);
+
+            helmInstallSuccess = result.IsSuccess;
+            helmInstallOutput = result.IsSuccess ? result.Data : result.Error;
+        }
+        finally { installingHelm = false; }
+    }
+
+    // ──────── Helm Values ────────
+
+    private async Task LoadValues()
+    {
+        activeTab = "values";
+        helmValuesYaml = Deployment.HelmValues ?? "";
+        valuesSaved = false;
+        valuesError = null;
+        helmInstallOutput = null;
+        helmInstallSuccess = null;
+    }
+
+    private async Task SaveHelmValues()
+    {
+        savingValues = true;
+        valuesSaved = false;
+        valuesError = null;
+        try
+        {
+            await DeploymentService.UpdateHelmValuesAsync(Deployment.Id, helmValuesYaml);
+            Deployment.HelmValues = helmValuesYaml;
+            valuesSaved = true;
+        }
+        catch (Exception ex) { valuesError = ex.Message; }
+        finally { savingValues = false; }
+    }
+
+    // ──────── Resources ────────
+
+    private async Task LoadResources()
+    {
+        StopResourceRefresh();
+        activeTab = "resources";
+        resourceTree = null;
+        resourcesError = null;
+        StateHasChanged();
+
+        await RefreshResourcesAsync();
+
+        _resourceTimerCts = new CancellationTokenSource();
+        _ = RunResourceAutoRefreshAsync(_resourceTimerCts.Token);
+    }
+
+    private async Task RefreshResourcesAsync()
+    {
+        KubernetesOperationResult<List<DeploymentResource>> result =
+            await K8sOps.GetLiveResourcesAsync(Deployment.Id);
+
+        if (result.IsSuccess)
+        {
+            resourceTree = result.Data ?? [];
+            _resourcesRefreshedAt = DateTime.UtcNow;
+
+            (SyncStatus sync, HealthStatus health) =
+                KubernetesOperationsService.ComputeStatusFromResources(resourceTree);
+
+            await DeploymentService.UpdateDeploymentStatusAsync(Deployment.Id, sync, health);
+            Deployment.SyncStatus = sync;
+            Deployment.HealthStatus = health;
+        }
+        else
+        {
+            resourcesError = result.Error;
+            resourceTree = [];
+        }
+    }
+
+    private async Task RunResourceAutoRefreshAsync(CancellationToken ct)
+    {
+        _resourceTimer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+        try
+        {
+            while (await _resourceTimer.WaitForNextTickAsync(ct))
+            {
+                await InvokeAsync(async () =>
+                {
+                    await RefreshResourcesAsync();
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    // ──────── Metrics ────────
+
+    private async Task LoadMetrics()
+    {
+        StopResourceRefresh();
+        activeTab = "metrics";
+        metricsLoading = true;
+        metricsError = null;
+        metrics = null;
+        StateHasChanged();
+
+        KubernetesOperationResult<DeploymentMetricsSummary> result =
+            await PrometheusService.GetDeploymentMetricsAsync(Deployment.Id);
+
+        if (result.IsSuccess)
+            metrics = result.Data;
+        else
+            metricsError = result.Error;
+
+        metricsLoading = false;
+    }
+
+    // ──────── Activity ────────
+
+    private async Task LoadActivity()
+    {
+        StopResourceRefresh();
+        activeTab = "activity";
+        activityLoading = true;
+        auditEvents = null;
+        StateHasChanged();
+
+        auditEvents = await AuditService.GetDeploymentEventsAsync(Deployment.Id);
+        activityLoading = false;
+    }
+
+    private async Task LoadMonitoring()
+    {
+        StopResourceRefresh();
+        activeTab = "monitoring";
+        monitoringLoading = true;
+        StateHasChanged();
+
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        DateTime from7 = DateTime.UtcNow.AddDays(-7);
+
+        healthSnapshots = await db.DeploymentHealthSnapshots
+            .Where(s => s.DeploymentId == Deployment.Id && s.SnapshotAt >= from7)
+            .OrderBy(s => s.SnapshotAt)
+            .ToListAsync();
+
+        uptime7d  = await IncidentService.GetUptimeAsync(Deployment.Id, 7);
+        uptime30d = await IncidentService.GetUptimeAsync(Deployment.Id, 30);
+
+        // Load active alerts for this namespace (filtered client-side)
+        if (Deployment.Cluster is not null)
+        {
+            KubernetesOperationResult<List<AlertInfo>> alertsResult =
+                await PrometheusService.GetAlertsAsync(Deployment.ClusterId);
+
+            if (alertsResult.IsSuccess && alertsResult.Data is not null)
+            {
+                activeAlerts = alertsResult.Data
+                    .Where(a => a.Labels.TryGetValue("namespace", out string? ns)
+                                && ns == Deployment.Namespace)
+                    .ToList();
+            }
+            else
+            {
+                activeAlerts = [];
+            }
+        }
+
+        activeAlertCount = activeAlerts.Count;
+        monitoringLoading = false;
+    }
+
+    // ──────── Operation message helpers ────────
+
+    private void SetOperationMessage(string? msg, bool success)
+    {
+        operationMessage = msg;
+        operationSuccess = success;
+        if (msg is not null)
+            _ = AutoDismissMessageAsync(msg);
+    }
+
+    private async Task AutoDismissMessageAsync(string snapshot)
+    {
+        await Task.Delay(6000);
+        // Only clear if the message hasn't been replaced by a newer one.
+        if (operationMessage == snapshot)
+        {
+            operationMessage = null;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    // ──────── Rendering helpers ────────
+
+    private static string PodAge(DateTime startTime)
+    {
+        TimeSpan age = DateTime.UtcNow - startTime;
+        if (age.TotalDays >= 1)    return $"{(int)age.TotalDays}d";
+        if (age.TotalHours >= 1)   return $"{(int)age.TotalHours}h";
+        if (age.TotalMinutes >= 1) return $"{(int)age.TotalMinutes}m";
+        return "<1m";
+    }
+
+    private static string RestartBadgeClass(int restarts) =>
+        restarts >= 5 ? "bg-danger" : "bg-warning text-dark";
+
+    private static string GetPodStatusColor(string status) => status switch
+    {
+        "Running" => "text-success",
+        "Pending" => "text-warning",
+        "Succeeded" => "text-info",
+        "Failed" => "text-danger",
+        _ => "text-muted"
+    };
+
+    private static string GetPodStatusBadgeClass(string status) => status switch
+    {
+        "Running" => "bg-success",
+        "Pending" => "bg-warning text-dark",
+        "Succeeded" => "bg-info",
+        "Failed" => "bg-danger",
+        _ => "bg-secondary"
+    };
+
+    private static string TruncateImage(string image)
+    {
+        int slash = image.LastIndexOf('/');
+        return slash >= 0 ? image[(slash + 1)..] : image;
+    }
+
+    private RenderFragment TypeBadge(DeploymentType type) => type switch
+    {
+        DeploymentType.Manual => @<span class="badge bg-info">Manual</span>,
+        DeploymentType.Yaml => @<span class="badge bg-warning text-dark">YAML</span>,
+        DeploymentType.HelmChart => @<span class="badge bg-purple text-white" style="background-color: #6f42c1 !important;">Helm</span>,
+        _ => @<span class="badge bg-secondary">Unknown</span>
+    };
+
+    private RenderFragment SyncBadge(SyncStatus status) => status switch
+    {
+        SyncStatus.Synced => @<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Synced</span>,
+        SyncStatus.OutOfSync => @<span class="badge bg-warning text-dark"><i class="bi bi-exclamation-circle me-1"></i>OutOfSync</span>,
+        SyncStatus.Syncing => @<span class="badge bg-info"><i class="bi bi-arrow-repeat me-1"></i>Syncing</span>,
+        SyncStatus.Failed => @<span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>,
+        _ => @<span class="badge bg-secondary">Unknown</span>
+    };
+
+    private RenderFragment HealthBadge(HealthStatus status) => status switch
+    {
+        HealthStatus.Healthy => @<span class="badge bg-success"><i class="bi bi-heart-fill me-1"></i>Healthy</span>,
+        HealthStatus.Progressing => @<span class="badge bg-info"><i class="bi bi-hourglass-split me-1"></i>Progressing</span>,
+        HealthStatus.Degraded => @<span class="badge bg-warning text-dark"><i class="bi bi-exclamation-triangle me-1"></i>Degraded</span>,
+        HealthStatus.Missing => @<span class="badge bg-danger"><i class="bi bi-question-circle me-1"></i>Missing</span>,
+        HealthStatus.Suspended => @<span class="badge bg-secondary"><i class="bi bi-pause-circle me-1"></i>Suspended</span>,
+        _ => @<span class="badge bg-secondary">Unknown</span>
+    };
+
+
+
+}

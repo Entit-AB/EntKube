@@ -1,0 +1,80 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+@* Cluster picker — AlertRulesPanel is cluster-scoped *@
+<div class="d-flex align-items-center gap-3 mb-4">
+    <label class="form-label small text-muted mb-0 text-nowrap">Cluster</label>
+    <select class="form-select form-select-sm" style="min-width:220px"
+            @bind="selectedClusterId" @bind:after="OnClusterChanged">
+        <option value="">— select a cluster —</option>
+        @foreach (ClusterOption opt in clusterOptions)
+        {
+            <option value="@opt.Id" disabled="@(!opt.HasPrometheus)">
+                @opt.Name@(!opt.HasPrometheus ? " (Prometheus not installed)" : "")
+            </option>
+        }
+    </select>
+    @if (clusterOptions.Any(c => c.HasPrometheus) && string.IsNullOrEmpty(selectedClusterId))
+    {
+        <span class="text-muted small">Select a cluster to view its alert rules.</span>
+    }
+</div>
+
+@if (string.IsNullOrEmpty(selectedClusterId))
+{
+    @if (!isLoading && clusterOptions.Count == 0)
+    {
+        <EmptyState Icon="bi-hdd-rack"
+                    Title="No clusters"
+                    Message="No clusters are registered for this tenant." />
+    }
+    else if (!isLoading && !clusterOptions.Any(c => c.HasPrometheus))
+    {
+        <EmptyState Icon="bi-speedometer2"
+                    Title="No Prometheus clusters"
+                    Message="Install kube-prometheus-stack on a cluster to enable alert rules." />
+    }
+}
+else
+{
+    <AlertRulesPanel ClusterId="@(Guid.Parse(selectedClusterId))" />
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<ClusterOption> clusterOptions = [];
+    private string selectedClusterId = "";
+    private bool isLoading = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        List<KubernetesCluster> clusters = await db.KubernetesClusters
+            .Include(c => c.Components)
+            .Where(c => c.TenantId == TenantId)
+            .OrderBy(c => c.Name)
+            .ToListAsync();
+
+        clusterOptions = clusters.Select(c => new ClusterOption(
+            c.Id.ToString(),
+            c.Name,
+            HasPrometheus: c.Components.Any(comp =>
+                comp.HelmChartName == "kube-prometheus-stack" &&
+                comp.Status == ComponentStatus.Installed)
+        )).ToList();
+
+        // Auto-select first cluster with Prometheus
+        ClusterOption? best = clusterOptions.FirstOrDefault(c => c.HasPrometheus);
+        if (best is not null)
+            selectedClusterId = best.Id;
+
+        isLoading = false;
+    }
+
+    private void OnClusterChanged() { }
+
+    private record ClusterOption(string Id, string Name, bool HasPrometheus);
+}

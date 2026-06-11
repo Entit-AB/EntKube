@@ -1,0 +1,91 @@
+@using EntKube.Web.Data
+
+@* ── Server record edit / create form ── *@
+<div class="row g-2">
+    <div class="col-md-6">
+        <label class="form-label small mb-1">Display name <span class="text-danger">*</span></label>
+        <input class="form-control form-control-sm" @bind="Server.DisplayName" placeholder="e.g. node-01" />
+    </div>
+    <div class="col-md-3">
+        <label class="form-label small mb-1">Provider</label>
+        <select class="form-select form-select-sm" @bind="Server.Provider">
+            @foreach (ServerProvider p in Enum.GetValues<ServerProvider>())
+            {
+                <option value="@p">@p</option>
+            }
+        </select>
+    </div>
+    <div class="col-md-3">
+        <label class="form-label small mb-1">Link to node</label>
+        <input class="form-control form-control-sm font-monospace" @bind="Server.NodeName"
+               placeholder="node-1.example.com" />
+    </div>
+
+    <div class="col-md-3">
+        <label class="form-label small mb-1">IP address</label>
+        <input class="form-control form-control-sm font-monospace" @bind="Server.IpAddress" placeholder="10.0.0.1" />
+    </div>
+    <div class="col-md-3">
+        <label class="form-label small mb-1">Management IP</label>
+        <input class="form-control form-control-sm font-monospace" @bind="Server.ManagementIpAddress" placeholder="10.0.1.1" />
+    </div>
+    <div class="col-md-6">
+        <label class="form-label small mb-1">OS distribution</label>
+        <input class="form-control form-control-sm" @bind="Server.OsDistribution" placeholder="Ubuntu 22.04 LTS" />
+    </div>
+
+    <div class="col-md-2">
+        <label class="form-label small mb-1">CPU cores</label>
+        <input class="form-control form-control-sm" type="number" min="1" @bind="Server.CpuCores" />
+    </div>
+    <div class="col-md-2">
+        <label class="form-label small mb-1">RAM (GB)</label>
+        <input class="form-control form-control-sm" type="number" min="1" @bind="Server.RamGb" />
+    </div>
+    <div class="col-md-2">
+        <label class="form-label small mb-1">Disk (GB)</label>
+        <input class="form-control form-control-sm" type="number" min="1" @bind="Server.DiskGb" />
+    </div>
+    <div class="col-md-6">
+        <label class="form-label small mb-1">Location / zone / datacenter</label>
+        <input class="form-control form-control-sm" @bind="Server.Location" placeholder="us-east-1a / rack-B2" />
+    </div>
+
+    <div class="col-md-3">
+        <label class="form-label small mb-1">SSH user</label>
+        <input class="form-control form-control-sm font-monospace" @bind="Server.SshUser" placeholder="ubuntu" />
+    </div>
+    <div class="col-md-2">
+        <label class="form-label small mb-1">SSH port</label>
+        <input class="form-control form-control-sm" type="number" min="1" max="65535" @bind="Server.SshPort" />
+    </div>
+    <div class="col-md-7">
+        <label class="form-label small mb-1">Jump host</label>
+        <input class="form-control form-control-sm font-monospace" @bind="Server.JumpHost"
+               placeholder="bastion.example.com:22 (optional)" />
+    </div>
+
+    <div class="col-12">
+        <label class="form-label small mb-1">Notes</label>
+        <textarea class="form-control form-control-sm" rows="2" @bind="Server.Notes"
+                  placeholder="Maintenance history, special config, caveats…"></textarea>
+    </div>
+
+    <div class="col-12 d-flex gap-2 mt-1">
+        <button class="btn btn-sm btn-primary" @onclick="HandleSave"
+                disabled="@(string.IsNullOrWhiteSpace(Server.DisplayName))">
+            <i class="bi bi-check-lg me-1"></i>Save
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="() => OnCancel.InvokeAsync()">
+            Cancel
+        </button>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public ClusterServer Server { get; set; } = null!;
+    [Parameter, EditorRequired] public EventCallback<ClusterServer> OnSave { get; set; }
+    [Parameter, EditorRequired] public EventCallback OnCancel { get; set; }
+
+    private Task HandleSave() => OnSave.InvokeAsync(Server);
+}

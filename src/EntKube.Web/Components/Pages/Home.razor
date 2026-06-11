@@ -1,0 +1,111 @@
+@page "/"
+@using Microsoft.AspNetCore.Components.Authorization
+
+<PageTitle>EntKube</PageTitle>
+
+<div class="mb-4">
+    <h1 class="mb-1"><i class="bi bi-server me-2 text-primary"></i>EntKube</h1>
+    <p class="text-muted mb-0">Multi-tenant platform for managing shared Kubernetes applications and infrastructure services.</p>
+</div>
+
+<AuthorizeView>
+    <Authorized>
+        <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-3">
+
+            <AuthorizeView Policy="HasTenantAccess" Context="tenantCtx">
+                <Authorized>
+                    <div class="col">
+                        <a href="/tenants" class="text-decoration-none">
+                            <div class="card h-100 shadow-sm border-0 home-card">
+                                <div class="card-body">
+                                    <div class="d-flex align-items-center mb-2">
+                                        <div class="home-card-icon bg-primary bg-opacity-10 text-primary rounded me-3">
+                                            <i class="bi bi-building fs-4"></i>
+                                        </div>
+                                        <h5 class="mb-0">Tenants</h5>
+                                    </div>
+                                    <p class="text-muted small mb-0">Manage tenant organisations, infrastructure, services, and deployments.</p>
+                                </div>
+                                <div class="card-footer bg-transparent border-0 pt-0">
+                                    <span class="text-primary small fw-semibold">Manage Tenants <i class="bi bi-arrow-right ms-1"></i></span>
+                                </div>
+                            </div>
+                        </a>
+                    </div>
+                </Authorized>
+            </AuthorizeView>
+
+            <div class="col">
+                <a href="/portal" class="text-decoration-none">
+                    <div class="card h-100 shadow-sm border-0 home-card">
+                        <div class="card-body">
+                            <div class="d-flex align-items-center mb-2">
+                                <div class="home-card-icon bg-success bg-opacity-10 text-success rounded me-3">
+                                    <i class="bi bi-grid fs-4"></i>
+                                </div>
+                                <h5 class="mb-0">Customer Portal</h5>
+                            </div>
+                            <p class="text-muted small mb-0">Browse your customers, manage deployments, and access application resources.</p>
+                        </div>
+                        <div class="card-footer bg-transparent border-0 pt-0">
+                            <span class="text-success small fw-semibold">Open Portal <i class="bi bi-arrow-right ms-1"></i></span>
+                        </div>
+                    </div>
+                </a>
+            </div>
+
+            <div class="col">
+                <a href="/portal/status" class="text-decoration-none">
+                    <div class="card h-100 shadow-sm border-0 home-card">
+                        <div class="card-body">
+                            <div class="d-flex align-items-center mb-2">
+                                <div class="home-card-icon bg-info bg-opacity-10 text-info rounded me-3">
+                                    <i class="bi bi-activity fs-4"></i>
+                                </div>
+                                <h5 class="mb-0">Status Overview</h5>
+                            </div>
+                            <p class="text-muted small mb-0">Cross-customer health, SLA targets, uptime, and active alerts at a glance.</p>
+                        </div>
+                        <div class="card-footer bg-transparent border-0 pt-0">
+                            <span class="text-info small fw-semibold">View Status <i class="bi bi-arrow-right ms-1"></i></span>
+                        </div>
+                    </div>
+                </a>
+            </div>
+
+            <AuthorizeView Roles="Admin" Context="adminCtx">
+                <Authorized>
+                    <div class="col">
+                        <a href="/admin/backup" class="text-decoration-none">
+                            <div class="card h-100 shadow-sm border-0 home-card">
+                                <div class="card-body">
+                                    <div class="d-flex align-items-center mb-2">
+                                        <div class="home-card-icon bg-warning bg-opacity-10 text-warning rounded me-3">
+                                            <i class="bi bi-arrow-repeat fs-4"></i>
+                                        </div>
+                                        <h5 class="mb-0">Backup &amp; Restore</h5>
+                                    </div>
+                                    <p class="text-muted small mb-0">Export and restore platform state for migration or disaster recovery.</p>
+                                </div>
+                                <div class="card-footer bg-transparent border-0 pt-0">
+                                    <span class="text-warning small fw-semibold">Open Backup <i class="bi bi-arrow-right ms-1"></i></span>
+                                </div>
+                            </div>
+                        </a>
+                    </div>
+                </Authorized>
+            </AuthorizeView>
+
+        </div>
+    </Authorized>
+    <NotAuthorized>
+        <div class="d-flex gap-2 mt-3">
+            <a href="/Account/Login" class="btn btn-primary btn-lg">
+                <i class="bi bi-box-arrow-in-right me-2"></i>Sign In
+            </a>
+            <a href="/Account/Register" class="btn btn-outline-secondary btn-lg">
+                <i class="bi bi-person-plus me-2"></i>Register
+            </a>
+        </div>
+    </NotAuthorized>
+</AuthorizeView>

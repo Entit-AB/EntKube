@@ -1,0 +1,197 @@
+@page "/tenants"
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@rendermode InteractiveServer
+@inject TenantService TenantService
+@inject UserAccessService UserAccessService
+@inject AuthenticationStateProvider AuthStateProvider
+@inject NavigationManager Navigation
+
+<PageTitle>Tenants</PageTitle>
+
+<LoadingPanel Loading="@(!loaded)" LoadingText="Loading tenants…">
+@if (loaded)
+{
+    <div class="d-flex align-items-center justify-content-between mb-4">
+        <div>
+            <h1 class="mb-0"><i class="bi bi-building me-2 text-primary"></i>Tenants</h1>
+            <p class="text-muted small mb-0 mt-1">Organizations and workspaces in your platform.</p>
+        </div>
+    </div>
+
+    @if (isAdmin)
+    {
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-body py-2">
+                <div class="input-group">
+                    <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-plus-circle"></i></span>
+                    <input type="text" class="form-control border-start-0" placeholder="New tenant name (e.g. Acme Corp)"
+                           @bind="newTenantName" @bind:event="oninput"
+                           @onkeydown="@(async (e) => { if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(newTenantName)) await CreateTenant(); })" />
+                    <button class="btn btn-primary" @onclick="CreateTenant"
+                            disabled="@(string.IsNullOrWhiteSpace(newTenantName) || creating)">
+                        @if (creating) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        else { <i class="bi bi-plus-lg me-1"></i> }
+                        Create Tenant
+                    </button>
+                </div>
+                @if (!string.IsNullOrEmpty(errorMessage))
+                {
+                    <div class="text-danger small mt-2"><i class="bi bi-exclamation-triangle me-1"></i>@errorMessage</div>
+                }
+                @if (!string.IsNullOrEmpty(successMessage))
+                {
+                    <div class="text-success small mt-2"><i class="bi bi-check-circle me-1"></i>@successMessage</div>
+                }
+            </div>
+        </div>
+    }
+
+    @if (tenants is null || tenants.Count == 0)
+    {
+        <EmptyState Icon="bi-building"
+                    Title="No tenants yet"
+                    Message="@(isAdmin ? "Create your first tenant above to get started." : "You have not been added to any tenants yet.")" />
+    }
+    else
+    {
+        <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-3">
+            @foreach (Tenant tenant in tenants)
+            {
+                <div class="col">
+                    <div class="card h-100 shadow-sm border-0 tenant-card">
+                        <div class="card-body">
+                            <div class="d-flex align-items-start justify-content-between">
+                                <div>
+                                    <h5 class="card-title mb-1">
+                                        <i class="bi bi-building me-1 text-primary"></i>@tenant.Name
+                                    </h5>
+                                    <p class="card-text text-muted small mb-0">
+                                        <code>@tenant.Slug</code>
+                                    </p>
+                                </div>
+                                @if (isAdmin)
+                                {
+                                    <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteId = tenant.Id"
+                                            title="Delete tenant">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                }
+                            </div>
+                        </div>
+
+                        @if (isAdmin && confirmDeleteId == tenant.Id)
+                        {
+                            <div class="card-body py-2 border-top">
+                                <ConfirmDialog Visible="true"
+                                               Message="@($"Permanently delete tenant '{tenant.Name}' and all its data?")"
+                                               ConfirmText="Delete"
+                                               IsBusy="deleting"
+                                               OnConfirm="() => DeleteTenant(tenant.Id)"
+                                               OnCancel="() => confirmDeleteId = null" />
+                            </div>
+                        }
+
+                        <div class="card-footer bg-transparent border-top-0 pt-0">
+                            <a href="/tenants/@tenant.Slug" class="btn btn-primary btn-sm w-100">
+                                <i class="bi bi-gear me-1"></i>Manage
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+}
+</LoadingPanel>
+
+@code {
+    private List<Tenant>? tenants;
+    private string newTenantName = "";
+    private string? errorMessage;
+    private string? successMessage;
+    private Guid? confirmDeleteId;
+    private bool isAdmin;
+    private bool loaded;
+    private bool creating;
+    private bool deleting;
+    private string? userId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        System.Security.Claims.ClaimsPrincipal user = authState.User;
+
+        if (user.Identity?.IsAuthenticated != true)
+        {
+            Navigation.NavigateTo("/Account/Login", forceLoad: true);
+            return;
+        }
+
+        userId = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        if (userId is null)
+        {
+            Navigation.NavigateTo("/Account/Login", forceLoad: true);
+            return;
+        }
+
+        isAdmin = await UserAccessService.IsGlobalAdminAsync(userId);
+        bool hasMembership = isAdmin || await UserAccessService.HasAnyTenantMembershipAsync(userId);
+
+        if (!hasMembership)
+        {
+            Navigation.NavigateTo("/portal");
+            return;
+        }
+
+        await LoadTenants();
+        loaded = true;
+    }
+
+    private async Task LoadTenants()
+    {
+        if (userId is null) return;
+        tenants = await UserAccessService.GetAccessibleTenantsAsync(userId);
+    }
+
+    private async Task ShowSuccessAsync(string message)
+    {
+        successMessage = message;
+        StateHasChanged();
+        await Task.Delay(3500);
+        successMessage = null;
+        StateHasChanged();
+    }
+
+    private async Task CreateTenant()
+    {
+        if (!isAdmin) return;
+        errorMessage = null;
+        creating = true;
+
+        try
+        {
+            string name = newTenantName.Trim();
+            await TenantService.CreateTenantAsync(name);
+            newTenantName = "";
+            await LoadTenants();
+            _ = ShowSuccessAsync($"Tenant '{name}' created.");
+        }
+        catch (DbUpdateException)
+        {
+            errorMessage = "A tenant with that name already exists.";
+        }
+        finally { creating = false; }
+    }
+
+    private async Task DeleteTenant(Guid id)
+    {
+        if (!isAdmin) return;
+        deleting = true;
+        await TenantService.DeleteTenantAsync(id);
+        deleting = false;
+        confirmDeleteId = null;
+        await LoadTenants();
+    }
+}

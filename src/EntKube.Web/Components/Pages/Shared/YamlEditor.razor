@@ -1,0 +1,108 @@
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+
+<div class="yaml-editor-outer @(_fullscreen ? "yaml-editor-fullscreen" : "")">
+    @if (_fullscreen)
+    {
+        <div class="yaml-editor-fs-bar d-flex align-items-center justify-content-between px-3 py-2 border-bottom bg-light flex-shrink-0">
+            <span class="small fw-medium text-muted">
+                <i class="bi bi-code-slash me-1"></i>@Language.ToUpper()
+            </span>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="ExitFullscreen">
+                <i class="bi bi-fullscreen-exit me-1"></i>Exit Fullscreen
+            </button>
+        </div>
+    }
+    <div class="yaml-editor-inner position-relative">
+        <div @ref="_container" class="yaml-editor-container @_borderClass" style="min-height: 100px; overflow: hidden;"></div>
+        @if (Expandable && !_fullscreen)
+        {
+            <button class="yaml-expand-btn btn btn-sm btn-light" @onclick="EnterFullscreen" title="Expand to fullscreen">
+                <i class="bi bi-arrows-fullscreen"></i>
+            </button>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public string Value { get; set; } = "";
+    [Parameter] public EventCallback<string> ValueChanged { get; set; }
+    [Parameter] public string Language { get; set; } = "yaml";
+    [Parameter] public bool ReadOnly { get; set; } = false;
+    [Parameter] public bool Borderless { get; set; } = false;
+    [Parameter] public bool AutoHeight { get; set; } = true;
+    [Parameter] public string MaxHeight { get; set; } = "600px";
+    [Parameter] public bool Expandable { get; set; } = true;
+
+    private string _borderClass => Borderless ? "" : "border border-secondary-subtle rounded";
+
+    private bool _fullscreen = false;
+    private bool _pendingLayoutUpdate = false;
+    private ElementReference _container;
+    private IJSObjectReference? _jsModule;
+    private IJSObjectReference? _editor;
+    private DotNetObjectReference<YamlEditor>? _dotNetRef;
+    private string _lastKnownValue = "";
+
+    private int MaxHeightPx => int.TryParse(MaxHeight?.Replace("px", "").Trim(), out var px) ? px : 0;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _dotNetRef = DotNetObjectReference.Create(this);
+            _jsModule = await JS.InvokeAsync<IJSObjectReference>(
+                "import", "./Components/Pages/Shared/YamlEditor.razor.js");
+            _editor = await _jsModule.InvokeAsync<IJSObjectReference>(
+                "createEditor", _container, Value ?? "", Language, ReadOnly, _dotNetRef, AutoHeight, MaxHeightPx);
+            _lastKnownValue = Value ?? "";
+        }
+
+        if (_pendingLayoutUpdate && _editor is not null && _jsModule is not null)
+        {
+            _pendingLayoutUpdate = false;
+            await _jsModule.InvokeVoidAsync("relayoutEditor", _editor, _container, _fullscreen);
+        }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_editor is not null && _jsModule is not null && Value != _lastKnownValue)
+        {
+            await _jsModule.InvokeVoidAsync("setEditorValue", _editor, Value ?? "");
+            _lastKnownValue = Value ?? "";
+        }
+    }
+
+    [JSInvokable]
+    public async Task OnValueChanged(string value)
+    {
+        _lastKnownValue = value;
+        Value = value;
+        await ValueChanged.InvokeAsync(value);
+    }
+
+    private void EnterFullscreen()
+    {
+        _fullscreen = true;
+        _pendingLayoutUpdate = true;
+    }
+
+    private void ExitFullscreen()
+    {
+        _fullscreen = false;
+        _pendingLayoutUpdate = true;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_editor is not null && _jsModule is not null)
+        {
+            try { await _jsModule.InvokeVoidAsync("disposeEditor", _editor); } catch { }
+            await _editor.DisposeAsync();
+        }
+        if (_jsModule is not null)
+            await _jsModule.DisposeAsync();
+        _dotNetRef?.Dispose();
+    }
+}

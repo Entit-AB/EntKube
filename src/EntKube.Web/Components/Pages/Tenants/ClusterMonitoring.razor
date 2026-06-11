@@ -1,0 +1,304 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject PrometheusService PrometheusService
+
+@* ═══════════════════════════════════════════════════════════════════════════
+   ClusterMonitoring — full monitoring dashboard for a single cluster.
+   Shows real-time metrics from Prometheus, time-series graphs, and
+   Alertmanager alerts/silences. The operations team's single pane of glass.
+   ═══════════════════════════════════════════════════════════════════════════ *@
+
+<div class="mb-4">
+    @if (loading && health is null)
+    {
+        <div class="text-center py-5">
+            <div class="spinner-border text-primary" role="status"></div>
+            <p class="text-muted mt-2">Connecting to Prometheus...</p>
+        </div>
+    }
+    else if (!string.IsNullOrEmpty(errorMessage))
+    {
+        <div class="alert alert-warning">
+            <i class="bi bi-exclamation-triangle me-2"></i>@errorMessage
+            <button class="btn btn-sm btn-outline-warning ms-3" @onclick="LoadAll">Retry</button>
+        </div>
+    }
+    else
+    {
+        @* ── Header with refresh ── *@
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5 class="mb-0"><i class="bi bi-heart-pulse me-2 text-success"></i>Monitoring</h5>
+            <div class="d-flex align-items-center gap-2">
+                <select class="form-select form-select-sm" style="width: auto;" @bind="timeRange" @bind:after="LoadMetrics">
+                    <option value="30">Last 30 min</option>
+                    <option value="60">Last 1 hour</option>
+                    <option value="180">Last 3 hours</option>
+                    <option value="360">Last 6 hours</option>
+                    <option value="720">Last 12 hours</option>
+                    <option value="1440">Last 24 hours</option>
+                </select>
+                @if (loading)
+                {
+                    <span class="spinner-border spinner-border-sm text-primary"></span>
+                }
+                <button class="btn btn-sm btn-outline-primary" @onclick="LoadAll" disabled="@loading">
+                    <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                </button>
+            </div>
+        </div>
+
+        @* ── Status Overview Cards ── *@
+        @if (health is not null)
+        {
+            <div class="row g-3 mb-4">
+                <div class="col-md-3 col-6">
+                    <div class="card text-center h-100 @(health.ReadyNodes == health.TotalNodes ? "border-success" : "border-danger")">
+                        <div class="card-body py-3">
+                            <div class="fs-2 fw-bold @(health.ReadyNodes == health.TotalNodes ? "text-success" : "text-danger")">
+                                @health.ReadyNodes<span class="fs-5 text-muted">/@health.TotalNodes</span>
+                            </div>
+                            <small class="text-muted">Nodes Ready</small>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3 col-6">
+                    <div class="card text-center h-100 border-primary">
+                        <div class="card-body py-3">
+                            <div class="fs-2 fw-bold text-primary">@health.RunningPods</div>
+                            <small class="text-muted">Running Pods</small>
+                            @if (health.PendingPods > 0 || health.FailedPods > 0)
+                            {
+                                <div class="mt-1">
+                                    @if (health.PendingPods > 0)
+                                    {
+                                        <span class="badge bg-warning text-dark">@health.PendingPods pending</span>
+                                    }
+                                    @if (health.FailedPods > 0)
+                                    {
+                                        <span class="badge bg-danger">@health.FailedPods failed</span>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3 col-6">
+                    <div class="card text-center h-100 @GetBorderClass(health.CpuUsagePercent)">
+                        <div class="card-body py-3">
+                            <div class="fs-2 fw-bold @GetTextClass(health.CpuUsagePercent)">@health.CpuUsagePercent.ToString("F1")<span class="fs-6">%</span></div>
+                            <small class="text-muted">CPU Usage</small>
+                            <div class="progress mt-2" style="height: 4px;">
+                                <div class="progress-bar @GetBarClass(health.CpuUsagePercent)" style="width: @health.CpuUsagePercent%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3 col-6">
+                    <div class="card text-center h-100 @GetBorderClass(health.MemoryUsagePercent)">
+                        <div class="card-body py-3">
+                            <div class="fs-2 fw-bold @GetTextClass(health.MemoryUsagePercent)">@health.MemoryUsagePercent.ToString("F1")<span class="fs-6">%</span></div>
+                            <small class="text-muted">Memory Usage</small>
+                            <div class="progress mt-2" style="height: 4px;">
+                                <div class="progress-bar @GetBarClass(health.MemoryUsagePercent)" style="width: @health.MemoryUsagePercent%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @* ── Time-Series Graphs ── *@
+        <div class="row g-3 mb-4">
+            <div class="col-md-6">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <MetricChart Title="CPU Usage" DataPoints="cpuHistory" Color="#0d6efd" Unit="%" MaxValue="100" HeightPx="80" />
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <MetricChart Title="Memory Usage" DataPoints="memHistory" Color="#6f42c1" Unit="%" MaxValue="100" HeightPx="80" />
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <MetricChart Title="Pod Count" DataPoints="podCountHistory" Color="#fd7e14" HeightPx="80" />
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @* ── Per-Node Status ── *@
+        @if (health is not null && health.Nodes.Count > 0)
+        {
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-white">
+                    <i class="bi bi-hdd-rack me-2"></i><strong>Node Status</strong>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-sm table-hover align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Node</th>
+                                    <th>Status</th>
+                                    <th style="min-width: 150px;">CPU</th>
+                                    <th style="min-width: 150px;">Memory</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (NodeHealthInfo node in health.Nodes)
+                                {
+                                    <tr>
+                                        <td><code>@node.Name</code></td>
+                                        <td>
+                                            @if (node.Ready)
+                                            {
+                                                <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Ready</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>NotReady</span>
+                                            }
+                                        </td>
+                                        <td>
+                                            <div class="d-flex align-items-center gap-2">
+                                                <div class="progress flex-grow-1" style="height: 8px;">
+                                                    <div class="progress-bar @GetBarClass(node.CpuUsagePercent)"
+                                                         style="width: @node.CpuUsagePercent%"></div>
+                                                </div>
+                                                <small class="fw-medium" style="min-width: 40px;">@node.CpuUsagePercent.ToString("F1")%</small>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <div class="d-flex align-items-center gap-2">
+                                                <div class="progress flex-grow-1" style="height: 8px;">
+                                                    <div class="progress-bar @GetBarClass(node.MemoryUsagePercent)"
+                                                         style="width: @node.MemoryUsagePercent%"></div>
+                                                </div>
+                                                <small class="fw-medium" style="min-width: 40px;">@node.MemoryUsagePercent.ToString("F1")%</small>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @* ── Alerts ── *@
+        <AlertPanel ClusterId="ClusterId" PrometheusService="PrometheusService" />
+
+        @* ── Scrape Targets ── *@
+        <div class="mt-4">
+            <h6 class="text-muted mb-2"><span class="bi bi-radar me-1"></span>Scrape Targets</h6>
+            <ScrapeTargetsPanel ClusterId="ClusterId" />
+        </div>
+
+        @* ── Alert Rules ── *@
+        <div class="mt-4">
+            <h6 class="text-muted mb-2"><span class="bi bi-list-check me-1"></span>Alerting Rules</h6>
+            <AlertRulesPanel ClusterId="ClusterId" />
+        </div>
+
+        @* ── RabbitMQ Metrics ── *@
+        <div class="mt-4">
+            <h6 class="text-muted mb-2"><span class="bi bi-collection me-1"></span>RabbitMQ</h6>
+            <RabbitMQMonitoringPanel ClusterId="ClusterId" />
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter] public Guid ClusterId { get; set; }
+
+    private ClusterHealthSummary? health;
+    private List<TimeSeriesDataPoint> cpuHistory = [];
+    private List<TimeSeriesDataPoint> memHistory = [];
+    private List<TimeSeriesDataPoint> podCountHistory = [];
+    private bool loading;
+    private string? errorMessage;
+    private int timeRange = 60; // minutes
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAll();
+    }
+
+    private async Task LoadAll()
+    {
+        loading = true;
+        errorMessage = null;
+        StateHasChanged();
+
+        // Load the instant health summary and time-series data in parallel.
+
+        Task healthTask = LoadHealth();
+        Task metricsTask = LoadMetrics();
+        await Task.WhenAll(healthTask, metricsTask);
+
+        loading = false;
+    }
+
+    private async Task LoadHealth()
+    {
+        KubernetesOperationResult<ClusterHealthSummary> result =
+            await PrometheusService.GetClusterHealthAsync(ClusterId);
+
+        if (result.IsSuccess)
+        {
+            health = result.Data;
+        }
+        else
+        {
+            errorMessage = result.Error;
+        }
+    }
+
+    private async Task LoadMetrics()
+    {
+        KubernetesOperationResult<ClusterMetricsHistory> result =
+            await PrometheusService.GetClusterMetricsHistoryAsync(
+                ClusterId, TimeSpan.FromMinutes(timeRange));
+
+        if (result.IsSuccess && result.Data is not null)
+        {
+            cpuHistory      = result.Data.CpuPercent;
+            memHistory      = result.Data.MemoryPercent;
+            podCountHistory = result.Data.PodCount;
+        }
+        else
+        {
+            cpuHistory = memHistory = podCountHistory = [];
+            if (!string.IsNullOrEmpty(result.Error))
+                errorMessage ??= result.Error;
+        }
+    }
+
+    private static string GetBorderClass(double percent) => percent switch
+    {
+        >= 90 => "border-danger",
+        >= 70 => "border-warning",
+        _ => "border-success"
+    };
+
+    private static string GetTextClass(double percent) => percent switch
+    {
+        >= 90 => "text-danger",
+        >= 70 => "text-warning",
+        _ => "text-success"
+    };
+
+    private static string GetBarClass(double percent) => percent switch
+    {
+        >= 90 => "bg-danger",
+        >= 70 => "bg-warning",
+        _ => "bg-success"
+    };
+}

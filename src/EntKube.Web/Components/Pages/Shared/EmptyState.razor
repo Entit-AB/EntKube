@@ -1,0 +1,25 @@
+<div class="text-center py-4">
+    <i class="bi @Icon text-muted" style="font-size: 2.5rem;"></i>
+    @if (!string.IsNullOrEmpty(Title))
+    {
+        <h6 class="mt-3 mb-1 text-muted fw-semibold">@Title</h6>
+    }
+    @if (!string.IsNullOrEmpty(Message))
+    {
+        <p class="text-muted small mb-@(OnAction.HasDelegate ? 3 : 0)">@Message</p>
+    }
+    @if (OnAction.HasDelegate && !string.IsNullOrEmpty(ActionLabel))
+    {
+        <button class="btn btn-sm btn-primary" @onclick="OnAction">
+            <i class="bi bi-plus me-1"></i>@ActionLabel
+        </button>
+    }
+</div>
+
+@code {
+    [Parameter] public string Icon { get; set; } = "bi-inbox";
+    [Parameter] public string? Title { get; set; }
+    [Parameter] public string? Message { get; set; }
+    [Parameter] public string? ActionLabel { get; set; }
+    [Parameter] public EventCallback OnAction { get; set; }
+}

@@ -1,0 +1,155 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject PrometheusService PrometheusService
+
+<div class="d-flex gap-2 mb-3 align-items-center flex-wrap">
+    <select class="form-select form-select-sm" style="width:auto" @bind="filterHealth" @bind:after="ApplyFilter">
+        <option value="">All</option>
+        <option value="up">Up</option>
+        <option value="down">Down</option>
+    </select>
+    <input class="form-control form-control-sm" style="width:220px" placeholder="Filter by pool or label…"
+           value="@filterText" @oninput="OnSearchInput" />
+    <span class="ms-auto text-muted small">@filtered.Count of @targets.Count targets</span>
+    <button class="btn btn-sm btn-outline-secondary" @onclick="Load" disabled="@isLoading">
+        <span class="bi bi-arrow-clockwise @(isLoading ? "spin" : "")"></span>
+    </button>
+</div>
+
+@if (isLoading)
+{
+    <div class="text-center py-3 text-muted small">
+        <span class="bi bi-hourglass-split me-1"></span> Loading scrape targets…
+    </div>
+}
+else if (errorMessage is not null)
+{
+    <div class="alert alert-warning small py-2">
+        <span class="bi bi-exclamation-triangle me-1"></span>@errorMessage
+    </div>
+}
+else
+{
+    @if (DownCount > 0)
+    {
+        <div class="alert alert-danger py-2 small mb-3 d-flex align-items-center gap-2">
+            <span class="bi bi-exclamation-circle fs-5"></span>
+            <strong>@DownCount target@(DownCount == 1 ? "" : "s") down</strong> — check the affected exporters.
+        </div>
+    }
+
+    @foreach (IGrouping<string, ScrapeTarget> group in filtered.GroupBy(t => t.Pool).OrderBy(g => g.Key))
+    {
+        bool anyDown = group.Any(t => t.Health == "down");
+        <div class="mb-3">
+            <div class="d-flex align-items-center gap-2 mb-1">
+                <span class="text-muted small fw-semibold text-uppercase" style="letter-spacing:.05em">@group.Key</span>
+                <span class="badge @(anyDown ? "bg-danger" : "bg-success") rounded-pill">@group.Count()</span>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0 border">
+                    <tbody>
+                        @foreach (ScrapeTarget t in group.OrderBy(t => t.Health == "up" ? 1 : 0))
+                        {
+                            <tr class="@(t.Health == "down" ? "table-danger" : "")">
+                                <td style="width:50px">
+                                    @if (t.Health == "up")
+                                    {
+                                        <span class="badge bg-success"><span class="bi bi-check me-1"></span>UP</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-danger"><span class="bi bi-x me-1"></span>DOWN</span>
+                                    }
+                                </td>
+                                <td class="font-monospace small text-truncate" style="max-width:300px"
+                                    title="@t.ScrapeUrl">
+                                    @t.Labels.GetValueOrDefault("instance", t.ScrapeUrl)
+                                </td>
+                                <td class="text-muted small">
+                                    @if (t.Labels.TryGetValue("namespace", out string? ns))
+                                    {
+                                        <span class="badge bg-secondary-subtle text-secondary border me-1">@ns</span>
+                                    }
+                                    @if (t.Labels.TryGetValue("job", out string? job))
+                                    {
+                                        <span>@job</span>
+                                    }
+                                </td>
+                                <td class="text-muted small text-end">
+                                    @if (!string.IsNullOrEmpty(t.LastError))
+                                    {
+                                        <span class="text-danger" title="@t.LastError">
+                                            <span class="bi bi-exclamation-circle me-1"></span>Error
+                                        </span>
+                                    }
+                                    else if (t.LastScrape != default)
+                                    {
+                                        <span title="@t.LastScrape.ToLocalTime().ToString("u")">
+                                            @t.LastScrapeDurationSeconds.ToString("F2")s ago
+                                        </span>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public required Guid ClusterId { get; set; }
+
+    private List<ScrapeTarget> targets = [];
+    private List<ScrapeTarget> filtered = [];
+    private string filterHealth = "";
+    private string filterText = "";
+    private bool isLoading = true;
+    private string? errorMessage;
+
+    protected override async Task OnParametersSetAsync() => await Load();
+
+    private async Task Load()
+    {
+        isLoading = true;
+        errorMessage = null;
+        StateHasChanged();
+
+        KubernetesOperationResult<List<ScrapeTarget>> result =
+            await PrometheusService.GetScrapeTargetsAsync(ClusterId);
+
+        if (result.IsSuccess)
+        {
+            targets = result.Data ?? [];
+            ApplyFilter();
+        }
+        else
+        {
+            errorMessage = result.Error;
+            targets = [];
+            filtered = [];
+        }
+        isLoading = false;
+    }
+
+    private void OnSearchInput(ChangeEventArgs e)
+    {
+        filterText = e.Value?.ToString() ?? string.Empty;
+        ApplyFilter();
+    }
+
+    private int DownCount => targets.Count(t => t.Health == "down");
+
+    private void ApplyFilter()
+    {
+        filtered = targets.Where(t =>
+            (string.IsNullOrEmpty(filterHealth) || t.Health == filterHealth) &&
+            (string.IsNullOrEmpty(filterText) ||
+             t.Pool.Contains(filterText, StringComparison.OrdinalIgnoreCase) ||
+             t.ScrapeUrl.Contains(filterText, StringComparison.OrdinalIgnoreCase) ||
+             t.Labels.Values.Any(v => v.Contains(filterText, StringComparison.OrdinalIgnoreCase)))
+        ).ToList();
+    }
+}

@@ -1,0 +1,658 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject IncidentService IncidentService
+@inject OnCallService OnCallService
+@inject NotificationService NotificationService
+@inject AuthenticationStateProvider AuthStateProvider
+
+@* ── On-call banner ── *@
+@if (currentOnCall is not null)
+{
+    <div class="alert alert-success d-flex align-items-center gap-2 py-2 mb-3">
+        <span class="bi bi-person-check-fill"></span>
+        <span class="small">
+            On call now: <strong>@currentOnCall.AssigneeName</strong>
+            @if (!string.IsNullOrEmpty(currentOnCall.AssigneeEmail))
+            {
+                <a href="mailto:@currentOnCall.AssigneeEmail" class="ms-1">@currentOnCall.AssigneeEmail</a>
+            }
+            — until @currentOnCall.EndsAt.ToLocalTime().ToString("MMM d HH:mm")
+        </span>
+    </div>
+}
+
+@if (stats is not null)
+{
+    <div class="row g-2 mb-3">
+        <div class="col-auto">
+            <div class="card border-0 bg-light text-center px-3 py-2">
+                <div class="fw-bold fs-5 @(stats.Active > 0 ? "text-danger" : "text-success")">@stats.Active</div>
+                <div class="text-muted small">Active</div>
+            </div>
+        </div>
+        <div class="col-auto">
+            <div class="card border-0 bg-light text-center px-3 py-2">
+                <div class="fw-bold fs-5 text-warning">@stats.Acknowledged</div>
+                <div class="text-muted small">Acknowledged</div>
+            </div>
+        </div>
+        <div class="col-auto">
+            <div class="card border-0 bg-light text-center px-3 py-2">
+                <div class="fw-bold fs-5">@stats.Total</div>
+                <div class="text-muted small">Total (@stats.WindowDays)d</div>
+            </div>
+        </div>
+        <div class="col-auto">
+            <div class="card border-0 bg-light text-center px-3 py-2">
+                <div class="fw-bold fs-5 text-danger">@stats.Critical</div>
+                <div class="text-muted small">Critical</div>
+            </div>
+        </div>
+        <div class="col-auto">
+            <div class="card border-0 bg-light text-center px-3 py-2">
+                <div class="fw-bold fs-5">@stats.FormatMttr()</div>
+                <div class="text-muted small">MTTR</div>
+            </div>
+        </div>
+        <div class="col-auto">
+            <div class="card border-0 bg-light text-center px-3 py-2">
+                <div class="fw-bold fs-5">@stats.FormatMtta()</div>
+                <div class="text-muted small">MTTA</div>
+            </div>
+        </div>
+        @{
+            int unassignedActive = incidents.Count(i =>
+                i.AssignedTo is null && i.Status != IncidentStatus.Resolved);
+        }
+        @if (unassignedActive > 0)
+        {
+            <div class="col-auto">
+                <div class="card border-0 bg-warning-subtle text-center px-3 py-2"
+                     style="cursor:pointer" @onclick="() => { filterUnassigned = true; _ = LoadIncidents(); }">
+                    <div class="fw-bold fs-5 text-warning">@unassignedActive</div>
+                    <div class="text-muted small">Unassigned</div>
+                </div>
+            </div>
+        }
+        @if (stats.Daily.Count > 1)
+        {
+            int maxCount = stats.Daily.Max(d => d.Count);
+            <div class="col-auto align-self-center">
+                <div class="text-muted small mb-1">Alert volume (30d)</div>
+                <div class="d-flex align-items-end gap-px" style="height:32px;gap:2px">
+                    @foreach (DailyAlertCount day in stats.Daily)
+                    {
+                        int h = maxCount > 0 ? (int)Math.Max(2, day.Count * 32.0 / maxCount) : 2;
+                        string color = day.Count == 0 ? "#dee2e6" : "#dc3545";
+                        <div style="width:5px;height:@(h)px;background:@color;border-radius:1px"
+                             title="@day.Date.ToString("MMM d"): @day.Count alert@(day.Count == 1 ? "" : "s")"></div>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+}
+
+<div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
+    <select class="form-select form-select-sm" style="width:auto" @bind="filterStatus" @bind:after="LoadIncidents">
+        <option value="Open">Open (Active + Acknowledged)</option>
+        <option value="Active">Active</option>
+        <option value="Acknowledged">Acknowledged</option>
+        <option value="">All (including resolved)</option>
+        <option value="Resolved">Resolved only</option>
+    </select>
+    <select class="form-select form-select-sm" style="width:auto" @bind="filterSeverity" @bind:after="LoadIncidents">
+        <option value="">All severities</option>
+        <option value="critical">Critical</option>
+        <option value="warning">Warning</option>
+        <option value="info">Info</option>
+    </select>
+    <select class="form-select form-select-sm" style="width:auto" @bind="filterClusterId" @bind:after="LoadIncidents">
+        <option value="">All clusters</option>
+        @foreach (var c in clusters)
+        {
+            <option value="@c.Id">@c.Name</option>
+        }
+    </select>
+    <select class="form-select form-select-sm" style="width:auto" @bind="filterDays" @bind:after="LoadIncidents">
+        <option value="1">Last 24 hours</option>
+        <option value="7">Last 7 days</option>
+        <option value="30">Last 30 days</option>
+        <option value="90">Last 90 days</option>
+    </select>
+    <div class="form-check ms-1">
+        <input class="form-check-input" type="checkbox" id="chkUnassigned" @bind="filterUnassigned" @bind:after="LoadIncidents" />
+        <label class="form-check-label small" for="chkUnassigned">Unassigned only</label>
+    </div>
+    <input class="form-control form-control-sm ms-1" style="max-width:200px"
+           @bind="searchText" @bind:event="oninput" placeholder="Search alerts…" />
+    @if (selectedIds.Count > 0)
+    {
+        <span class="text-muted small">@selectedIds.Count selected</span>
+        <button class="btn btn-sm btn-outline-warning" @onclick="BulkAcknowledge">
+            <span class="bi bi-check-all me-1"></span>Ack
+        </button>
+        <button class="btn btn-sm btn-outline-success" @onclick="BulkResolve">
+            <span class="bi bi-check-circle me-1"></span>Resolve
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="() => selectedIds.Clear()">Clear</button>
+    }
+    <button class="btn btn-sm btn-outline-secondary" @onclick="LoadIncidents">
+        <span class="bi bi-arrow-clockwise"></span> Refresh
+    </button>
+    <span class="ms-auto text-muted small">@incidents.Count incident@(incidents.Count == 1 ? "" : "s")</span>
+</div>
+
+<LoadingPanel Loading="@isLoading" LoadingText="Loading incidents…">
+@if (!isLoading && incidents.Count == 0)
+{
+    <EmptyState Icon="bi-check-circle"
+                Title="No incidents found"
+                Message="No incidents match the selected filters." />
+}
+else if (!isLoading)
+{
+    <div class="table-responsive">
+        <table class="table table-hover align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th style="width:32px">
+                        <input type="checkbox" class="form-check-input"
+                               @onchange="e => ToggleSelectAll((bool)(e.Value ?? false))" />
+                    </th>
+                    <th style="width:90px">Severity</th>
+                    <th>Alert</th>
+                    <th>Cluster</th>
+                    <th>Started</th>
+                    <th>Duration</th>
+                    <th style="width:110px">Status</th>
+                    <th style="width:200px">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (AlertIncident incident in incidents)
+                {
+                    bool expanded = expandedId == incident.Id;
+                    bool selected = selectedIds.Contains(incident.Id);
+                    <tr class="@(expanded ? "table-active" : selected ? "table-warning" : "")"
+                        style="cursor:pointer" @onclick="() => ToggleExpand(incident.Id)">
+                        <td @onclick:stopPropagation="true">
+                            <input type="checkbox" class="form-check-input" checked="@selected"
+                                   @onchange="() => ToggleSelect(incident.Id)" />
+                        </td>
+                        <td>
+                            @SeverityBadge(incident.Severity)
+                            @if (incident.EscalatedAt.HasValue)
+                            {
+                                <div class="mt-1"><span class="badge bg-danger-subtle text-danger border border-danger small">Escalated</span></div>
+                            }
+                        </td>
+                        <td>
+                            <div class="fw-semibold small">@incident.AlertName</div>
+                            @if (incident.AssignedTo is not null)
+                            {
+                                <div class="text-muted" style="font-size:.77rem">
+                                    <span class="bi bi-person me-1"></span>@incident.AssignedTo
+                                </div>
+                            }
+                        </td>
+                        <td class="text-muted small">@incident.Cluster?.Name</td>
+                        <td class="text-muted small">@incident.StartsAt.ToLocalTime().ToString("MMM d HH:mm")</td>
+                        <td class="text-muted small">@FormatDuration(incident)</td>
+                        <td>@StatusBadge(incident.Status)</td>
+                        <td @onclick:stopPropagation="true">
+                            @if (incident.Status == IncidentStatus.Active)
+                            {
+                                <button class="btn btn-sm btn-outline-warning me-1" @onclick="() => Acknowledge(incident)">
+                                    Ack
+                                </button>
+                            }
+                            @if (incident.Status != IncidentStatus.Resolved)
+                            {
+                                <button class="btn btn-sm btn-outline-success me-1" @onclick="() => Resolve(incident)">
+                                    Resolve
+                                </button>
+                            }
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => ToggleExpand(incident.Id)">
+                                Details @(incident.Notes.Count > 0 ? $"({incident.Notes.Count})" : "")
+                            </button>
+                        </td>
+                    </tr>
+                    @if (expanded)
+                    {
+                        <tr>
+                            <td colspan="8" class="bg-light px-4 py-3">
+                                <div class="row g-4">
+
+                                    @* ── Left: Timeline ── *@
+                                    <div class="col-12 col-lg-5">
+                                        @if (!string.IsNullOrEmpty(incident.Summary))
+                                        {
+                                            <p class="mb-1 small"><strong>Summary:</strong> @incident.Summary</p>
+                                        }
+                                        @if (!string.IsNullOrEmpty(incident.Description))
+                                        {
+                                            <p class="mb-2 small text-muted">@incident.Description</p>
+                                        }
+                                        @if (!string.IsNullOrEmpty(incident.RunbookUrl))
+                                        {
+                                            <p class="mb-3">
+                                                <a href="@incident.RunbookUrl" target="_blank" rel="noopener noreferrer"
+                                                   class="btn btn-sm btn-outline-secondary">
+                                                    <span class="bi bi-book me-1"></span>Runbook
+                                                </a>
+                                            </p>
+                                        }
+
+                                        <strong class="small d-block mb-2">Timeline</strong>
+                                        <div style="position:relative;padding-left:28px">
+                                            <div style="position:absolute;left:9px;top:0;bottom:0;width:2px;background:#dee2e6"></div>
+                                            @foreach (TimelineEvent ev in BuildTimeline(incident))
+                                            {
+                                                <div style="position:relative;margin-bottom:14px">
+                                                    <span style="position:absolute;left:-19px;top:2px;width:20px;height:20px;border-radius:50%;background:white;border:2px solid #dee2e6;display:flex;align-items:center;justify-content:center;font-size:.72rem"
+                                                          class="@ev.IconColor">
+                                                        <i class="bi @ev.Icon"></i>
+                                                    </span>
+                                                    <div class="d-flex gap-2 align-items-baseline">
+                                                        <span class="small fw-semibold">@ev.Label</span>
+                                                        <span class="text-muted" style="font-size:.72rem">@ev.At.ToLocalTime().ToString("MMM d HH:mm")</span>
+                                                    </div>
+                                                    @if (!string.IsNullOrEmpty(ev.Detail))
+                                                    {
+                                                        <div class="text-muted small mt-1">@ev.Detail</div>
+                                                    }
+                                                </div>
+                                            }
+                                        </div>
+                                    </div>
+
+                                    @* ── Right: Actions ── *@
+                                    <div class="col-12 col-lg-7">
+
+                                        @* Assignment *@
+                                        <div class="mb-3">
+                                            <strong class="small d-block mb-2">Assignment</strong>
+                                            @if (incident.AssignedTo is not null)
+                                            {
+                                                <p class="mb-1 small text-muted">
+                                                    <span class="bi bi-person-check me-1"></span>
+                                                    Assigned to <strong>@incident.AssignedTo</strong>
+                                                    @if (incident.AssignedAt.HasValue)
+                                                    {
+                                                        <span>at @incident.AssignedAt.Value.ToLocalTime().ToString("MMM d HH:mm")</span>
+                                                    }
+                                                </p>
+                                            }
+                                            @if (assigningId == incident.Id)
+                                            {
+                                                <div class="d-flex gap-2 align-items-center mt-1">
+                                                    <input class="form-control form-control-sm" style="max-width:220px"
+                                                           @bind="assigneeInput" placeholder="Assignee name or email" />
+                                                    <button class="btn btn-sm btn-primary"
+                                                            @onclick="() => SubmitAssign(incident)"
+                                                            disabled="@string.IsNullOrWhiteSpace(assigneeInput)">
+                                                        Assign
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary"
+                                                            @onclick="() => assigningId = null">Cancel</button>
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <button class="btn btn-sm btn-outline-secondary mt-1"
+                                                        @onclick="() => StartAssign(incident)">
+                                                    <span class="bi bi-person-plus me-1"></span>
+                                                    @(incident.AssignedTo is null ? "Assign" : "Reassign")
+                                                </button>
+                                            }
+                                        </div>
+
+                                        @* Notification delivery history *@
+                                        @if (deliveriesByIncident.TryGetValue(incident.Id, out List<NotificationDelivery>? deliveries) && deliveries.Count > 0)
+                                        {
+                                            <div class="mb-3">
+                                                <strong class="small d-block mb-1">Notification history</strong>
+                                                <div class="table-responsive">
+                                                    <table class="table table-sm table-borderless mb-0" style="font-size:.77rem">
+                                                        <tbody>
+                                                            @foreach (NotificationDelivery d in deliveries)
+                                                            {
+                                                                <tr>
+                                                                    <td class="py-0 text-muted">@d.SentAt.ToLocalTime().ToString("MMM d HH:mm")</td>
+                                                                    <td class="py-0">@d.Channel?.Name</td>
+                                                                    <td class="py-0 text-muted">@(d.IsFiring ? "FIRING" : "RESOLVED")</td>
+                                                                    <td class="py-0">
+                                                                        @if (d.Success)
+                                                                        {
+                                                                            <span class="text-success"><span class="bi bi-check-circle me-1"></span>Sent</span>
+                                                                        }
+                                                                        else
+                                                                        {
+                                                                            <span class="text-danger" title="@d.Error"><span class="bi bi-x-circle me-1"></span>Failed</span>
+                                                                        }
+                                                                    </td>
+                                                                </tr>
+                                                            }
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        }
+
+                                        @* Re-notify *@
+                                        <div class="mb-3 d-flex gap-2 align-items-center">
+                                            <button class="btn btn-sm btn-outline-info"
+                                                    @onclick="() => ReNotify(incident)"
+                                                    disabled="@(reNotifyingId == incident.Id)">
+                                                @if (reNotifyingId == incident.Id)
+                                                {
+                                                    <span class="spinner-border spinner-border-sm me-1"></span>
+                                                }
+                                                <span class="bi bi-send me-1"></span>Re-notify
+                                            </button>
+                                            @if (reNotifyResults.TryGetValue(incident.Id, out string? reNotifyMsg))
+                                            {
+                                                <span class="small @(reNotifyMsg.StartsWith("✓") ? "text-success" : "text-danger")">@reNotifyMsg</span>
+                                            }
+                                        </div>
+
+                                        @* Add note *@
+                                        <strong class="small d-block mb-1">Add note</strong>
+                                        <div class="d-flex gap-2">
+                                            <textarea class="form-control form-control-sm" rows="2"
+                                                      placeholder="Add a note…"
+                                                      @bind="noteText" style="max-width:360px"></textarea>
+                                            <button class="btn btn-sm btn-primary align-self-end"
+                                                    @onclick="() => AddNote(incident)">
+                                                Add
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                }
+            </tbody>
+        </table>
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<AlertIncident> incidents = [];
+    private List<KubernetesCluster> clusters = [];
+    private AlertStats? stats;
+    private Guid? expandedId;
+    private string filterStatus = "Open";
+    private string filterSeverity = "";
+    private string filterClusterId = "";
+    private int filterDays = 7;
+    private string noteText = "";
+    private bool isLoading = true;
+    private string? currentUser;
+
+    private HashSet<Guid> selectedIds = [];
+    private Guid? assigningId;
+    private string assigneeInput = "";
+    private bool filterUnassigned;
+    private string searchText = "";
+    private OnCallShift? currentOnCall;
+    private Dictionary<Guid, List<NotificationDelivery>> deliveriesByIncident = new();
+    private Guid? reNotifyingId;
+    private Dictionary<Guid, string> reNotifyResults = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        currentUser = authState.User.Identity?.Name ?? "Unknown";
+        await Task.WhenAll(LoadIncidents(), LoadStats(), LoadOnCall());
+    }
+
+    private async Task LoadOnCall()
+    {
+        currentOnCall = await OnCallService.GetCurrentOnCallAsync(TenantId);
+    }
+
+    private async Task LoadStats()
+    {
+        stats = await IncidentService.GetStatsForTenantAsync(TenantId, windowDays: 30);
+    }
+
+    private async Task LoadIncidents()
+    {
+        isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            IncidentStatus? status = filterStatus switch
+            {
+                "Active" => IncidentStatus.Active,
+                "Acknowledged" => IncidentStatus.Acknowledged,
+                "Resolved" => IncidentStatus.Resolved,
+                _ => null  // "Open" and "" both pass null — post-filter handles "Open"
+            };
+
+            Guid? clusterId = Guid.TryParse(filterClusterId, out Guid cid) ? cid : null;
+
+            // Open incidents are ongoing — don't cut them off by start date.
+            // Apply the time window only when browsing resolved history.
+            bool isOpenFilter = filterStatus is "Open" or "Active" or "Acknowledged";
+            DateTime? fromDate = isOpenFilter ? null : DateTime.UtcNow.AddDays(-filterDays);
+
+            incidents = await IncidentService.GetIncidentsForTenantAsync(
+                TenantId,
+                status: status,
+                severity: string.IsNullOrEmpty(filterSeverity) ? null : filterSeverity,
+                clusterId: clusterId,
+                from: fromDate,
+                to: null);
+
+            // "Open" means Active + Acknowledged — exclude resolved
+            if (filterStatus == "Open")
+                incidents = incidents.Where(i => i.Status != IncidentStatus.Resolved).ToList();
+
+            if (filterUnassigned)
+                incidents = incidents.Where(i => i.AssignedTo is null).ToList();
+
+            if (!string.IsNullOrWhiteSpace(searchText))
+            {
+                string q = searchText.Trim();
+                incidents = incidents.Where(i =>
+                    i.AlertName.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                    i.Summary.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
+            }
+
+            deliveriesByIncident.Clear();
+
+            clusters = incidents
+                .Where(i => i.Cluster is not null)
+                .Select(i => i.Cluster!)
+                .DistinctBy(c => c.Id)
+                .OrderBy(c => c.Name)
+                .ToList();
+        }
+        catch
+        {
+            incidents = [];
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private void ToggleExpand(Guid id)
+    {
+        if (expandedId == id)
+        {
+            expandedId = null;
+        }
+        else
+        {
+            expandedId = id;
+            _ = LoadDeliveriesAsync(id);
+        }
+        noteText = "";
+        if (assigningId != id) assigningId = null;
+    }
+
+    private async Task LoadDeliveriesAsync(Guid incidentId)
+    {
+        List<NotificationDelivery> deliveries = await IncidentService.GetDeliveriesAsync(incidentId);
+        deliveriesByIncident[incidentId] = deliveries;
+        StateHasChanged();
+    }
+
+    private async Task ReNotify(AlertIncident incident)
+    {
+        reNotifyingId = incident.Id;
+        reNotifyResults.Remove(incident.Id);
+        StateHasChanged();
+
+        try
+        {
+            int count = await NotificationService.ReNotifyAsync(incident.Id, incident.Cluster!.TenantId);
+            reNotifyResults[incident.Id] = count > 0
+                ? $"✓ Notified {count} channel{(count == 1 ? "" : "s")}"
+                : "✓ No channels to notify";
+
+            // Refresh deliveries so the new entry appears
+            await LoadDeliveriesAsync(incident.Id);
+        }
+        catch (Exception ex)
+        {
+            reNotifyResults[incident.Id] = $"✗ {ex.Message}";
+        }
+        finally
+        {
+            reNotifyingId = null;
+        }
+    }
+
+    private void ToggleSelect(Guid id)
+    {
+        if (!selectedIds.Remove(id))
+            selectedIds.Add(id);
+    }
+
+    private void ToggleSelectAll(bool select)
+    {
+        selectedIds.Clear();
+        if (select)
+        {
+            foreach (AlertIncident incident in incidents)
+                selectedIds.Add(incident.Id);
+        }
+    }
+
+    private async Task BulkAcknowledge()
+    {
+        await IncidentService.BulkAcknowledgeAsync(selectedIds, currentUser!);
+        selectedIds.Clear();
+        await Task.WhenAll(LoadIncidents(), LoadStats());
+    }
+
+    private async Task BulkResolve()
+    {
+        await IncidentService.BulkResolveAsync(selectedIds);
+        selectedIds.Clear();
+        await Task.WhenAll(LoadIncidents(), LoadStats());
+    }
+
+    private void StartAssign(AlertIncident incident)
+    {
+        assigningId = incident.Id;
+        assigneeInput = incident.AssignedTo ?? "";
+    }
+
+    private async Task SubmitAssign(AlertIncident incident)
+    {
+        if (string.IsNullOrWhiteSpace(assigneeInput)) return;
+        await IncidentService.AssignAsync(incident.Id, assigneeInput.Trim());
+        assigningId = null;
+        await Task.WhenAll(LoadIncidents(), LoadStats());
+        expandedId = incident.Id;
+    }
+
+    private async Task Acknowledge(AlertIncident incident)
+    {
+        await IncidentService.AcknowledgeAsync(incident.Id, currentUser!);
+        await Task.WhenAll(LoadIncidents(), LoadStats());
+    }
+
+    private async Task Resolve(AlertIncident incident)
+    {
+        await IncidentService.ResolveAsync(incident.Id, currentUser!);
+        await Task.WhenAll(LoadIncidents(), LoadStats());
+    }
+
+    private async Task AddNote(AlertIncident incident)
+    {
+        if (string.IsNullOrWhiteSpace(noteText)) return;
+        await IncidentService.AddNoteAsync(incident.Id, currentUser!, noteText.Trim());
+        noteText = "";
+        await LoadIncidents();
+        expandedId = incident.Id;
+    }
+
+    private record TimelineEvent(DateTime At, string Icon, string IconColor, string Label, string Detail);
+
+    private static List<TimelineEvent> BuildTimeline(AlertIncident incident)
+    {
+        List<TimelineEvent> events = [];
+
+        events.Add(new(incident.StartsAt, "bi-bell-fill", "text-danger", "Alert fired", ""));
+
+        if (incident.EscalatedAt.HasValue)
+            events.Add(new(incident.EscalatedAt.Value, "bi-exclamation-triangle-fill", "text-danger",
+                "Escalated", "No acknowledgement within threshold"));
+
+        if (incident.AssignedAt.HasValue && incident.AssignedTo is not null)
+            events.Add(new(incident.AssignedAt.Value, "bi-person-fill", "text-primary",
+                $"Assigned to {incident.AssignedTo}", ""));
+
+        if (incident.AcknowledgedAt.HasValue)
+            events.Add(new(incident.AcknowledgedAt.Value, "bi-check-circle-fill", "text-warning",
+                $"Acknowledged{(incident.AcknowledgedBy is not null ? $" by {incident.AcknowledgedBy}" : "")}", ""));
+
+        foreach (IncidentNote note in incident.Notes)
+            events.Add(new(note.CreatedAt, "bi-chat-left-text-fill", "text-secondary",
+                $"Note by {note.Author}", note.Content));
+
+        if (incident.ResolvedAt.HasValue)
+            events.Add(new(incident.ResolvedAt.Value, "bi-check2-circle", "text-success", "Resolved", ""));
+
+        return [.. events.OrderBy(e => e.At)];
+    }
+
+    private static string FormatDuration(AlertIncident incident)
+    {
+        DateTime end = incident.EndsAt ?? DateTime.UtcNow;
+        TimeSpan duration = end - incident.StartsAt;
+        if (duration.TotalDays >= 1) return $"{(int)duration.TotalDays}d {duration.Hours}h";
+        if (duration.TotalHours >= 1) return $"{(int)duration.TotalHours}h {duration.Minutes}m";
+        return $"{(int)duration.TotalMinutes}m";
+    }
+
+    private static RenderFragment SeverityBadge(string severity) => severity switch
+    {
+        "critical" => @<span class="badge bg-danger">Critical</span>,
+        "warning"  => @<span class="badge bg-warning text-dark">Warning</span>,
+        "info"     => @<span class="badge bg-info text-dark">Info</span>,
+        _          => @<span class="badge bg-secondary">@severity</span>
+    };
+
+    private static RenderFragment StatusBadge(IncidentStatus status) => status switch
+    {
+        IncidentStatus.Active       => @<span class="badge bg-danger">Active</span>,
+        IncidentStatus.Acknowledged => @<span class="badge bg-warning text-dark">Acknowledged</span>,
+        IncidentStatus.Resolved     => @<span class="badge bg-success">Resolved</span>,
+        _                           => @<span class="badge bg-secondary">@status</span>
+    };
+}

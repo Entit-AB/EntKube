@@ -1,0 +1,153 @@
+@page "/admin/users"
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Identity
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = "Admin")]
+
+@inject UserManagementService UserManagement
+@inject NavigationManager NavigationManager
+
+<PageTitle>User Management</PageTitle>
+
+<div class="d-flex align-items-center justify-content-between mb-4">
+    <div>
+        <h1 class="mb-0"><i class="bi bi-people me-2 text-primary"></i>Users</h1>
+        <p class="text-muted small mb-0 mt-1">Manage system users, roles, and tenant access.</p>
+    </div>
+    <button class="btn btn-primary" @onclick="() => showAddForm = !showAddForm">
+        <i class="bi bi-person-plus me-1"></i>Add User
+    </button>
+</div>
+
+@if (showAddForm)
+{
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-body">
+            <h5 class="card-title mb-3"><i class="bi bi-person-plus me-2 text-primary"></i>New User</h5>
+            @if (!string.IsNullOrEmpty(addError))
+            {
+                <div class="alert alert-danger py-2 small">
+                    <i class="bi bi-exclamation-triangle me-1"></i>@addError
+                </div>
+            }
+            <div class="row g-3">
+                <div class="col-md-5">
+                    <input type="email" class="form-control" placeholder="Email address"
+                           @bind="newEmail" @bind:event="oninput" />
+                </div>
+                <div class="col-md-5">
+                    <input type="password" class="form-control" placeholder="Password"
+                           @bind="newPassword" @bind:event="oninput" />
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-primary w-100" @onclick="CreateUser"
+                            disabled="@(string.IsNullOrWhiteSpace(newEmail) || string.IsNullOrWhiteSpace(newPassword) || creating)">
+                        @if (creating)
+                        {
+                            <span class="spinner-border spinner-border-sm" role="status"></span>
+                        }
+                        else
+                        {
+                            <span>Create</span>
+                        }
+                    </button>
+                </div>
+            </div>
+            <small class="text-muted mt-2 d-block">The account will be created with email pre-confirmed — no email verification needed.</small>
+        </div>
+    </div>
+}
+
+<LoadingPanel Loading="@(users is null)" LoadingText="Loading users…">
+    @if (users is not null && users.Count == 0)
+    {
+        <EmptyState Icon="bi-people"
+                    Title="No users yet"
+                    Message="Add the first user above." />
+    }
+    else if (users is not null)
+    {
+        <div class="card border-0 shadow-sm">
+            <div class="table-responsive">
+                <table class="table table-hover mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Email</th>
+                            <th>Status</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (ApplicationUser user in users)
+                        {
+                            <tr style="cursor:pointer" @onclick='() => NavigationManager.NavigateTo($"/admin/users/{user.Id}")'>
+                                <td class="align-middle">
+                                    <i class="bi bi-person-circle me-2 text-muted"></i>@user.Email
+                                </td>
+                                <td class="align-middle">
+                                    @if (user.EmailConfirmed)
+                                    {
+                                        <span class="badge bg-success-subtle text-success border border-success-subtle">Confirmed</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-warning-subtle text-warning border border-warning-subtle">Unconfirmed</span>
+                                    }
+                                </td>
+                                <td class="align-middle text-end">
+                                    <i class="bi bi-chevron-right text-muted"></i>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+</LoadingPanel>
+
+@code {
+    private List<ApplicationUser>? users;
+    private bool showAddForm;
+    private bool creating;
+    private string newEmail = "";
+    private string newPassword = "";
+    private string? addError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+    }
+
+    private async Task Load()
+    {
+        users = await UserManagement.GetAllUsersAsync();
+    }
+
+    private async Task CreateUser()
+    {
+        addError = null;
+        creating = true;
+
+        try
+        {
+            IdentityResult result = await UserManagement.CreateUserAsync(newEmail.Trim(), newPassword);
+            if (!result.Succeeded)
+            {
+                addError = string.Join(" ", result.Errors.Select(e => e.Description));
+                return;
+            }
+
+            newEmail = "";
+            newPassword = "";
+            showAddForm = false;
+            await Load();
+        }
+        finally
+        {
+            creating = false;
+        }
+    }
+}

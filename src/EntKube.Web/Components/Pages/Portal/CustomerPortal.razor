@@ -1,0 +1,851 @@
+@page "/portal"
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@attribute [Authorize]
+@rendermode InteractiveServer
+@inject CustomerAccessService CustomerAccessService
+@inject DeploymentService DeploymentService
+@inject TenantService TenantService
+@inject KubernetesOperationsService K8sOps
+@inject KeycloakService KeycloakService
+@inject HarborService HarborService
+@inject VaultService VaultService
+@inject PrometheusService PrometheusService
+@inject AuditService AuditService
+@inject IncidentService IncidentService
+@inject CustomerGitService CustomerGitService
+@inject AppRouteService AppRouteService
+@inject AuthenticationStateProvider AuthStateProvider
+@inject NavigationManager Navigation
+
+<PageTitle>Customer Portal</PageTitle>
+
+@* ═══════════════════════════════════════════════════════════════════
+   Customer Portal — a scoped view where a user sees only the customers
+   they've been granted access to. From here they can drill into apps,
+   deployments, view pod logs, restart deployments, and delete pods.
+
+   Navigation flow: My Customers → Apps → Deployments → Operations
+   ═══════════════════════════════════════════════════════════════════ *@
+
+@if (loading)
+{
+    <div class="text-center py-5">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="text-muted mt-2">Loading portal...</p>
+    </div>
+}
+else if (customers is null || customers.Count == 0)
+{
+    <EmptyState Icon="bi-shield-lock"
+                Title="No access granted"
+                Message="You don't have access to any customers yet. Ask a tenant administrator to grant you access." />
+}
+else
+{
+    @* ── Level 0: Breadcrumb navigation ── *@
+    <Breadcrumb Items="PortalBreadcrumbs" />
+
+    @* ════════════════════════════════════════════════════════════════
+       Level 1: Customer list
+       ════════════════════════════════════════════════════════════════ *@
+    @if (selectedCustomer is null)
+    {
+        <div class="d-flex align-items-center mb-4">
+            <i class="bi bi-grid fs-3 me-2 text-primary"></i>
+            <h2 class="mb-0">My Customers</h2>
+        </div>
+
+        <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-3">
+            @foreach (Customer customer in customers)
+            {
+                <div class="col">
+                    <div class="card shadow-sm h-100" role="button" style="cursor: pointer;"
+                         @onclick="() => SelectCustomer(customer)">
+                        <div class="card-body">
+                            <div class="d-flex align-items-center mb-2">
+                                <i class="bi bi-people fs-4 me-2 text-primary"></i>
+                                <h5 class="mb-0">@customer.Name</h5>
+                            </div>
+                            <div class="text-muted small">
+                                <i class="bi bi-app-indicator me-1"></i>
+                                @customer.Apps.Count app@(customer.Apps.Count != 1 ? "s" : "")
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+
+    @* ════════════════════════════════════════════════════════════════
+       Level 2 (loading): Apps data loading for selected customer
+       ════════════════════════════════════════════════════════════════ *@
+    else if (loadingCustomer)
+    {
+        <div class="d-flex align-items-center mb-3">
+            <i class="bi bi-people fs-3 me-2 text-primary"></i>
+            <h2 class="mb-0">@selectedCustomer!.Name</h2>
+        </div>
+        <div class="text-center py-5">
+            <div class="spinner-border text-primary" role="status"></div>
+            <p class="text-muted small mt-2 mb-0">Loading apps...</p>
+        </div>
+    }
+
+    @* ════════════════════════════════════════════════════════════════
+       Level 2: Apps and deployments for a selected customer
+       ════════════════════════════════════════════════════════════════ *@
+    else if (selectedDeployment is null && selectedIdentityRealm is null && selectedSecrets is null && selectedRegistryProject is null && selectedGovernanceApp is null && selectedResourcesApp is null && selectedRoutesApp is null && selectedPortalEnvironment is null)
+    {
+        <div class="d-flex align-items-center mb-3">
+            <i class="bi bi-people fs-3 me-2 text-primary"></i>
+            <div>
+                <h2 class="mb-0">@selectedCustomer.Name</h2>
+                <small class="text-muted">@selectedCustomer.Apps.Count app@(selectedCustomer.Apps.Count != 1 ? "s" : "")</small>
+            </div>
+            <div class="ms-auto d-flex gap-2">
+                <button class="btn btn-sm @(showMonitoringPanel ? "btn-primary" : "btn-outline-secondary")"
+                        @onclick="() => showMonitoringPanel = !showMonitoringPanel">
+                    <span class="bi bi-heart-pulse me-1"></span>Monitoring
+                </button>
+                <a class="btn btn-sm btn-outline-secondary" href="/portal/status">
+                    <span class="bi bi-activity me-1"></span>Status Overview
+                </a>
+            </div>
+        </div>
+
+        @* ── Maintenance notice ── *@
+        <CustomerMaintenanceNotice TenantId="selectedCustomer.TenantId" ClusterIds="AllCustomerClusterIds" />
+
+        @* ── Monitoring panel (toggled) ── *@
+        @if (showMonitoringPanel)
+        {
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-white d-flex align-items-center gap-2 py-2">
+                    <span class="bi bi-heart-pulse text-primary"></span>
+                    <strong>Monitoring — @selectedCustomer.Name</strong>
+                    <button class="btn-close btn-sm ms-auto" @onclick="() => showMonitoringPanel = false"></button>
+                </div>
+                <div class="card-body p-0">
+                    <div class="p-3 border-bottom">
+                        <h6 class="text-muted small mb-2"><span class="bi bi-shield-check me-1"></span>SLA & Uptime</h6>
+                        @if (AllCustomerDeployments.Count > 0)
+                        {
+                            <CustomerSlaReport
+                                Deployments="AllCustomerDeployments"
+                                CustomerId="selectedCustomer.Id"
+                                TenantId="selectedCustomer.TenantId" />
+                        }
+                        else { <div class="text-muted small">No deployments yet.</div> }
+                    </div>
+                    <div class="p-3">
+                        <h6 class="text-muted small mb-2"><span class="bi bi-clock-history me-1"></span>Incident History (30 days)</h6>
+                        @if (AllCustomerDeployments.Count > 0)
+                        {
+                            <CustomerIncidentHistory Deployments="AllCustomerDeployments" WindowDays="30" />
+                        }
+                        else { <div class="text-muted small">No deployments yet.</div> }
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (selectedCustomer.Apps.Count == 0)
+        {
+            <EmptyState Icon="bi-app-indicator"
+                        Message="No apps configured for this customer yet." />
+        }
+        else
+        {
+            @foreach (Data.App app in selectedCustomer.Apps.OrderBy(a => a.Name))
+            {
+                bool hasIdentity = appRealms.ContainsKey(app.Id);
+                bool hasRegistry = appHarborProjects.ContainsKey(app.Id);
+
+                <div class="card shadow-sm mb-3">
+                    <div class="card-header bg-white py-2">
+                        <div class="d-flex align-items-center justify-content-between">
+                            <div class="d-flex align-items-center">
+                                <i class="bi bi-app-indicator me-2 text-primary"></i>
+                                <strong>@app.Name</strong>
+                            </div>
+                            <div class="d-flex gap-2 align-items-center">
+                                <div class="dropdown">
+                                    <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button"
+                                            data-bs-toggle="dropdown" aria-expanded="false">
+                                        <i class="bi bi-three-dots me-1"></i>More
+                                    </button>
+                                    <ul class="dropdown-menu dropdown-menu-end">
+                                        <li><h6 class="dropdown-header">Secrets</h6></li>
+                                        <li>
+                                            <button class="dropdown-item" @onclick="() => OpenAppSecrets(app)">
+                                                <i class="bi bi-key me-2 text-primary"></i>App Secrets
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button class="dropdown-item" @onclick="() => OpenDatabases(app)">
+                                                <i class="bi bi-database me-2 text-primary"></i>Databases
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button class="dropdown-item" @onclick="() => OpenMessaging(app)">
+                                                <i class="bi bi-send me-2 text-primary"></i>Messaging
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button class="dropdown-item" @onclick="() => OpenCache(app)">
+                                                <i class="bi bi-lightning me-2 text-primary"></i>Cache
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button class="dropdown-item" @onclick="() => OpenDockerRegistries(app)">
+                                                <i class="bi bi-box-seam me-2 text-primary"></i>Registries
+                                            </button>
+                                        </li>
+                                        <li><hr class="dropdown-divider" /></li>
+                                        @if (hasIdentity)
+                                        {
+                                            <li>
+                                                <button class="dropdown-item" @onclick="() => SelectIdentityRealm(app.Id)">
+                                                    <i class="bi bi-shield-lock me-2 text-primary"></i>Identity
+                                                </button>
+                                            </li>
+                                        }
+                                        @if (hasRegistry)
+                                        {
+                                            <li>
+                                                <button class="dropdown-item" @onclick="() => SelectRegistryProject(app.Id)">
+                                                    <i class="bi bi-archive me-2 text-primary"></i>Registry
+                                                </button>
+                                            </li>
+                                        }
+                                        <li>
+                                            <button class="dropdown-item" @onclick="() => SelectRoutesApp(app)">
+                                                <i class="bi bi-globe me-2 text-primary"></i>URL Configuration
+                                            </button>
+                                        </li>
+                                        @if (currentAccessRole >= CustomerAccessRole.Admin)
+                                        {
+                                            <li><hr class="dropdown-divider" /></li>
+                                            <li>
+                                                <button class="dropdown-item" @onclick="() => StartEditApp(app)">
+                                                    <i class="bi bi-pencil me-2"></i>Rename
+                                                </button>
+                                            </li>
+                                            <li>
+                                                <button class="dropdown-item text-danger" @onclick="() => StartDeleteApp(app)">
+                                                    <i class="bi bi-trash me-2"></i>Delete App
+                                                </button>
+                                            </li>
+                                        }
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    @if (editingAppId == app.Id)
+                    {
+                        <div class="px-3 py-2 border-top">
+                            <div class="d-flex gap-2 align-items-center flex-wrap">
+                                <input class="form-control form-control-sm" style="max-width:280px"
+                                       @bind="editAppName" @bind:event="oninput"
+                                       @onkeyup="OnEditAppNameKeyUp" />
+                                <button class="btn btn-sm btn-primary" @onclick="SaveAppName" disabled="@savingAppName">
+                                    @if (savingAppName) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Save
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelEditApp" disabled="@savingAppName">Cancel</button>
+                            </div>
+                        </div>
+                    }
+                    @if (deletingAppId == app.Id)
+                    {
+                        <div class="px-3 py-2 border-top">
+                            @if (deleteAppError is not null)
+                            {
+                                <div class="alert alert-danger py-1 small mb-2">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>@deleteAppError
+                                </div>
+                            }
+                            <ConfirmDialog Visible="true"
+                                           Message="@($"Permanently delete {app.Name} and all its deployments and cluster resources?")"
+                                           ConfirmText="Yes, delete"
+                                           IsBusy="deletingApp"
+                                           OnConfirm="() => ConfirmDeleteApp(app.Id)"
+                                           OnCancel="CancelDeleteApp" />
+                        </div>
+                    }
+                    <div class="card-body">
+                        @* ── Environment cards ── *@
+                        @if (appLinkedEnvironments.TryGetValue(app.Id, out List<Data.Environment>? linkedEnvs) && linkedEnvs.Count > 0)
+                        {
+                            <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-2">
+                                @foreach (Data.Environment env in linkedEnvs)
+                                {
+                                    int deployCount = appDeployments.TryGetValue(app.Id, out List<AppDeployment>? deploys2)
+                                        ? deploys2.Count(d => d.EnvironmentId == env.Id)
+                                        : 0;
+                                    <div class="col">
+                                        <div class="card border-light h-100 portal-env-card" role="button" style="cursor: pointer;"
+                                             @onclick="() => SelectPortalEnvironment(app, env)">
+                                            <div class="card-body py-2">
+                                                <div class="d-flex align-items-center justify-content-between mb-1">
+                                                    <span class="fw-medium">
+                                                        <i class="bi bi-layers me-1 text-primary"></i>@env.Name
+                                                    </span>
+                                                    <i class="bi bi-chevron-right text-muted small"></i>
+                                                </div>
+                                                <div class="small text-muted">
+                                                    @if (deployCount > 0)
+                                                    {
+                                                        <span><i class="bi bi-rocket-takeoff me-1"></i>@deployCount deployment@(deployCount == 1 ? "" : "s")</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <span class="fst-italic">No deployments</span>
+                                                    }
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+                            </div>
+                        }
+                        else
+                        {
+                            <EmptyState Icon="bi-layers"
+                                        Message="No environments linked to this app yet." />
+                        }
+
+                        @* ── External URLs ── *@
+                        @if (appRoutes.TryGetValue(app.Id, out List<AppRoute>? routes) && routes.Count > 0)
+                        {
+                            <div class="mt-3 pt-2 border-top">
+                                <div class="small text-muted mb-1">
+                                    <i class="bi bi-globe me-1"></i>External URLs
+                                </div>
+                                <div class="d-flex flex-wrap gap-2">
+                                    @foreach (AppRoute route in routes.Where(r => r.IsEnabled))
+                                    {
+                                        string href = $"https://{route.Hostname}";
+                                        bool allUp = route.DeploymentRoutes.Any() && route.DeploymentRoutes.All(dr => dr.IsReachable == true);
+                                        bool anyDown = route.DeploymentRoutes.Any(dr => dr.IsReachable == false);
+                                        string statusClass = allUp ? "text-success" : anyDown ? "text-danger" : "text-muted";
+                                        string statusIcon = allUp ? "bi-check-circle-fill" : anyDown ? "bi-x-circle-fill" : "bi-circle";
+                                        string tlsTitle = route.TlsMode == TlsMode.ClusterIssuer
+                                            ? $"TLS: auto ({route.ClusterIssuerName})"
+                                            : "TLS: manual certificate";
+
+                                        <div class="d-flex align-items-center gap-1 border rounded px-2 py-1 bg-light"
+                                             title="@tlsTitle">
+                                            <i class="bi @statusIcon @statusClass small"></i>
+                                            <a href="@href" target="_blank" rel="noopener noreferrer"
+                                               class="small text-decoration-none fw-medium">
+                                                @route.Hostname
+                                            </a>
+                                            <i class="bi bi-lock-fill text-success small" title="@tlsTitle"></i>
+                                            @if (route.DeploymentRoutes.Count(dr => dr.IsEnabled) > 1)
+                                            {
+                                                <span class="badge bg-secondary bg-opacity-50 small" title="Multiple deployment paths">
+                                                    @route.DeploymentRoutes.Count(dr => dr.IsEnabled)
+                                                </span>
+                                            }
+                                        </div>
+                                    }
+                                </div>
+                                @if (routes.Any(r => r.IsEnabled && r.DeploymentRoutes.Any(dr => dr.IsEnabled && dr.PathPrefix != "/")))
+                                {
+                                    <div class="mt-1">
+                                        @foreach (AppRoute route in routes.Where(r => r.IsEnabled))
+                                        {
+                                            @foreach (AppDeploymentRoute dr in route.DeploymentRoutes.Where(dr => dr.IsEnabled && dr.PathPrefix != "/").OrderBy(dr => dr.PathPrefix))
+                                            {
+                                                <span class="badge bg-light text-dark border me-1 small" title="@(dr.AppDeployment?.Environment?.Name)">
+                                                    <i class="bi bi-link-45deg me-1"></i>@dr.PathPrefix
+                                                    <span class="text-muted ms-1">(@(dr.AppDeployment?.Environment?.Name ?? "unknown"))</span>
+                                                </span>
+                                            }
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+        }
+    }
+
+    @* ════════════════════════════════════════════════════════════════
+       Level 3: Per-environment view (deployments, resources, external access)
+       ════════════════════════════════════════════════════════════════ *@
+    else if (selectedPortalEnvironment is not null && selectedPortalApp is not null)
+    {
+        <AppEnvironmentDetail App="selectedPortalApp"
+                              Environment="selectedPortalEnvironment"
+                              TenantId="selectedCustomer!.TenantId"
+                              IsPortalView="true"
+                              AccessRole="currentAccessRole"
+                              OnBack="() => { selectedPortalApp = null; selectedPortalEnvironment = null; }" />
+    }
+
+    @* ════════════════════════════════════════════════════════════════
+       Level 3: Deployment detail with operations
+       ════════════════════════════════════════════════════════════════ *@
+    else if (selectedDeployment is not null)
+    {
+        <PortalDeploymentDetail
+            Deployment="selectedDeployment"
+            AccessRole="currentAccessRole"
+            K8sOps="K8sOps"
+            DeploymentService="DeploymentService"
+            PrometheusService="PrometheusService"
+            AuditService="AuditService"
+            CustomerId="selectedCustomer!.Id"
+            TenantId="selectedCustomer!.TenantId"
+            EnvironmentId="selectedDeployment.EnvironmentId"
+            GovernanceNamespace="@(selectedCustomer?.Apps.FirstOrDefault(a => a.Id == selectedDeployment.AppId)?.Namespace)"
+            OnBack="BackToApps"
+            OnDeleted="OnDeploymentDeleted" />
+    }
+
+    @* ════════════════════════════════════════════════════════════════
+       Level 3: Identity (Keycloak realm) management
+       ════════════════════════════════════════════════════════════════ *@
+    else if (selectedIdentityRealm is not null)
+    {
+        <PortalIdentityDetail
+            Realm="selectedIdentityRealm"
+            TenantId="selectedCustomer!.TenantId" />
+    }
+
+    @* ════════════════════════════════════════════════════════════════
+       Level 3: App secrets vault
+       ════════════════════════════════════════════════════════════════ *@
+    else if (selectedSecrets is not null)
+    {
+        <PortalSecretsDetail
+            @key="(selectedSecrets.App.Id, selectedSecrets.Scope)"
+            App="selectedSecrets.App"
+            TenantId="selectedCustomer!.TenantId"
+            AccessRole="currentAccessRole"
+            InitialScope="@selectedSecrets.Scope" />
+    }
+
+    @* ════════════════════════════════════════════════════════════════
+       Level 3: Harbor registry project management
+       ════════════════════════════════════════════════════════════════ *@
+    else if (selectedRegistryProject is not null)
+    {
+        <PortalRegistryDetail
+            Project="selectedRegistryProject"
+            TenantId="selectedCustomer!.TenantId"
+            AccessRole="currentAccessRole" />
+    }
+    @* Kept for reference — governance is now accessed via environment cards *@
+    else if (selectedResourcesApp is not null)
+    {
+        <AppResourcesPanel AppId="selectedResourcesApp.Id" />
+    }
+    else if (selectedRoutesApp is not null)
+    {
+        <PortalAppRoutesPanel App="selectedRoutesApp" AccessRole="currentAccessRole" />
+    }
+}
+
+<style>
+    .portal-env-card { transition: box-shadow .14s, transform .1s; }
+    .portal-env-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,.13) !important; transform: translateY(-1px); }
+</style>
+
+@code {
+    private bool loading = true;
+    private bool loadingCustomer;
+    private string? currentUserId;
+    private CustomerAccessRole currentAccessRole;
+
+    private bool InDetailView =>
+        selectedDeployment is not null || selectedIdentityRealm is not null ||
+        selectedSecrets is not null || selectedRegistryProject is not null ||
+        selectedGovernanceApp is not null || selectedResourcesApp is not null ||
+        selectedRoutesApp is not null || selectedPortalEnvironment is not null;
+
+    private IReadOnlyList<Breadcrumb.BreadcrumbItem> PortalBreadcrumbs
+    {
+        get
+        {
+            var items = new List<Breadcrumb.BreadcrumbItem>();
+
+            if (InDetailView)
+                items.Add(new("Portal", "bi-grid", OnClick: EventCallback.Factory.Create(this, BackToApps)));
+            else if (selectedCustomer is not null)
+                items.Add(new("Portal", "bi-grid", OnClick: EventCallback.Factory.Create(this, BackToCustomers)));
+            else
+                items.Add(new("Portal", "bi-grid", IsActive: true));
+
+            if (selectedCustomer is not null)
+            {
+                if (InDetailView)
+                    items.Add(new(selectedCustomer.Name, OnClick: EventCallback.Factory.Create(this, BackToApps)));
+                else
+                    items.Add(new(selectedCustomer.Name, IsActive: true));
+            }
+
+            if (selectedDeployment is not null)
+                items.Add(new(selectedDeployment.Name, IsActive: true));
+            else if (selectedIdentityRealm is not null)
+                items.Add(new(selectedIdentityRealm.DisplayName, "bi-shield-lock", IsActive: true));
+            else if (selectedSecrets is not null)
+                items.Add(new($"{selectedSecrets.App.Name} — {SecretsScopeLabel}", SecretsScopeIcon, IsActive: true));
+            else if (selectedRegistryProject is not null)
+                items.Add(new($"{selectedRegistryProject.ProjectName} — Registry", "bi-archive", IsActive: true));
+            else if (selectedGovernanceApp is not null)
+                items.Add(new($"{selectedGovernanceApp.Name} — Policy", "bi-shield-check", IsActive: true));
+            else if (selectedResourcesApp is not null)
+                items.Add(new($"{selectedResourcesApp.Name} — Resources", "bi-diagram-3", IsActive: true));
+            else if (selectedRoutesApp is not null)
+                items.Add(new($"{selectedRoutesApp.Name} — URLs", "bi-globe", IsActive: true));
+            else if (selectedPortalEnvironment is not null && selectedPortalApp is not null)
+                items.Add(new($"{selectedPortalApp.Name} › {selectedPortalEnvironment.Name}", "bi-app-indicator", IsActive: true));
+
+            return items;
+        }
+    }
+
+    private List<Customer>? customers;
+    private Customer? selectedCustomer;
+    private AppDeployment? selectedDeployment;
+    private KeycloakRealm? selectedIdentityRealm;
+
+    private sealed record SecretsNav(Data.App App, string Scope);
+    private SecretsNav? selectedSecrets;
+
+    private string SecretsScopeIcon => selectedSecrets?.Scope switch
+    {
+        "database" => "bi-database",
+        "messaging" => "bi-send",
+        "cache"    => "bi-lightning",
+        "docker"   => "bi-box-seam",
+        _          => "bi-key"
+    };
+
+    private string SecretsScopeLabel => selectedSecrets?.Scope switch
+    {
+        "database" => "Databases",
+        "messaging" => "Messaging",
+        "cache"    => "Cache",
+        "docker"   => "Registries",
+        _          => "App Secrets"
+    };
+    private HarborProject? selectedRegistryProject;
+    private Data.App? selectedGovernanceApp;
+    private Data.App? selectedResourcesApp;
+    private Data.App? selectedRoutesApp;
+
+    // Per-environment navigation in portal (environment-first view)
+    private Data.App? selectedPortalApp;
+    private Data.Environment? selectedPortalEnvironment;
+    private Dictionary<Guid, List<Data.Environment>> appLinkedEnvironments = new();
+
+    // Deployments indexed by app ID for the selected customer.
+    private Dictionary<Guid, List<AppDeployment>> appDeployments = new();
+
+    // Linked Keycloak realms indexed by app ID for the selected customer.
+    private Dictionary<Guid, KeycloakRealm> appRealms = new();
+
+    // Linked Harbor projects indexed by app ID for the selected customer.
+    private Dictionary<Guid, HarborProject> appHarborProjects = new();
+
+    // External routes indexed by app ID for the selected customer.
+    private Dictionary<Guid, List<AppRoute>> appRoutes = new();
+
+    // Environments and clusters for deployment creation (loaded when Admin selects a customer).
+    private List<Data.Environment> tenantEnvironments = [];
+    private List<KubernetesCluster> tenantClusters = [];
+
+    // Monitoring panel toggle in Level 2
+    private bool showMonitoringPanel;
+
+    private List<AppDeployment> AllCustomerDeployments =>
+        appDeployments.Values.SelectMany(d => d).ToList();
+
+    private HashSet<Guid> AllCustomerClusterIds =>
+        AllCustomerDeployments.Select(d => d.ClusterId).ToHashSet();
+
+
+    // App edit/delete state
+    private Guid? editingAppId;
+    private string editAppName = "";
+    private bool savingAppName;
+    private Guid? deletingAppId;
+    private bool deletingApp;
+    private string? deleteAppError;
+
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Determine who the logged-in user is.
+        AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        currentUserId = authState.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+        if (string.IsNullOrEmpty(currentUserId))
+        {
+            loading = false;
+            return;
+        }
+
+        // Load only the customers this user has access to.
+        customers = await CustomerAccessService.GetAccessibleCustomersAsync(currentUserId);
+        loading = false;
+    }
+
+    private async Task SelectCustomer(Customer customer)
+    {
+        selectedCustomer = customer;
+        loadingCustomer = true;
+        showMonitoringPanel = false;
+        StateHasChanged();
+
+        // Look up the user's role for this customer.
+        CustomerAccess? access = await CustomerAccessService.GetAccessAsync(currentUserId!, customer.Id);
+        currentAccessRole = access?.Role ?? CustomerAccessRole.Viewer;
+
+        // Load deployments, linked Keycloak realms, Harbor projects, and external routes for all apps.
+        appDeployments.Clear();
+        appRealms.Clear();
+        appHarborProjects.Clear();
+        appRoutes.Clear();
+        appLinkedEnvironments.Clear();
+        selectedPortalApp = null;
+        selectedPortalEnvironment = null;
+
+        foreach (Data.App app in customer.Apps)
+        {
+            List<AppDeployment> deploys = await DeploymentService.GetDeploymentsAsync(app.Id);
+            appDeployments[app.Id] = deploys;
+
+            KeycloakRealm? realm = await KeycloakService.GetRealmForAppAsync(customer.TenantId, app.Id);
+            if (realm is not null)
+                appRealms[app.Id] = realm;
+
+            HarborProject? harborProject = await HarborService.GetProjectForAppAsync(customer.TenantId, app.Id);
+            if (harborProject is not null)
+                appHarborProjects[app.Id] = harborProject;
+
+            try
+            {
+                List<AppRoute> routes = await AppRouteService.GetRoutesForAppAsync(app.Id);
+                if (routes.Count > 0)
+                    appRoutes[app.Id] = routes;
+            }
+            catch
+            {
+                // Routes table may not exist if a migration is pending; skip silently.
+            }
+        }
+
+        // Always load environments — needed to show environment cards for all roles.
+        tenantEnvironments = await TenantService.GetEnvironmentsAsync(customer.TenantId);
+
+        // Compute per-app linked environments from AppEnvironments navigation property.
+        foreach (Data.App app in customer.Apps)
+        {
+            appLinkedEnvironments[app.Id] = tenantEnvironments
+                .Where(e => app.AppEnvironments.Any(ae => ae.EnvironmentId == e.Id))
+                .ToList();
+        }
+
+        if (currentAccessRole >= CustomerAccessRole.Admin)
+        {
+            tenantClusters = await TenantService.GetClustersAsync(customer.TenantId);
+        }
+
+        loadingCustomer = false;
+    }
+
+    private void SelectPortalEnvironment(Data.App app, Data.Environment env)
+    {
+        selectedPortalApp = app;
+        selectedPortalEnvironment = env;
+    }
+
+    private void SelectDeployment(AppDeployment deploy)
+    {
+        selectedDeployment = deploy;
+    }
+
+    private void SelectIdentityRealm(Guid appId)
+    {
+        if (appRealms.TryGetValue(appId, out KeycloakRealm? realm))
+            selectedIdentityRealm = realm;
+    }
+
+    private void SelectRegistryProject(Guid appId)
+    {
+        if (appHarborProjects.TryGetValue(appId, out HarborProject? project))
+            selectedRegistryProject = project;
+    }
+
+    private void BackToCustomers()
+    {
+        selectedCustomer = null;
+        selectedDeployment = null;
+        selectedIdentityRealm = null;
+        selectedSecrets = null;
+        selectedRegistryProject = null;
+
+
+    }
+
+    private void OpenAppSecrets(Data.App app)       => selectedSecrets = new(app, "app");
+    private void OpenDatabases(Data.App app)        => selectedSecrets = new(app, "database");
+    private void OpenMessaging(Data.App app)        => selectedSecrets = new(app, "messaging");
+    private void OpenCache(Data.App app)            => selectedSecrets = new(app, "cache");
+    private void OpenDockerRegistries(Data.App app) => selectedSecrets = new(app, "docker");
+
+    // ──────── App edit ────────
+
+    private void StartEditApp(Data.App app)
+    {
+        editingAppId = app.Id;
+        editAppName = app.Name;
+        deletingAppId = null;
+    }
+
+    private void CancelEditApp()
+    {
+        editingAppId = null;
+        editAppName = "";
+    }
+
+    private async Task OnEditAppNameKeyUp(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await SaveAppName();
+    }
+
+    private async Task SaveAppName()
+    {
+        if (editingAppId is null || string.IsNullOrWhiteSpace(editAppName)) return;
+
+        savingAppName = true;
+        await TenantService.RenameAppAsync(editingAppId.Value, editAppName);
+
+        Data.App? appInList = selectedCustomer!.Apps.FirstOrDefault(a => a.Id == editingAppId.Value);
+        if (appInList is not null) appInList.Name = editAppName.Trim();
+
+        editingAppId = null;
+        editAppName = "";
+        savingAppName = false;
+    }
+
+    // ──────── App delete ────────
+
+    private void StartDeleteApp(Data.App app)
+    {
+        deletingAppId = app.Id;
+        deleteAppError = null;
+        editingAppId = null;
+    }
+
+    private void CancelDeleteApp()
+    {
+        deletingAppId = null;
+        deleteAppError = null;
+    }
+
+    private async Task ConfirmDeleteApp(Guid appId)
+    {
+        deletingApp = true;
+        deleteAppError = null;
+
+        await K8sOps.DeleteAppFromClusterAsync(appId, currentUserId);
+        await TenantService.DeleteAppAsync(appId);
+
+        Data.App? appToRemove = selectedCustomer!.Apps.FirstOrDefault(a => a.Id == appId);
+        if (appToRemove is not null) selectedCustomer.Apps.Remove(appToRemove);
+        appDeployments.Remove(appId);
+        appRealms.Remove(appId);
+        appHarborProjects.Remove(appId);
+
+        deletingApp = false;
+        deletingAppId = null;
+    }
+
+    private void SelectGovernanceApp(Data.App app)
+    {
+        selectedGovernanceApp = app;
+    }
+
+    private void SelectResourcesApp(Data.App app)
+    {
+        selectedResourcesApp = app;
+    }
+
+    private void SelectRoutesApp(Data.App app)
+    {
+        selectedRoutesApp = app;
+    }
+
+    private void BackToApps()
+    {
+        selectedDeployment = null;
+        selectedIdentityRealm = null;
+        selectedSecrets = null;
+        selectedRegistryProject = null;
+        selectedGovernanceApp = null;
+        selectedResourcesApp = null;
+        selectedRoutesApp = null;
+        selectedPortalApp = null;
+        selectedPortalEnvironment = null;
+
+    }
+
+    private async Task OnDeploymentDeleted()
+    {
+        if (selectedDeployment is not null)
+        {
+            Guid appId = selectedDeployment.AppId;
+            selectedDeployment = null;
+            // Reload the affected app's deployments.
+            appDeployments[appId] = await DeploymentService.GetDeploymentsAsync(appId);
+        }
+    }
+
+    private static bool IsGitType(DeploymentType type)
+        => type is DeploymentType.GitYaml or DeploymentType.GitHelm or DeploymentType.GitAppOfApps;
+
+    // ──────── Badge helpers ────────
+
+    private RenderFragment TypeBadge(DeploymentType type) => type switch
+    {
+        DeploymentType.Manual => @<span class="badge bg-info">Manual</span>,
+        DeploymentType.Yaml => @<span class="badge bg-warning text-dark">YAML</span>,
+        DeploymentType.HelmChart => @<span class="badge bg-purple text-white" style="background-color: #6f42c1 !important;">Helm</span>,
+        DeploymentType.GitYaml => @<span class="badge bg-success"><i class="bi bi-git me-1"></i>Git YAML</span>,
+        DeploymentType.GitHelm => @<span class="badge bg-success"><i class="bi bi-git me-1"></i>Git Helm</span>,
+        DeploymentType.GitAppOfApps => @<span class="badge bg-success"><i class="bi bi-git me-1"></i>App of Apps</span>,
+        _ => @<span class="badge bg-secondary">Unknown</span>
+    };
+
+    private RenderFragment SyncBadge(SyncStatus status) => status switch
+    {
+        SyncStatus.Synced => @<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Synced</span>,
+        SyncStatus.OutOfSync => @<span class="badge bg-warning text-dark"><i class="bi bi-exclamation-circle me-1"></i>OutOfSync</span>,
+        SyncStatus.Syncing => @<span class="badge bg-info"><i class="bi bi-arrow-repeat me-1"></i>Syncing</span>,
+        SyncStatus.Failed => @<span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>,
+        _ => @<span class="badge bg-secondary">Unknown</span>
+    };
+
+    private RenderFragment HealthBadge(HealthStatus status) => status switch
+    {
+        HealthStatus.Healthy => @<span class="badge bg-success"><i class="bi bi-heart-fill me-1"></i>Healthy</span>,
+        HealthStatus.Progressing => @<span class="badge bg-info"><i class="bi bi-hourglass-split me-1"></i>Progressing</span>,
+        HealthStatus.Degraded => @<span class="badge bg-warning text-dark"><i class="bi bi-exclamation-triangle me-1"></i>Degraded</span>,
+        HealthStatus.Missing => @<span class="badge bg-danger"><i class="bi bi-question-circle me-1"></i>Missing</span>,
+        HealthStatus.Suspended => @<span class="badge bg-secondary"><i class="bi bi-pause-circle me-1"></i>Suspended</span>,
+        _ => @<span class="badge bg-secondary">Unknown</span>
+    };
+}

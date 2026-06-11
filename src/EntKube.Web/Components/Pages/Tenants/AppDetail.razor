@@ -1,0 +1,219 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject TenantService TenantService
+
+@* ═══════════════════════════════════════════════════════════════════
+   App Detail — app-level header + environment cards.
+   All per-environment content (deployments, resources, governance,
+   metrics, external access) is handled by AppEnvironmentDetail.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+@if (selectedEnvironment is not null)
+{
+    <AppEnvironmentDetail App="App"
+                          Environment="selectedEnvironment"
+                          TenantId="TenantId"
+                          IsPortalView="false"
+                          OnBack="() => selectedEnvironment = null" />
+}
+else
+{
+    @* --- Back button --- *@
+    <nav class="mb-3">
+        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="OnBack">
+            <i class="bi bi-arrow-left me-1"></i>Back to @CustomerName
+        </button>
+    </nav>
+
+    @* --- App header --- *@
+    <div class="card shadow-sm mb-4">
+        <div class="card-body">
+            <div class="d-flex align-items-start justify-content-between">
+                <div class="d-flex align-items-start">
+                    <i class="bi bi-app-indicator fs-3 me-3 text-primary"></i>
+                    <div>
+                        <h4 class="mb-1">@App.Name</h4>
+                        <div class="d-flex flex-wrap gap-2 text-muted small">
+                            <span><i class="bi bi-person me-1"></i>@CustomerName</span>
+                            <span><i class="bi bi-calendar me-1"></i>Created @App.CreatedAt.ToString("MMM d, yyyy")</span>
+                        </div>
+                    </div>
+                </div>
+
+                @if (!confirmDelete)
+                {
+                    <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDelete = true" title="Delete app">
+                        <i class="bi bi-trash me-1"></i>Delete
+                    </button>
+                }
+            </div>
+
+            <ConfirmDialog Visible="confirmDelete"
+                           Message="@($"Permanently delete {App.Name} and all its data?")"
+                           ConfirmText="Yes, delete"
+                           IsBusy="deleting"
+                           OnConfirm="DeleteApp"
+                           OnCancel="() => confirmDelete = false" />
+        </div>
+    </div>
+
+    @* --- Linked environments (clickable cards → per-env detail) --- *@
+    <div class="d-flex align-items-center justify-content-between mb-3">
+        <h6 class="mb-0 fw-semibold">
+            <i class="bi bi-layers me-2 text-primary"></i>Environments
+        </h6>
+        <button class="btn btn-sm btn-link p-0 text-muted" @onclick="() => showLinkPanel = !showLinkPanel">
+            <i class="bi @(showLinkPanel ? "bi-chevron-up" : "bi-link-45deg") me-1"></i>
+            @(showLinkPanel ? "Hide" : "Link / Unlink")
+        </button>
+    </div>
+
+    @if (showLinkPanel)
+    {
+        <div class="card mb-3">
+            <div class="card-header bg-white py-2">
+                <small class="text-muted">Select which environments this app is deployed in.</small>
+            </div>
+            <div class="card-body py-2">
+                <LoadingPanel Loading="@(allEnvironments is null)">
+                @if (allEnvironments is not null && allEnvironments.Count == 0)
+                {
+                    <EmptyState Icon="bi-layers"
+                                Message="No environments exist for this tenant yet. Create environments first." />
+                }
+                else if (allEnvironments is not null)
+                {
+                    <div class="row row-cols-1 row-cols-md-3 g-2">
+                        @foreach (Data.Environment env in allEnvironments)
+                        {
+                            bool isLinked = linkedEnvIds.Contains(env.Id);
+                            <div class="col">
+                                <div class="card @(isLinked ? "border-success bg-success bg-opacity-10" : "border-light")"
+                                     role="button" style="cursor: pointer;"
+                                     @onclick="() => ToggleEnvironment(env.Id, isLinked)">
+                                    <div class="card-body py-2 d-flex align-items-center">
+                                        <i class="bi @(isLinked ? "bi-check-circle-fill text-success" : "bi-circle text-muted") me-2 fs-5"></i>
+                                        <span class="fw-medium">@env.Name</span>
+                                        @if (isLinked) { <span class="badge bg-success ms-auto">Active</span> }
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+                </LoadingPanel>
+            </div>
+        </div>
+    }
+
+    <LoadingPanel Loading="@(linkedEnvironments is null)">
+    @if (linkedEnvironments is not null && linkedEnvironments.Count == 0)
+    {
+        <div class="card border-dashed">
+            <div class="card-body">
+                <EmptyState Icon="bi-layers"
+                            Title="No environments linked yet"
+                            Message="Use the Link / Unlink button above to connect this app to an environment." />
+            </div>
+        </div>
+    }
+    else if (linkedEnvironments is not null)
+    {
+        <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3">
+            @foreach (Data.Environment env in linkedEnvironments)
+            {
+                int deployCount = deployCountByEnv.GetValueOrDefault(env.Id, 0);
+
+                <div class="col">
+                    <div class="card shadow-sm border-light h-100 env-card" role="button" style="cursor: pointer;"
+                         @onclick="() => selectedEnvironment = env">
+                        <div class="card-body">
+                            <div class="d-flex align-items-start justify-content-between mb-2">
+                                <div class="d-flex align-items-center gap-2">
+                                    <i class="bi bi-layers fs-4 text-primary"></i>
+                                    <h6 class="mb-0 fw-semibold">@env.Name</h6>
+                                </div>
+                                <i class="bi bi-chevron-right text-muted small mt-1"></i>
+                            </div>
+                            <div class="d-flex flex-wrap gap-2 small text-muted">
+                                @if (deployCount > 0)
+                                {
+                                    <span><i class="bi bi-rocket-takeoff me-1"></i>@deployCount deployment@(deployCount == 1 ? "" : "s")</span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted fst-italic">No deployments</span>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+    </LoadingPanel>
+}
+
+<style>
+    .env-card { transition: box-shadow .14s, transform .1s; }
+    .env-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,.13) !important; transform: translateY(-1px); }
+    .border-dashed { border-style: dashed !important; }
+</style>
+
+@code {
+    [Parameter] public required Data.App App { get; set; }
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public string CustomerName { get; set; } = "";
+    [Parameter] public EventCallback OnBack { get; set; }
+    [Parameter] public EventCallback OnDeleted { get; set; }
+
+    private bool confirmDelete;
+    private bool deleting;
+    private bool showLinkPanel;
+
+    private List<Data.Environment>? allEnvironments;
+    private List<Data.Environment>? linkedEnvironments;
+    private HashSet<Guid> linkedEnvIds = new();
+    private Dictionary<Guid, int> deployCountByEnv = new();
+
+    private Data.Environment? selectedEnvironment;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadEnvironments();
+    }
+
+    private async Task DeleteApp()
+    {
+        deleting = true;
+        await TenantService.DeleteAppAsync(App.Id);
+        deleting = false;
+        confirmDelete = false;
+        await OnDeleted.InvokeAsync();
+    }
+
+    private async Task LoadEnvironments()
+    {
+        allEnvironments = await TenantService.GetEnvironmentsAsync(TenantId);
+
+        List<Data.App> apps = await TenantService.GetAppsAsync(App.CustomerId);
+        Data.App? freshApp = apps.FirstOrDefault(a => a.Id == App.Id);
+        linkedEnvIds = freshApp?.AppEnvironments.Select(ae => ae.EnvironmentId).ToHashSet() ?? new();
+
+        linkedEnvironments = allEnvironments.Where(e => linkedEnvIds.Contains(e.Id)).ToList();
+
+        deployCountByEnv = (freshApp?.Deployments ?? [])
+            .GroupBy(d => d.EnvironmentId)
+            .ToDictionary(g => g.Key, g => g.Count());
+    }
+
+    private async Task ToggleEnvironment(Guid envId, bool currentlyLinked)
+    {
+        if (currentlyLinked)
+            await TenantService.UnlinkAppFromEnvironmentAsync(App.Id, envId);
+        else
+            await TenantService.LinkAppToEnvironmentAsync(App.Id, envId);
+
+        await LoadEnvironments();
+    }
+}

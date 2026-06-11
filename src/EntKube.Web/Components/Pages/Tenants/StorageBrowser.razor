@@ -1,0 +1,632 @@
+@using System.IO
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.AspNetCore.Components.Forms
+@inject StorageBrowserService BrowserService
+@inject IJSRuntime JS
+@implements IAsyncDisposable
+
+<div class="card shadow-sm mb-4 border-primary">
+    <div class="card-header bg-primary bg-opacity-10 d-flex align-items-center justify-content-between">
+        <h6 class="mb-0">
+            <i class="bi bi-folder2-open me-2"></i>Browse:
+            <strong>@Link.BucketName</strong>
+            <span class="badge bg-secondary ms-2 small fw-normal">@GetProviderLabel()</span>
+        </h6>
+        <button class="btn btn-sm btn-outline-secondary border-0" @onclick="OnClose">
+            <i class="bi bi-x-lg"></i>
+        </button>
+    </div>
+    <div class="card-body">
+
+        @if (!string.IsNullOrEmpty(error))
+        {
+            <div class="alert alert-danger small py-2 mb-3">
+                <i class="bi bi-exclamation-triangle me-1"></i>@error
+            </div>
+        }
+
+        @* Breadcrumb + toolbar *@
+        <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+            <nav aria-label="breadcrumb" class="flex-grow-1 overflow-hidden">
+                <ol class="breadcrumb mb-0 small flex-nowrap text-nowrap overflow-auto">
+                    <li class="breadcrumb-item">
+                        <button type="button" class="btn btn-link btn-sm p-0 text-decoration-none" @onclick="NavigateToRoot">
+                            <i class="bi bi-bucket me-1"></i>@Link.BucketName
+                        </button>
+                    </li>
+                    @foreach (BreadcrumbItem crumb in breadcrumbs)
+                    {
+                        if (crumb.IsLast)
+                        {
+                            <li class="breadcrumb-item active">@crumb.Label</li>
+                        }
+                        else
+                        {
+                            <li class="breadcrumb-item">
+                                <button type="button" class="btn btn-link btn-sm p-0 text-decoration-none" @onclick="() => NavigateTo(crumb.Path)">@crumb.Label</button>
+                            </li>
+                        }
+                    }
+                </ol>
+            </nav>
+            <div class="d-flex gap-1 flex-shrink-0">
+                @if (!showNewFolderInput)
+                {
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="ShowNewFolderInput" title="New folder">
+                        <i class="bi bi-folder-plus me-1"></i><span class="d-none d-sm-inline">New Folder</span>
+                    </button>
+                }
+                <label class="btn btn-sm btn-outline-primary mb-0" title="Upload file(s)" style="cursor:pointer">
+                    <i class="bi bi-upload me-1"></i><span class="d-none d-sm-inline">Upload</span>
+                    <InputFile OnChange="HandleFileUpload" class="d-none" multiple />
+                </label>
+            </div>
+        </div>
+
+        @* New folder input *@
+        @if (showNewFolderInput)
+        {
+            <div class="d-flex gap-2 mb-3 align-items-center">
+                <input type="text"
+                       class="form-control form-control-sm"
+                       style="max-width:280px"
+                       placeholder="Folder name"
+                       @bind="newFolderName"
+                       @bind:event="oninput"
+                       @onkeydown="OnFolderNameKeyDown" />
+                <button class="btn btn-sm btn-primary"
+                        @onclick="CreateFolder"
+                        disabled="@(string.IsNullOrWhiteSpace(newFolderName) || creatingFolder)">
+                    @if (creatingFolder)
+                    {
+                        <span class="spinner-border spinner-border-sm me-1"></span>
+                    }
+                    Create
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelNewFolder">Cancel</button>
+            </div>
+        }
+
+        @if (uploadingFile)
+        {
+            <div class="alert alert-info small py-2 mb-3">
+                <span class="spinner-border spinner-border-sm me-2"></span>Uploading...
+            </div>
+        }
+
+        @if (loading)
+        {
+            <div class="text-center py-4 text-muted">
+                <span class="spinner-border spinner-border-sm me-2"></span>Loading...
+            </div>
+        }
+        else if (listing is not null)
+        {
+            <div class="table-responsive">
+                <table class="table table-sm table-hover align-middle mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th style="width:30px">
+                                <input type="checkbox"
+                                       class="form-check-input"
+                                       checked="@AllSelected"
+                                       @onchange="ToggleSelectAll" />
+                            </th>
+                            <th>Name</th>
+                            <th class="d-none d-md-table-cell text-end" style="width:90px">Size</th>
+                            <th class="d-none d-lg-table-cell" style="width:145px">Modified</th>
+                            <th style="width:95px"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (string folder in listing.Folders)
+                        {
+                            string folderName = folder.TrimEnd('/').Split('/').Last();
+                            bool folderSelected = selectedKeys.Contains(folder);
+                            <tr>
+                                <td>
+                                    <input type="checkbox"
+                                           class="form-check-input"
+                                           checked="@folderSelected"
+                                           @onchange="e => ToggleKey(folder, (bool)e.Value!)" />
+                                </td>
+                                <td>
+                                    <button type="button"
+                                            class="btn btn-link p-0 text-dark fw-semibold text-decoration-none"
+                                            @onclick="() => NavigateTo(folder)">
+                                        <i class="bi bi-folder-fill text-warning me-2"></i>@folderName/
+                                    </button>
+                                </td>
+                                <td class="d-none d-md-table-cell text-end text-muted small">—</td>
+                                <td class="d-none d-lg-table-cell text-muted small">—</td>
+                                <td class="text-end">
+                                    <button class="btn btn-sm btn-outline-danger border-0 py-0"
+                                            @onclick="() => DeleteFolder(folder)"
+                                            title="Delete folder and all contents">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                        @foreach (StorageObject obj in listing.Objects)
+                        {
+                            string fileName = obj.Name;
+                            string fileKey = obj.Key;
+                            bool fileSelected = selectedKeys.Contains(fileKey);
+                            <tr>
+                                <td>
+                                    <input type="checkbox"
+                                           class="form-check-input"
+                                           checked="@fileSelected"
+                                           @onchange="e => ToggleKey(fileKey, (bool)e.Value!)" />
+                                </td>
+                                <td>
+                                    <i class="@GetFileIcon(fileName) text-secondary me-2"></i>
+                                    <span class="text-break">@fileName</span>
+                                </td>
+                                <td class="d-none d-md-table-cell text-end small text-muted">@FormatSize(obj.SizeBytes)</td>
+                                <td class="d-none d-lg-table-cell small text-muted">@obj.LastModified.ToString("yyyy-MM-dd HH:mm")</td>
+                                <td class="text-end">
+                                    <button class="btn btn-sm btn-outline-secondary border-0 py-0"
+                                            @onclick="() => DownloadFile(fileKey, fileName)"
+                                            disabled="@(downloadingKey == fileKey)"
+                                            title="Download">
+                                        @if (downloadingKey == fileKey)
+                                        {
+                                            <span class="spinner-border spinner-border-sm"></span>
+                                        }
+                                        else
+                                        {
+                                            <i class="bi bi-download"></i>
+                                        }
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary border-0 py-0"
+                                            @onclick="() => GenerateLink(fileKey, fileName)"
+                                            disabled="@(generatingLinkKey == fileKey)"
+                                            title="Get shareable link">
+                                        @if (generatingLinkKey == fileKey)
+                                        {
+                                            <span class="spinner-border spinner-border-sm"></span>
+                                        }
+                                        else
+                                        {
+                                            <i class="bi bi-link-45deg"></i>
+                                        }
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-danger border-0 py-0"
+                                            @onclick="() => DeleteObject(fileKey)"
+                                            title="Delete">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                        @if (listing.Folders.Count == 0 && listing.Objects.Count == 0)
+                        {
+                            <tr>
+                                <td colspan="5" class="text-center text-muted small py-4">
+                                    <i class="bi bi-inbox me-2"></i>This folder is empty
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            @if (selectedKeys.Count > 0)
+            {
+                <div class="mt-2">
+                    <button class="btn btn-sm btn-outline-danger"
+                            @onclick="DeleteSelected"
+                            disabled="@deleting">
+                        @if (deleting)
+                        {
+                            <span class="spinner-border spinner-border-sm me-1"></span>
+                        }
+                        <i class="bi bi-trash me-1"></i>Delete Selected (@selectedKeys.Count)
+                    </button>
+                </div>
+            }
+            @if (sharedUrl is not null)
+            {
+                <div class="mt-3 p-3 rounded border border-success-subtle bg-success-subtle">
+                    <div class="d-flex align-items-start gap-2">
+                        <i class="bi bi-link-45deg text-success flex-shrink-0 mt-1"></i>
+                        <div class="flex-grow-1" style="min-width:0">
+                            <div class="small fw-semibold mb-1">
+                                Presigned link for <em>@sharedUrlFileName</em>
+                                <span class="text-muted fw-normal">— valid for 1 hour</span>
+                            </div>
+                            <div class="d-flex gap-2">
+                                <input type="text"
+                                       class="form-control form-control-sm font-monospace"
+                                       value="@sharedUrl"
+                                       readonly />
+                                <button class="btn btn-sm @(linkCopied ? "btn-success" : "btn-outline-success") flex-shrink-0"
+                                        @onclick="CopyLink"
+                                        title="Copy to clipboard">
+                                    @if (linkCopied)
+                                    {
+                                        <i class="bi bi-check-lg"></i>
+                                    }
+                                    else
+                                    {
+                                        <i class="bi bi-clipboard"></i>
+                                    }
+                                </button>
+                            </div>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary border-0 flex-shrink-0"
+                                @onclick="() => sharedUrl = null"
+                                title="Dismiss">
+                            <i class="bi bi-x-lg"></i>
+                        </button>
+                    </div>
+                </div>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public StorageLink Link { get; set; } = null!;
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private string currentPrefix = "";
+    private List<BreadcrumbItem> breadcrumbs = new();
+    private StorageBrowseResult? listing;
+    private bool loading = true;
+    private string? error;
+    private bool uploadingFile;
+    private bool creatingFolder;
+    private string newFolderName = "";
+    private bool showNewFolderInput;
+    private HashSet<string> selectedKeys = new();
+    private bool deleting;
+    private string? downloadingKey;
+    private string? generatingLinkKey;
+    private string? sharedUrl;
+    private string? sharedUrlFileName;
+    private bool linkCopied;
+    private IJSObjectReference? jsModule;
+
+    private bool AllSelected =>
+        listing is not null &&
+        (listing.Folders.Count + listing.Objects.Count) > 0 &&
+        listing.Folders.All(f => selectedKeys.Contains(f)) &&
+        listing.Objects.All(o => selectedKeys.Contains(o.Key));
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadListing();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            jsModule = await JS.InvokeAsync<IJSObjectReference>(
+                "import", "./Components/Pages/Tenants/StorageBrowser.razor.js");
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (jsModule is not null)
+            await jsModule.DisposeAsync();
+    }
+
+    private void UpdateBreadcrumbs()
+    {
+        breadcrumbs.Clear();
+        string[] parts = currentPrefix.TrimEnd('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        string built = "";
+        for (int i = 0; i < parts.Length; i++)
+        {
+            string part = parts[i];
+            built += part + "/";
+            breadcrumbs.Add(new BreadcrumbItem { Label = part, Path = built, IsLast = i == parts.Length - 1 });
+        }
+    }
+
+    private async Task LoadListing()
+    {
+        loading = true;
+        error = null;
+        selectedKeys.Clear();
+        UpdateBreadcrumbs();
+        StateHasChanged();
+        try
+        {
+            listing = await BrowserService.ListAsync(TenantId, Link, currentPrefix);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            listing = null;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task NavigateToRoot()
+    {
+        currentPrefix = "";
+        await LoadListing();
+    }
+
+    private async Task NavigateTo(string prefix)
+    {
+        currentPrefix = prefix;
+        await LoadListing();
+    }
+
+    private void ShowNewFolderInput()
+    {
+        showNewFolderInput = true;
+    }
+
+    private async Task HandleFileUpload(InputFileChangeEventArgs e)
+    {
+        uploadingFile = true;
+        error = null;
+        StateHasChanged();
+        try
+        {
+            foreach (IBrowserFile file in e.GetMultipleFiles(20))
+            {
+                string key = currentPrefix + file.Name;
+                using Stream stream = file.OpenReadStream(maxAllowedSize: 100 * 1024 * 1024);
+                await BrowserService.UploadAsync(TenantId, Link, key, stream, file.ContentType);
+            }
+            await LoadListing();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            uploadingFile = false;
+        }
+    }
+
+    private async Task CreateFolder()
+    {
+        if (string.IsNullOrWhiteSpace(newFolderName)) return;
+        creatingFolder = true;
+        error = null;
+        try
+        {
+            string folderPath = currentPrefix + newFolderName.Trim('/');
+            await BrowserService.CreateFolderAsync(TenantId, Link, folderPath);
+            newFolderName = "";
+            showNewFolderInput = false;
+            await LoadListing();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            creatingFolder = false;
+        }
+    }
+
+    private void CancelNewFolder()
+    {
+        showNewFolderInput = false;
+        newFolderName = "";
+    }
+
+    private async Task OnFolderNameKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await CreateFolder();
+        else if (e.Key == "Escape") CancelNewFolder();
+    }
+
+    private async Task DownloadFile(string key, string fileName)
+    {
+        downloadingKey = key;
+        error = null;
+        StateHasChanged();
+        try
+        {
+            byte[] bytes = await BrowserService.DownloadAsync(TenantId, Link, key);
+            if (jsModule is not null)
+                await jsModule.InvokeVoidAsync("downloadFile", fileName, GetContentType(fileName), bytes);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            downloadingKey = null;
+        }
+    }
+
+    private async Task GenerateLink(string key, string fileName)
+    {
+        generatingLinkKey = key;
+        sharedUrl = null;
+        linkCopied = false;
+        error = null;
+        StateHasChanged();
+        try
+        {
+            sharedUrl = await BrowserService.GetPresignedUrlAsync(TenantId, Link, key);
+            sharedUrlFileName = fileName;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            generatingLinkKey = null;
+        }
+    }
+
+    private async Task CopyLink()
+    {
+        if (sharedUrl is null || jsModule is null) return;
+        await jsModule.InvokeVoidAsync("copyToClipboard", sharedUrl);
+        linkCopied = true;
+        StateHasChanged();
+        await Task.Delay(2000);
+        linkCopied = false;
+    }
+
+private async Task DeleteObject(string key)
+    {
+        error = null;
+        try
+        {
+            await BrowserService.DeleteAsync(TenantId, Link, key);
+            await LoadListing();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+    }
+
+    private async Task DeleteFolder(string prefix)
+    {
+        error = null;
+        try
+        {
+            await BrowserService.DeleteFolderAsync(TenantId, Link, prefix);
+            await LoadListing();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+    }
+
+    private async Task DeleteSelected()
+    {
+        if (selectedKeys.Count == 0) return;
+        deleting = true;
+        error = null;
+        try
+        {
+            List<string> folders = new(selectedKeys.Where(k => k.EndsWith('/')));
+            List<string> files = new(selectedKeys.Where(k => !k.EndsWith('/')));
+
+            foreach (string folder in folders)
+                await BrowserService.DeleteFolderAsync(TenantId, Link, folder);
+
+            if (files.Count > 0)
+                await BrowserService.DeleteManyAsync(TenantId, Link, files);
+
+            selectedKeys.Clear();
+            await LoadListing();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            deleting = false;
+        }
+    }
+
+    private void ToggleKey(string key, bool selected)
+    {
+        if (selected) selectedKeys.Add(key);
+        else selectedKeys.Remove(key);
+    }
+
+    private void ToggleSelectAll(ChangeEventArgs e)
+    {
+        if (listing is null) return;
+        if ((bool)e.Value!)
+        {
+            selectedKeys.UnionWith(listing.Folders);
+            selectedKeys.UnionWith(listing.Objects.Select(o => o.Key));
+        }
+        else
+        {
+            selectedKeys.Clear();
+        }
+    }
+
+    private string GetProviderLabel()
+    {
+        return Link.Provider switch
+        {
+            StorageProvider.AwsS3 => "AWS S3",
+            StorageProvider.CleuraS3 => "Cleura S3",
+            StorageProvider.MinIO => "MinIO",
+            _ => Link.Provider.ToString()
+        };
+    }
+
+    private static string GetFileIcon(string fileName)
+    {
+        string ext = Path.GetExtension(fileName).ToLowerInvariant();
+        if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" || ext == ".webp" || ext == ".svg" || ext == ".bmp")
+            return "bi bi-file-image";
+        if (ext == ".pdf")
+            return "bi bi-file-pdf";
+        if (ext == ".zip" || ext == ".tar" || ext == ".gz" || ext == ".7z" || ext == ".rar")
+            return "bi bi-file-zip";
+        if (ext == ".mp4" || ext == ".avi" || ext == ".mov" || ext == ".mkv" || ext == ".webm")
+            return "bi bi-file-play";
+        if (ext == ".mp3" || ext == ".wav" || ext == ".ogg" || ext == ".flac")
+            return "bi bi-file-music";
+        if (ext == ".json" || ext == ".xml" || ext == ".yaml" || ext == ".yml" || ext == ".toml")
+            return "bi bi-file-code";
+        if (ext == ".cs" || ext == ".js" || ext == ".ts" || ext == ".py" || ext == ".go" || ext == ".rs")
+            return "bi bi-file-code";
+        if (ext == ".txt" || ext == ".md" || ext == ".log")
+            return "bi bi-file-text";
+        if (ext == ".csv" || ext == ".xlsx" || ext == ".xls")
+            return "bi bi-file-spreadsheet";
+        return "bi bi-file-earmark";
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        if (bytes < 1024L * 1024 * 1024) return $"{bytes / 1024.0 / 1024.0:F1} MB";
+        return $"{bytes / 1024.0 / 1024.0 / 1024.0:F1} GB";
+    }
+
+    private static string GetContentType(string fileName)
+    {
+        string ext = Path.GetExtension(fileName).ToLowerInvariant();
+        if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+        if (ext == ".png") return "image/png";
+        if (ext == ".gif") return "image/gif";
+        if (ext == ".webp") return "image/webp";
+        if (ext == ".svg") return "image/svg+xml";
+        if (ext == ".pdf") return "application/pdf";
+        if (ext == ".json") return "application/json";
+        if (ext == ".xml") return "application/xml";
+        if (ext == ".txt" || ext == ".md" || ext == ".log") return "text/plain";
+        if (ext == ".csv") return "text/csv";
+        if (ext == ".html" || ext == ".htm") return "text/html";
+        if (ext == ".css") return "text/css";
+        if (ext == ".js") return "text/javascript";
+        if (ext == ".zip") return "application/zip";
+        if (ext == ".gz") return "application/gzip";
+        return "application/octet-stream";
+    }
+
+    private class BreadcrumbItem
+    {
+        public string Label { get; set; } = "";
+        public string Path { get; set; } = "";
+        public bool IsLast { get; set; }
+    }
+}

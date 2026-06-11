@@ -1,0 +1,528 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject TenantService TenantService
+@inject CustomerAccessService CustomerAccessService
+@inject PrometheusService PrometheusService
+
+@* ===========================================================================
+   Three-level drill-down:  Customers ▸ Apps ▸ App Detail
+   The user sees ONE level at a time — no nested panel clutter.
+   =========================================================================== *@
+
+@if (selectedApp is not null)
+{
+    @* ───────────── Level 3: App Detail ───────────── *@
+    <AppDetail App="selectedApp"
+               TenantId="TenantId"
+               CustomerName="@selectedCustomer!.Name"
+               OnBack="BackToApps"
+               OnDeleted="AppDeleted" />
+}
+else if (selectedCustomer is not null)
+{
+    @* ───────────── Level 2: Apps for a customer ───────────── *@
+
+    <nav class="mb-3">
+        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="BackToCustomers">
+            <i class="bi bi-arrow-left me-1"></i>All Customers
+        </button>
+    </nav>
+
+    <div class="d-flex align-items-center justify-content-between mb-3">
+        <div class="d-flex align-items-center">
+            <i class="bi bi-person-circle fs-4 me-2 text-primary"></i>
+            <div>
+                <h4 class="mb-0">@selectedCustomer.Name</h4>
+                <small class="text-muted">Applications owned by this customer</small>
+            </div>
+        </div>
+        <button class="btn btn-sm @(customerView == "metrics" ? "btn-primary" : "btn-outline-secondary")"
+                @onclick="OpenCustomerMetrics">
+            <i class="bi bi-bar-chart-line me-1"></i>Metrics
+        </button>
+    </div>
+
+    @if (customerView == "metrics")
+    {
+        <div class="card shadow-sm mb-4">
+            <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
+                <div>
+                    <i class="bi bi-bar-chart-line me-2 text-primary"></i>
+                    <strong>Customer Metrics</strong>
+                    <span class="text-muted small ms-2">aggregate across all apps and deployments</span>
+                </div>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="OpenCustomerMetrics" disabled="@customerMetricsLoading">
+                    <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                </button>
+            </div>
+            <div class="card-body">
+                <LoadingPanel Loading="@customerMetricsLoading" Error="@customerMetricsError">
+                @if (!customerMetricsLoading && customerMetrics is not null)
+                {
+                    <div class="row g-3 mb-2">
+                        <div class="col-sm-6 col-lg-3">
+                            <div class="border rounded text-center p-3">
+                                <div class="fs-3 fw-bold text-primary">
+                                    @(customerMetrics.CpuCores >= 1 ? $"{(int)Math.Round(customerMetrics.CpuCores)} cores" : $"{(int)Math.Round(customerMetrics.CpuCores * 1000)}m")
+                                </div>
+                                <div class="small text-muted">CPU (5 m avg)</div>
+                            </div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3">
+                            <div class="border rounded text-center p-3">
+                                <div class="fs-3 fw-bold text-info">@customerMetrics.MemoryMiB.ToString("F0") <small class="fs-6">MiB</small></div>
+                                <div class="small text-muted">Memory (working set)</div>
+                            </div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3">
+                            <div class="border rounded text-center p-3">
+                                <div class="fs-3 fw-bold text-success">@customerMetrics.PodCount</div>
+                                <div class="small text-muted">Pods running</div>
+                            </div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3">
+                            <div class="border rounded text-center p-3">
+                                <div class="fs-3 fw-bold @(customerMetrics.RestartCount > 0 ? "text-warning" : "text-success")">@customerMetrics.RestartCount</div>
+                                <div class="small text-muted">Container restarts</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="text-muted small">
+                        <i class="bi bi-clock me-1"></i>Queried @customerMetrics.QueriedAt.ToLocalTime().ToString("HH:mm:ss")
+                    </div>
+                }
+                </LoadingPanel>
+            </div>
+        </div>
+    }
+
+    @* --- Add App --- *@
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-body py-2">
+            <div class="input-group">
+                <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-plus-circle"></i></span>
+                <input type="text" class="form-control border-start-0" placeholder="New app name (e.g. billing-api)"
+                       @bind="newAppName" @bind:event="oninput"
+                       @onkeydown="@(async (e) => { if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(newAppName)) await CreateApp(); })" />
+                <button class="btn btn-primary" @onclick="CreateApp" disabled="@string.IsNullOrWhiteSpace(newAppName)">
+                    <i class="bi bi-plus-lg me-1"></i>Add App
+                </button>
+            </div>
+            @if (!string.IsNullOrEmpty(appError))
+            {
+                <div class="text-danger small mt-2"><i class="bi bi-exclamation-triangle me-1"></i>@appError</div>
+            }
+        </div>
+    </div>
+
+    @* --- App cards --- *@
+    <LoadingPanel Loading="@(apps is null)">
+    @if (apps is not null && apps.Count == 0)
+    {
+        <EmptyState Icon="bi-app-indicator"
+                    Title="No apps yet"
+                    Message="Create one above to get started." />
+    }
+    else if (apps is not null)
+    {
+        <div class="row row-cols-1 row-cols-md-2 g-3">
+            @foreach (Data.App app in apps)
+            {
+                <div class="col">
+                    <div class="card shadow-sm h-100" role="button" @onclick="() => OpenApp(app)" style="cursor: pointer;">
+                        <div class="card-body py-3">
+                            <div class="d-flex align-items-start">
+                                <i class="bi bi-app-indicator fs-4 me-3 text-primary"></i>
+                                <div class="flex-grow-1 min-width-0">
+                                    <h6 class="fw-semibold mb-1">@app.Name</h6>
+                                    <div class="d-flex flex-wrap gap-1 mb-1">
+                                        @if (app.AppEnvironments.Any())
+                                        {
+                                            @foreach (AppEnvironment ae in app.AppEnvironments)
+                                            {
+                                                <span class="badge bg-primary bg-opacity-75">@ae.Environment.Name</span>
+                                            }
+                                        }
+                                        else
+                                        {
+                                            <small class="text-muted">No environments linked</small>
+                                        }
+                                    </div>
+                                    <small class="text-muted">Created @app.CreatedAt.ToString("MMM d, yyyy")</small>
+                                </div>
+                                <i class="bi bi-chevron-right text-muted"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+    </LoadingPanel>
+
+    @* --- Portal Access Management --- *@
+    <div class="card shadow-sm mt-4">
+        <div class="card-header bg-white py-2">
+            <div class="d-flex align-items-center">
+                <i class="bi bi-shield-lock me-2 text-primary"></i>
+                <strong>Portal Access</strong>
+            </div>
+            <small class="text-muted">Grant users access to this customer's apps via the customer portal.</small>
+        </div>
+        <div class="card-body">
+            @* --- Grant access form --- *@
+            <div class="input-group mb-3">
+                <input type="email" class="form-control form-control-sm" placeholder="User email address"
+                       @bind="grantEmail" @bind:event="oninput" />
+                <select class="form-select form-select-sm" style="max-width: 140px;" @bind="grantRole">
+                    <option value="@CustomerAccessRole.Viewer">Viewer</option>
+                    <option value="@CustomerAccessRole.Operator">Operator</option>
+                    <option value="@CustomerAccessRole.Admin">Admin</option>
+                </select>
+                <button class="btn btn-sm btn-outline-primary" @onclick="GrantAccess"
+                        disabled="@string.IsNullOrWhiteSpace(grantEmail)">
+                    <i class="bi bi-plus me-1"></i>Grant
+                </button>
+            </div>
+
+            @if (!string.IsNullOrEmpty(accessError))
+            {
+                <div class="alert alert-danger py-1 small mb-2">@accessError</div>
+            }
+
+            @if (!string.IsNullOrEmpty(accessSuccess))
+            {
+                <div class="alert alert-success py-1 small mb-2">@accessSuccess</div>
+            }
+
+            @* --- Current access list --- *@
+            <LoadingPanel Loading="@(customerAccesses is null)">
+            @if (customerAccesses is not null && customerAccesses.Count == 0)
+            {
+                <EmptyState Icon="bi-person-x"
+                            Message="No users have portal access to this customer yet." />
+            }
+            else if (customerAccesses is not null)
+            {
+                @foreach (CustomerAccess access in customerAccesses)
+                {
+                    <div class="d-flex align-items-center justify-content-between py-1 border-bottom">
+                        <div class="small">
+                            <i class="bi bi-person me-1"></i>
+                            <span class="fw-medium">@access.User.Email</span>
+                            <span class="badge @GetRoleBadgeClass(access.Role) ms-1">@access.Role</span>
+                        </div>
+                        @if (confirmRevokeUserId == access.UserId)
+                        {
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm btn-danger" @onclick="() => RevokeAccess(access.UserId)">Revoke</button>
+                                <button class="btn btn-sm btn-link p-0" @onclick="() => confirmRevokeUserId = null">Cancel</button>
+                            </div>
+                        }
+                        else
+                        {
+                            <button class="btn btn-sm btn-outline-danger" title="Revoke access"
+                                    @onclick="() => confirmRevokeUserId = access.UserId">
+                                <i class="bi bi-x"></i>
+                            </button>
+                        }
+                    </div>
+                }
+            }
+            </LoadingPanel>
+        </div>
+    </div>
+}
+else
+{
+    @* ───────────── Level 1: Customer list ───────────── *@
+
+    <div class="d-flex align-items-center mb-2">
+        <i class="bi bi-people fs-4 me-2 text-primary"></i>
+        <h4 class="mb-0">Customers</h4>
+    </div>
+    <p class="text-muted small mb-3">End-clients or accounts served by this tenant. Click a customer to manage their apps.</p>
+
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-body py-2">
+            <div class="input-group">
+                <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-plus-circle"></i></span>
+                <input type="text" class="form-control border-start-0" placeholder="New customer name (e.g. Contoso Ltd)"
+                       @bind="newName" @bind:event="oninput"
+                       @onkeydown="@(async (e) => { if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(newName)) await Create(); })" />
+                <button class="btn btn-primary" @onclick="Create" disabled="@string.IsNullOrWhiteSpace(newName)">
+                    <i class="bi bi-plus-lg me-1"></i>Add
+                </button>
+            </div>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(errorMessage))
+    {
+        <div class="alert alert-danger alert-dismissible fade show py-2" role="alert">
+            <i class="bi bi-exclamation-triangle me-1"></i>@errorMessage
+            <button type="button" class="btn-close btn-close-sm" @onclick="() => errorMessage = null"></button>
+        </div>
+    }
+
+    <LoadingPanel Loading="@(customers is null)">
+    @if (customers is not null && customers.Count == 0)
+    {
+        <EmptyState Icon="bi-people"
+                    Title="No customers yet"
+                    Message="Create one above to get started." />
+    }
+    else if (customers is not null)
+    {
+        <div class="list-group shadow-sm">
+            @foreach (Customer customer in customers)
+            {
+                <div class="list-group-item p-0">
+                    @if (confirmDeleteId == customer.Id)
+                    {
+                        <div class="d-flex align-items-center justify-content-between px-3 py-2 bg-danger bg-opacity-10">
+                            <span class="text-danger small"><i class="bi bi-exclamation-triangle me-1"></i>Delete <strong>@customer.Name</strong> and all apps?</span>
+                            <div>
+                                <button class="btn btn-sm btn-danger me-1" @onclick="() => Delete(customer.Id)">Yes, delete</button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDeleteId = null">Cancel</button>
+                            </div>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="d-flex align-items-center px-3 py-2">
+                            <div class="flex-grow-1 d-flex align-items-center" role="button" @onclick="() => OpenCustomer(customer)" style="cursor: pointer;">
+                                <i class="bi bi-person-circle me-2 text-primary"></i>
+                                <div>
+                                    <span class="fw-semibold">@customer.Name</span>
+                                    <br />
+                                    <small class="text-muted">@(appCounts.GetValueOrDefault(customer.Id, 0)) app(s) · Created @customer.CreatedAt.ToString("MMM d, yyyy")</small>
+                                </div>
+                            </div>
+                            <div class="d-flex align-items-center gap-1">
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteId = customer.Id"
+                                        @onclick:stopPropagation="true" title="Delete customer">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                                <i class="bi bi-chevron-right text-muted ms-2"></i>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    }
+    </LoadingPanel>
+}
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    // --- Level 1: Customer list ---
+    private List<Customer>? customers;
+    private Dictionary<Guid, int> appCounts = new();
+    private string newName = "";
+    private string? errorMessage;
+    private Guid? confirmDeleteId;
+
+    // --- Level 2: Selected customer → apps ---
+    private Customer? selectedCustomer;
+    private List<Data.App>? apps;
+    private string newAppName = "";
+    private string? appError;
+    private string customerView = "apps"; // "apps" | "metrics"
+
+    // Customer metrics
+    private DeploymentMetricsSummary? customerMetrics;
+    private bool customerMetricsLoading;
+    private string? customerMetricsError;
+
+    // --- Level 3: Selected app → detail ---
+    private Data.App? selectedApp;
+
+    // --- Portal access management ---
+    private List<CustomerAccess>? customerAccesses;
+    private string grantEmail = "";
+    private CustomerAccessRole grantRole = CustomerAccessRole.Viewer;
+    private string? accessError;
+    private string? accessSuccess;
+
+
+    // --- Portal access ---
+    private string? confirmRevokeUserId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadCustomers();
+    }
+
+    // ──────────────── Level 1 ────────────────
+
+    private async Task LoadCustomers()
+    {
+        customers = await TenantService.GetCustomersAsync(TenantId);
+
+        // Pre-load app counts for the list view.
+        appCounts = new Dictionary<Guid, int>();
+
+        foreach (Customer customer in customers)
+        {
+            List<Data.App> customerApps = await TenantService.GetAppsAsync(customer.Id);
+            appCounts[customer.Id] = customerApps.Count;
+        }
+    }
+
+    private async Task Create()
+    {
+        errorMessage = null;
+
+        try
+        {
+            await TenantService.CreateCustomerAsync(TenantId, newName.Trim());
+            newName = "";
+            await LoadCustomers();
+        }
+        catch (DbUpdateException)
+        {
+            errorMessage = "A customer with that name already exists.";
+        }
+    }
+
+    private async Task Delete(Guid id)
+    {
+        confirmDeleteId = null;
+        await TenantService.DeleteCustomerAsync(id);
+        await LoadCustomers();
+    }
+
+    private async Task OpenCustomer(Customer customer)
+    {
+        selectedCustomer = customer;
+        selectedApp = null;
+        appError = null;
+        newAppName = "";
+        accessError = null;
+        accessSuccess = null;
+        customerView = "apps";
+        customerMetrics = null;
+        await LoadApps();
+        await LoadAccesses();
+    }
+
+    private async Task OpenCustomerMetrics()
+    {
+        customerView = "metrics";
+        customerMetricsLoading = true;
+        customerMetricsError = null;
+        customerMetrics = null;
+        StateHasChanged();
+
+        KubernetesOperationResult<DeploymentMetricsSummary> result =
+            await PrometheusService.GetCustomerMetricsAsync(selectedCustomer!.Id);
+
+        if (result.IsSuccess)
+            customerMetrics = result.Data;
+        else
+            customerMetricsError = result.Error;
+
+        customerMetricsLoading = false;
+    }
+
+    private async Task BackToCustomers()
+    {
+        selectedCustomer = null;
+        selectedApp = null;
+        apps = null;
+        await LoadCustomers();
+    }
+
+    // ──────────────── Level 2 ────────────────
+
+    private async Task LoadApps()
+    {
+        apps = await TenantService.GetAppsAsync(selectedCustomer!.Id);
+    }
+
+    private async Task CreateApp()
+    {
+        appError = null;
+
+        try
+        {
+            await TenantService.CreateAppAsync(selectedCustomer!.Id, newAppName.Trim());
+            newAppName = "";
+            await LoadApps();
+        }
+        catch (DbUpdateException)
+        {
+            appError = "An app with that name already exists for this customer.";
+        }
+    }
+
+    private void OpenApp(Data.App app)
+    {
+        selectedApp = app;
+    }
+
+    private async Task BackToApps()
+    {
+        selectedApp = null;
+        await LoadApps();
+    }
+
+    private async Task AppDeleted()
+    {
+        selectedApp = null;
+        await LoadApps();
+    }
+
+    // ──────────────── Portal Access ────────────────
+
+    private async Task LoadAccesses()
+    {
+        customerAccesses = await CustomerAccessService.GetCustomerUsersAsync(selectedCustomer!.Id);
+    }
+
+    private async Task GrantAccess()
+    {
+        accessError = null;
+        accessSuccess = null;
+
+        // Look up the user by email.
+        ApplicationUser? user = await TenantService.FindUserByEmailAsync(grantEmail.Trim());
+
+        if (user is null)
+        {
+            accessError = $"No user found with email '{grantEmail}'.";
+            return;
+        }
+
+        try
+        {
+            await CustomerAccessService.GrantAccessAsync(user.Id, selectedCustomer!.Id, grantRole);
+            accessSuccess = $"Access granted to {grantEmail}.";
+            grantEmail = "";
+            await LoadAccesses();
+        }
+        catch (Exception)
+        {
+            accessError = $"User '{grantEmail}' already has access to this customer.";
+        }
+    }
+
+    private async Task RevokeAccess(string userId)
+    {
+        confirmRevokeUserId = null;
+        await CustomerAccessService.RevokeAccessAsync(userId, selectedCustomer!.Id);
+        await LoadAccesses();
+    }
+
+    private static string GetRoleBadgeClass(CustomerAccessRole role) => role switch
+    {
+        CustomerAccessRole.Admin => "bg-danger",
+        CustomerAccessRole.Operator => "bg-warning text-dark",
+        CustomerAccessRole.Viewer => "bg-info",
+        _ => "bg-secondary"
+    };
+}

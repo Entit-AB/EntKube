@@ -1,0 +1,497 @@
+@page "/admin/users/{UserId}"
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Identity
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = "Admin")]
+
+@inject UserManagementService UserManagement
+@inject NavigationManager NavigationManager
+
+<PageTitle>@(user?.Email ?? "User")</PageTitle>
+
+@if (user is null && loaded)
+{
+    <div class="alert alert-danger"><i class="bi bi-exclamation-triangle me-2"></i>User not found.</div>
+}
+else if (user is not null)
+{
+    <div class="d-flex align-items-center mb-1">
+        <a href="/admin/users" class="btn btn-sm btn-outline-secondary me-3">
+            <i class="bi bi-arrow-left me-1"></i>Users
+        </a>
+        <h1 class="mb-0 fs-3"><i class="bi bi-person-circle me-2 text-primary"></i>@user.Email</h1>
+        @if (user.EmailConfirmed)
+        {
+            <span class="badge bg-success-subtle text-success border border-success-subtle ms-3">Confirmed</span>
+        }
+        else
+        {
+            <span class="badge bg-warning-subtle text-warning border border-warning-subtle ms-3">Unconfirmed</span>
+        }
+    </div>
+    <p class="text-muted small mb-4">ID: @user.Id</p>
+
+    @if (!string.IsNullOrEmpty(errorMessage))
+    {
+        <div class="alert alert-danger alert-dismissible py-2" role="alert">
+            <i class="bi bi-exclamation-triangle me-1"></i>@errorMessage
+            <button type="button" class="btn-close btn-close-sm" @onclick="() => errorMessage = null"></button>
+        </div>
+    }
+    @if (!string.IsNullOrEmpty(successMessage))
+    {
+        <div class="alert alert-success py-2 small" role="alert">
+            <i class="bi bi-check-circle me-1"></i>@successMessage
+        </div>
+    }
+
+    <div class="row g-4">
+
+        @* ── Global Roles ── *@
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5 class="card-title mb-3"><i class="bi bi-shield-lock me-2 text-primary"></i>Global Roles</h5>
+                    @if (allRoles.Count == 0)
+                    {
+                        <p class="text-muted small mb-0">No global roles defined.</p>
+                    }
+                    else
+                    {
+                        <div class="d-flex flex-wrap gap-3">
+                            @foreach (IdentityRole role in allRoles)
+                            {
+                                bool hasRole = userRoles.Contains(role.Name ?? "");
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" role="switch"
+                                           id="role-@role.Id"
+                                           checked="@hasRole"
+                                           @onchange="e => ToggleRole(role.Name!, (bool)(e.Value ?? false))" />
+                                    <label class="form-check-label fw-semibold" for="role-@role.Id">
+                                        @role.Name
+                                    </label>
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+
+        @* ── Tenant Memberships ── *@
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5 class="card-title mb-3"><i class="bi bi-building me-2 text-primary"></i>Tenant Memberships</h5>
+
+                    @if (tenantMemberships.Count > 0)
+                    {
+                        <div class="table-responsive mb-3">
+                            <table class="table table-sm mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Tenant</th>
+                                        <th>Role</th>
+                                        <th>Joined</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (TenantMembership m in tenantMemberships)
+                                    {
+                                        <tr>
+                                            <td class="align-middle">@m.Tenant.Name</td>
+                                            <td class="align-middle">
+                                                <span class="badge bg-primary-subtle text-primary border border-primary-subtle">@m.Role.Name</span>
+                                            </td>
+                                            <td class="align-middle text-muted small">@m.JoinedAt.ToString("MMM d, yyyy")</td>
+                                            <td class="align-middle text-end">
+                                                <button class="btn btn-sm btn-outline-danger"
+                                                        @onclick="() => confirmRemoveTenantId = m.TenantId">
+                                                    <i class="bi bi-trash"></i>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                        @if (confirmRemoveTenantId == m.TenantId)
+                                        {
+                                            <tr class="table-danger table-sm">
+                                                <td colspan="4" class="px-3 py-2">
+                                                    <ConfirmDialog Visible="true"
+                                                                   Message="@($"Remove {user!.Email} from tenant '{m.Tenant.Name}'?")"
+                                                                   ConfirmText="Remove"
+                                                                   IsBusy="removingMembership"
+                                                                   OnConfirm="() => RemoveTenantMembership(m.TenantId)"
+                                                                   OnCancel="() => confirmRemoveTenantId = null" />
+                                                </td>
+                                            </tr>
+                                        }
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+
+                    @* Add tenant form *@
+                    @if (availableTenants.Count > 0)
+                    {
+                        <div class="d-flex gap-2 align-items-end flex-wrap">
+                            <div>
+                                <label class="form-label small text-muted mb-1">Tenant</label>
+                                <select class="form-select form-select-sm" @bind="addTenantId" style="min-width:180px">
+                                    <option value="">Select tenant…</option>
+                                    @foreach (Tenant t in availableTenants)
+                                    {
+                                        <option value="@t.Id">@t.Name</option>
+                                    }
+                                </select>
+                            </div>
+                            <div>
+                                <label class="form-label small text-muted mb-1">Role</label>
+                                @if (addTenantId != Guid.Empty && !rolesForSelectedTenant.Any())
+                                {
+                                    <div class="text-muted small">
+                                        <i class="bi bi-exclamation-circle me-1"></i>No roles defined for this tenant.
+                                        <a href="/admin/roles">Create roles first</a>.
+                                    </div>
+                                }
+                                else
+                                {
+                                    <select class="form-select form-select-sm" @bind="addTenantRoleId" style="min-width:150px">
+                                        <option value="">Select role…</option>
+                                        @foreach (TenantRole r in rolesForSelectedTenant)
+                                        {
+                                            <option value="@r.Id">@r.Name</option>
+                                        }
+                                    </select>
+                                }
+                            </div>
+                            <button class="btn btn-sm btn-primary" @onclick="AddTenantMembership"
+                                    disabled="@(addTenantId == Guid.Empty || addTenantRoleId == Guid.Empty)">
+                                <i class="bi bi-plus-lg me-1"></i>Add
+                            </button>
+                        </div>
+                    }
+                    else if (tenantMemberships.Count == 0)
+                    {
+                        <p class="text-muted small mb-0">No tenants available to assign.</p>
+                    }
+                </div>
+            </div>
+        </div>
+
+        @* ── Group Memberships ── *@
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5 class="card-title mb-3"><i class="bi bi-diagram-3 me-2 text-primary"></i>Group Memberships</h5>
+
+                    @if (groupMemberships.Count > 0)
+                    {
+                        <div class="table-responsive mb-3">
+                            <table class="table table-sm mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Group</th>
+                                        <th>Tenant</th>
+                                        <th>Joined</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (GroupMembership gm in groupMemberships)
+                                    {
+                                        <tr>
+                                            <td class="align-middle">@gm.Group.Name</td>
+                                            <td class="align-middle text-muted small">@gm.Group.Tenant.Name</td>
+                                            <td class="align-middle text-muted small">@gm.JoinedAt.ToString("MMM d, yyyy")</td>
+                                            <td class="align-middle text-end">
+                                                <button class="btn btn-sm btn-outline-danger"
+                                                        @onclick="() => confirmRemoveGroupId = gm.GroupId">
+                                                    <i class="bi bi-trash"></i>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                        @if (confirmRemoveGroupId == gm.GroupId)
+                                        {
+                                            <tr class="table-danger table-sm">
+                                                <td colspan="4" class="px-3 py-2">
+                                                    <ConfirmDialog Visible="true"
+                                                                   Message="@($"Remove {user!.Email} from group '{gm.Group.Name}'?")"
+                                                                   ConfirmText="Remove"
+                                                                   IsBusy="removingMembership"
+                                                                   OnConfirm="() => RemoveGroupMembership(gm.GroupId)"
+                                                                   OnCancel="() => confirmRemoveGroupId = null" />
+                                                </td>
+                                            </tr>
+                                        }
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+
+                    @* Add group form — only tenants this user is a member of have groups *@
+                    @if (tenantMemberships.Count > 0)
+                    {
+                        <div class="d-flex gap-2 align-items-end flex-wrap">
+                            <div>
+                                <label class="form-label small text-muted mb-1">Tenant</label>
+                                <select class="form-select form-select-sm" @bind="addGroupTenantId" style="min-width:180px">
+                                    <option value="">Select tenant…</option>
+                                    @foreach (TenantMembership m in tenantMemberships)
+                                    {
+                                        <option value="@m.TenantId">@m.Tenant.Name</option>
+                                    }
+                                </select>
+                            </div>
+                            <div>
+                                <label class="form-label small text-muted mb-1">Group</label>
+                                <select class="form-select form-select-sm" @bind="addGroupId" style="min-width:180px">
+                                    <option value="">Select group…</option>
+                                    @foreach (Group g in availableGroupsForTenant)
+                                    {
+                                        <option value="@g.Id">@g.Name</option>
+                                    }
+                                </select>
+                            </div>
+                            <button class="btn btn-sm btn-primary" @onclick="AddGroupMembership"
+                                    disabled="@(addGroupId == Guid.Empty)">
+                                <i class="bi bi-plus-lg me-1"></i>Add
+                            </button>
+                        </div>
+                    }
+                    else if (groupMemberships.Count == 0)
+                    {
+                        <p class="text-muted small mb-0">Add the user to a tenant first, then assign groups.</p>
+                    }
+                </div>
+            </div>
+        </div>
+
+        @* ── Danger Zone ── *@
+        <div class="col-12">
+            <div class="card border-danger border-opacity-50 shadow-sm">
+                <div class="card-body">
+                    <h5 class="card-title text-danger mb-1"><i class="bi bi-exclamation-triangle me-2"></i>Danger Zone</h5>
+                    <p class="text-muted small mb-3">Permanently delete this user account. All tenant and group memberships are removed. This cannot be undone.</p>
+                    <button class="btn btn-outline-danger" @onclick="() => confirmDelete = true"
+                            hidden="@confirmDelete">
+                        <i class="bi bi-trash me-1"></i>Delete User
+                    </button>
+                    <ConfirmDialog Visible="confirmDelete"
+                                   Message="@($"Permanently delete {user.Email}? All memberships are removed and this cannot be undone.")"
+                                   ConfirmText="Delete Permanently"
+                                   IsBusy="deletingUser"
+                                   OnConfirm="DeleteUser"
+                                   OnCancel="() => confirmDelete = false" />
+                </div>
+            </div>
+        </div>
+
+    </div>
+}
+
+@code {
+    [Parameter] public string UserId { get; set; } = null!;
+
+    private ApplicationUser? user;
+    private bool loaded;
+    private string? errorMessage;
+
+    private List<IdentityRole> allRoles = [];
+    private IList<string> userRoles = [];
+
+    private List<TenantMembership> tenantMemberships = [];
+    private List<Tenant> allTenants = [];
+    private List<Tenant> availableTenants = [];
+
+    // Add-tenant form state
+    private Guid _addTenantId;
+    private Guid addTenantId
+    {
+        get => _addTenantId;
+        set
+        {
+            _addTenantId = value;
+            addTenantRoleId = Guid.Empty;
+        }
+    }
+    private Guid addTenantRoleId;
+    private IEnumerable<TenantRole> rolesForSelectedTenant =>
+        allTenants.FirstOrDefault(t => t.Id == addTenantId)?.Roles ?? [];
+
+    private List<GroupMembership> groupMemberships = [];
+
+    // Add-group form state
+    private Guid _addGroupTenantId;
+    private Guid addGroupTenantId
+    {
+        get => _addGroupTenantId;
+        set
+        {
+            _addGroupTenantId = value;
+            addGroupId = Guid.Empty;
+            _ = LoadGroupsForSelectedTenant();
+        }
+    }
+    private Guid addGroupId;
+    private List<Group> availableGroupsForTenant = [];
+
+    private Guid? confirmRemoveTenantId;
+    private Guid? confirmRemoveGroupId;
+    private bool confirmDelete;
+    private bool removingMembership;
+    private bool deletingUser;
+    private string? successMessage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+    }
+
+    private async Task Load()
+    {
+        user = await UserManagement.GetUserByIdAsync(UserId);
+        loaded = true;
+        if (user is null) return;
+
+        // UserManager and RoleManager share the scoped DbContext — run sequentially.
+        // The IDbContextFactory-based calls each create their own instance and are safe.
+        allRoles = await UserManagement.GetAllRolesAsync();
+        userRoles = await UserManagement.GetUserRolesAsync(UserId);
+        tenantMemberships = await UserManagement.GetUserTenantMembershipsAsync(UserId);
+        groupMemberships = await UserManagement.GetUserGroupMembershipsAsync(UserId);
+        allTenants = await UserManagement.GetAllTenantsAsync();
+
+        RefreshAvailableTenants();
+    }
+
+    private void RefreshAvailableTenants()
+    {
+        HashSet<Guid> joined = tenantMemberships.Select(m => m.TenantId).ToHashSet();
+        availableTenants = allTenants.Where(t => !joined.Contains(t.Id)).ToList();
+        if (!availableTenants.Any(t => t.Id == addTenantId))
+        {
+            addTenantId = Guid.Empty;
+            addTenantRoleId = Guid.Empty;
+        }
+    }
+
+    private async Task LoadGroupsForSelectedTenant()
+    {
+        if (_addGroupTenantId == Guid.Empty)
+        {
+            availableGroupsForTenant = [];
+            return;
+        }
+        List<Group> all = await UserManagement.GetGroupsForTenantAsync(_addGroupTenantId);
+        HashSet<Guid> joined = groupMemberships.Select(gm => gm.GroupId).ToHashSet();
+        availableGroupsForTenant = all.Where(g => !joined.Contains(g.Id)).ToList();
+        StateHasChanged();
+    }
+
+    private async Task ToggleRole(string role, bool grant)
+    {
+        errorMessage = null;
+        IdentityResult result = grant
+            ? await UserManagement.AddToRoleAsync(UserId, role)
+            : await UserManagement.RemoveFromRoleAsync(UserId, role);
+
+        if (!result.Succeeded)
+        {
+            errorMessage = string.Join(" ", result.Errors.Select(e => e.Description));
+            return;
+        }
+
+        userRoles = await UserManagement.GetUserRolesAsync(UserId);
+    }
+
+    private async Task AddTenantMembership()
+    {
+        if (addTenantId == Guid.Empty || addTenantRoleId == Guid.Empty) return;
+        errorMessage = null;
+
+        try
+        {
+            await UserManagement.AddTenantMembershipAsync(UserId, addTenantId, addTenantRoleId);
+            addTenantId = Guid.Empty;
+            tenantMemberships = await UserManagement.GetUserTenantMembershipsAsync(UserId);
+            RefreshAvailableTenants();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to add tenant membership: {ex.Message}";
+        }
+    }
+
+    private async Task ShowSuccessAsync(string message)
+    {
+        successMessage = message;
+        StateHasChanged();
+        await Task.Delay(3500);
+        successMessage = null;
+        StateHasChanged();
+    }
+
+    private async Task RemoveTenantMembership(Guid tenantId)
+    {
+        removingMembership = true;
+        errorMessage = null;
+        string? tenantName = tenantMemberships.FirstOrDefault(m => m.TenantId == tenantId)?.Tenant.Name;
+
+        await UserManagement.RemoveTenantMembershipAsync(UserId, tenantId);
+        tenantMemberships = await UserManagement.GetUserTenantMembershipsAsync(UserId);
+        RefreshAvailableTenants();
+        removingMembership = false;
+        confirmRemoveTenantId = null;
+        if (tenantName is not null) _ = ShowSuccessAsync($"Removed from tenant '{tenantName}'.");
+    }
+
+    private async Task AddGroupMembership()
+    {
+        if (addGroupId == Guid.Empty) return;
+        errorMessage = null;
+
+        try
+        {
+            await UserManagement.AddGroupMembershipAsync(UserId, addGroupId);
+            groupMemberships = await UserManagement.GetUserGroupMembershipsAsync(UserId);
+            await LoadGroupsForSelectedTenant();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to add group membership: {ex.Message}";
+        }
+    }
+
+    private async Task RemoveGroupMembership(Guid groupId)
+    {
+        removingMembership = true;
+        errorMessage = null;
+        string? groupName = groupMemberships.FirstOrDefault(gm => gm.GroupId == groupId)?.Group.Name;
+
+        await UserManagement.RemoveGroupMembershipAsync(UserId, groupId);
+        groupMemberships = await UserManagement.GetUserGroupMembershipsAsync(UserId);
+        await LoadGroupsForSelectedTenant();
+        removingMembership = false;
+        confirmRemoveGroupId = null;
+        if (groupName is not null) _ = ShowSuccessAsync($"Removed from group '{groupName}'.");
+    }
+
+    private async Task DeleteUser()
+    {
+        deletingUser = true;
+        IdentityResult result = await UserManagement.DeleteUserAsync(UserId);
+        deletingUser = false;
+
+        if (!result.Succeeded)
+        {
+            errorMessage = string.Join(" ", result.Errors.Select(e => e.Description));
+            confirmDelete = false;
+            return;
+        }
+        NavigationManager.NavigateTo("/admin/users");
+    }
+}
