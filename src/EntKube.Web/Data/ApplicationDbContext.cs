@@ -86,6 +86,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<AlertRoutingRule> AlertRoutingRules => Set<AlertRoutingRule>();
     public DbSet<NotificationProviderConfig> NotificationProviderConfigs => Set<NotificationProviderConfig>();
     public DbSet<ClusterServer> ClusterServers => Set<ClusterServer>();
+    public DbSet<IdentityBinding> IdentityBindings => Set<IdentityBinding>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
@@ -762,6 +763,26 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .OnDelete(DeleteBehavior.SetNull);
         });
 
+        // IdentityBinding — connects a Keycloak OIDC client to an app deployment.
+
+        builder.Entity<IdentityBinding>(entity =>
+        {
+            entity.HasKey(b => b.Id);
+            entity.Property(b => b.ClientUuid).HasMaxLength(36).IsRequired();
+            entity.Property(b => b.ClientId).HasMaxLength(255).IsRequired();
+            entity.Property(b => b.KubernetesSecretName).HasMaxLength(253).IsRequired();
+
+            entity.HasOne(b => b.KeycloakRealm)
+                .WithMany()
+                .HasForeignKey(b => b.KeycloakRealmId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(b => b.AppDeployment)
+                .WithMany()
+                .HasForeignKey(b => b.AppDeploymentId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         // RegisteredPostgresInstance — a vanilla Postgres server inside a K8s cluster
         // that is not managed by CNPG. EntKube registers it to manage databases and
         // credentials, but does not own the server lifecycle.
@@ -1052,6 +1073,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(c => c.Name).HasMaxLength(200).IsRequired();
             entity.Property(c => c.Type).HasConversion<string>().HasMaxLength(20);
             entity.Property(c => c.SeverityFilter).HasConversion<string>().HasMaxLength(30);
+            entity.Property(c => c.AcknowledgeFilter).HasConversion<string>().HasMaxLength(30);
+            entity.Property(c => c.FiringFilter).HasConversion<string>().HasMaxLength(30);
 
             entity.HasOne(c => c.Tenant)
                 .WithMany()

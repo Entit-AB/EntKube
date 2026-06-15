@@ -64,6 +64,75 @@ public class CopyResult
     public List<string> Errors { get; set; } = [];
 }
 
+public class KeycloakClientInfo
+{
+    public required string Id { get; set; }
+    public required string ClientId { get; set; }
+    public string? Name { get; set; }
+    public string? Description { get; set; }
+    public bool Enabled { get; set; }
+    public bool PublicClient { get; set; }
+    public bool BearerOnly { get; set; }
+    public string? Protocol { get; set; }
+}
+
+public class KeycloakClientDetail : KeycloakClientInfo
+{
+    public string? BaseUrl { get; set; }
+    public string? RootUrl { get; set; }
+    public List<string> RedirectUris { get; set; } = [];
+    public List<string> WebOrigins { get; set; } = [];
+    public bool StandardFlowEnabled { get; set; }
+    public bool DirectAccessGrantsEnabled { get; set; }
+    public bool ServiceAccountsEnabled { get; set; }
+    public bool ImplicitFlowEnabled { get; set; }
+}
+
+public class KeycloakProtocolMapper
+{
+    public string Id { get; set; } = "";
+    public required string Name { get; set; }
+    public string Protocol { get; set; } = "openid-connect";
+    public required string ProtocolMapper { get; set; }
+    public Dictionary<string, string> Config { get; set; } = [];
+}
+
+public class KeycloakRole
+{
+    public required string Id { get; set; }
+    public required string Name { get; set; }
+    public string? Description { get; set; }
+    public bool Composite { get; set; }
+    public bool ClientRole { get; set; }
+}
+
+public class KeycloakRealmSettings
+{
+    public int AccessTokenLifespan { get; set; } = 300;
+    public int SsoSessionIdleTimeout { get; set; } = 1800;
+    public int SsoSessionMaxLifespan { get; set; } = 36000;
+    public int OfflineSessionIdleTimeout { get; set; } = 2592000;
+    public bool RegistrationAllowed { get; set; }
+    public bool ResetPasswordAllowed { get; set; }
+    public bool RememberMe { get; set; }
+    public bool LoginWithEmailAllowed { get; set; } = true;
+    public bool DuplicateEmailsAllowed { get; set; }
+    public bool VerifyEmail { get; set; }
+    public bool BruteForceProtected { get; set; }
+    public int FailureFactor { get; set; } = 30;
+    public int WaitIncrementSeconds { get; set; } = 60;
+    public int MaxFailureWaitSeconds { get; set; } = 900;
+    public string SmtpHost { get; set; } = "";
+    public string SmtpPort { get; set; } = "465";
+    public string SmtpFrom { get; set; } = "";
+    public string SmtpUser { get; set; } = "";
+    public string SmtpPassword { get; set; } = "";
+    public bool SmtpSsl { get; set; }
+    public bool SmtpStarttls { get; set; }
+    public bool SmtpAuth { get; set; }
+    public string PasswordPolicy { get; set; } = "";
+}
+
 /// <summary>
 /// A Keycloak instance tracked by EntKube. May be an EntKube-managed install
 /// (Component is set) or an externally deployed instance (Component is null).
@@ -106,7 +175,8 @@ public class KeycloakService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
     IHttpClientFactory httpClientFactory,
-    CnpgService cnpgService)
+    CnpgService cnpgService,
+    IKubernetesClientFactory k8sFactory)
 {
     private readonly record struct TokenCacheKey(Guid ComponentId);
     private readonly Dictionary<TokenCacheKey, (string Token, DateTime Expiry)> _tokenCache = [];
@@ -1315,6 +1385,117 @@ public class KeycloakService(
             .FirstOrDefaultAsync(r => r.TenantId == tenantId && r.LinkedAppId == appId, ct);
     }
 
+    public async Task<List<KeycloakRealm>> GetAllRealmsForTenantAsync(Guid tenantId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.KeycloakRealms
+            .Include(r => r.LinkedApp).ThenInclude(a => a!.Customer)
+            .Where(r => r.TenantId == tenantId)
+            .OrderBy(r => r.DisplayName)
+            .ToListAsync(ct);
+    }
+
+    // ── Identity bindings ─────────────────────────────────────────────────────
+
+    public async Task<List<IdentityBinding>> GetIdentityBindingsForDeploymentAsync(
+        Guid appDeploymentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.IdentityBindings
+            .Include(b => b.KeycloakRealm)
+            .Where(b => b.AppDeploymentId == appDeploymentId)
+            .OrderBy(b => b.ClientId)
+            .ToListAsync(ct);
+    }
+
+    public async Task<IdentityBinding> CreateIdentityBindingAsync(
+        Guid realmId, Guid appDeploymentId,
+        string clientUuid, string clientId, string k8sSecretName,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        IdentityBinding binding = new()
+        {
+            Id = Guid.NewGuid(),
+            KeycloakRealmId = realmId,
+            AppDeploymentId = appDeploymentId,
+            ClientUuid = clientUuid,
+            ClientId = clientId,
+            KubernetesSecretName = k8sSecretName
+        };
+
+        db.IdentityBindings.Add(binding);
+        await db.SaveChangesAsync(ct);
+        return binding;
+    }
+
+    public async Task RemoveIdentityBindingAsync(Guid bindingId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        IdentityBinding binding = await db.IdentityBindings
+            .FirstOrDefaultAsync(b => b.Id == bindingId, ct)
+            ?? throw new InvalidOperationException("Identity binding not found.");
+        db.IdentityBindings.Remove(binding);
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Fetches the OIDC client secret from Keycloak and writes it — together with
+    /// the issuer URL and client ID — into a Kubernetes Secret in the app deployment's
+    /// namespace. The Secret contains OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET.
+    /// </summary>
+    public async Task SyncIdentityBindingAsync(
+        Guid tenantId, Guid bindingId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        IdentityBinding binding = await db.IdentityBindings
+            .Include(b => b.KeycloakRealm).ThenInclude(r => r.ComponentConfig)
+            .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
+            .FirstOrDefaultAsync(b => b.Id == bindingId, ct)
+            ?? throw new InvalidOperationException("Identity binding not found.");
+
+        string? clientSecret = await GetClientSecretAsync(
+            tenantId, binding.KeycloakRealmId, binding.ClientUuid, ct);
+
+        if (string.IsNullOrWhiteSpace(clientSecret))
+            throw new InvalidOperationException(
+                $"No client secret found for client '{binding.ClientId}'. " +
+                "Ensure the client has credentials enabled in Keycloak.");
+
+        string adminUrl = binding.KeycloakRealm.ComponentConfig.AdminUrl!.TrimEnd('/');
+        string issuerUrl = $"{adminUrl}/realms/{binding.KeycloakRealm.RealmName}";
+        string kubeconfig = binding.AppDeployment.Cluster.Kubeconfig!;
+        string ns = binding.AppDeployment.Namespace;
+
+        await k8sFactory.EnsureNamespaceAsync(ns, kubeconfig, ct);
+
+        string secretManifest = $"""
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: {binding.KubernetesSecretName}
+              namespace: {ns}
+            type: Opaque
+            data:
+              OIDC_ISSUER_URL: {B64Id(issuerUrl)}
+              OIDC_CLIENT_ID: {B64Id(binding.ClientId)}
+              OIDC_CLIENT_SECRET: {B64Id(clientSecret)}
+            """;
+
+        await k8sFactory.ApplyManifestAsync(secretManifest, kubeconfig, ct);
+
+        binding.LastSyncedAt = DateTime.UtcNow;
+        using ApplicationDbContext db2 = dbFactory.CreateDbContext();
+        db2.IdentityBindings.Update(binding);
+        await db2.SaveChangesAsync(ct);
+    }
+
+    private static string B64Id(string value) =>
+        Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(value));
+
     public async Task<List<CnpgDatabase>> GetDatabasesForComponentAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
@@ -1911,6 +2092,659 @@ public class KeycloakService(
         writer.WriteEndObject();
         writer.Flush();
         return ms.ToArray();
+    }
+
+    // ── Clients ───────────────────────────────────────────────────────────────
+
+    public async Task<List<KeycloakClientInfo>> GetClientsAsync(
+        Guid tenantId, Guid realmId, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Get,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/clients?max=200")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+
+        using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+
+        return doc.RootElement.EnumerateArray().Select(c => new KeycloakClientInfo
+        {
+            Id = c.GetStringOrDefault("id") ?? "",
+            ClientId = c.GetStringOrDefault("clientId") ?? "",
+            Name = c.GetStringOrDefault("name"),
+            Description = c.GetStringOrDefault("description"),
+            Enabled = c.TryGetProperty("enabled", out JsonElement en) && en.GetBoolean(),
+            PublicClient = c.TryGetProperty("publicClient", out JsonElement pc) && pc.GetBoolean(),
+            BearerOnly = c.TryGetProperty("bearerOnly", out JsonElement bo) && bo.GetBoolean(),
+            Protocol = c.GetStringOrDefault("protocol")
+        }).ToList();
+    }
+
+    public async Task<KeycloakClientDetail> GetClientAsync(
+        Guid tenantId, Guid realmId, string clientUuid, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Get,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/clients/{clientUuid}")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+
+        using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        JsonElement c = doc.RootElement;
+
+        return new KeycloakClientDetail
+        {
+            Id = c.GetStringOrDefault("id") ?? "",
+            ClientId = c.GetStringOrDefault("clientId") ?? "",
+            Name = c.GetStringOrDefault("name"),
+            Description = c.GetStringOrDefault("description"),
+            Enabled = c.TryGetProperty("enabled", out JsonElement en) && en.GetBoolean(),
+            PublicClient = c.TryGetProperty("publicClient", out JsonElement pc) && pc.GetBoolean(),
+            BearerOnly = c.TryGetProperty("bearerOnly", out JsonElement bo) && bo.GetBoolean(),
+            Protocol = c.GetStringOrDefault("protocol"),
+            BaseUrl = c.GetStringOrDefault("baseUrl"),
+            RootUrl = c.GetStringOrDefault("rootUrl"),
+            RedirectUris = c.TryGetProperty("redirectUris", out JsonElement ru)
+                ? [.. ru.EnumerateArray().Select(v => v.GetString() ?? "").Where(v => v.Length > 0)]
+                : [],
+            WebOrigins = c.TryGetProperty("webOrigins", out JsonElement wo)
+                ? [.. wo.EnumerateArray().Select(v => v.GetString() ?? "").Where(v => v.Length > 0)]
+                : [],
+            StandardFlowEnabled = c.TryGetProperty("standardFlowEnabled", out JsonElement sfe) && sfe.GetBoolean(),
+            DirectAccessGrantsEnabled = c.TryGetProperty("directAccessGrantsEnabled", out JsonElement dage) && dage.GetBoolean(),
+            ServiceAccountsEnabled = c.TryGetProperty("serviceAccountsEnabled", out JsonElement sae) && sae.GetBoolean(),
+            ImplicitFlowEnabled = c.TryGetProperty("implicitFlowEnabled", out JsonElement ife) && ife.GetBoolean()
+        };
+    }
+
+    public async Task<string> CreateClientAsync(
+        Guid tenantId, Guid realmId, string clientId, bool publicClient, string? name,
+        CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        var body = new
+        {
+            clientId,
+            name = name ?? clientId,
+            enabled = true,
+            publicClient,
+            standardFlowEnabled = true,
+            directAccessGrantsEnabled = !publicClient
+        };
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Post,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/clients")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+
+        // Extract the new client UUID from the Location header.
+        string? location = resp.Headers.Location?.ToString();
+        return location?.Split('/').LastOrDefault() ?? "";
+    }
+
+    public async Task UpdateClientAsync(
+        Guid tenantId, Guid realmId, KeycloakClientDetail client, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        var body = new
+        {
+            id = client.Id,
+            clientId = client.ClientId,
+            name = client.Name ?? "",
+            description = client.Description ?? "",
+            enabled = client.Enabled,
+            publicClient = client.PublicClient,
+            bearerOnly = client.BearerOnly,
+            standardFlowEnabled = client.StandardFlowEnabled,
+            directAccessGrantsEnabled = client.DirectAccessGrantsEnabled,
+            serviceAccountsEnabled = client.ServiceAccountsEnabled,
+            implicitFlowEnabled = client.ImplicitFlowEnabled,
+            baseUrl = client.BaseUrl ?? "",
+            rootUrl = client.RootUrl ?? "",
+            redirectUris = client.RedirectUris,
+            webOrigins = client.WebOrigins
+        };
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Put,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/clients/{client.Id}")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task DeleteClientAsync(
+        Guid tenantId, Guid realmId, string clientUuid, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Delete,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/clients/{clientUuid}")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task<string?> GetClientSecretAsync(
+        Guid tenantId, Guid realmId, string clientUuid, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Get,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/clients/{clientUuid}/client-secret")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        if (!resp.IsSuccessStatusCode) return null;
+
+        using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        return doc.RootElement.GetStringOrDefault("value");
+    }
+
+    public async Task<string?> RegenerateClientSecretAsync(
+        Guid tenantId, Guid realmId, string clientUuid, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Post,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/clients/{clientUuid}/client-secret")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+
+        using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        return doc.RootElement.GetStringOrDefault("value");
+    }
+
+    // ── Protocol Mappers ──────────────────────────────────────────────────────
+
+    public async Task<List<KeycloakProtocolMapper>> GetClientMappersAsync(
+        Guid tenantId, Guid realmId, string clientUuid, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Get,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/clients/{clientUuid}/protocol-mappers/models")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+
+        using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+
+        return doc.RootElement.EnumerateArray().Select(m =>
+        {
+            Dictionary<string, string> config = [];
+            if (m.TryGetProperty("config", out JsonElement cfgEl) && cfgEl.ValueKind == JsonValueKind.Object)
+            {
+                foreach (JsonProperty p in cfgEl.EnumerateObject())
+                {
+                    string? v = p.Value.ValueKind == JsonValueKind.String ? p.Value.GetString() : null;
+                    if (v is not null) config[p.Name] = v;
+                }
+            }
+
+            return new KeycloakProtocolMapper
+            {
+                Id = m.GetStringOrDefault("id") ?? "",
+                Name = m.GetStringOrDefault("name") ?? "",
+                Protocol = m.GetStringOrDefault("protocol") ?? "openid-connect",
+                ProtocolMapper = m.GetStringOrDefault("protocolMapper") ?? "",
+                Config = config
+            };
+        }).ToList();
+    }
+
+    public async Task CreateClientMapperAsync(
+        Guid tenantId, Guid realmId, string clientUuid, KeycloakProtocolMapper mapper,
+        CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        var body = new
+        {
+            name = mapper.Name,
+            protocol = mapper.Protocol,
+            protocolMapper = mapper.ProtocolMapper,
+            consentRequired = false,
+            config = mapper.Config
+        };
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Post,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/clients/{clientUuid}/protocol-mappers/models")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task UpdateClientMapperAsync(
+        Guid tenantId, Guid realmId, string clientUuid, KeycloakProtocolMapper mapper,
+        CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        var body = new
+        {
+            id = mapper.Id,
+            name = mapper.Name,
+            protocol = mapper.Protocol,
+            protocolMapper = mapper.ProtocolMapper,
+            consentRequired = false,
+            config = mapper.Config
+        };
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Put,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/clients/{clientUuid}/protocol-mappers/models/{mapper.Id}")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task DeleteClientMapperAsync(
+        Guid tenantId, Guid realmId, string clientUuid, string mapperId, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Delete,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/clients/{clientUuid}/protocol-mappers/models/{mapperId}")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
+    // ── Realm Roles ───────────────────────────────────────────────────────────
+
+    public async Task<List<KeycloakRole>> GetRealmRolesAsync(
+        Guid tenantId, Guid realmId, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Get,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/roles")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+
+        using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+
+        return doc.RootElement.EnumerateArray().Select(r => new KeycloakRole
+        {
+            Id = r.GetStringOrDefault("id") ?? "",
+            Name = r.GetStringOrDefault("name") ?? "",
+            Description = r.GetStringOrDefault("description"),
+            Composite = r.TryGetProperty("composite", out JsonElement comp) && comp.GetBoolean(),
+            ClientRole = r.TryGetProperty("clientRole", out JsonElement cl) && cl.GetBoolean()
+        }).ToList();
+    }
+
+    public async Task CreateRealmRoleAsync(
+        Guid tenantId, Guid realmId, string name, string? description, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        var body = new { name, description = description ?? "" };
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Post,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/roles")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task DeleteRealmRoleAsync(
+        Guid tenantId, Guid realmId, string roleName, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Delete,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/roles/{Uri.EscapeDataString(roleName)}")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
+    // ── User Updates ──────────────────────────────────────────────────────────
+
+    public async Task UpdateUserAsync(
+        Guid tenantId, Guid realmId, string userId,
+        string? firstName, string? lastName, string? email,
+        bool enabled, bool emailVerified,
+        Dictionary<string, List<string>>? attributes,
+        CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        var body = new
+        {
+            firstName = firstName ?? "",
+            lastName = lastName ?? "",
+            email,
+            enabled,
+            emailVerified,
+            attributes
+        };
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Put,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/users/{userId}")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task ResetUserPasswordAsync(
+        Guid tenantId, Guid realmId, string userId, string newPassword, bool temporary,
+        CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        var body = new { type = "password", value = newPassword, temporary };
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Put,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/users/{userId}/reset-password")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task<List<KeycloakRole>> GetUserRoleMappingsAsync(
+        Guid tenantId, Guid realmId, string userId, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Get,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/users/{userId}/role-mappings/realm")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+
+        using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+
+        return doc.RootElement.EnumerateArray().Select(r => new KeycloakRole
+        {
+            Id = r.GetStringOrDefault("id") ?? "",
+            Name = r.GetStringOrDefault("name") ?? "",
+            Description = r.GetStringOrDefault("description"),
+            Composite = r.TryGetProperty("composite", out JsonElement comp) && comp.GetBoolean(),
+            ClientRole = false
+        }).ToList();
+    }
+
+    public async Task AddUserRoleMappingsAsync(
+        Guid tenantId, Guid realmId, string userId, List<KeycloakRole> rolesToAdd,
+        CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        var body = rolesToAdd.Select(r => new { id = r.Id, name = r.Name }).ToArray();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Post,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/users/{userId}/role-mappings/realm")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task DeleteUserRoleMappingsAsync(
+        Guid tenantId, Guid realmId, string userId, List<KeycloakRole> rolesToRemove,
+        CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        var body = rolesToRemove.Select(r => new { id = r.Id, name = r.Name }).ToArray();
+
+        HttpRequestMessage request = new(HttpMethod.Delete,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/users/{userId}/role-mappings/realm")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+        };
+
+        HttpResponseMessage resp = await http.SendAsync(request, ct);
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task<List<KeycloakGroupInfo>> GetUserGroupsAsync(
+        Guid tenantId, Guid realmId, string userId, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Get,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/users/{userId}/groups")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+
+        using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+
+        return doc.RootElement.EnumerateArray().Select(g => new KeycloakGroupInfo
+        {
+            Id = g.GetStringOrDefault("id") ?? "",
+            Name = g.GetStringOrDefault("name") ?? "",
+            Path = g.GetStringOrDefault("path")
+        }).ToList();
+    }
+
+    public async Task AddUserToGroupAsync(
+        Guid tenantId, Guid realmId, string userId, string groupId, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Put,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/users/{userId}/groups/{groupId}")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task RemoveUserFromGroupAsync(
+        Guid tenantId, Guid realmId, string userId, string groupId, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Delete,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}/users/{userId}/groups/{groupId}")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
+    // ── Realm Settings ────────────────────────────────────────────────────────
+
+    public async Task<KeycloakRealmSettings> GetRealmSettingsAsync(
+        Guid tenantId, Guid realmId, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Get,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) }
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+
+        using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        JsonElement r = doc.RootElement;
+
+        string smtpHost = "", smtpPort = "465", smtpFrom = "", smtpUser = "", smtpPassword = "";
+        bool smtpSsl = false, smtpStarttls = false, smtpAuth = false;
+        if (r.TryGetProperty("smtpServer", out JsonElement smtp) && smtp.ValueKind == JsonValueKind.Object)
+        {
+            smtpHost = smtp.GetStringOrDefault("host") ?? "";
+            smtpPort = smtp.GetStringOrDefault("port") ?? "465";
+            smtpFrom = smtp.GetStringOrDefault("from") ?? "";
+            smtpUser = smtp.GetStringOrDefault("user") ?? "";
+            smtpPassword = smtp.GetStringOrDefault("password") ?? "";
+            smtpSsl = smtp.GetStringOrDefault("ssl") == "true";
+            smtpStarttls = smtp.GetStringOrDefault("starttls") == "true";
+            smtpAuth = smtp.GetStringOrDefault("auth") == "true";
+        }
+
+        return new KeycloakRealmSettings
+        {
+            AccessTokenLifespan = r.TryGetProperty("accessTokenLifespan", out JsonElement atl) ? atl.GetInt32() : 300,
+            SsoSessionIdleTimeout = r.TryGetProperty("ssoSessionIdleTimeout", out JsonElement ssit) ? ssit.GetInt32() : 1800,
+            SsoSessionMaxLifespan = r.TryGetProperty("ssoSessionMaxLifespan", out JsonElement ssml) ? ssml.GetInt32() : 36000,
+            OfflineSessionIdleTimeout = r.TryGetProperty("offlineSessionIdleTimeout", out JsonElement osit) ? osit.GetInt32() : 2592000,
+            RegistrationAllowed = r.TryGetProperty("registrationAllowed", out JsonElement ra) && ra.GetBoolean(),
+            ResetPasswordAllowed = r.TryGetProperty("resetPasswordAllowed", out JsonElement rpa) && rpa.GetBoolean(),
+            RememberMe = r.TryGetProperty("rememberMe", out JsonElement rm) && rm.GetBoolean(),
+            LoginWithEmailAllowed = !r.TryGetProperty("loginWithEmailAllowed", out JsonElement lwea) || lwea.GetBoolean(),
+            DuplicateEmailsAllowed = r.TryGetProperty("duplicateEmailsAllowed", out JsonElement dea) && dea.GetBoolean(),
+            VerifyEmail = r.TryGetProperty("verifyEmail", out JsonElement ve) && ve.GetBoolean(),
+            BruteForceProtected = r.TryGetProperty("bruteForceProtected", out JsonElement bfp) && bfp.GetBoolean(),
+            FailureFactor = r.TryGetProperty("failureFactor", out JsonElement ff) ? ff.GetInt32() : 30,
+            WaitIncrementSeconds = r.TryGetProperty("waitIncrementSeconds", out JsonElement wis) ? wis.GetInt32() : 60,
+            MaxFailureWaitSeconds = r.TryGetProperty("maxFailureWaitSeconds", out JsonElement mfws) ? mfws.GetInt32() : 900,
+            PasswordPolicy = r.GetStringOrDefault("passwordPolicy") ?? "",
+            SmtpHost = smtpHost,
+            SmtpPort = smtpPort,
+            SmtpFrom = smtpFrom,
+            SmtpUser = smtpUser,
+            SmtpPassword = smtpPassword,
+            SmtpSsl = smtpSsl,
+            SmtpStarttls = smtpStarttls,
+            SmtpAuth = smtpAuth
+        };
+    }
+
+    public async Task UpdateRealmSettingsAsync(
+        Guid tenantId, Guid realmId, KeycloakRealmSettings settings, CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+        HttpClient http = CreateHttpClient();
+
+        object smtpServer = string.IsNullOrWhiteSpace(settings.SmtpHost)
+            ? new { }
+            : settings.SmtpAuth
+                ? (object)new
+                {
+                    host = settings.SmtpHost,
+                    port = settings.SmtpPort,
+                    from = settings.SmtpFrom,
+                    user = settings.SmtpUser,
+                    password = settings.SmtpPassword,
+                    ssl = settings.SmtpSsl ? "true" : "false",
+                    starttls = settings.SmtpStarttls ? "true" : "false",
+                    auth = "true"
+                }
+                : new
+                {
+                    host = settings.SmtpHost,
+                    port = settings.SmtpPort,
+                    from = settings.SmtpFrom,
+                    user = "",
+                    password = "",
+                    ssl = settings.SmtpSsl ? "true" : "false",
+                    starttls = settings.SmtpStarttls ? "true" : "false",
+                    auth = "false"
+                };
+
+        var body = new
+        {
+            accessTokenLifespan = settings.AccessTokenLifespan,
+            ssoSessionIdleTimeout = settings.SsoSessionIdleTimeout,
+            ssoSessionMaxLifespan = settings.SsoSessionMaxLifespan,
+            offlineSessionIdleTimeout = settings.OfflineSessionIdleTimeout,
+            registrationAllowed = settings.RegistrationAllowed,
+            resetPasswordAllowed = settings.ResetPasswordAllowed,
+            rememberMe = settings.RememberMe,
+            loginWithEmailAllowed = settings.LoginWithEmailAllowed,
+            duplicateEmailsAllowed = settings.DuplicateEmailsAllowed,
+            verifyEmail = settings.VerifyEmail,
+            bruteForceProtected = settings.BruteForceProtected,
+            failureFactor = settings.FailureFactor,
+            waitIncrementSeconds = settings.WaitIncrementSeconds,
+            maxFailureWaitSeconds = settings.MaxFailureWaitSeconds,
+            passwordPolicy = settings.PasswordPolicy,
+            smtpServer
+        };
+
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Put,
+            $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
     }
 }
 

@@ -32,15 +32,18 @@
     </div>
 
     <ul class="nav nav-tabs mb-3 flex-wrap">
-        @foreach (string tab in new[] { "users", "idp", "groups", "orgs", "themes", "backup", "portal" })
+        @foreach (string tab in new[] { "users", "roles", "clients", "idp", "groups", "orgs", "themes", "settings", "backup", "portal" })
         {
             string label = tab switch
             {
                 "users" => "Users",
+                "roles" => "Roles",
+                "clients" => "Clients",
                 "idp" => "Identity Providers",
                 "groups" => "Groups",
                 "orgs" => "Organizations",
                 "themes" => "Themes",
+                "settings" => "Settings",
                 "backup" => "Backup & Restore",
                 "portal" => "Customer Portal",
                 _ => tab
@@ -109,6 +112,7 @@
                 <div class="list-group">
                     @foreach (KeycloakUserInfo user in users)
                     {
+                        bool isEditingThisUser = selectedUserId == user.Id;
                         <div class="list-group-item py-2">
                             <div class="d-flex justify-content-between align-items-start">
                                 <div>
@@ -135,11 +139,247 @@
                                         </div>
                                     }
                                 </div>
-                                <button class="btn btn-sm btn-outline-danger border-0 ms-2"
-                                        @onclick="() => DeleteUser(user.Id)">
-                                    <i class="bi bi-trash"></i>
-                                </button>
+                                <div class="d-flex gap-1">
+                                    <button class="btn btn-sm btn-outline-secondary border-0"
+                                            @onclick="() => OpenUserEdit(user)">
+                                        <i class="bi bi-pencil"></i>
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-danger border-0"
+                                            @onclick="() => DeleteUser(user.Id)">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </div>
                             </div>
+
+                            @if (isEditingThisUser)
+                            {
+                                <div class="mt-2 p-3 bg-light border rounded">
+                                    @if (userEditError is not null)
+                                    {
+                                        <div class="alert alert-danger py-2 small mb-2">@userEditError</div>
+                                    }
+                                    <ul class="nav nav-tabs mb-3 nav-sm">
+                                        @foreach (string ut in new[] { "profile", "roles", "groups", "password", "attributes" })
+                                        {
+                                            <li class="nav-item">
+                                                <button class="nav-link py-1 px-2 small @(userEditTab == ut ? "active" : "")"
+                                                        @onclick="() => SwitchUserEditTab(ut, user)">
+                                                    @(ut switch { "profile" => "Profile", "roles" => "Roles", "groups" => "Groups", "password" => "Password", "attributes" => "Attributes", _ => ut })
+                                                </button>
+                                            </li>
+                                        }
+                                        <li class="ms-auto">
+                                            <button class="btn btn-sm btn-link text-muted py-1"
+                                                    @onclick="CloseUserEdit">
+                                                <i class="bi bi-x-lg"></i>
+                                            </button>
+                                        </li>
+                                    </ul>
+
+                                    @* ── Profile sub-tab ── *@
+                                    @if (userEditTab == "profile")
+                                    {
+                                        <div class="row g-2" style="max-width:520px">
+                                            <div class="col-md-6">
+                                                <label class="form-label small">First Name</label>
+                                                <input class="form-control form-control-sm" @bind="editUserFirstName" />
+                                            </div>
+                                            <div class="col-md-6">
+                                                <label class="form-label small">Last Name</label>
+                                                <input class="form-control form-control-sm" @bind="editUserLastName" />
+                                            </div>
+                                            <div class="col-12">
+                                                <label class="form-label small">Email</label>
+                                                <input class="form-control form-control-sm" type="email" @bind="editUserEmail" />
+                                            </div>
+                                            <div class="col-12 d-flex gap-3">
+                                                <div class="form-check">
+                                                    <input class="form-check-input" type="checkbox" id="editUserEnabled_@user.Id" @bind="editUserEnabled" />
+                                                    <label class="form-check-label small" for="editUserEnabled_@user.Id">Enabled</label>
+                                                </div>
+                                                <div class="form-check">
+                                                    <input class="form-check-input" type="checkbox" id="editUserVerified_@user.Id" @bind="editUserEmailVerified" />
+                                                    <label class="form-check-label small" for="editUserVerified_@user.Id">Email Verified</label>
+                                                </div>
+                                            </div>
+                                            <div class="col-12">
+                                                <button class="btn btn-sm btn-primary" @onclick="() => SaveUserProfile(user.Id)"
+                                                        disabled="@savingUserEdit">
+                                                    @if (savingUserEdit) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Save
+                                                </button>
+                                            </div>
+                                        </div>
+                                    }
+
+                                    @* ── Roles sub-tab ── *@
+                                    @if (userEditTab == "roles")
+                                    {
+                                        @if (loadingUserRoles)
+                                        {
+                                            <div class="spinner-border spinner-border-sm text-primary"></div>
+                                        }
+                                        else
+                                        {
+                                            @if (userRoles is not null && userRoles.Count > 0)
+                                            {
+                                                <div class="d-flex flex-wrap gap-1 mb-2">
+                                                    @foreach (KeycloakRole role in userRoles)
+                                                    {
+                                                        <span class="badge bg-primary-subtle text-primary border border-primary-subtle d-flex align-items-center gap-1">
+                                                            @role.Name
+                                                            <button class="btn-close btn-close-sm ms-1" style="font-size:0.6rem"
+                                                                    @onclick="() => RemoveUserRole(user.Id, role)"></button>
+                                                        </span>
+                                                    }
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <p class="text-muted small mb-2">No roles assigned.</p>
+                                            }
+                                            @if (roles is not null)
+                                            {
+                                                HashSet<string> assignedRoleIds = [.. (userRoles ?? []).Select(r => r.Id)];
+                                                List<KeycloakRole> availableToAdd = roles.Where(r => !assignedRoleIds.Contains(r.Id)).ToList();
+                                                @if (availableToAdd.Count > 0)
+                                                {
+                                                    <div class="d-flex gap-2 align-items-center" style="max-width:320px">
+                                                        <select class="form-select form-select-sm" @bind="addRoleToUserId">
+                                                            <option value="">Add role…</option>
+                                                            @foreach (KeycloakRole r in availableToAdd)
+                                                            {
+                                                                <option value="@r.Id">@r.Name</option>
+                                                            }
+                                                        </select>
+                                                        <button class="btn btn-sm btn-primary" @onclick="() => AddRoleToUser(user.Id)"
+                                                                disabled="@(string.IsNullOrEmpty(addRoleToUserId))">
+                                                            Add
+                                                        </button>
+                                                    </div>
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    @* ── Groups sub-tab ── *@
+                                    @if (userEditTab == "groups")
+                                    {
+                                        @if (loadingUserGroups)
+                                        {
+                                            <div class="spinner-border spinner-border-sm text-primary"></div>
+                                        }
+                                        else
+                                        {
+                                            @if (userGroupMemberships is not null && userGroupMemberships.Count > 0)
+                                            {
+                                                <div class="d-flex flex-wrap gap-1 mb-2">
+                                                    @foreach (KeycloakGroupInfo g in userGroupMemberships)
+                                                    {
+                                                        <span class="badge bg-secondary-subtle text-secondary border d-flex align-items-center gap-1">
+                                                            <i class="bi bi-people me-1"></i>@g.Name
+                                                            <button class="btn-close btn-close-sm ms-1" style="font-size:0.6rem"
+                                                                    @onclick="() => RemoveUserFromGroup(user.Id, g.Id)"></button>
+                                                        </span>
+                                                    }
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <p class="text-muted small mb-2">Not a member of any group.</p>
+                                            }
+                                            @if (groups is not null)
+                                            {
+                                                HashSet<string> memberGroupIds = [.. (userGroupMemberships ?? []).Select(g => g.Id)];
+                                                List<KeycloakGroupInfo> availableGroups = groups.Where(g => !memberGroupIds.Contains(g.Id)).ToList();
+                                                @if (availableGroups.Count > 0)
+                                                {
+                                                    <div class="d-flex gap-2 align-items-center" style="max-width:320px">
+                                                        <select class="form-select form-select-sm" @bind="addGroupToUserId">
+                                                            <option value="">Add to group…</option>
+                                                            @foreach (KeycloakGroupInfo g in availableGroups)
+                                                            {
+                                                                <option value="@g.Id">@g.Name</option>
+                                                            }
+                                                        </select>
+                                                        <button class="btn btn-sm btn-primary" @onclick="() => AddUserToGroup(user.Id)"
+                                                                disabled="@(string.IsNullOrEmpty(addGroupToUserId))">
+                                                            Add
+                                                        </button>
+                                                    </div>
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    @* ── Password sub-tab ── *@
+                                    @if (userEditTab == "password")
+                                    {
+                                        <div class="row g-2" style="max-width:360px">
+                                            <div class="col-12">
+                                                <label class="form-label small">New Password</label>
+                                                <input type="password" class="form-control form-control-sm"
+                                                       @bind="editUserNewPassword" />
+                                            </div>
+                                            <div class="col-12">
+                                                <div class="form-check">
+                                                    <input class="form-check-input" type="checkbox" id="pwdTemp_@user.Id"
+                                                           @bind="editUserPasswordTemporary" />
+                                                    <label class="form-check-label small" for="pwdTemp_@user.Id">
+                                                        Temporary (user must change on next login)
+                                                    </label>
+                                                </div>
+                                            </div>
+                                            <div class="col-12">
+                                                <button class="btn btn-sm btn-warning" @onclick="() => ResetUserPassword(user.Id)"
+                                                        disabled="@(savingUserEdit || string.IsNullOrWhiteSpace(editUserNewPassword))">
+                                                    @if (savingUserEdit) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Reset Password
+                                                </button>
+                                            </div>
+                                        </div>
+                                    }
+
+                                    @* ── Attributes sub-tab ── *@
+                                    @if (userEditTab == "attributes")
+                                    {
+                                        <div style="max-width:520px">
+                                            @foreach (KeyValuePair<string, string> attr in editUserAttributes)
+                                            {
+                                                string attrKey = attr.Key;
+                                                <div class="d-flex gap-2 mb-2 align-items-center">
+                                                    <input class="form-control form-control-sm font-monospace"
+                                                           style="max-width:180px" value="@attr.Key" disabled />
+                                                    <input class="form-control form-control-sm"
+                                                           value="@attr.Value"
+                                                           @oninput="e => editUserAttributes[attrKey] = e.Value?.ToString() ?? string.Empty" />
+                                                    <button class="btn btn-sm btn-outline-danger border-0"
+                                                            @onclick="() => editUserAttributes.Remove(attrKey)">
+                                                        <i class="bi bi-trash"></i>
+                                                    </button>
+                                                </div>
+                                            }
+                                            <div class="d-flex gap-2 mb-3 align-items-center">
+                                                <input class="form-control form-control-sm font-monospace"
+                                                       style="max-width:180px" placeholder="attribute key"
+                                                       @bind="newAttrKey" />
+                                                <input class="form-control form-control-sm" placeholder="value"
+                                                       @bind="newAttrValue" />
+                                                <button class="btn btn-sm btn-outline-secondary"
+                                                        @onclick="AddUserAttribute"
+                                                        disabled="@string.IsNullOrWhiteSpace(newAttrKey)">
+                                                    <i class="bi bi-plus-lg"></i>
+                                                </button>
+                                            </div>
+                                            <button class="btn btn-sm btn-primary" @onclick="() => SaveUserAttributes(user.Id)"
+                                                    disabled="@savingUserEdit">
+                                                @if (savingUserEdit) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Save Attributes
+                                            </button>
+                                        </div>
+                                    }
+                                </div>
+                            }
                         </div>
                     }
                 </div>
@@ -525,6 +765,834 @@
                     }
                 </div>
             }
+        }
+    }
+
+    @* ── Roles ── *@
+    @if (realmTab == "roles")
+    {
+        @if (loadingRoles)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else
+        {
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="text-muted small">@(roles?.Count ?? 0) roles</span>
+                <button class="btn btn-sm btn-primary" @onclick="() => showAddRole = !showAddRole">
+                    <i class="bi bi-plus-circle me-1"></i>Add Role
+                </button>
+            </div>
+
+            @if (showAddRole)
+            {
+                <div class="card mb-3 border-primary-subtle">
+                    <div class="card-body">
+                        @if (roleError is not null)
+                        {
+                            <div class="alert alert-danger py-2 small">@roleError</div>
+                        }
+                        <div class="row g-2" style="max-width:480px">
+                            <div class="col-md-5">
+                                <label class="form-label small">Role Name</label>
+                                <input class="form-control form-control-sm" placeholder="e.g. app-admin" @bind="newRoleName" />
+                            </div>
+                            <div class="col-md-7">
+                                <label class="form-label small">Description <span class="text-muted">(optional)</span></label>
+                                <input class="form-control form-control-sm" @bind="newRoleDescription" />
+                            </div>
+                        </div>
+                        <div class="mt-2 d-flex gap-2">
+                            <button class="btn btn-sm btn-primary" @onclick="AddRole" disabled="@(savingRole || string.IsNullOrWhiteSpace(newRoleName))">
+                                @if (savingRole) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddRole = false">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @if (roles is not null)
+            {
+                <div class="list-group">
+                    @foreach (KeycloakRole role in roles)
+                    {
+                        <div class="list-group-item d-flex justify-content-between align-items-center py-2">
+                            <div>
+                                <strong>@role.Name</strong>
+                                @if (!string.IsNullOrWhiteSpace(role.Description))
+                                {
+                                    <span class="text-muted small ms-2">@role.Description</span>
+                                }
+                                @if (role.Composite)
+                                {
+                                    <span class="badge bg-info-subtle text-info ms-1 small">composite</span>
+                                }
+                            </div>
+                            <button class="btn btn-sm btn-outline-danger border-0"
+                                    @onclick="() => DeleteRole(role.Name)">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    }
+                </div>
+            }
+        }
+    }
+
+    @* ── Clients ── *@
+    @if (realmTab == "clients")
+    {
+        @if (loadingClients)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else
+        {
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="text-muted small">@(clients?.Count ?? 0) clients</span>
+                <button class="btn btn-sm btn-primary" @onclick="() => showAddClient = !showAddClient">
+                    <i class="bi bi-plus-circle me-1"></i>Add Client
+                </button>
+            </div>
+
+            @if (showAddClient)
+            {
+                <div class="card mb-3 border-primary-subtle">
+                    <div class="card-body">
+                        @if (clientError is not null)
+                        {
+                            <div class="alert alert-danger py-2 small">@clientError</div>
+                        }
+                        <div class="row g-2" style="max-width:520px">
+                            <div class="col-md-5">
+                                <label class="form-label small">Client ID</label>
+                                <input class="form-control form-control-sm font-monospace" placeholder="my-app" @bind="newClientId" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Name <span class="text-muted">(optional)</span></label>
+                                <input class="form-control form-control-sm" @bind="newClientName" />
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small">Access Type</label>
+                                <select class="form-select form-select-sm" @bind="newClientPublic">
+                                    <option value="false">Confidential</option>
+                                    <option value="true">Public</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="mt-2 d-flex gap-2">
+                            <button class="btn btn-sm btn-primary" @onclick="AddClient"
+                                    disabled="@(savingClient || string.IsNullOrWhiteSpace(newClientId))">
+                                @if (savingClient) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddClient = false">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @if (clients is not null)
+            {
+                <div class="list-group">
+                    @foreach (KeycloakClientInfo client in clients)
+                    {
+                        bool isEditingClient = selectedClientUuid == client.Id;
+                        <div class="list-group-item py-2">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div>
+                                    <strong class="font-monospace">@client.ClientId</strong>
+                                    @if (!string.IsNullOrWhiteSpace(client.Name) && client.Name != client.ClientId)
+                                    {
+                                        <span class="text-muted small ms-2">@client.Name</span>
+                                    }
+                                    @if (!client.Enabled)
+                                    {
+                                        <span class="badge bg-secondary-subtle text-secondary ms-1 small">Disabled</span>
+                                    }
+                                    @if (client.PublicClient)
+                                    {
+                                        <span class="badge bg-info-subtle text-info ms-1 small">public</span>
+                                    }
+                                    else if (client.BearerOnly)
+                                    {
+                                        <span class="badge bg-warning-subtle text-warning ms-1 small">bearer-only</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-success-subtle text-success ms-1 small">confidential</span>
+                                    }
+                                </div>
+                                <div class="d-flex gap-1">
+                                    <button class="btn btn-sm btn-outline-secondary border-0"
+                                            @onclick="() => OpenClientEdit(client)">
+                                        <i class="bi @(isEditingClient ? "bi-chevron-up" : "bi-pencil")"></i>
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-danger border-0"
+                                            @onclick="() => DeleteClient(client.Id)">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </div>
+                            </div>
+
+                            @if (isEditingClient && clientDetail is not null)
+                            {
+                                <div class="mt-2 p-3 bg-light border rounded">
+                                    @if (clientEditError is not null)
+                                    {
+                                        <div class="alert alert-danger py-2 small mb-2">@clientEditError</div>
+                                    }
+                                    <ul class="nav nav-tabs mb-3 nav-sm">
+                                        @foreach (string ct2 in new[] { "settings", "secret", "mappers" }
+                                            .Where(t => !(t == "secret" && clientDetail.PublicClient)))
+                                        {
+                                            <li class="nav-item">
+                                                <button class="nav-link py-1 px-2 small @(clientEditTab == ct2 ? "active" : "")"
+                                                        @onclick="() => SwitchClientTab(ct2)">
+                                                    @(ct2 switch { "settings" => "Settings", "secret" => "Credentials", "mappers" => "Mappers", _ => ct2 })
+                                                </button>
+                                            </li>
+                                        }
+                                    </ul>
+
+                                    @* ── Client Settings ── *@
+                                    @if (clientEditTab == "settings")
+                                    {
+                                        <div class="row g-2" style="max-width:560px">
+                                            <div class="col-md-6">
+                                                <label class="form-label small">Name</label>
+                                                <input class="form-control form-control-sm" @bind="clientDetail.Name" />
+                                            </div>
+                                            <div class="col-md-6">
+                                                <label class="form-label small">Description</label>
+                                                <input class="form-control form-control-sm" @bind="clientDetail.Description" />
+                                            </div>
+                                            <div class="col-md-6">
+                                                <label class="form-label small">Base URL</label>
+                                                <input class="form-control form-control-sm" @bind="clientDetail.BaseUrl" />
+                                            </div>
+                                            <div class="col-md-6">
+                                                <label class="form-label small">Root URL</label>
+                                                <input class="form-control form-control-sm" @bind="clientDetail.RootUrl" />
+                                            </div>
+                                            <div class="col-12">
+                                                <label class="form-label small">Valid Redirect URIs <span class="text-muted">(one per line)</span></label>
+                                                <textarea class="form-control form-control-sm font-monospace" rows="3"
+                                                          value="@string.Join("\n", clientDetail.RedirectUris)"
+                                                          @oninput="e => clientDetail.RedirectUris = (e.Value?.ToString() ?? string.Empty).Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList()"></textarea>
+                                            </div>
+                                            <div class="col-12">
+                                                <label class="form-label small">Web Origins <span class="text-muted">(one per line)</span></label>
+                                                <textarea class="form-control form-control-sm font-monospace" rows="2"
+                                                          value="@string.Join("\n", clientDetail.WebOrigins)"
+                                                          @oninput="e => clientDetail.WebOrigins = (e.Value?.ToString() ?? string.Empty).Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList()"></textarea>
+                                            </div>
+                                            <div class="col-12">
+                                                <label class="form-label small d-block mb-1">Flows</label>
+                                                <div class="d-flex flex-wrap gap-3">
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="checkbox" id="sfe_@client.Id" @bind="clientDetail.StandardFlowEnabled" />
+                                                        <label class="form-check-label small" for="sfe_@client.Id">Standard Flow</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="checkbox" id="dage_@client.Id" @bind="clientDetail.DirectAccessGrantsEnabled" />
+                                                        <label class="form-check-label small" for="dage_@client.Id">Direct Access Grants</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="checkbox" id="ife_@client.Id" @bind="clientDetail.ImplicitFlowEnabled" />
+                                                        <label class="form-check-label small" for="ife_@client.Id">Implicit Flow</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="checkbox" id="sae_@client.Id" @bind="clientDetail.ServiceAccountsEnabled" />
+                                                        <label class="form-check-label small" for="sae_@client.Id">Service Accounts</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="checkbox" id="clientEnabled_@client.Id" @bind="clientDetail.Enabled" />
+                                                        <label class="form-check-label small" for="clientEnabled_@client.Id">Enabled</label>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div class="col-12">
+                                                <button class="btn btn-sm btn-primary" @onclick="SaveClientSettings"
+                                                        disabled="@savingClient">
+                                                    @if (savingClient) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Save
+                                                </button>
+                                            </div>
+                                        </div>
+                                    }
+
+                                    @* ── Client Secret ── *@
+                                    @if (clientEditTab == "secret")
+                                    {
+                                        <div style="max-width:480px">
+                                            @if (clientSecret is not null)
+                                            {
+                                                <div class="input-group input-group-sm mb-2">
+                                                    <span class="input-group-text"><i class="bi bi-key"></i></span>
+                                                    <input type="@(showClientSecret ? "text" : "password")"
+                                                           class="form-control font-monospace"
+                                                           value="@clientSecret" readonly />
+                                                    <button class="btn btn-outline-secondary" type="button"
+                                                            @onclick="() => showClientSecret = !showClientSecret">
+                                                        <i class="bi bi-@(showClientSecret ? "eye-slash" : "eye")"></i>
+                                                    </button>
+                                                </div>
+                                            }
+                                            <button class="btn btn-sm btn-warning" @onclick="RegenerateSecret"
+                                                    disabled="@savingClient">
+                                                @if (savingClient) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                <i class="bi bi-arrow-clockwise me-1"></i>Regenerate Secret
+                                            </button>
+                                        </div>
+                                    }
+
+                                    @* ── Protocol Mappers ── *@
+                                    @if (clientEditTab == "mappers")
+                                    {
+                                        @if (loadingMappers)
+                                        {
+                                            <div class="spinner-border spinner-border-sm text-primary"></div>
+                                        }
+                                        else
+                                        {
+                                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                                <span class="text-muted small">@(clientMappers?.Count ?? 0) mappers</span>
+                                                <button class="btn btn-sm btn-primary" @onclick="() => showAddMapper = !showAddMapper">
+                                                    <i class="bi bi-plus-circle me-1"></i>Add Mapper
+                                                </button>
+                                            </div>
+
+                                            @if (showAddMapper)
+                                            {
+                                                <div class="card mb-3 border-primary-subtle">
+                                                    <div class="card-body">
+                                                        @if (mapperError is not null)
+                                                        {
+                                                            <div class="alert alert-danger py-2 small">@mapperError</div>
+                                                        }
+                                                        <div class="row g-2" style="max-width:560px">
+                                                            <div class="col-md-5">
+                                                                <label class="form-label small">Mapper Name</label>
+                                                                <input class="form-control form-control-sm" @bind="newMapperName" />
+                                                            </div>
+                                                            <div class="col-md-7">
+                                                                <label class="form-label small">Mapper Type</label>
+                                                                <select class="form-select form-select-sm" @bind="newMapperType"
+                                                                        @bind:after="OnMapperTypeChanged">
+                                                                    <option value="oidc-usermodel-attribute-mapper">User Attribute → Claim</option>
+                                                                    <option value="oidc-usermodel-property-mapper">User Property → Claim</option>
+                                                                    <option value="oidc-group-membership-mapper">Group Membership → Claim</option>
+                                                                    <option value="oidc-hardcoded-claim-mapper">Hardcoded Claim</option>
+                                                                    <option value="oidc-audience-mapper">Audience</option>
+                                                                    <option value="oidc-full-name-mapper">Full Name</option>
+                                                                    <option value="oidc-role-name-mapper">Role Name</option>
+                                                                </select>
+                                                            </div>
+
+                                                            @* User Attribute mapper fields *@
+                                                            @if (newMapperType == "oidc-usermodel-attribute-mapper")
+                                                            {
+                                                                <div class="col-md-6">
+                                                                    <label class="form-label small">User Attribute</label>
+                                                                    <input class="form-control form-control-sm font-monospace" placeholder="e.g. department"
+                                                                           @bind="MapperUserAttr" />
+                                                                </div>
+                                                                <div class="col-md-6">
+                                                                    <label class="form-label small">Token Claim Name</label>
+                                                                    <input class="form-control form-control-sm font-monospace" placeholder="e.g. department"
+                                                                           @bind="MapperClaimName" />
+                                                                </div>
+                                                                <div class="col-md-4">
+                                                                    <label class="form-label small">Claim JSON Type</label>
+                                                                    <select class="form-select form-select-sm" @bind="MapperJsonType">
+                                                                        <option value="String">String</option>
+                                                                        <option value="long">long</option>
+                                                                        <option value="int">int</option>
+                                                                        <option value="boolean">boolean</option>
+                                                                        <option value="JSON">JSON</option>
+                                                                    </select>
+                                                                </div>
+                                                                <div class="col-12 d-flex flex-wrap gap-3">
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="atc1" @bind="MapperAccessToken" />
+                                                                        <label class="form-check-label small" for="atc1">Access token</label>
+                                                                    </div>
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="itc1" @bind="MapperIdToken" />
+                                                                        <label class="form-check-label small" for="itc1">ID token</label>
+                                                                    </div>
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="uic1" @bind="MapperUserinfoToken" />
+                                                                        <label class="form-check-label small" for="uic1">Userinfo</label>
+                                                                    </div>
+                                                                </div>
+                                                            }
+
+                                                            @* User Property mapper fields *@
+                                                            @if (newMapperType == "oidc-usermodel-property-mapper")
+                                                            {
+                                                                <div class="col-md-6">
+                                                                    <label class="form-label small">User Property</label>
+                                                                    <select class="form-select form-select-sm" @bind="MapperUserAttr">
+                                                                        <option value="username">username</option>
+                                                                        <option value="email">email</option>
+                                                                        <option value="firstName">firstName</option>
+                                                                        <option value="lastName">lastName</option>
+                                                                    </select>
+                                                                </div>
+                                                                <div class="col-md-6">
+                                                                    <label class="form-label small">Token Claim Name</label>
+                                                                    <input class="form-control form-control-sm font-monospace"
+                                                                           @bind="MapperClaimName" />
+                                                                </div>
+                                                                <div class="col-12 d-flex flex-wrap gap-3">
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="atc2" @bind="MapperAccessToken" />
+                                                                        <label class="form-check-label small" for="atc2">Access token</label>
+                                                                    </div>
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="itc2" @bind="MapperIdToken" />
+                                                                        <label class="form-check-label small" for="itc2">ID token</label>
+                                                                    </div>
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="uic2" @bind="MapperUserinfoToken" />
+                                                                        <label class="form-check-label small" for="uic2">Userinfo</label>
+                                                                    </div>
+                                                                </div>
+                                                            }
+
+                                                            @* Group membership mapper fields *@
+                                                            @if (newMapperType == "oidc-group-membership-mapper")
+                                                            {
+                                                                <div class="col-md-6">
+                                                                    <label class="form-label small">Token Claim Name</label>
+                                                                    <input class="form-control form-control-sm font-monospace" placeholder="groups"
+                                                                           @bind="MapperClaimName" />
+                                                                </div>
+                                                                <div class="col-md-6 d-flex align-items-end pb-1">
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="fullPath" @bind="MapperFullPath" />
+                                                                        <label class="form-check-label small" for="fullPath">Full group path</label>
+                                                                    </div>
+                                                                </div>
+                                                                <div class="col-12 d-flex flex-wrap gap-3">
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="atc3" @bind="MapperAccessToken" />
+                                                                        <label class="form-check-label small" for="atc3">Access token</label>
+                                                                    </div>
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="itc3" @bind="MapperIdToken" />
+                                                                        <label class="form-check-label small" for="itc3">ID token</label>
+                                                                    </div>
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="uic3" @bind="MapperUserinfoToken" />
+                                                                        <label class="form-check-label small" for="uic3">Userinfo</label>
+                                                                    </div>
+                                                                </div>
+                                                            }
+
+                                                            @* Hardcoded claim mapper *@
+                                                            @if (newMapperType == "oidc-hardcoded-claim-mapper")
+                                                            {
+                                                                <div class="col-md-6">
+                                                                    <label class="form-label small">Token Claim Name</label>
+                                                                    <input class="form-control form-control-sm font-monospace"
+                                                                           @bind="MapperClaimName" />
+                                                                </div>
+                                                                <div class="col-md-6">
+                                                                    <label class="form-label small">Claim Value</label>
+                                                                    <input class="form-control form-control-sm"
+                                                                           @bind="MapperClaimValue" />
+                                                                </div>
+                                                                <div class="col-md-4">
+                                                                    <label class="form-label small">JSON Type</label>
+                                                                    <select class="form-select form-select-sm" @bind="MapperJsonType">
+                                                                        <option value="String">String</option>
+                                                                        <option value="boolean">boolean</option>
+                                                                        <option value="int">int</option>
+                                                                        <option value="JSON">JSON</option>
+                                                                    </select>
+                                                                </div>
+                                                                <div class="col-12 d-flex flex-wrap gap-3">
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="atc4" @bind="MapperAccessToken" />
+                                                                        <label class="form-check-label small" for="atc4">Access token</label>
+                                                                    </div>
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="itc4" @bind="MapperIdToken" />
+                                                                        <label class="form-check-label small" for="itc4">ID token</label>
+                                                                    </div>
+                                                                    <div class="form-check">
+                                                                        <input class="form-check-input" type="checkbox" id="uic4" @bind="MapperUserinfoToken" />
+                                                                        <label class="form-check-label small" for="uic4">Userinfo</label>
+                                                                    </div>
+                                                                </div>
+                                                            }
+
+                                                            @* Audience mapper *@
+                                                            @if (newMapperType == "oidc-audience-mapper")
+                                                            {
+                                                                <div class="col-md-6">
+                                                                    <label class="form-label small">Included Audience</label>
+                                                                    <input class="form-control form-control-sm font-monospace"
+                                                                           @bind="MapperClientAudience" />
+                                                                </div>
+                                                            }
+                                                        </div>
+                                                        <div class="mt-2 d-flex gap-2">
+                                                            <button class="btn btn-sm btn-primary" @onclick="AddMapper"
+                                                                    disabled="@(savingMapper || string.IsNullOrWhiteSpace(newMapperName))">
+                                                                @if (savingMapper) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                                Add
+                                                            </button>
+                                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddMapper = false">Cancel</button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            }
+
+                                            @if (clientMappers is not null)
+                                            {
+                                                <div class="list-group">
+                                                    @foreach (KeycloakProtocolMapper mapper in clientMappers)
+                                                    {
+                                                        bool isEditingMapper = editingMapperId == mapper.Id;
+                                                        <div class="list-group-item py-2">
+                                                            <div class="d-flex justify-content-between align-items-center">
+                                                                <div>
+                                                                    <strong>@mapper.Name</strong>
+                                                                    <span class="badge bg-secondary-subtle text-secondary ms-2 small font-monospace">@mapper.ProtocolMapper</span>
+                                                                    @if (mapper.Config.TryGetValue("claim.name", out string? claimName))
+                                                                    {
+                                                                        <span class="text-muted small ms-2">→ <code>@claimName</code></span>
+                                                                    }
+                                                                </div>
+                                                                <div class="d-flex gap-1">
+                                                                    <button class="btn btn-sm btn-outline-secondary border-0"
+                                                                            @onclick="() => OpenMapperEdit(mapper)">
+                                                                        <i class="bi bi-pencil"></i>
+                                                                    </button>
+                                                                    <button class="btn btn-sm btn-outline-danger border-0"
+                                                                            @onclick="() => DeleteMapper(mapper.Id)">
+                                                                        <i class="bi bi-trash"></i>
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                            @if (isEditingMapper)
+                                                            {
+                                                                <div class="mt-2 pt-2 border-top">
+                                                                    @if (mapperError is not null)
+                                                                    {
+                                                                        <div class="alert alert-danger py-1 small mb-2">@mapperError</div>
+                                                                    }
+                                                                    <div class="row g-2" style="max-width:560px">
+                                                                        <div class="col-12">
+                                                                            <label class="form-label small">Mapper Name</label>
+                                                                            <input class="form-control form-control-sm" @bind="newMapperName" />
+                                                                        </div>
+                                                                        @if (newMapperType == "oidc-usermodel-attribute-mapper")
+                                                                        {
+                                                                            <div class="col-md-6">
+                                                                                <label class="form-label small">User Attribute</label>
+                                                                                <input class="form-control form-control-sm font-monospace" @bind="MapperUserAttr" />
+                                                                            </div>
+                                                                            <div class="col-md-6">
+                                                                                <label class="form-label small">Token Claim Name</label>
+                                                                                <input class="form-control form-control-sm font-monospace" @bind="MapperClaimName" />
+                                                                            </div>
+                                                                            <div class="col-md-4">
+                                                                                <label class="form-label small">JSON Type</label>
+                                                                                <select class="form-select form-select-sm" @bind="MapperJsonType">
+                                                                                    <option value="String">String</option>
+                                                                                    <option value="long">long</option>
+                                                                                    <option value="int">int</option>
+                                                                                    <option value="boolean">boolean</option>
+                                                                                    <option value="JSON">JSON</option>
+                                                                                </select>
+                                                                            </div>
+                                                                        }
+                                                                        @if (newMapperType == "oidc-usermodel-property-mapper")
+                                                                        {
+                                                                            <div class="col-md-6">
+                                                                                <label class="form-label small">User Property</label>
+                                                                                <select class="form-select form-select-sm" @bind="MapperUserAttr">
+                                                                                    <option value="username">username</option>
+                                                                                    <option value="email">email</option>
+                                                                                    <option value="firstName">firstName</option>
+                                                                                    <option value="lastName">lastName</option>
+                                                                                </select>
+                                                                            </div>
+                                                                            <div class="col-md-6">
+                                                                                <label class="form-label small">Token Claim Name</label>
+                                                                                <input class="form-control form-control-sm font-monospace" @bind="MapperClaimName" />
+                                                                            </div>
+                                                                        }
+                                                                        @if (newMapperType == "oidc-group-membership-mapper")
+                                                                        {
+                                                                            <div class="col-md-6">
+                                                                                <label class="form-label small">Token Claim Name</label>
+                                                                                <input class="form-control form-control-sm font-monospace" @bind="MapperClaimName" />
+                                                                            </div>
+                                                                            <div class="col-md-6 d-flex align-items-end pb-1">
+                                                                                <div class="form-check">
+                                                                                    <input class="form-check-input" type="checkbox" id="fullPathE" @bind="MapperFullPath" />
+                                                                                    <label class="form-check-label small" for="fullPathE">Full group path</label>
+                                                                                </div>
+                                                                            </div>
+                                                                        }
+                                                                        @if (newMapperType == "oidc-hardcoded-claim-mapper")
+                                                                        {
+                                                                            <div class="col-md-6">
+                                                                                <label class="form-label small">Token Claim Name</label>
+                                                                                <input class="form-control form-control-sm font-monospace" @bind="MapperClaimName" />
+                                                                            </div>
+                                                                            <div class="col-md-6">
+                                                                                <label class="form-label small">Claim Value</label>
+                                                                                <input class="form-control form-control-sm" @bind="MapperClaimValue" />
+                                                                            </div>
+                                                                            <div class="col-md-4">
+                                                                                <label class="form-label small">JSON Type</label>
+                                                                                <select class="form-select form-select-sm" @bind="MapperJsonType">
+                                                                                    <option value="String">String</option>
+                                                                                    <option value="boolean">boolean</option>
+                                                                                    <option value="int">int</option>
+                                                                                    <option value="JSON">JSON</option>
+                                                                                </select>
+                                                                            </div>
+                                                                        }
+                                                                        @if (newMapperType == "oidc-audience-mapper")
+                                                                        {
+                                                                            <div class="col-md-6">
+                                                                                <label class="form-label small">Included Audience</label>
+                                                                                <input class="form-control form-control-sm font-monospace" @bind="MapperClientAudience" />
+                                                                            </div>
+                                                                        }
+                                                                        @if (newMapperType != "oidc-audience-mapper")
+                                                                        {
+                                                                            <div class="col-12 d-flex flex-wrap gap-3">
+                                                                                <div class="form-check">
+                                                                                    <input class="form-check-input" type="checkbox" id="atcE" @bind="MapperAccessToken" />
+                                                                                    <label class="form-check-label small" for="atcE">Access token</label>
+                                                                                </div>
+                                                                                <div class="form-check">
+                                                                                    <input class="form-check-input" type="checkbox" id="itcE" @bind="MapperIdToken" />
+                                                                                    <label class="form-check-label small" for="itcE">ID token</label>
+                                                                                </div>
+                                                                                <div class="form-check">
+                                                                                    <input class="form-check-input" type="checkbox" id="uicE" @bind="MapperUserinfoToken" />
+                                                                                    <label class="form-check-label small" for="uicE">Userinfo</label>
+                                                                                </div>
+                                                                            </div>
+                                                                        }
+                                                                    </div>
+                                                                    <div class="mt-2 d-flex gap-2">
+                                                                        <button class="btn btn-sm btn-primary" @onclick="SaveMapperEdit"
+                                                                                disabled="@(savingMapper || string.IsNullOrWhiteSpace(newMapperName))">
+                                                                            @if (savingMapper) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                                            Save
+                                                                        </button>
+                                                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => editingMapperId = null">Cancel</button>
+                                                                    </div>
+                                                                </div>
+                                                            }
+                                                        </div>
+                                                    }
+                                                </div>
+                                            }
+                                        }
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+        }
+    }
+
+    @* ── Realm Settings ── *@
+    @if (realmTab == "settings")
+    {
+        @if (loadingSettings)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else if (realmSettings is not null)
+        {
+            @if (settingsError is not null)
+            {
+                <div class="alert alert-danger py-2 small mb-3">@settingsError</div>
+            }
+
+            <div class="row g-4" style="max-width:620px">
+
+                @* Login Settings *@
+                <div class="col-12">
+                    <h6 class="fw-semibold mb-2"><i class="bi bi-box-arrow-in-right me-1 text-muted"></i>Login</h6>
+                    <div class="row g-2">
+                        <div class="col-md-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="regAllowed" @bind="realmSettings.RegistrationAllowed" />
+                                <label class="form-check-label small" for="regAllowed">Registration allowed</label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="resetPwd" @bind="realmSettings.ResetPasswordAllowed" />
+                                <label class="form-check-label small" for="resetPwd">Forgot password</label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="rememberMe" @bind="realmSettings.RememberMe" />
+                                <label class="form-check-label small" for="rememberMe">Remember me</label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="loginEmail" @bind="realmSettings.LoginWithEmailAllowed" />
+                                <label class="form-check-label small" for="loginEmail">Login with email</label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="dupEmails" @bind="realmSettings.DuplicateEmailsAllowed" />
+                                <label class="form-check-label small" for="dupEmails">Duplicate emails allowed</label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="verifyEmail" @bind="realmSettings.VerifyEmail" />
+                                <label class="form-check-label small" for="verifyEmail">Verify email</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                @* Token lifetimes *@
+                <div class="col-12">
+                    <h6 class="fw-semibold mb-2"><i class="bi bi-clock me-1 text-muted"></i>Token Lifetimes</h6>
+                    <div class="row g-2">
+                        <div class="col-md-6">
+                            <label class="form-label small">Access Token Lifespan (seconds)</label>
+                            <input type="number" class="form-control form-control-sm" @bind="realmSettings.AccessTokenLifespan" />
+                            <div class="form-text">@FormatSeconds(realmSettings.AccessTokenLifespan)</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">SSO Session Idle (seconds)</label>
+                            <input type="number" class="form-control form-control-sm" @bind="realmSettings.SsoSessionIdleTimeout" />
+                            <div class="form-text">@FormatSeconds(realmSettings.SsoSessionIdleTimeout)</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">SSO Session Max (seconds)</label>
+                            <input type="number" class="form-control form-control-sm" @bind="realmSettings.SsoSessionMaxLifespan" />
+                            <div class="form-text">@FormatSeconds(realmSettings.SsoSessionMaxLifespan)</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">Offline Session Idle (seconds)</label>
+                            <input type="number" class="form-control form-control-sm" @bind="realmSettings.OfflineSessionIdleTimeout" />
+                            <div class="form-text">@FormatSeconds(realmSettings.OfflineSessionIdleTimeout)</div>
+                        </div>
+                    </div>
+                </div>
+
+                @* Password Policy *@
+                <div class="col-12">
+                    <h6 class="fw-semibold mb-2"><i class="bi bi-shield-lock me-1 text-muted"></i>Password Policy</h6>
+                    <input class="form-control form-control-sm font-monospace"
+                           placeholder="e.g. length(8) and digits(1) and specialChars(1)"
+                           @bind="realmSettings.PasswordPolicy" />
+                    <div class="form-text">Keycloak password policy expression. Leave blank for no policy.</div>
+                </div>
+
+                @* Brute Force *@
+                <div class="col-12">
+                    <h6 class="fw-semibold mb-2"><i class="bi bi-shield-exclamation me-1 text-muted"></i>Brute Force Detection</h6>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="bfProtected" @bind="realmSettings.BruteForceProtected" />
+                        <label class="form-check-label small" for="bfProtected">Enabled</label>
+                    </div>
+                    @if (realmSettings.BruteForceProtected)
+                    {
+                        <div class="row g-2">
+                            <div class="col-md-4">
+                                <label class="form-label small">Max Login Failures</label>
+                                <input type="number" class="form-control form-control-sm" @bind="realmSettings.FailureFactor" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Wait Increment (seconds)</label>
+                                <input type="number" class="form-control form-control-sm" @bind="realmSettings.WaitIncrementSeconds" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Max Wait (seconds)</label>
+                                <input type="number" class="form-control form-control-sm" @bind="realmSettings.MaxFailureWaitSeconds" />
+                            </div>
+                        </div>
+                    }
+                </div>
+
+                @* SMTP *@
+                <div class="col-12">
+                    <h6 class="fw-semibold mb-2"><i class="bi bi-envelope me-1 text-muted"></i>Email (SMTP)</h6>
+                    <div class="row g-2">
+                        <div class="col-md-8">
+                            <label class="form-label small">SMTP Host</label>
+                            <input class="form-control form-control-sm" placeholder="smtp.example.com" @bind="realmSettings.SmtpHost" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Port</label>
+                            <input class="form-control form-control-sm" @bind="realmSettings.SmtpPort" />
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small">From Address</label>
+                            <input class="form-control form-control-sm" type="email" @bind="realmSettings.SmtpFrom" />
+                        </div>
+                        <div class="col-md-4">
+                            <div class="form-check mt-1">
+                                <input class="form-check-input" type="checkbox" id="smtpSsl" @bind="realmSettings.SmtpSsl" />
+                                <label class="form-check-label small" for="smtpSsl">SSL</label>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="form-check mt-1">
+                                <input class="form-check-input" type="checkbox" id="smtpStarttls" @bind="realmSettings.SmtpStarttls" />
+                                <label class="form-check-label small" for="smtpStarttls">STARTTLS</label>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="form-check mt-1">
+                                <input class="form-check-input" type="checkbox" id="smtpAuth" @bind="realmSettings.SmtpAuth" />
+                                <label class="form-check-label small" for="smtpAuth">Authentication</label>
+                            </div>
+                        </div>
+                        @if (realmSettings.SmtpAuth)
+                        {
+                            <div class="col-md-6">
+                                <label class="form-label small">Username</label>
+                                <input class="form-control form-control-sm" @bind="realmSettings.SmtpUser" />
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">Password</label>
+                                <input type="password" class="form-control form-control-sm" @bind="realmSettings.SmtpPassword" />
+                            </div>
+                        }
+                    </div>
+                </div>
+
+                <div class="col-12">
+                    <button class="btn btn-sm btn-primary" @onclick="SaveRealmSettings" disabled="@savingSettings">
+                        @if (savingSettings) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        <i class="bi bi-floppy me-1"></i>Save Settings
+                    </button>
+                    @if (settingsSaved)
+                    {
+                        <span class="text-success small ms-2"><i class="bi bi-check-circle me-1"></i>Saved</span>
+                    }
+                </div>
+            </div>
         }
     }
 
@@ -1477,6 +2545,75 @@ else
     private string registerExternalUsername = "admin";
     private string registerExternalPassword = "";
 
+    // ── Roles tab ────────────────────────────────────────────────────────────
+    private List<KeycloakRole>? roles;
+    private bool loadingRoles;
+    private bool showAddRole;
+    private bool savingRole;
+    private string? roleError;
+    private string newRoleName = "";
+    private string newRoleDescription = "";
+
+    // ── Clients tab ───────────────────────────────────────────────────────────
+    private List<KeycloakClientInfo>? clients;
+    private bool loadingClients;
+    private bool showAddClient;
+    private bool savingClient;
+    private string? clientError;
+    private string newClientId = "";
+    private string newClientName = "";
+    private string newClientPublic = "false";
+
+    private string? selectedClientUuid;
+    private KeycloakClientDetail? clientDetail;
+    private string clientEditTab = "settings";
+    private string? clientEditError;
+
+    private string? clientSecret;
+    private bool showClientSecret;
+
+    private List<KeycloakProtocolMapper>? clientMappers;
+    private bool loadingMappers;
+    private bool showAddMapper;
+    private bool savingMapper;
+    private string? mapperError;
+    private string? editingMapperId;
+    private string newMapperName = "";
+    private string newMapperType = "oidc-usermodel-attribute-mapper";
+    private Dictionary<string, string> newMapperConfig = [];
+
+    // ── User edit panel ───────────────────────────────────────────────────────
+    private string? selectedUserId;
+    private string userEditTab = "profile";
+    private string? userEditError;
+    private bool savingUserEdit;
+    private bool loadingUserRoles;
+    private bool loadingUserGroups;
+
+    private string editUserFirstName = "";
+    private string editUserLastName = "";
+    private string editUserEmail = "";
+    private bool editUserEnabled;
+    private bool editUserEmailVerified;
+    private string editUserNewPassword = "";
+    private bool editUserPasswordTemporary;
+
+    private List<KeycloakRole>? userRoles;
+    private List<KeycloakGroupInfo>? userGroupMemberships;
+    private string addRoleToUserId = "";
+    private string addGroupToUserId = "";
+
+    private Dictionary<string, string> editUserAttributes = [];
+    private string newAttrKey = "";
+    private string newAttrValue = "";
+
+    // ── Realm Settings tab ────────────────────────────────────────────────────
+    private KeycloakRealmSettings? realmSettings;
+    private bool loadingSettings;
+    private bool savingSettings;
+    private bool settingsSaved;
+    private string? settingsError;
+
     // ── Migrate tab ───────────────────────────────────────────────────────────
     private Guid migrateSourceKcId;
     private List<KeycloakRealm>? migrateSourceRealms;
@@ -1873,6 +3010,13 @@ else
         orgs = null;
         backups = null;
         realmDetails = null;
+        roles = null;
+        clients = null;
+        realmSettings = null;
+        selectedClientUuid = null;
+        clientDetail = null;
+        clientMappers = null;
+        selectedUserId = null;
         await SwitchRealmTab("users");
     }
 
@@ -1885,6 +3029,13 @@ else
         orgs = null;
         backups = null;
         realmDetails = null;
+        roles = null;
+        clients = null;
+        realmSettings = null;
+        selectedClientUuid = null;
+        clientDetail = null;
+        clientMappers = null;
+        selectedUserId = null;
     }
 
     private async Task SwitchRealmTab(string tab)
@@ -1949,6 +3100,30 @@ else
                 try { backups = await KeycloakService.GetBackupsAsync(TenantId, selectedRealm.Id); }
                 catch (Exception ex) { backupError = ex.Message; }
                 finally { loadingBackups = false; }
+                break;
+
+            case "roles" when roles is null:
+                loadingRoles = true;
+                StateHasChanged();
+                try { roles = await KeycloakService.GetRealmRolesAsync(TenantId, selectedRealm.Id); }
+                catch (Exception ex) { roleError = ex.Message; }
+                finally { loadingRoles = false; }
+                break;
+
+            case "clients" when clients is null:
+                loadingClients = true;
+                StateHasChanged();
+                try { clients = await KeycloakService.GetClientsAsync(TenantId, selectedRealm.Id); }
+                catch (Exception ex) { clientError = ex.Message; }
+                finally { loadingClients = false; }
+                break;
+
+            case "settings" when realmSettings is null:
+                loadingSettings = true;
+                StateHasChanged();
+                try { realmSettings = await KeycloakService.GetRealmSettingsAsync(TenantId, selectedRealm.Id); }
+                catch (Exception ex) { settingsError = ex.Message; }
+                finally { loadingSettings = false; }
                 break;
 
             case "portal":
@@ -2429,7 +3604,524 @@ else
         }
     }
 
+    // ── Mapper config property helpers ────────────────────────────────────────
+    // Needed because Razor can't parse dictionary string indexers inside double-quoted HTML attributes.
+
+    private string MapperUserAttr      { get => newMapperConfig.GetValueOrDefault("user.attribute", ""); set => newMapperConfig["user.attribute"] = value; }
+    private string MapperClaimName     { get => newMapperConfig.GetValueOrDefault("claim.name", ""); set => newMapperConfig["claim.name"] = value; }
+    private string MapperClaimValue    { get => newMapperConfig.GetValueOrDefault("claim.value", ""); set => newMapperConfig["claim.value"] = value; }
+    private string MapperJsonType      { get => newMapperConfig.GetValueOrDefault("jsonType.label", "String"); set => newMapperConfig["jsonType.label"] = value; }
+    private string MapperClientAudience { get => newMapperConfig.GetValueOrDefault("included.client.audience", ""); set => newMapperConfig["included.client.audience"] = value; }
+    private bool   MapperAccessToken   { get => newMapperConfig.GetValueOrDefault("access.token.claim", "true") != "false"; set => newMapperConfig["access.token.claim"] = value ? "true" : "false"; }
+    private bool   MapperIdToken       { get => newMapperConfig.GetValueOrDefault("id.token.claim", "true") != "false"; set => newMapperConfig["id.token.claim"] = value ? "true" : "false"; }
+    private bool   MapperUserinfoToken { get => newMapperConfig.GetValueOrDefault("userinfo.token.claim", "true") != "false"; set => newMapperConfig["userinfo.token.claim"] = value ? "true" : "false"; }
+    private bool   MapperFullPath      { get => newMapperConfig.GetValueOrDefault("full.path", "false") != "false"; set => newMapperConfig["full.path"] = value ? "true" : "false"; }
+
+    // ── Roles ─────────────────────────────────────────────────────────────────
+
+    private async Task AddRole()
+    {
+        if (selectedRealm is null || string.IsNullOrWhiteSpace(newRoleName)) return;
+
+        savingRole = true;
+        roleError = null;
+
+        try
+        {
+            await KeycloakService.CreateRealmRoleAsync(TenantId, selectedRealm.Id, newRoleName,
+                string.IsNullOrWhiteSpace(newRoleDescription) ? null : newRoleDescription);
+            roles = await KeycloakService.GetRealmRolesAsync(TenantId, selectedRealm.Id);
+            showAddRole = false;
+            newRoleName = "";
+            newRoleDescription = "";
+        }
+        catch (Exception ex) { roleError = ex.Message; }
+        finally { savingRole = false; }
+    }
+
+    private async Task DeleteRole(string roleName)
+    {
+        if (selectedRealm is null) return;
+
+        try
+        {
+            await KeycloakService.DeleteRealmRoleAsync(TenantId, selectedRealm.Id, roleName);
+            roles = await KeycloakService.GetRealmRolesAsync(TenantId, selectedRealm.Id);
+        }
+        catch (Exception ex) { roleError = ex.Message; }
+    }
+
+    // ── Clients ───────────────────────────────────────────────────────────────
+
+    private async Task AddClient()
+    {
+        if (selectedRealm is null || string.IsNullOrWhiteSpace(newClientId)) return;
+
+        savingClient = true;
+        clientError = null;
+
+        try
+        {
+            bool isPublic = newClientPublic == "true";
+            await KeycloakService.CreateClientAsync(TenantId, selectedRealm.Id, newClientId, isPublic,
+                string.IsNullOrWhiteSpace(newClientName) ? null : newClientName);
+            clients = await KeycloakService.GetClientsAsync(TenantId, selectedRealm.Id);
+            showAddClient = false;
+            newClientId = "";
+            newClientName = "";
+        }
+        catch (Exception ex) { clientError = ex.Message; }
+        finally { savingClient = false; }
+    }
+
+    private async Task OpenClientEdit(KeycloakClientInfo client)
+    {
+        if (selectedClientUuid == client.Id)
+        {
+            selectedClientUuid = null;
+            clientDetail = null;
+            clientMappers = null;
+            return;
+        }
+
+        selectedClientUuid = client.Id;
+        clientEditTab = "settings";
+        clientEditError = null;
+        clientDetail = null;
+        clientMappers = null;
+        clientSecret = null;
+        showClientSecret = false;
+
+        try
+        {
+            clientDetail = await KeycloakService.GetClientAsync(TenantId, selectedRealm!.Id, client.Id);
+        }
+        catch (Exception ex) { clientEditError = ex.Message; }
+    }
+
+    private async Task SwitchClientTab(string tab)
+    {
+        clientEditTab = tab;
+        clientEditError = null;
+
+        if (tab == "secret" && clientSecret is null && selectedClientUuid is not null)
+        {
+            try
+            {
+                clientSecret = await KeycloakService.GetClientSecretAsync(TenantId, selectedRealm!.Id, selectedClientUuid);
+            }
+            catch (Exception ex) { clientEditError = ex.Message; }
+        }
+        else if (tab == "mappers" && clientMappers is null && selectedClientUuid is not null)
+        {
+            loadingMappers = true;
+            StateHasChanged();
+            try
+            {
+                clientMappers = await KeycloakService.GetClientMappersAsync(TenantId, selectedRealm!.Id, selectedClientUuid);
+                ResetAddMapper();
+            }
+            catch (Exception ex) { clientEditError = ex.Message; }
+            finally { loadingMappers = false; }
+        }
+    }
+
+    private async Task SaveClientSettings()
+    {
+        if (selectedRealm is null || clientDetail is null) return;
+
+        savingClient = true;
+        clientEditError = null;
+
+        try
+        {
+            await KeycloakService.UpdateClientAsync(TenantId, selectedRealm.Id, clientDetail);
+            clients = await KeycloakService.GetClientsAsync(TenantId, selectedRealm.Id);
+        }
+        catch (Exception ex) { clientEditError = ex.Message; }
+        finally { savingClient = false; }
+    }
+
+    private async Task DeleteClient(string clientUuid)
+    {
+        if (selectedRealm is null) return;
+
+        try
+        {
+            await KeycloakService.DeleteClientAsync(TenantId, selectedRealm.Id, clientUuid);
+            if (selectedClientUuid == clientUuid) { selectedClientUuid = null; clientDetail = null; }
+            clients = await KeycloakService.GetClientsAsync(TenantId, selectedRealm.Id);
+        }
+        catch (Exception ex) { clientError = ex.Message; }
+    }
+
+    private async Task RegenerateSecret()
+    {
+        if (selectedRealm is null || selectedClientUuid is null) return;
+
+        savingClient = true;
+        clientEditError = null;
+
+        try
+        {
+            clientSecret = await KeycloakService.RegenerateClientSecretAsync(TenantId, selectedRealm.Id, selectedClientUuid);
+            showClientSecret = true;
+        }
+        catch (Exception ex) { clientEditError = ex.Message; }
+        finally { savingClient = false; }
+    }
+
+    private async Task AddMapper()
+    {
+        if (selectedRealm is null || selectedClientUuid is null || string.IsNullOrWhiteSpace(newMapperName)) return;
+
+        savingMapper = true;
+        mapperError = null;
+        editingMapperId = null;
+
+        try
+        {
+            KeycloakProtocolMapper mapper = new()
+            {
+                Name = newMapperName,
+                ProtocolMapper = newMapperType,
+                Config = new Dictionary<string, string>(newMapperConfig)
+            };
+            await KeycloakService.CreateClientMapperAsync(TenantId, selectedRealm.Id, selectedClientUuid, mapper);
+            clientMappers = await KeycloakService.GetClientMappersAsync(TenantId, selectedRealm.Id, selectedClientUuid);
+            showAddMapper = false;
+            ResetAddMapper();
+        }
+        catch (Exception ex) { mapperError = ex.Message; }
+        finally { savingMapper = false; }
+    }
+
+    private void OpenMapperEdit(KeycloakProtocolMapper mapper)
+    {
+        if (editingMapperId == mapper.Id) { editingMapperId = null; return; }
+        editingMapperId = mapper.Id;
+        showAddMapper = false;
+        newMapperName = mapper.Name;
+        newMapperType = mapper.ProtocolMapper;
+        newMapperConfig = new Dictionary<string, string>(mapper.Config);
+        mapperError = null;
+    }
+
+    private async Task SaveMapperEdit()
+    {
+        if (selectedRealm is null || selectedClientUuid is null || editingMapperId is null) return;
+
+        savingMapper = true;
+        mapperError = null;
+
+        try
+        {
+            KeycloakProtocolMapper updated = new()
+            {
+                Id = editingMapperId,
+                Name = newMapperName,
+                ProtocolMapper = newMapperType,
+                Config = new Dictionary<string, string>(newMapperConfig)
+            };
+            await KeycloakService.UpdateClientMapperAsync(TenantId, selectedRealm.Id, selectedClientUuid, updated);
+            clientMappers = await KeycloakService.GetClientMappersAsync(TenantId, selectedRealm.Id, selectedClientUuid);
+            editingMapperId = null;
+            ResetAddMapper();
+        }
+        catch (Exception ex) { mapperError = ex.Message; }
+        finally { savingMapper = false; }
+    }
+
+    private async Task DeleteMapper(string mapperId)
+    {
+        if (selectedRealm is null || selectedClientUuid is null) return;
+
+        try
+        {
+            await KeycloakService.DeleteClientMapperAsync(TenantId, selectedRealm.Id, selectedClientUuid, mapperId);
+            clientMappers = await KeycloakService.GetClientMappersAsync(TenantId, selectedRealm.Id, selectedClientUuid);
+        }
+        catch (Exception ex) { clientEditError = ex.Message; }
+    }
+
+    private void OnMapperTypeChanged()
+    {
+        newMapperConfig = [];
+        newMapperConfig["access.token.claim"] = "true";
+        newMapperConfig["id.token.claim"] = "true";
+        newMapperConfig["userinfo.token.claim"] = "true";
+
+        if (newMapperType == "oidc-usermodel-attribute-mapper" || newMapperType == "oidc-usermodel-property-mapper")
+            newMapperConfig["jsonType.label"] = "String";
+        else if (newMapperType == "oidc-group-membership-mapper")
+        {
+            newMapperConfig["claim.name"] = "groups";
+            newMapperConfig["full.path"] = "false";
+        }
+        else if (newMapperType == "oidc-hardcoded-claim-mapper")
+            newMapperConfig["jsonType.label"] = "String";
+    }
+
+    private void ResetAddMapper()
+    {
+        newMapperName = "";
+        newMapperType = "oidc-usermodel-attribute-mapper";
+        newMapperConfig = [];
+        newMapperConfig["access.token.claim"] = "true";
+        newMapperConfig["id.token.claim"] = "true";
+        newMapperConfig["userinfo.token.claim"] = "true";
+        newMapperConfig["jsonType.label"] = "String";
+    }
+
+    // ── User Edit ─────────────────────────────────────────────────────────────
+
+    private async Task OpenUserEdit(KeycloakUserInfo user)
+    {
+        if (selectedUserId == user.Id)
+        {
+            CloseUserEdit();
+            return;
+        }
+
+        selectedUserId = user.Id;
+        userEditTab = "profile";
+        userEditError = null;
+        editUserFirstName = user.FirstName ?? "";
+        editUserLastName = user.LastName ?? "";
+        editUserEmail = user.Email ?? "";
+        editUserEnabled = user.Enabled;
+        editUserEmailVerified = user.EmailVerified;
+        editUserNewPassword = "";
+        editUserPasswordTemporary = false;
+        editUserAttributes = user.Attributes.ToDictionary(
+            kv => kv.Key, kv => string.Join(", ", kv.Value));
+        newAttrKey = "";
+        newAttrValue = "";
+        userRoles = null;
+        userGroupMemberships = null;
+        addRoleToUserId = "";
+        addGroupToUserId = "";
+    }
+
+    private void CloseUserEdit()
+    {
+        selectedUserId = null;
+        userRoles = null;
+        userGroupMemberships = null;
+        userEditError = null;
+    }
+
+    private async Task SwitchUserEditTab(string tab, KeycloakUserInfo user)
+    {
+        userEditTab = tab;
+        userEditError = null;
+
+        if (tab == "roles")
+        {
+            if (roles is null)
+            {
+                loadingRoles = true;
+                StateHasChanged();
+                try { roles = await KeycloakService.GetRealmRolesAsync(TenantId, selectedRealm!.Id); }
+                catch { }
+                finally { loadingRoles = false; }
+            }
+            if (userRoles is null)
+            {
+                loadingUserRoles = true;
+                StateHasChanged();
+                try { userRoles = await KeycloakService.GetUserRoleMappingsAsync(TenantId, selectedRealm!.Id, user.Id); }
+                catch (Exception ex) { userEditError = ex.Message; }
+                finally { loadingUserRoles = false; }
+            }
+        }
+        else if (tab == "groups")
+        {
+            if (groups is null)
+            {
+                loadingGroups = true;
+                StateHasChanged();
+                try { groups = await KeycloakService.GetGroupsAsync(TenantId, selectedRealm!.Id); }
+                catch { }
+                finally { loadingGroups = false; }
+            }
+            if (userGroupMemberships is null)
+            {
+                loadingUserGroups = true;
+                StateHasChanged();
+                try { userGroupMemberships = await KeycloakService.GetUserGroupsAsync(TenantId, selectedRealm!.Id, user.Id); }
+                catch (Exception ex) { userEditError = ex.Message; }
+                finally { loadingUserGroups = false; }
+            }
+        }
+    }
+
+    private async Task SaveUserProfile(string userId)
+    {
+        if (selectedRealm is null) return;
+
+        savingUserEdit = true;
+        userEditError = null;
+
+        try
+        {
+            Dictionary<string, List<string>> attrs = editUserAttributes
+                .Where(kv => !string.IsNullOrWhiteSpace(kv.Key))
+                .ToDictionary(kv => kv.Key, kv => new List<string> { kv.Value });
+
+            await KeycloakService.UpdateUserAsync(
+                TenantId, selectedRealm.Id, userId,
+                editUserFirstName, editUserLastName, editUserEmail,
+                editUserEnabled, editUserEmailVerified, attrs);
+
+            users = await KeycloakService.GetUsersAsync(TenantId, selectedRealm.Id);
+            KeycloakUserInfo? updated = users.FirstOrDefault(u => u.Id == userId);
+            if (updated is not null)
+            {
+                editUserFirstName = updated.FirstName ?? "";
+                editUserLastName = updated.LastName ?? "";
+                editUserEmail = updated.Email ?? "";
+                editUserEnabled = updated.Enabled;
+                editUserEmailVerified = updated.EmailVerified;
+            }
+        }
+        catch (Exception ex) { userEditError = ex.Message; }
+        finally { savingUserEdit = false; }
+    }
+
+    private async Task SaveUserAttributes(string userId)
+    {
+        if (selectedRealm is null) return;
+
+        savingUserEdit = true;
+        userEditError = null;
+
+        try
+        {
+            Dictionary<string, List<string>> attrs = editUserAttributes
+                .Where(kv => !string.IsNullOrWhiteSpace(kv.Key))
+                .ToDictionary(kv => kv.Key, kv => new List<string> { kv.Value });
+
+            await KeycloakService.UpdateUserAsync(
+                TenantId, selectedRealm.Id, userId,
+                editUserFirstName, editUserLastName, editUserEmail,
+                editUserEnabled, editUserEmailVerified, attrs);
+
+            users = await KeycloakService.GetUsersAsync(TenantId, selectedRealm.Id);
+        }
+        catch (Exception ex) { userEditError = ex.Message; }
+        finally { savingUserEdit = false; }
+    }
+
+    private async Task ResetUserPassword(string userId)
+    {
+        if (selectedRealm is null || string.IsNullOrWhiteSpace(editUserNewPassword)) return;
+
+        savingUserEdit = true;
+        userEditError = null;
+
+        try
+        {
+            await KeycloakService.ResetUserPasswordAsync(
+                TenantId, selectedRealm.Id, userId, editUserNewPassword, editUserPasswordTemporary);
+            editUserNewPassword = "";
+        }
+        catch (Exception ex) { userEditError = ex.Message; }
+        finally { savingUserEdit = false; }
+    }
+
+    private async Task AddRoleToUser(string userId)
+    {
+        if (selectedRealm is null || string.IsNullOrEmpty(addRoleToUserId) || roles is null) return;
+
+        KeycloakRole? role = roles.FirstOrDefault(r => r.Id == addRoleToUserId);
+        if (role is null) return;
+
+        try
+        {
+            await KeycloakService.AddUserRoleMappingsAsync(TenantId, selectedRealm.Id, userId, [role]);
+            userRoles = await KeycloakService.GetUserRoleMappingsAsync(TenantId, selectedRealm.Id, userId);
+            addRoleToUserId = "";
+        }
+        catch (Exception ex) { userEditError = ex.Message; }
+    }
+
+    private async Task RemoveUserRole(string userId, KeycloakRole role)
+    {
+        if (selectedRealm is null) return;
+
+        try
+        {
+            await KeycloakService.DeleteUserRoleMappingsAsync(TenantId, selectedRealm.Id, userId, [role]);
+            userRoles = await KeycloakService.GetUserRoleMappingsAsync(TenantId, selectedRealm.Id, userId);
+        }
+        catch (Exception ex) { userEditError = ex.Message; }
+    }
+
+    private async Task AddUserToGroup(string userId)
+    {
+        if (selectedRealm is null || string.IsNullOrEmpty(addGroupToUserId)) return;
+
+        try
+        {
+            await KeycloakService.AddUserToGroupAsync(TenantId, selectedRealm.Id, userId, addGroupToUserId);
+            userGroupMemberships = await KeycloakService.GetUserGroupsAsync(TenantId, selectedRealm.Id, userId);
+            addGroupToUserId = "";
+        }
+        catch (Exception ex) { userEditError = ex.Message; }
+    }
+
+    private async Task RemoveUserFromGroup(string userId, string groupId)
+    {
+        if (selectedRealm is null) return;
+
+        try
+        {
+            await KeycloakService.RemoveUserFromGroupAsync(TenantId, selectedRealm.Id, userId, groupId);
+            userGroupMemberships = await KeycloakService.GetUserGroupsAsync(TenantId, selectedRealm.Id, userId);
+        }
+        catch (Exception ex) { userEditError = ex.Message; }
+    }
+
+    private void AddUserAttribute()
+    {
+        if (string.IsNullOrWhiteSpace(newAttrKey)) return;
+        editUserAttributes[newAttrKey.Trim()] = newAttrValue;
+        newAttrKey = "";
+        newAttrValue = "";
+    }
+
+    // ── Realm Settings ────────────────────────────────────────────────────────
+
+    private async Task SaveRealmSettings()
+    {
+        if (selectedRealm is null || realmSettings is null) return;
+
+        savingSettings = true;
+        settingsSaved = false;
+        settingsError = null;
+
+        try
+        {
+            await KeycloakService.UpdateRealmSettingsAsync(TenantId, selectedRealm.Id, realmSettings);
+            settingsSaved = true;
+        }
+        catch (Exception ex) { settingsError = ex.Message; }
+        finally { savingSettings = false; }
+    }
+
     // ── Utilities ─────────────────────────────────────────────────────────────
+
+    private static string FormatSeconds(int seconds)
+    {
+        if (seconds < 60) return $"{seconds}s";
+        int minutes = seconds / 60;
+        int hours = minutes / 60;
+        int days = hours / 24;
+        if (days > 0) return hours % 24 == 0 ? $"{days}d" : $"{days}d {hours % 24}h";
+        if (hours > 0) return minutes % 60 == 0 ? $"{hours}h" : $"{hours}h {minutes % 60}min";
+        return $"{minutes}min";
+    }
 
     private static string FormatSize(long bytes)
     {

@@ -6,17 +6,23 @@
 <LoadingPanel Loading="@loading" LoadingText="Scanning for Harbor instances…">
 @if (selectedProject is not null && selectedHarbor is not null)
 {
-    @* ── Level 3: Project repositories ── *@
+    @* ── Level 3: Project detail (repos + webhooks) ── *@
     <nav class="mb-3">
         <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="BackToProjects">
             <i class="bi bi-arrow-left me-1"></i>Back to Projects
         </button>
     </nav>
 
-    <div class="d-flex align-items-center gap-2 mb-4">
+    <div class="d-flex align-items-center gap-2 mb-3">
         <i class="bi bi-folder2-open fs-4 text-primary"></i>
         <div>
-            <h5 class="mb-0">@selectedProject.Name</h5>
+            <h5 class="mb-0">
+                @selectedProject.Name
+                @if (selectedProject.IsProxyCache)
+                {
+                    <span class="badge bg-info-subtle text-info border border-info-subtle ms-2 small">Proxy Cache</span>
+                }
+            </h5>
             <small class="text-muted">
                 @if (selectedProject.Public) { <span class="badge bg-success-subtle text-success border border-success-subtle me-2">Public</span> }
                 else { <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle me-2">Private</span> }
@@ -25,99 +31,258 @@
         </div>
     </div>
 
-    @if (loadingRepos)
-    {
-        <div class="spinner-border spinner-border-sm text-primary"></div>
-    }
-    else if (repos is not null && repos.Count == 0)
-    {
-        <div class="alert alert-light border text-muted small">
-            <i class="bi bi-inbox me-1"></i>No repositories in this project yet.
-            Push an image to <code>@(selectedHarbor.Config?.RegistryUrl?.TrimEnd('/') ?? "registry")/</code><code>@selectedProject.Name/your-image:tag</code> to get started.
-        </div>
-    }
-    else if (repos is not null)
-    {
-        <div class="list-group">
-            @foreach (HarborRepositoryInfo repo in repos)
-            {
-                string shortName = repo.Name.Contains('/') ? repo.Name[(repo.Name.IndexOf('/') + 1)..] : repo.Name;
-                bool isExpanded = expandedRepo == repo.Name;
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item">
+            <button class="nav-link @(projectSubTab == "repos" ? "active" : "")"
+                    @onclick="@(() => SwitchProjectTab("repos"))">Repositories</button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link @(projectSubTab == "webhooks" ? "active" : "")"
+                    @onclick="@(() => SwitchProjectTab("webhooks"))">Webhooks</button>
+        </li>
+    </ul>
 
-                <div class="list-group-item p-0">
-                    <button class="btn w-100 text-start py-2 px-3 d-flex align-items-center justify-content-between"
-                            @onclick="() => ToggleRepo(repo)">
-                        <div class="d-flex align-items-center gap-2">
-                            <i class="bi @(isExpanded ? "bi-chevron-down" : "bi-chevron-right") text-muted small"></i>
-                            <i class="bi bi-box-seam text-primary"></i>
-                            <span class="font-monospace small">@shortName</span>
-                        </div>
-                        <div class="d-flex gap-3 text-muted small">
-                            <span>@repo.ArtifactCount artifacts</span>
-                            <span>@FormatSize(repo.SizeBytes)</span>
-                            @if (repo.UpdatedAt.HasValue)
-                            {
-                                <span>@repo.UpdatedAt.Value.ToString("yyyy-MM-dd")</span>
-                            }
-                        </div>
-                    </button>
+    @* ── Repositories sub-tab ── *@
+    @if (projectSubTab == "repos")
+    {
+        @if (loadingRepos)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else if (repos is not null && repos.Count == 0)
+        {
+            <div class="alert alert-light border text-muted small">
+                <i class="bi bi-inbox me-1"></i>No repositories in this project yet.
+                @if (!selectedProject.IsProxyCache)
+                {
+                    <span>Push an image to <code>@(selectedHarbor.Config?.RegistryUrl?.TrimEnd('/') ?? "registry")/@selectedProject.Name/your-image:tag</code> to get started.</span>
+                }
+                else
+                {
+                    <span>Pull an image through this proxy cache to populate it: <code>docker pull @(selectedHarbor.Config?.RegistryUrl?.TrimEnd('/') ?? "registry")/@selectedProject.Name/image:tag</code></span>
+                }
+            </div>
+        }
+        else if (repos is not null)
+        {
+            <div class="list-group">
+                @foreach (HarborRepositoryInfo repo in repos)
+                {
+                    string shortName = repo.Name.Contains('/') ? repo.Name[(repo.Name.IndexOf('/') + 1)..] : repo.Name;
+                    bool isExpanded = expandedRepo == repo.Name;
 
-                    @if (isExpanded)
-                    {
-                        <div class="border-top bg-light px-3 py-2">
-                            @if (loadingArtifacts)
-                            {
-                                <div class="spinner-border spinner-border-sm text-primary m-2"></div>
-                            }
-                            else if (artifacts is not null && artifacts.Count == 0)
-                            {
-                                <p class="text-muted small mb-0">No artifacts.</p>
-                            }
-                            else if (artifacts is not null)
-                            {
-                                <table class="table table-sm table-borderless mb-0 small">
-                                    <thead>
-                                        <tr class="text-muted">
-                                            <th>Tags</th>
-                                            <th>Digest</th>
-                                            <th>Size</th>
-                                            <th>Pushed</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        @foreach (HarborArtifactInfo artifact in artifacts)
-                                        {
-                                            <tr>
-                                                <td>
-                                                    @if (artifact.Tags.Count == 0)
-                                                    {
-                                                        <span class="text-muted fst-italic">untagged</span>
-                                                    }
-                                                    else
-                                                    {
-                                                        @foreach (string tag in artifact.Tags)
-                                                        {
-                                                            <span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">@tag</span>
-                                                        }
-                                                    }
-                                                </td>
-                                                <td class="font-monospace text-muted">@artifact.Digest[..19]…</td>
-                                                <td>@FormatSize(artifact.SizeBytes)</td>
-                                                <td>@artifact.PushedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                    <div class="list-group-item p-0">
+                        <button class="btn w-100 text-start py-2 px-3 d-flex align-items-center justify-content-between"
+                                @onclick="() => ToggleRepo(repo)">
+                            <div class="d-flex align-items-center gap-2">
+                                <i class="bi @(isExpanded ? "bi-chevron-down" : "bi-chevron-right") text-muted small"></i>
+                                <i class="bi bi-box-seam text-primary"></i>
+                                <span class="font-monospace small">@shortName</span>
+                            </div>
+                            <div class="d-flex gap-3 text-muted small">
+                                <span>@repo.ArtifactCount artifacts</span>
+                                <span>@FormatSize(repo.SizeBytes)</span>
+                                @if (repo.UpdatedAt.HasValue)
+                                {
+                                    <span>@repo.UpdatedAt.Value.ToString("yyyy-MM-dd")</span>
+                                }
+                            </div>
+                        </button>
+
+                        @if (isExpanded)
+                        {
+                            <div class="border-top bg-light px-3 py-2">
+                                @if (loadingArtifacts)
+                                {
+                                    <div class="spinner-border spinner-border-sm text-primary m-2"></div>
+                                }
+                                else if (artifacts is not null && artifacts.Count == 0)
+                                {
+                                    <p class="text-muted small mb-0">No artifacts.</p>
+                                }
+                                else if (artifacts is not null)
+                                {
+                                    <table class="table table-sm table-borderless mb-0 small">
+                                        <thead>
+                                            <tr class="text-muted">
+                                                <th>Tags</th>
+                                                <th>Digest</th>
+                                                <th>Size</th>
+                                                <th>Pushed</th>
                                             </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (HarborArtifactInfo artifact in artifacts)
+                                            {
+                                                <tr>
+                                                    <td>
+                                                        @if (artifact.Tags.Count == 0)
+                                                        {
+                                                            <span class="text-muted fst-italic">untagged</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            @foreach (string tag in artifact.Tags)
+                                                            {
+                                                                <span class="badge bg-primary-subtle text-primary border border-primary-subtle me-1">@tag</span>
+                                                            }
+                                                        }
+                                                    </td>
+                                                    <td class="font-monospace text-muted">@artifact.Digest[..19]…</td>
+                                                    <td>@FormatSize(artifact.SizeBytes)</td>
+                                                    <td>@artifact.PushedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        }
+        @if (repoError is not null)
+        {
+            <div class="alert alert-danger small mt-2">@repoError</div>
+        }
+    }
+
+    @* ── Webhooks sub-tab ── *@
+    @if (projectSubTab == "webhooks")
+    {
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <span class="text-muted small">@(webhooks?.Count ?? 0) webhooks</span>
+            <button class="btn btn-sm btn-primary" @onclick="() => showCreateWebhook = !showCreateWebhook">
+                <i class="bi bi-bell me-1"></i>New Webhook
+            </button>
+        </div>
+
+        @if (showCreateWebhook)
+        {
+            <div class="card mb-3 border-primary-subtle">
+                <div class="card-body">
+                    @if (webhookError is not null)
+                    {
+                        <div class="alert alert-danger py-2 small">@webhookError</div>
+                    }
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <label class="form-label form-label-sm">Name</label>
+                            <input class="form-control form-control-sm" placeholder="my-webhook" @bind="newWebhookName" />
+                        </div>
+                        <div class="col-md-8">
+                            <label class="form-label form-label-sm">Target URL</label>
+                            <input class="form-control form-control-sm font-monospace" placeholder="https://example.com/webhook"
+                                   @bind="newWebhookUrl" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label form-label-sm">Auth Header (optional)</label>
+                            <input class="form-control form-control-sm font-monospace" placeholder="Bearer token…"
+                                   @bind="newWebhookAuthHeader" />
+                        </div>
+                        <div class="col-md-6 d-flex align-items-end gap-3 pb-1">
+                            <div class="form-check">
+                                <input type="checkbox" class="form-check-input" id="whSkipCert"
+                                       @bind="newWebhookSkipCert" />
+                                <label class="form-check-label small" for="whSkipCert">Skip TLS verify</label>
+                            </div>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label form-label-sm">Event types</label>
+                            <div class="d-flex flex-wrap gap-3">
+                                @foreach (string evt in WebhookEventTypes)
+                                {
+                                    bool isChecked = newWebhookEvents.Contains(evt);
+                                    <div class="form-check">
+                                        <input type="checkbox" class="form-check-input"
+                                               id="whe_@evt"
+                                               checked="@isChecked"
+                                               @onchange="e => ToggleWebhookEvent(evt, (bool)(e.Value ?? false))" />
+                                        <label class="form-check-label small" for="whe_@evt">@evt.Replace("_", " ")</label>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mt-3 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="CreateWebhook" disabled="@savingWebhook">
+                            @if (savingWebhook) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Create
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary"
+                                @onclick="() => { showCreateWebhook = false; webhookError = null; }">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (loadingWebhooks)
+        {
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+        }
+        else if (webhookListError is not null)
+        {
+            <div class="alert alert-danger small">@webhookListError</div>
+        }
+        else if (webhooks is not null)
+        {
+            @if (webhooks.Count == 0)
+            {
+                <p class="text-muted small">No webhooks configured for this project.</p>
+            }
+            else
+            {
+                <div class="list-group">
+                    @foreach (HarborWebhookInfo wh in webhooks)
+                    {
+                        <div class="list-group-item py-2">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <i class="bi bi-bell text-primary"></i>
+                                        <span class="fw-medium small">@wh.Name</span>
+                                        @if (wh.Enabled)
+                                        {
+                                            <span class="badge bg-success-subtle text-success border border-success-subtle small">Active</span>
                                         }
-                                    </tbody>
-                                </table>
-                            }
+                                        else
+                                        {
+                                            <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle small">Disabled</span>
+                                        }
+                                    </div>
+                                    <div class="text-muted small mt-1">
+                                        <code>@wh.TargetUrl</code>
+                                    </div>
+                                    <div class="mt-1 d-flex flex-wrap gap-1">
+                                        @foreach (string evt in wh.EventTypes)
+                                        {
+                                            <span class="badge bg-light text-secondary border small">@evt.Replace("_", " ")</span>
+                                        }
+                                    </div>
+                                </div>
+                                @if (confirmDeleteWebhook == wh.Id)
+                                {
+                                    <div class="d-flex gap-1 align-items-center">
+                                        <span class="text-danger small me-2">Delete?</span>
+                                        <button class="btn btn-sm btn-danger" @onclick="() => DeleteWebhook(wh.Id)">Yes</button>
+                                        <button class="btn btn-sm btn-outline-secondary"
+                                                @onclick="() => confirmDeleteWebhook = null">Cancel</button>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-outline-danger"
+                                            @onclick="() => confirmDeleteWebhook = wh.Id">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                }
+                            </div>
                         </div>
                     }
                 </div>
             }
-        </div>
-    }
-    @if (repoError is not null)
-    {
-        <div class="alert alert-danger small mt-2">@repoError</div>
+        }
     }
 }
 else if (selectedHarbor is not null)
@@ -170,18 +335,11 @@ else if (selectedHarbor is not null)
     else
     {
         <ul class="nav nav-tabs mb-3 flex-wrap">
-            @foreach (string tab in new[] { "projects", "robots", "info" })
+            @foreach ((string id, string label) in InstanceTabs)
             {
-                string label = tab switch
-                {
-                    "projects" => "Projects",
-                    "robots" => "Robot Accounts",
-                    "info" => "System Info",
-                    _ => tab
-                };
                 <li class="nav-item">
-                    <button class="nav-link @(instanceTab == tab ? "active" : "")"
-                            @onclick="() => SwitchTab(tab)">@label</button>
+                    <button class="nav-link @(instanceTab == id ? "active" : "")"
+                            @onclick="() => SwitchTab(id)">@label</button>
                 </li>
             }
         </ul>
@@ -204,7 +362,7 @@ else if (selectedHarbor is not null)
                         {
                             <div class="alert alert-danger py-2 small">@projectError</div>
                         }
-                        <div class="row g-2 align-items-end">
+                        <div class="row g-2 align-items-start">
                             <div class="col-md-4">
                                 <label class="form-label form-label-sm">Project name</label>
                                 <input class="form-control form-control-sm font-monospace" placeholder="my-project"
@@ -215,10 +373,42 @@ else if (selectedHarbor is not null)
                                 <input class="form-control form-control-sm" placeholder="Description"
                                        @bind="newProjectDescription" />
                             </div>
-                            <div class="col-md-2 d-flex align-items-center gap-2 pt-3">
-                                <input type="checkbox" class="form-check-input" id="projPublic" @bind="newProjectPublic" />
-                                <label class="form-check-label small" for="projPublic">Public</label>
+                            <div class="col-md-4 d-flex align-items-end gap-3 pb-1">
+                                <div class="form-check">
+                                    <input type="checkbox" class="form-check-input" id="projPublic" @bind="newProjectPublic" />
+                                    <label class="form-check-label small" for="projPublic">Public</label>
+                                </div>
+                                <div class="form-check">
+                                    <input type="checkbox" class="form-check-input" id="projProxy" @bind="newProjectIsProxy" />
+                                    <label class="form-check-label small" for="projProxy">Proxy Cache</label>
+                                </div>
                             </div>
+                            @if (newProjectIsProxy)
+                            {
+                                <div class="col-md-6">
+                                    <label class="form-label form-label-sm">Remote registry to proxy</label>
+                                    @if (registries is null)
+                                    {
+                                        <div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Loading registries…</div>
+                                    }
+                                    else if (registries.Count == 0)
+                                    {
+                                        <div class="alert alert-warning py-1 small mb-0">
+                                            No remote registries configured yet. Add one in the <strong>Registries</strong> tab first.
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <select class="form-select form-select-sm" @bind="newProjectProxyRegistryId">
+                                            <option value="">Select registry…</option>
+                                            @foreach (HarborRegistryInfo reg in registries)
+                                            {
+                                                <option value="@reg.Id">@reg.Name (@reg.Type — @reg.Url)</option>
+                                            }
+                                        </select>
+                                    }
+                                </div>
+                            }
                         </div>
                         <div class="mt-2 d-flex gap-2">
                             <button class="btn btn-sm btn-primary" @onclick="CreateProject" disabled="@savingProject">
@@ -226,7 +416,7 @@ else if (selectedHarbor is not null)
                                 Create
                             </button>
                             <button class="btn btn-sm btn-outline-secondary"
-                                    @onclick="() => { showCreateProject = false; projectError = null; }">Cancel</button>
+                                    @onclick="() => { showCreateProject = false; projectError = null; newProjectIsProxy = false; }">Cancel</button>
                         </div>
                     </div>
                 </div>
@@ -262,6 +452,12 @@ else if (selectedHarbor is not null)
                                         else
                                         {
                                             <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle small">Private</span>
+                                        }
+                                        @if (project.IsProxyCache)
+                                        {
+                                            <span class="badge bg-info-subtle text-info border border-info-subtle small">
+                                                <i class="bi bi-arrow-repeat me-1"></i>Proxy Cache
+                                            </span>
                                         }
                                         @if (tracked?.LinkedApp is not null)
                                         {
@@ -339,13 +535,363 @@ else if (selectedHarbor is not null)
                                                 @onclick="() => { portalLinkProjectName = null; portalLinkError = null; }">Cancel</button>
                                     </div>
                                     <div class="text-muted small mt-1">
-                                        The customer will see a <strong>Registry</strong> button in their portal for this app and can browse repositories and manage robot accounts.
+                                        The customer will see a <strong>Registry</strong> button in their portal for this app.
                                     </div>
                                 </div>
                             }
                         </div>
                     }
                 </div>
+            }
+        }
+
+        @* ── Registries tab ── *@
+        @if (instanceTab == "registries")
+        {
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div>
+                    <span class="text-muted small">@(registries?.Count ?? 0) remote registries</span>
+                    <div class="text-muted small">Add remote registries to use as proxy caches when creating projects.</div>
+                </div>
+                <button class="btn btn-sm btn-primary" @onclick="() => showCreateRegistry = !showCreateRegistry">
+                    <i class="bi bi-plus-circle me-1"></i>Add Registry
+                </button>
+            </div>
+
+            @if (showCreateRegistry)
+            {
+                <div class="card mb-3 border-primary-subtle">
+                    <div class="card-body">
+                        @if (registryError is not null)
+                        {
+                            <div class="alert alert-danger py-2 small">@registryError</div>
+                        }
+                        <div class="row g-2">
+                            <div class="col-md-4">
+                                <label class="form-label form-label-sm">Name</label>
+                                <input class="form-control form-control-sm" placeholder="docker-hub-proxy"
+                                       @bind="newRegistryName" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label form-label-sm">Registry type</label>
+                                <select class="form-select form-select-sm" @bind="newRegistryType"
+                                        @bind:after="OnRegistryTypeChanged">
+                                    @foreach ((string id, string label) in RegistryTypes)
+                                    {
+                                        <option value="@id">@label</option>
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label form-label-sm">
+                                    URL @(RegistryHasFixedUrl(newRegistryType) ? "(auto-filled)" : "")
+                                </label>
+                                <input class="form-control form-control-sm font-monospace"
+                                       placeholder="https://registry.example.com"
+                                       @bind="newRegistryUrl"
+                                       disabled="@RegistryHasFixedUrl(newRegistryType)" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label form-label-sm">Username / Access Key (optional)</label>
+                                <input class="form-control form-control-sm" placeholder="username"
+                                       @bind="newRegistryAccessKey" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label form-label-sm">Password / Secret (optional)</label>
+                                <input type="password" class="form-control form-control-sm"
+                                       @bind="newRegistryAccessSecret" />
+                            </div>
+                            <div class="col-md-4 d-flex align-items-end pb-1">
+                                <div class="form-check">
+                                    <input type="checkbox" class="form-check-input" id="regInsecure"
+                                           @bind="newRegistryInsecure" />
+                                    <label class="form-check-label small" for="regInsecure">Skip TLS verify</label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="mt-2 d-flex gap-2">
+                            <button class="btn btn-sm btn-primary" @onclick="CreateRegistry" disabled="@savingRegistry">
+                                @if (savingRegistry) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Add Registry
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => { showCreateRegistry = false; registryError = null; }">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @if (loadingRegistries)
+            {
+                <div class="spinner-border spinner-border-sm text-primary"></div>
+            }
+            else if (registryListError is not null)
+            {
+                <div class="alert alert-danger small">@registryListError</div>
+            }
+            else if (registries is not null)
+            {
+                @if (registries.Count == 0)
+                {
+                    <div class="alert alert-light border text-muted small">
+                        <i class="bi bi-diagram-3 me-2"></i>
+                        No remote registries yet. Add a registry to use it as a proxy cache (e.g. Docker Hub, Quay.io, GHCR).
+                    </div>
+                }
+                else
+                {
+                    <div class="list-group">
+                        @foreach (HarborRegistryInfo reg in registries)
+                        {
+                            bool isPinging = pingingRegistryId == reg.Id;
+                            <div class="list-group-item py-2">
+                                <div class="d-flex justify-content-between align-items-start">
+                                    <div>
+                                        <div class="d-flex align-items-center gap-2">
+                                            <i class="bi @RegistryTypeIcon(reg.Type) text-primary"></i>
+                                            <span class="fw-medium">@reg.Name</span>
+                                            <span class="badge bg-light text-secondary border small">@reg.Type</span>
+                                            @if (reg.Status == "healthy")
+                                            {
+                                                <span class="badge bg-success-subtle text-success border border-success-subtle small">Healthy</span>
+                                            }
+                                            else if (!string.IsNullOrEmpty(reg.Status))
+                                            {
+                                                <span class="badge bg-warning-subtle text-warning border border-warning-subtle small">@reg.Status</span>
+                                            }
+                                        </div>
+                                        @if (!string.IsNullOrEmpty(reg.Url))
+                                        {
+                                            <div class="text-muted small mt-1 font-monospace">@reg.Url</div>
+                                        }
+                                        @if (reg.Insecure)
+                                        {
+                                            <span class="badge bg-warning-subtle text-warning border border-warning-subtle small mt-1">TLS skip</span>
+                                        }
+                                        @if (pingResults.TryGetValue(reg.Id, out string? pingResult))
+                                        {
+                                            <div class="small mt-1 @(pingResult == "healthy" ? "text-success" : "text-danger")">
+                                                <i class="bi @(pingResult == "healthy" ? "bi-check-circle" : "bi-x-circle") me-1"></i>@pingResult
+                                            </div>
+                                        }
+                                    </div>
+                                    <div class="d-flex gap-1">
+                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => PingRegistry(reg.Id)"
+                                                disabled="@isPinging" title="Test connectivity">
+                                            @if (isPinging)
+                                            {
+                                                <span class="spinner-border spinner-border-sm"></span>
+                                            }
+                                            else
+                                            {
+                                                <i class="bi bi-wifi"></i>
+                                            }
+                                        </button>
+                                        @if (confirmDeleteRegistry == reg.Id)
+                                        {
+                                            <span class="text-danger small me-1 mt-1">Delete?</span>
+                                            <button class="btn btn-sm btn-danger" @onclick="() => DeleteRegistry(reg.Id)">Yes</button>
+                                            <button class="btn btn-sm btn-outline-secondary"
+                                                    @onclick="() => confirmDeleteRegistry = null">Cancel</button>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-outline-danger"
+                                                    @onclick="() => confirmDeleteRegistry = reg.Id">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        }
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+            }
+        }
+
+        @* ── Replication tab ── *@
+        @if (instanceTab == "replication")
+        {
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="text-muted small">@(replications?.Count ?? 0) replication policies</span>
+                <button class="btn btn-sm btn-primary" @onclick="() => showCreateReplication = !showCreateReplication">
+                    <i class="bi bi-plus-circle me-1"></i>New Policy
+                </button>
+            </div>
+
+            @if (showCreateReplication)
+            {
+                <div class="card mb-3 border-primary-subtle">
+                    <div class="card-body">
+                        @if (replicationError is not null)
+                        {
+                            <div class="alert alert-danger py-2 small">@replicationError</div>
+                        }
+                        <div class="row g-2">
+                            <div class="col-md-6">
+                                <label class="form-label form-label-sm">Policy name</label>
+                                <input class="form-control form-control-sm" placeholder="sync-from-dockerhub"
+                                       @bind="newReplicationName" />
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label form-label-sm">Description (optional)</label>
+                                <input class="form-control form-control-sm" @bind="newReplicationDescription" />
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label form-label-sm">
+                                    Source registry <small class="text-muted">(leave blank = this Harbor)</small>
+                                </label>
+                                <select class="form-select form-select-sm" @bind="newReplicationSrcRegistryIdStr">
+                                    <option value="">Local (this Harbor)</option>
+                                    @if (registries is not null)
+                                    {
+                                        @foreach (HarborRegistryInfo reg in registries)
+                                        {
+                                            <option value="@reg.Id">@reg.Name (@reg.Type)</option>
+                                        }
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label form-label-sm">
+                                    Destination registry <small class="text-muted">(leave blank = this Harbor)</small>
+                                </label>
+                                <select class="form-select form-select-sm" @bind="newReplicationDestRegistryIdStr">
+                                    <option value="">Local (this Harbor)</option>
+                                    @if (registries is not null)
+                                    {
+                                        @foreach (HarborRegistryInfo reg in registries)
+                                        {
+                                            <option value="@reg.Id">@reg.Name (@reg.Type)</option>
+                                        }
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label form-label-sm">
+                                    Name filter <small class="text-muted">(**=all)</small>
+                                </label>
+                                <input class="form-control form-control-sm font-monospace" placeholder="library/**"
+                                       @bind="newReplicationNameFilter" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label form-label-sm">Destination namespace (optional)</label>
+                                <input class="form-control form-control-sm font-monospace" placeholder="my-project"
+                                       @bind="newReplicationDestNamespace" />
+                            </div>
+                            <div class="col-md-4 d-flex align-items-end gap-3 pb-1">
+                                <div class="form-check">
+                                    <input type="checkbox" class="form-check-input" id="replOverride"
+                                           @bind="newReplicationOverride" />
+                                    <label class="form-check-label small" for="replOverride">Override existing</label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="mt-2 d-flex gap-2">
+                            <button class="btn btn-sm btn-primary" @onclick="CreateReplication"
+                                    disabled="@savingReplication">
+                                @if (savingReplication) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create Policy
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => { showCreateReplication = false; replicationError = null; }">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @if (loadingReplications)
+            {
+                <div class="spinner-border spinner-border-sm text-primary"></div>
+            }
+            else if (replicationListError is not null)
+            {
+                <div class="alert alert-danger small">@replicationListError</div>
+            }
+            else if (replications is not null)
+            {
+                @if (replications.Count == 0)
+                {
+                    <div class="alert alert-light border text-muted small">
+                        <i class="bi bi-arrow-left-right me-2"></i>
+                        No replication policies yet. Create one to synchronise images between registries.
+                    </div>
+                }
+                else
+                {
+                    <div class="list-group">
+                        @foreach (HarborReplicationInfo repl in replications)
+                        {
+                            bool isTriggering = triggeringReplicationId == repl.Id;
+                            <div class="list-group-item py-2">
+                                <div class="d-flex justify-content-between align-items-start">
+                                    <div>
+                                        <div class="d-flex align-items-center gap-2">
+                                            <i class="bi bi-arrow-left-right text-primary"></i>
+                                            <span class="fw-medium">@repl.Name</span>
+                                            @if (repl.Enabled)
+                                            {
+                                                <span class="badge bg-success-subtle text-success border border-success-subtle small">Enabled</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle small">Disabled</span>
+                                            }
+                                        </div>
+                                        <div class="text-muted small mt-1">
+                                            <span>
+                                                <strong>From:</strong> @(repl.SrcRegistryName ?? "Local")
+                                                <i class="bi bi-arrow-right mx-1"></i>
+                                                <strong>To:</strong> @(repl.DestRegistryName ?? "Local")
+                                            </span>
+                                            @if (!string.IsNullOrWhiteSpace(repl.NameFilter) && repl.NameFilter != "**")
+                                            {
+                                                <span class="ms-2">· Filter: <code>@repl.NameFilter</code></span>
+                                            }
+                                            @if (!string.IsNullOrWhiteSpace(repl.DestNamespace))
+                                            {
+                                                <span class="ms-2">· Dest namespace: <code>@repl.DestNamespace</code></span>
+                                            }
+                                        </div>
+                                        @if (triggerResults.TryGetValue(repl.Id, out string? triggerMsg))
+                                        {
+                                            <div class="small text-success mt-1"><i class="bi bi-check-circle me-1"></i>@triggerMsg</div>
+                                        }
+                                    </div>
+                                    <div class="d-flex gap-1">
+                                        <button class="btn btn-sm btn-outline-secondary"
+                                                @onclick="() => TriggerReplication(repl.Id)"
+                                                disabled="@isTriggering" title="Run now">
+                                            @if (isTriggering)
+                                            {
+                                                <span class="spinner-border spinner-border-sm"></span>
+                                            }
+                                            else
+                                            {
+                                                <i class="bi bi-play-fill"></i>
+                                            }
+                                        </button>
+                                        @if (confirmDeleteReplication == repl.Id)
+                                        {
+                                            <span class="text-danger small me-1 mt-1">Delete?</span>
+                                            <button class="btn btn-sm btn-danger" @onclick="() => DeleteReplication(repl.Id)">Yes</button>
+                                            <button class="btn btn-sm btn-outline-secondary"
+                                                    @onclick="() => confirmDeleteReplication = null">Cancel</button>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-outline-danger"
+                                                    @onclick="() => confirmDeleteReplication = repl.Id">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        }
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
             }
         }
 
@@ -572,8 +1118,10 @@ else if (selectedHarbor is not null)
                             <div>docker login @selectedHarbor.Config.RegistryUrl.TrimEnd('/')</div>
                             <div class="text-success mt-2 mb-1"># Pull an image</div>
                             <div>docker pull @selectedHarbor.Config.RegistryUrl.TrimEnd('/')/<span class="text-warning">project/image:tag</span></div>
-                            <div class="text-success mt-2 mb-1"># Add as Helm repo</div>
+                            <div class="text-success mt-2 mb-1"># Add as Helm OCI repo</div>
                             <div>helm repo add <span class="text-warning">my-harbor</span> oci://@selectedHarbor.Config.RegistryUrl.TrimEnd('/')/<span class="text-warning">project</span></div>
+                            <div class="text-success mt-2 mb-1"># Pull via proxy cache</div>
+                            <div>docker pull @selectedHarbor.Config.RegistryUrl.TrimEnd('/')/<span class="text-warning">dockerhub-proxy</span>/library/nginx:latest</div>
                         </div>
                     </div>
                 }
@@ -645,6 +1193,43 @@ else
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    private static readonly (string Id, string Label)[] InstanceTabs =
+    [
+        ("projects",    "Projects"),
+        ("registries",  "Registries"),
+        ("replication", "Replication"),
+        ("robots",      "Robot Accounts"),
+        ("info",        "System Info")
+    ];
+
+    private static readonly (string Id, string Label)[] RegistryTypes =
+    [
+        ("docker-hub",      "Docker Hub"),
+        ("quay",            "Quay.io"),
+        ("ghcr",            "GitHub Container Registry"),
+        ("gcr",             "Google Container Registry"),
+        ("docker-registry", "Docker Registry V2"),
+        ("harbor",          "Another Harbor"),
+        ("aws-ecr",         "Amazon ECR"),
+        ("gitlab",          "GitLab Registry")
+    ];
+
+    private static readonly Dictionary<string, string> RegistryDefaultUrls = new()
+    {
+        ["docker-hub"] = "https://hub.docker.com",
+        ["quay"]       = "https://quay.io",
+        ["ghcr"]       = "https://ghcr.io",
+        ["gcr"]        = "https://gcr.io"
+    };
+
+    private static readonly string[] WebhookEventTypes =
+    [
+        "PUSH_ARTIFACT", "PULL_ARTIFACT", "DELETE_ARTIFACT",
+        "CREATE_TAG", "DELETE_TAG",
+        "SCANNING_COMPLETED", "SCANNING_FAILED",
+        "REPLICATION"
+    ];
+
     private bool loading = true;
     private List<DetectedHarbor>? harborInstances;
     private DetectedHarbor? selectedHarbor;
@@ -658,11 +1243,14 @@ else
     private string newProjectName = "";
     private string newProjectDescription = "";
     private bool newProjectPublic;
+    private bool newProjectIsProxy;
+    private string newProjectProxyRegistryId = "";
     private string? projectError;
     private string? confirmDeleteProject;
 
     // Repositories (level 3)
     private HarborProjectInfo? selectedProject;
+    private string projectSubTab = "repos";
     private List<HarborRepositoryInfo>? repos;
     private bool loadingRepos;
     private string? expandedRepo;
@@ -691,6 +1279,55 @@ else
     private bool loadingInfo;
     private string? infoError;
 
+    // Registries
+    private List<HarborRegistryInfo>? registries;
+    private bool loadingRegistries;
+    private bool showCreateRegistry;
+    private bool savingRegistry;
+    private string newRegistryName = "";
+    private string newRegistryType = "docker-hub";
+    private string newRegistryUrl = "https://hub.docker.com";
+    private string newRegistryAccessKey = "";
+    private string newRegistryAccessSecret = "";
+    private bool newRegistryInsecure;
+    private string? registryError;
+    private string? registryListError;
+    private long? confirmDeleteRegistry;
+    private long? pingingRegistryId;
+    private Dictionary<long, string> pingResults = [];
+
+    // Replication
+    private List<HarborReplicationInfo>? replications;
+    private bool loadingReplications;
+    private bool showCreateReplication;
+    private bool savingReplication;
+    private string newReplicationName = "";
+    private string newReplicationDescription = "";
+    private string newReplicationSrcRegistryIdStr = "";
+    private string newReplicationDestRegistryIdStr = "";
+    private string newReplicationNameFilter = "**";
+    private string newReplicationDestNamespace = "";
+    private bool newReplicationOverride = true;
+    private string? replicationError;
+    private string? replicationListError;
+    private long? confirmDeleteReplication;
+    private long? triggeringReplicationId;
+    private Dictionary<long, string> triggerResults = [];
+
+    // Webhooks (project level)
+    private List<HarborWebhookInfo>? webhooks;
+    private bool loadingWebhooks;
+    private bool showCreateWebhook;
+    private bool savingWebhook;
+    private string newWebhookName = "";
+    private string newWebhookUrl = "";
+    private string newWebhookAuthHeader = "";
+    private bool newWebhookSkipCert;
+    private HashSet<string> newWebhookEvents = [];
+    private string? webhookError;
+    private string? webhookListError;
+    private long? confirmDeleteWebhook;
+
     // Portal linking
     private List<HarborProject>? trackedProjects;
     private List<Data.App>? allApps;
@@ -712,10 +1349,13 @@ else
         selectedProject = null;
         trackedProjects = null;
         portalLinkProjectName = null;
+        registries = null;
+        replications = null;
+        pingResults = [];
+        triggerResults = [];
 
         if (harbor.IsConfigured && harbor.Config is not null)
         {
-            // Load tracked projects and available apps in parallel.
             Task<List<HarborProject>> trackedTask = HarborService.GetTrackedProjectsAsync(TenantId, harbor.Config.Id);
             Task<List<Data.App>> appsTask = TenantService.GetAppsWithCustomersAsync(TenantId);
             await Task.WhenAll(trackedTask, appsTask);
@@ -733,9 +1373,13 @@ else
         projects = null;
         robots = null;
         systemInfo = null;
+        registries = null;
+        replications = null;
         trackedProjects = null;
         allApps = null;
         portalLinkProjectName = null;
+        pingResults = [];
+        triggerResults = [];
     }
 
     private void BackToProjects()
@@ -744,6 +1388,8 @@ else
         repos = null;
         artifacts = null;
         expandedRepo = null;
+        webhooks = null;
+        projectSubTab = "repos";
     }
 
     private async Task SwitchTab(string tab)
@@ -753,201 +1399,423 @@ else
         robotError = null;
         robotListError = null;
         infoError = null;
+        registryError = null;
+        registryListError = null;
+        replicationError = null;
+        replicationListError = null;
 
-        if (tab == "projects")
+        switch (tab)
         {
-            await LoadProjects();
+            case "projects":
+                await Task.WhenAll(LoadProjects(), EnsureRegistriesLoaded());
+                break;
+            case "registries":
+                await LoadRegistries();
+                break;
+            case "replication":
+                await Task.WhenAll(LoadReplications(), EnsureRegistriesLoaded());
+                break;
+            case "robots":
+                await LoadRobots();
+                break;
+            case "info":
+                await LoadInfo();
+                break;
         }
-        else if (tab == "robots")
-        {
-            await LoadRobots();
-        }
-        else if (tab == "info")
-        {
-            await LoadInfo();
-        }
+    }
+
+    private async Task SwitchProjectTab(string tab)
+    {
+        projectSubTab = tab;
+        if (tab == "webhooks" && webhooks is null)
+            await LoadWebhooks();
     }
 
     private async Task LoadProjects()
     {
         if (selectedHarbor?.Config is null) return;
-
         loadingProjects = true;
         projectError = null;
         StateHasChanged();
-
         try
         {
             projects = await HarborService.GetProjectsAsync(TenantId, selectedHarbor.Config);
         }
-        catch (Exception ex)
+        catch (Exception ex) { projectError = ex.Message; }
+        finally { loadingProjects = false; }
+    }
+
+    private async Task EnsureRegistriesLoaded()
+    {
+        if (registries is not null) return;
+        if (selectedHarbor?.Config is null) return;
+        try { registries = await HarborService.GetRegistriesAsync(TenantId, selectedHarbor.Config); }
+        catch { /* non-fatal; registries selector will just be empty */ }
+    }
+
+    private async Task LoadRegistries()
+    {
+        if (selectedHarbor?.Config is null) return;
+        loadingRegistries = true;
+        registryListError = null;
+        StateHasChanged();
+        try
         {
-            projectError = ex.Message;
+            registries = await HarborService.GetRegistriesAsync(TenantId, selectedHarbor.Config);
         }
-        finally
+        catch (Exception ex) { registryListError = ex.Message; }
+        finally { loadingRegistries = false; }
+    }
+
+    private async Task LoadReplications()
+    {
+        if (selectedHarbor?.Config is null) return;
+        loadingReplications = true;
+        replicationListError = null;
+        StateHasChanged();
+        try
         {
-            loadingProjects = false;
+            replications = await HarborService.GetReplicationsAsync(TenantId, selectedHarbor.Config);
         }
+        catch (Exception ex) { replicationListError = ex.Message; }
+        finally { loadingReplications = false; }
     }
 
     private async Task LoadRobots()
     {
         if (selectedHarbor?.Config is null) return;
-
         loadingRobots = true;
         robotListError = null;
         StateHasChanged();
-
         try
         {
             robots = await HarborService.GetRobotsAsync(TenantId, selectedHarbor.Config);
         }
-        catch (Exception ex)
-        {
-            robotListError = ex.Message;
-        }
-        finally
-        {
-            loadingRobots = false;
-        }
+        catch (Exception ex) { robotListError = ex.Message; }
+        finally { loadingRobots = false; }
     }
 
     private async Task LoadInfo()
     {
         if (selectedHarbor?.Config is null) return;
-
         loadingInfo = true;
         infoError = null;
         StateHasChanged();
-
         try
         {
             systemInfo = await HarborService.GetSystemInfoAsync(TenantId, selectedHarbor.Config);
         }
-        catch (Exception ex)
+        catch (Exception ex) { infoError = ex.Message; }
+        finally { loadingInfo = false; }
+    }
+
+    private async Task LoadWebhooks()
+    {
+        if (selectedHarbor?.Config is null || selectedProject is null) return;
+        loadingWebhooks = true;
+        webhookListError = null;
+        StateHasChanged();
+        try
         {
-            infoError = ex.Message;
+            webhooks = await HarborService.GetWebhooksAsync(TenantId, selectedHarbor.Config, selectedProject.Name);
         }
-        finally
-        {
-            loadingInfo = false;
-        }
+        catch (Exception ex) { webhookListError = ex.Message; }
+        finally { loadingWebhooks = false; }
     }
 
     private async Task OpenProject(HarborProjectInfo project)
     {
         if (selectedHarbor?.Config is null) return;
-
         selectedProject = project;
+        projectSubTab = "repos";
         repos = null;
         artifacts = null;
         expandedRepo = null;
         repoError = null;
+        webhooks = null;
         loadingRepos = true;
         StateHasChanged();
-
         try
         {
             repos = await HarborService.GetRepositoriesAsync(TenantId, selectedHarbor.Config, project.Name);
         }
-        catch (Exception ex)
-        {
-            repoError = ex.Message;
-        }
-        finally
-        {
-            loadingRepos = false;
-        }
+        catch (Exception ex) { repoError = ex.Message; }
+        finally { loadingRepos = false; }
     }
 
     private async Task ToggleRepo(HarborRepositoryInfo repo)
     {
         if (selectedHarbor?.Config is null || selectedProject is null) return;
-
-        if (expandedRepo == repo.Name)
-        {
-            expandedRepo = null;
-            artifacts = null;
-            return;
-        }
-
+        if (expandedRepo == repo.Name) { expandedRepo = null; artifacts = null; return; }
         expandedRepo = repo.Name;
         artifacts = null;
         loadingArtifacts = true;
         repoError = null;
         StateHasChanged();
-
         try
         {
             string shortName = repo.Name.Contains('/') ? repo.Name[(repo.Name.IndexOf('/') + 1)..] : repo.Name;
             artifacts = await HarborService.GetArtifactsAsync(
                 TenantId, selectedHarbor.Config, selectedProject.Name, shortName);
         }
-        catch (Exception ex)
-        {
-            repoError = ex.Message;
-        }
-        finally
-        {
-            loadingArtifacts = false;
-        }
+        catch (Exception ex) { repoError = ex.Message; }
+        finally { loadingArtifacts = false; }
     }
 
     private async Task CreateProject()
     {
         if (selectedHarbor?.Config is null || string.IsNullOrWhiteSpace(newProjectName)) return;
-
         savingProject = true;
         projectError = null;
-
         try
         {
+            long? registryId = null;
+            if (newProjectIsProxy && long.TryParse(newProjectProxyRegistryId, out long rid))
+                registryId = rid;
+
             await HarborService.CreateProjectAsync(
                 TenantId, selectedHarbor.Config,
                 newProjectName.Trim(), newProjectPublic,
-                string.IsNullOrWhiteSpace(newProjectDescription) ? null : newProjectDescription.Trim());
+                string.IsNullOrWhiteSpace(newProjectDescription) ? null : newProjectDescription.Trim(),
+                registryId);
 
             projects = await HarborService.GetProjectsAsync(TenantId, selectedHarbor.Config);
             showCreateProject = false;
             newProjectName = "";
             newProjectDescription = "";
             newProjectPublic = false;
+            newProjectIsProxy = false;
+            newProjectProxyRegistryId = "";
         }
-        catch (Exception ex)
-        {
-            projectError = ex.Message;
-        }
-        finally
-        {
-            savingProject = false;
-        }
+        catch (Exception ex) { projectError = ex.Message; }
+        finally { savingProject = false; }
     }
 
     private async Task DeleteProject(string projectName)
     {
         if (selectedHarbor?.Config is null) return;
-
         confirmDeleteProject = null;
         projectError = null;
-
         try
         {
             await HarborService.DeleteProjectAsync(TenantId, selectedHarbor.Config, projectName);
             projects = await HarborService.GetProjectsAsync(TenantId, selectedHarbor.Config);
         }
+        catch (Exception ex) { projectError = ex.Message; }
+    }
+
+    // ── Registries ────────────────────────────────────────────────────────────
+
+    private void OnRegistryTypeChanged()
+    {
+        if (RegistryDefaultUrls.TryGetValue(newRegistryType, out string? url))
+            newRegistryUrl = url;
+        else if (!RegistryHasFixedUrl(newRegistryType))
+            newRegistryUrl = "";
+    }
+
+    private static bool RegistryHasFixedUrl(string type) =>
+        RegistryDefaultUrls.ContainsKey(type);
+
+    private static string RegistryTypeIcon(string type) => type switch
+    {
+        "docker-hub"      => "bi-boxes",
+        "quay"            => "bi-shield-check",
+        "ghcr"            => "bi-github",
+        "gcr"             => "bi-google",
+        "harbor"          => "bi-archive",
+        "aws-ecr"         => "bi-cloud",
+        "gitlab"          => "bi-git",
+        _                 => "bi-box-seam"
+    };
+
+    private async Task CreateRegistry()
+    {
+        if (selectedHarbor?.Config is null || string.IsNullOrWhiteSpace(newRegistryName)) return;
+        savingRegistry = true;
+        registryError = null;
+        try
+        {
+            await HarborService.CreateRegistryAsync(
+                TenantId, selectedHarbor.Config,
+                newRegistryName.Trim(), newRegistryType,
+                string.IsNullOrWhiteSpace(newRegistryUrl) ? null : newRegistryUrl.Trim(),
+                string.IsNullOrWhiteSpace(newRegistryAccessKey) ? null : newRegistryAccessKey,
+                string.IsNullOrWhiteSpace(newRegistryAccessSecret) ? null : newRegistryAccessSecret,
+                newRegistryInsecure);
+
+            registries = await HarborService.GetRegistriesAsync(TenantId, selectedHarbor.Config);
+            showCreateRegistry = false;
+            newRegistryName = "";
+            newRegistryType = "docker-hub";
+            newRegistryUrl = "https://hub.docker.com";
+            newRegistryAccessKey = "";
+            newRegistryAccessSecret = "";
+            newRegistryInsecure = false;
+        }
+        catch (Exception ex) { registryError = ex.Message; }
+        finally { savingRegistry = false; }
+    }
+
+    private async Task DeleteRegistry(long registryId)
+    {
+        if (selectedHarbor?.Config is null) return;
+        confirmDeleteRegistry = null;
+        registryListError = null;
+        try
+        {
+            await HarborService.DeleteRegistryAsync(TenantId, selectedHarbor.Config, registryId);
+            registries = await HarborService.GetRegistriesAsync(TenantId, selectedHarbor.Config);
+            pingResults.Remove(registryId);
+        }
+        catch (Exception ex) { registryListError = ex.Message; }
+    }
+
+    private async Task PingRegistry(long registryId)
+    {
+        if (selectedHarbor?.Config is null) return;
+        pingingRegistryId = registryId;
+        pingResults.Remove(registryId);
+        StateHasChanged();
+        try
+        {
+            string result = await HarborService.PingRegistryAsync(TenantId, selectedHarbor.Config, registryId);
+            pingResults[registryId] = result;
+        }
         catch (Exception ex)
         {
-            projectError = ex.Message;
+            pingResults[registryId] = ex.Message;
         }
+        finally { pingingRegistryId = null; }
     }
+
+    // ── Replication ───────────────────────────────────────────────────────────
+
+    private async Task CreateReplication()
+    {
+        if (selectedHarbor?.Config is null || string.IsNullOrWhiteSpace(newReplicationName)) return;
+        savingReplication = true;
+        replicationError = null;
+        try
+        {
+            long? srcId = long.TryParse(newReplicationSrcRegistryIdStr, out long s) ? s : null;
+            long? destId = long.TryParse(newReplicationDestRegistryIdStr, out long d) ? d : null;
+
+            await HarborService.CreateReplicationAsync(
+                TenantId, selectedHarbor.Config,
+                newReplicationName.Trim(),
+                string.IsNullOrWhiteSpace(newReplicationDescription) ? null : newReplicationDescription.Trim(),
+                srcId, destId,
+                string.IsNullOrWhiteSpace(newReplicationDestNamespace) ? null : newReplicationDestNamespace.Trim(),
+                string.IsNullOrWhiteSpace(newReplicationNameFilter) ? "**" : newReplicationNameFilter.Trim(),
+                enabled: true, newReplicationOverride);
+
+            replications = await HarborService.GetReplicationsAsync(TenantId, selectedHarbor.Config);
+            showCreateReplication = false;
+            newReplicationName = "";
+            newReplicationDescription = "";
+            newReplicationSrcRegistryIdStr = "";
+            newReplicationDestRegistryIdStr = "";
+            newReplicationNameFilter = "**";
+            newReplicationDestNamespace = "";
+            newReplicationOverride = true;
+        }
+        catch (Exception ex) { replicationError = ex.Message; }
+        finally { savingReplication = false; }
+    }
+
+    private async Task DeleteReplication(long policyId)
+    {
+        if (selectedHarbor?.Config is null) return;
+        confirmDeleteReplication = null;
+        replicationListError = null;
+        try
+        {
+            await HarborService.DeleteReplicationAsync(TenantId, selectedHarbor.Config, policyId);
+            replications = await HarborService.GetReplicationsAsync(TenantId, selectedHarbor.Config);
+            triggerResults.Remove(policyId);
+        }
+        catch (Exception ex) { replicationListError = ex.Message; }
+    }
+
+    private async Task TriggerReplication(long policyId)
+    {
+        if (selectedHarbor?.Config is null) return;
+        triggeringReplicationId = policyId;
+        triggerResults.Remove(policyId);
+        StateHasChanged();
+        try
+        {
+            await HarborService.TriggerReplicationAsync(TenantId, selectedHarbor.Config, policyId);
+            triggerResults[policyId] = "Replication started";
+        }
+        catch (Exception ex) { replicationListError = ex.Message; }
+        finally { triggeringReplicationId = null; }
+    }
+
+    // ── Webhooks ──────────────────────────────────────────────────────────────
+
+    private void ToggleWebhookEvent(string evt, bool isChecked)
+    {
+        if (isChecked) newWebhookEvents.Add(evt);
+        else newWebhookEvents.Remove(evt);
+    }
+
+    private async Task CreateWebhook()
+    {
+        if (selectedHarbor?.Config is null || selectedProject is null) return;
+        if (string.IsNullOrWhiteSpace(newWebhookName) || string.IsNullOrWhiteSpace(newWebhookUrl)) return;
+
+        savingWebhook = true;
+        webhookError = null;
+        try
+        {
+            IEnumerable<string> events = newWebhookEvents.Count > 0
+                ? newWebhookEvents
+                : WebhookEventTypes;
+
+            await HarborService.CreateWebhookAsync(
+                TenantId, selectedHarbor.Config,
+                selectedProject.Name,
+                newWebhookName.Trim(),
+                newWebhookUrl.Trim(),
+                events,
+                enabled: true,
+                string.IsNullOrWhiteSpace(newWebhookAuthHeader) ? null : newWebhookAuthHeader.Trim(),
+                newWebhookSkipCert);
+
+            webhooks = await HarborService.GetWebhooksAsync(TenantId, selectedHarbor.Config, selectedProject.Name);
+            showCreateWebhook = false;
+            newWebhookName = "";
+            newWebhookUrl = "";
+            newWebhookAuthHeader = "";
+            newWebhookSkipCert = false;
+            newWebhookEvents = [];
+        }
+        catch (Exception ex) { webhookError = ex.Message; }
+        finally { savingWebhook = false; }
+    }
+
+    private async Task DeleteWebhook(long webhookId)
+    {
+        if (selectedHarbor?.Config is null || selectedProject is null) return;
+        confirmDeleteWebhook = null;
+        webhookListError = null;
+        try
+        {
+            await HarborService.DeleteWebhookAsync(TenantId, selectedHarbor.Config, selectedProject.Name, webhookId);
+            webhooks = await HarborService.GetWebhooksAsync(TenantId, selectedHarbor.Config, selectedProject.Name);
+        }
+        catch (Exception ex) { webhookListError = ex.Message; }
+    }
+
+    // ── Robots ────────────────────────────────────────────────────────────────
 
     private async Task CreateRobot()
     {
         if (selectedHarbor?.Config is null || string.IsNullOrWhiteSpace(newRobotName)) return;
-
         savingRobot = true;
         robotError = null;
-
         try
         {
             IEnumerable<string>? projectNames = newRobotScope == "project"
@@ -969,32 +1837,21 @@ else
             newRobotCanPull = true;
             newRobotCanPush = false;
         }
-        catch (Exception ex)
-        {
-            robotError = ex.Message;
-        }
-        finally
-        {
-            savingRobot = false;
-        }
+        catch (Exception ex) { robotError = ex.Message; }
+        finally { savingRobot = false; }
     }
 
     private async Task DeleteRobot(long robotId)
     {
         if (selectedHarbor?.Config is null) return;
-
         confirmDeleteRobot = null;
         robotListError = null;
-
         try
         {
             await HarborService.DeleteRobotAsync(TenantId, selectedHarbor.Config, robotId);
             robots = await HarborService.GetRobotsAsync(TenantId, selectedHarbor.Config);
         }
-        catch (Exception ex)
-        {
-            robotListError = ex.Message;
-        }
+        catch (Exception ex) { robotListError = ex.Message; }
     }
 
     // ── Portal linking ────────────────────────────────────────────────────────
@@ -1009,41 +1866,28 @@ else
     private async Task LinkProjectToApp(string projectName)
     {
         if (selectedHarbor?.Config is null || portalLinkAppId == Guid.Empty) return;
-
         savingPortalLink = true;
         portalLinkError = null;
-
         try
         {
             await HarborService.LinkProjectToAppAsync(
                 TenantId, selectedHarbor.Config.Id, projectName, portalLinkAppId);
-
             trackedProjects = await HarborService.GetTrackedProjectsAsync(TenantId, selectedHarbor.Config.Id);
             portalLinkProjectName = null;
         }
-        catch (Exception ex)
-        {
-            portalLinkError = ex.Message;
-        }
-        finally
-        {
-            savingPortalLink = false;
-        }
+        catch (Exception ex) { portalLinkError = ex.Message; }
+        finally { savingPortalLink = false; }
     }
 
     private async Task UnlinkProject(Guid projectId)
     {
         if (selectedHarbor?.Config is null) return;
-
         try
         {
             await HarborService.UnlinkProjectFromAppAsync(TenantId, projectId);
             trackedProjects = await HarborService.GetTrackedProjectsAsync(TenantId, selectedHarbor.Config.Id);
         }
-        catch (Exception ex)
-        {
-            projectError = ex.Message;
-        }
+        catch (Exception ex) { projectError = ex.Message; }
     }
 
     private static string FormatSize(long bytes)

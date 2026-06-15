@@ -447,6 +447,10 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("RewritePath")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("ServiceName")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -2349,6 +2353,16 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.Property<string>("SeverityFilter")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AcknowledgeFilter")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("FiringFilter")
                         .IsRequired()
                         .HasMaxLength(30)
                         .HasColumnType("TEXT");

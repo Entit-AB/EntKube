@@ -16,11 +16,12 @@
 </div>
 
 <ul class="nav nav-tabs mb-3 flex-wrap">
-    @foreach (string tab in new[] { "users", "idp", "groups", "orgs" })
+    @foreach (string tab in new[] { "users", "clients", "idp", "groups", "orgs" })
     {
         string label = tab switch
         {
             "users" => "Users",
+            "clients" => "Clients",
             "idp" => "Identity Providers",
             "groups" => "Groups",
             "orgs" => "Organizations",
@@ -113,10 +114,16 @@
                                     </div>
                                 }
                             </div>
-                            <button class="btn btn-sm btn-outline-danger border-0 ms-2"
-                                    @onclick="() => confirmDeleteUserId = user.Id">
-                                <i class="bi bi-trash"></i>
-                            </button>
+                            <div class="d-flex gap-1 ms-2">
+                                <button class="btn btn-sm btn-outline-secondary border-0"
+                                        @onclick="() => OpenPortalUserEdit(user)">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger border-0"
+                                        @onclick="() => confirmDeleteUserId = user.Id">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
                         </div>
                         @if (confirmDeleteUserId == user.Id)
                         {
@@ -126,6 +133,613 @@
                                            IsBusy="deletingItem"
                                            OnConfirm="() => DeleteUser(user.Id)"
                                            OnCancel="() => confirmDeleteUserId = null" />
+                        }
+                        @if (portalSelectedUserId == user.Id)
+                        {
+                            <div class="mt-2 p-3 bg-light border rounded">
+                                @if (portalUserEditError is not null)
+                                {
+                                    <div class="alert alert-danger py-2 small mb-2">@portalUserEditError</div>
+                                }
+                                <ul class="nav nav-tabs mb-3 nav-sm">
+                                    @foreach (string ut in new[] { "profile", "attributes", "password" })
+                                    {
+                                        <li class="nav-item">
+                                            <button class="nav-link py-1 px-2 small @(portalUserEditTab == ut ? "active" : "")"
+                                                    @onclick="() => portalUserEditTab = ut">
+                                                @(ut switch { "profile" => "Profile", "attributes" => "Attributes", "password" => "Password", _ => ut })
+                                            </button>
+                                        </li>
+                                    }
+                                    <li class="ms-auto">
+                                        <button class="btn btn-sm btn-link text-muted py-1"
+                                                @onclick="() => portalSelectedUserId = null">
+                                            <i class="bi bi-x-lg"></i>
+                                        </button>
+                                    </li>
+                                </ul>
+
+                                @if (portalUserEditTab == "profile")
+                                {
+                                    <div class="row g-2" style="max-width:520px">
+                                        <div class="col-md-6">
+                                            <label class="form-label small">First Name</label>
+                                            <input class="form-control form-control-sm" @bind="portalEditFirstName" />
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small">Last Name</label>
+                                            <input class="form-control form-control-sm" @bind="portalEditLastName" />
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label small">Email</label>
+                                            <input class="form-control form-control-sm" type="email" @bind="portalEditEmail" />
+                                        </div>
+                                        <div class="col-12 d-flex gap-3">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="peEnabled_@user.Id" @bind="portalEditEnabled" />
+                                                <label class="form-check-label small" for="peEnabled_@user.Id">Enabled</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="peVerified_@user.Id" @bind="portalEditEmailVerified" />
+                                                <label class="form-check-label small" for="peVerified_@user.Id">Email Verified</label>
+                                            </div>
+                                        </div>
+                                        <div class="col-12">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => SavePortalUserProfile(user.Id)"
+                                                    disabled="@portalSavingUser">
+                                                @if (portalSavingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Save
+                                            </button>
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (portalUserEditTab == "attributes")
+                                {
+                                    <div style="max-width:520px">
+                                        @foreach (KeyValuePair<string, string> attr in portalEditAttributes)
+                                        {
+                                            string attrKey = attr.Key;
+                                            <div class="d-flex gap-2 mb-2 align-items-center">
+                                                <input class="form-control form-control-sm font-monospace"
+                                                       style="max-width:180px" value="@attr.Key" disabled />
+                                                <input class="form-control form-control-sm"
+                                                       value="@attr.Value"
+                                                       @oninput="e => portalEditAttributes[attrKey] = e.Value?.ToString() ?? string.Empty" />
+                                                <button class="btn btn-sm btn-outline-danger border-0"
+                                                        @onclick="() => portalEditAttributes.Remove(attrKey)">
+                                                    <i class="bi bi-trash"></i>
+                                                </button>
+                                            </div>
+                                        }
+                                        <div class="d-flex gap-2 mb-3 align-items-center">
+                                            <input class="form-control form-control-sm font-monospace"
+                                                   style="max-width:180px" placeholder="attribute key"
+                                                   @bind="portalNewAttrKey" />
+                                            <input class="form-control form-control-sm" placeholder="value"
+                                                   @bind="portalNewAttrValue" />
+                                            <button class="btn btn-sm btn-outline-secondary"
+                                                    @onclick="AddPortalUserAttribute"
+                                                    disabled="@string.IsNullOrWhiteSpace(portalNewAttrKey)">
+                                                <i class="bi bi-plus-lg"></i>
+                                            </button>
+                                        </div>
+                                        <button class="btn btn-sm btn-primary" @onclick="() => SavePortalUserAttributes(user.Id)"
+                                                disabled="@portalSavingUser">
+                                            @if (portalSavingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            Save Attributes
+                                        </button>
+                                    </div>
+                                }
+
+                                @if (portalUserEditTab == "password")
+                                {
+                                    <div class="row g-2" style="max-width:360px">
+                                        <div class="col-12">
+                                            <label class="form-label small">New Password</label>
+                                            <input class="form-control form-control-sm" type="password" @bind="portalEditNewPassword" />
+                                        </div>
+                                        <div class="col-12">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="peTemp_@user.Id" @bind="portalEditPasswordTemporary" />
+                                                <label class="form-check-label small" for="peTemp_@user.Id">Temporary (user must change on next login)</label>
+                                            </div>
+                                        </div>
+                                        <div class="col-12">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => ResetPortalUserPassword(user.Id)"
+                                                    disabled="@(portalSavingUser || string.IsNullOrWhiteSpace(portalEditNewPassword))">
+                                                @if (portalSavingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Set Password
+                                            </button>
+                                        </div>
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        }
+    }
+    </LoadingPanel>
+}
+
+@* ── Clients ── *@
+@if (activeTab == "clients")
+{
+    <LoadingPanel Loading="@pLoadingClients">
+    @if (!pLoadingClients)
+    {
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <span class="text-muted small">@(pClients?.Count ?? 0) clients</span>
+            <button class="btn btn-sm btn-primary" @onclick="() => pShowAddClient = !pShowAddClient">
+                <i class="bi bi-plus-circle me-1"></i>Add Client
+            </button>
+        </div>
+
+        @if (pShowAddClient)
+        {
+            <div class="card mb-3 border-primary-subtle">
+                <div class="card-body">
+                    @if (pClientError is not null)
+                    {
+                        <div class="alert alert-danger py-2 small">@pClientError</div>
+                    }
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <label class="form-label small">Client ID</label>
+                            <input class="form-control form-control-sm font-monospace" placeholder="my-app" @bind="pNewClientId" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Name (optional)</label>
+                            <input class="form-control form-control-sm" @bind="pNewClientName" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Type</label>
+                            <select class="form-select form-select-sm" @bind="pNewClientPublic">
+                                <option value="false">Confidential (server-side app)</option>
+                                <option value="true">Public (SPA / mobile)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mt-2 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="AddPortalClient" disabled="@pSavingClient">
+                            @if (pSavingClient) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Create
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => pShowAddClient = false">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (pClients is not null)
+        {
+            <div class="list-group">
+                @foreach (KeycloakClientInfo client in pClients)
+                {
+                    bool isPClientExpanded = pSelectedClientUuid == client.Id;
+                    <div class="list-group-item py-2">
+                        <div class="d-flex justify-content-between align-items-center"
+                             style="cursor:pointer" @onclick="() => OpenPortalClientEdit(client)">
+                            <div>
+                                <i class="bi bi-app me-2 text-muted"></i>
+                                <strong>@client.ClientId</strong>
+                                @if (!string.IsNullOrWhiteSpace(client.Name) && client.Name != client.ClientId)
+                                {
+                                    <span class="text-muted ms-2 small">@client.Name</span>
+                                }
+                                @if (client.PublicClient)
+                                    { <span class="badge bg-info-subtle text-info ms-2 small">public</span> }
+                                else if (client.BearerOnly)
+                                    { <span class="badge bg-secondary-subtle text-secondary ms-2 small">bearer-only</span> }
+                                else
+                                    { <span class="badge bg-primary-subtle text-primary ms-2 small">confidential</span> }
+                                @if (!client.Enabled)
+                                {
+                                    <span class="badge bg-secondary-subtle text-secondary ms-1 small">disabled</span>
+                                }
+                            </div>
+                            <div class="d-flex gap-1" @onclick:stopPropagation>
+                                <button class="btn btn-sm btn-outline-danger border-0"
+                                        @onclick="() => DeletePortalClient(client.Id)">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        @if (isPClientExpanded && pClientDetail is not null)
+                        {
+                            <div class="mt-2 border-top pt-2">
+                                @if (pClientEditError is not null)
+                                {
+                                    <div class="alert alert-danger py-1 small mb-2">@pClientEditError</div>
+                                }
+                                <ul class="nav nav-tabs mb-3 nav-sm">
+                                    @foreach (string ct in new[] { "settings", "secret", "mappers" }
+                                        .Where(t => !(t == "secret" && pClientDetail!.PublicClient)))
+                                    {
+                                        <li class="nav-item">
+                                            <button class="nav-link py-1 px-2 small @(pClientEditTab == ct ? "active" : "")"
+                                                    @onclick="() => SwitchPortalClientTab(ct)">
+                                                @(ct switch { "settings" => "Settings", "secret" => "Credentials", "mappers" => "Mappers", _ => ct })
+                                            </button>
+                                        </li>
+                                    }
+                                </ul>
+
+                                @if (pClientEditTab == "settings")
+                                {
+                                    <div class="row g-2" style="max-width:560px">
+                                        <div class="col-md-6">
+                                            <label class="form-label small">Name</label>
+                                            <input class="form-control form-control-sm" @bind="pClientDetail.Name" />
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label small">Description</label>
+                                            <input class="form-control form-control-sm" @bind="pClientDetail.Description" />
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small">Base URL</label>
+                                            <input class="form-control form-control-sm font-monospace" @bind="pClientDetail.BaseUrl" />
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small">Root URL</label>
+                                            <input class="form-control form-control-sm font-monospace" @bind="pClientDetail.RootUrl" />
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label small">Valid Redirect URIs <span class="text-muted">(one per line)</span></label>
+                                            <textarea class="form-control form-control-sm font-monospace" rows="3"
+                                                      value="@string.Join("\n", pClientDetail.RedirectUris)"
+                                                      @oninput="e => pClientDetail.RedirectUris = (e.Value?.ToString() ?? string.Empty).Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList()"></textarea>
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label small">Web Origins <span class="text-muted">(one per line)</span></label>
+                                            <textarea class="form-control form-control-sm font-monospace" rows="2"
+                                                      value="@string.Join("\n", pClientDetail.WebOrigins)"
+                                                      @oninput="e => pClientDetail.WebOrigins = (e.Value?.ToString() ?? string.Empty).Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList()"></textarea>
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label small d-block mb-1">Flows</label>
+                                            <div class="d-flex flex-wrap gap-3">
+                                                <div class="form-check">
+                                                    <input class="form-check-input" type="checkbox" id="pStdFlow" @bind="pClientDetail.StandardFlowEnabled" />
+                                                    <label class="form-check-label small" for="pStdFlow">Standard (Authorization Code)</label>
+                                                </div>
+                                                <div class="form-check">
+                                                    <input class="form-check-input" type="checkbox" id="pDirectAccess" @bind="pClientDetail.DirectAccessGrantsEnabled" />
+                                                    <label class="form-check-label small" for="pDirectAccess">Direct Access Grants</label>
+                                                </div>
+                                                <div class="form-check">
+                                                    <input class="form-check-input" type="checkbox" id="pSvcAcct" @bind="pClientDetail.ServiceAccountsEnabled" />
+                                                    <label class="form-check-label small" for="pSvcAcct">Service Accounts</label>
+                                                </div>
+                                                <div class="form-check">
+                                                    <input class="form-check-input" type="checkbox" id="pEnabled" @bind="pClientDetail.Enabled" />
+                                                    <label class="form-check-label small" for="pEnabled">Enabled</label>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-12 mt-1">
+                                            <button class="btn btn-sm btn-primary" @onclick="SavePortalClientSettings"
+                                                    disabled="@pSavingClient">
+                                                @if (pSavingClient) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Save Settings
+                                            </button>
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (pClientEditTab == "secret")
+                                {
+                                    <div style="max-width:420px">
+                                        <label class="form-label small">Client Secret</label>
+                                        <div class="input-group input-group-sm mb-2">
+                                            <input class="form-control form-control-sm font-monospace"
+                                                   type="@(pShowClientSecret ? "text" : "password")"
+                                                   value="@pClientSecret" readonly />
+                                            <button class="btn btn-outline-secondary" @onclick="() => pShowClientSecret = !pShowClientSecret">
+                                                <i class="bi bi-@(pShowClientSecret ? "eye-slash" : "eye")"></i>
+                                            </button>
+                                        </div>
+                                        <button class="btn btn-sm btn-warning" @onclick="RegeneratePortalSecret"
+                                                disabled="@pSavingClient">
+                                            @if (pSavingClient) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            Regenerate Secret
+                                        </button>
+                                    </div>
+                                }
+
+                                @if (pClientEditTab == "mappers")
+                                {
+                                    @if (pLoadingMappers)
+                                    {
+                                        <div class="spinner-border spinner-border-sm text-primary"></div>
+                                    }
+                                    else
+                                    {
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <span class="text-muted small">@(pClientMappers?.Count ?? 0) mappers</span>
+                                            <button class="btn btn-sm btn-outline-primary border-0"
+                                                    @onclick="() => { pShowAddMapper = !pShowAddMapper; pEditingMapperId = null; ResetPortalMapper(); }">
+                                                <i class="bi bi-plus-lg me-1"></i>Add Mapper
+                                            </button>
+                                        </div>
+
+                                        @if (pShowAddMapper)
+                                        {
+                                            <div class="card mb-3 border-primary-subtle">
+                                                <div class="card-body p-2">
+                                                    @if (pMapperError is not null)
+                                                    {
+                                                        <div class="alert alert-danger py-1 small mb-2">@pMapperError</div>
+                                                    }
+                                                    <div class="row g-2">
+                                                        <div class="col-md-5">
+                                                            <label class="form-label small">Name</label>
+                                                            <input class="form-control form-control-sm" @bind="pNewMapperName" />
+                                                        </div>
+                                                        <div class="col-md-7">
+                                                            <label class="form-label small">Type</label>
+                                                            <select class="form-select form-select-sm" @bind="pNewMapperType" @bind:after="ResetPortalMapperConfig">
+                                                                <option value="oidc-usermodel-attribute-mapper">User Attribute → Claim</option>
+                                                                <option value="oidc-usermodel-property-mapper">User Property → Claim</option>
+                                                                <option value="oidc-group-membership-mapper">Group Membership → Claim</option>
+                                                                <option value="oidc-hardcoded-claim-mapper">Hardcoded Claim</option>
+                                                                <option value="oidc-audience-mapper">Audience</option>
+                                                                <option value="oidc-full-name-mapper">Full Name</option>
+                                                                <option value="oidc-role-name-mapper">Role Name</option>
+                                                            </select>
+                                                        </div>
+                                                        @if (pNewMapperType == "oidc-usermodel-attribute-mapper")
+                                                        {
+                                                            <div class="col-md-6">
+                                                                <label class="form-label small">User Attribute</label>
+                                                                <input class="form-control form-control-sm font-monospace" @bind="PMapperUserAttr" />
+                                                            </div>
+                                                            <div class="col-md-6">
+                                                                <label class="form-label small">Claim Name</label>
+                                                                <input class="form-control form-control-sm font-monospace" @bind="PMapperClaimName" />
+                                                            </div>
+                                                            <div class="col-md-4">
+                                                                <label class="form-label small">JSON Type</label>
+                                                                <select class="form-select form-select-sm" @bind="PMapperJsonType">
+                                                                    <option value="String">String</option>
+                                                                    <option value="long">long</option>
+                                                                    <option value="int">int</option>
+                                                                    <option value="boolean">boolean</option>
+                                                                    <option value="JSON">JSON</option>
+                                                                </select>
+                                                            </div>
+                                                        }
+                                                        @if (pNewMapperType == "oidc-usermodel-property-mapper")
+                                                        {
+                                                            <div class="col-md-6">
+                                                                <label class="form-label small">User Property</label>
+                                                                <select class="form-select form-select-sm" @bind="PMapperUserAttr">
+                                                                    <option value="username">username</option>
+                                                                    <option value="email">email</option>
+                                                                    <option value="firstName">firstName</option>
+                                                                    <option value="lastName">lastName</option>
+                                                                </select>
+                                                            </div>
+                                                            <div class="col-md-6">
+                                                                <label class="form-label small">Claim Name</label>
+                                                                <input class="form-control form-control-sm font-monospace" @bind="PMapperClaimName" />
+                                                            </div>
+                                                        }
+                                                        @if (pNewMapperType == "oidc-group-membership-mapper")
+                                                        {
+                                                            <div class="col-md-6">
+                                                                <label class="form-label small">Claim Name</label>
+                                                                <input class="form-control form-control-sm font-monospace" @bind="PMapperClaimName" />
+                                                            </div>
+                                                            <div class="col-md-6 d-flex align-items-end pb-1">
+                                                                <div class="form-check">
+                                                                    <input class="form-check-input" type="checkbox" id="pFullPath" @bind="PMapperFullPath" />
+                                                                    <label class="form-check-label small" for="pFullPath">Full group path</label>
+                                                                </div>
+                                                            </div>
+                                                        }
+                                                        @if (pNewMapperType == "oidc-hardcoded-claim-mapper")
+                                                        {
+                                                            <div class="col-md-6">
+                                                                <label class="form-label small">Claim Name</label>
+                                                                <input class="form-control form-control-sm font-monospace" @bind="PMapperClaimName" />
+                                                            </div>
+                                                            <div class="col-md-6">
+                                                                <label class="form-label small">Claim Value</label>
+                                                                <input class="form-control form-control-sm" @bind="PMapperClaimValue" />
+                                                            </div>
+                                                            <div class="col-md-4">
+                                                                <label class="form-label small">JSON Type</label>
+                                                                <select class="form-select form-select-sm" @bind="PMapperJsonType">
+                                                                    <option value="String">String</option>
+                                                                    <option value="boolean">boolean</option>
+                                                                    <option value="int">int</option>
+                                                                    <option value="JSON">JSON</option>
+                                                                </select>
+                                                            </div>
+                                                        }
+                                                        @if (pNewMapperType == "oidc-audience-mapper")
+                                                        {
+                                                            <div class="col-md-6">
+                                                                <label class="form-label small">Included Audience</label>
+                                                                <input class="form-control form-control-sm font-monospace" @bind="PMapperClientAudience" />
+                                                            </div>
+                                                        }
+                                                        @if (pNewMapperType != "oidc-audience-mapper" && pNewMapperType != "oidc-full-name-mapper" && pNewMapperType != "oidc-role-name-mapper")
+                                                        {
+                                                            <div class="col-12 d-flex flex-wrap gap-3">
+                                                                <div class="form-check">
+                                                                    <input class="form-check-input" type="checkbox" id="patc" @bind="PMapperAccessToken" />
+                                                                    <label class="form-check-label small" for="patc">Access token</label>
+                                                                </div>
+                                                                <div class="form-check">
+                                                                    <input class="form-check-input" type="checkbox" id="pitc" @bind="PMapperIdToken" />
+                                                                    <label class="form-check-label small" for="pitc">ID token</label>
+                                                                </div>
+                                                                <div class="form-check">
+                                                                    <input class="form-check-input" type="checkbox" id="puic" @bind="PMapperUserinfoToken" />
+                                                                    <label class="form-check-label small" for="puic">Userinfo</label>
+                                                                </div>
+                                                            </div>
+                                                        }
+                                                    </div>
+                                                    <div class="mt-2 d-flex gap-2">
+                                                        <button class="btn btn-sm btn-primary" @onclick="AddPortalMapper"
+                                                                disabled="@(pSavingMapper || string.IsNullOrWhiteSpace(pNewMapperName))">
+                                                            @if (pSavingMapper) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                            Add
+                                                        </button>
+                                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => pShowAddMapper = false">Cancel</button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        }
+
+                                        @if (pClientMappers is not null)
+                                        {
+                                            <div class="list-group">
+                                                @foreach (KeycloakProtocolMapper mapper in pClientMappers)
+                                                {
+                                                    bool isPEditingMapper = pEditingMapperId == mapper.Id;
+                                                    <div class="list-group-item py-2">
+                                                        <div class="d-flex justify-content-between align-items-center">
+                                                            <div>
+                                                                <strong>@mapper.Name</strong>
+                                                                <span class="badge bg-secondary-subtle text-secondary ms-2 small font-monospace">@mapper.ProtocolMapper</span>
+                                                                @if (mapper.Config.TryGetValue("claim.name", out string? claimName))
+                                                                {
+                                                                    <span class="text-muted small ms-2">→ <code>@claimName</code></span>
+                                                                }
+                                                            </div>
+                                                            <div class="d-flex gap-1">
+                                                                <button class="btn btn-sm btn-outline-secondary border-0"
+                                                                        @onclick="() => OpenPortalMapperEdit(mapper)">
+                                                                    <i class="bi bi-pencil"></i>
+                                                                </button>
+                                                                <button class="btn btn-sm btn-outline-danger border-0"
+                                                                        @onclick="() => DeletePortalMapper(mapper.Id)">
+                                                                    <i class="bi bi-trash"></i>
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                        @if (isPEditingMapper)
+                                                        {
+                                                            <div class="mt-2 pt-2 border-top">
+                                                                @if (pMapperError is not null)
+                                                                {
+                                                                    <div class="alert alert-danger py-1 small mb-2">@pMapperError</div>
+                                                                }
+                                                                <div class="row g-2" style="max-width:560px">
+                                                                    <div class="col-12">
+                                                                        <label class="form-label small">Mapper Name</label>
+                                                                        <input class="form-control form-control-sm" @bind="pNewMapperName" />
+                                                                    </div>
+                                                                    @if (pNewMapperType == "oidc-usermodel-attribute-mapper")
+                                                                    {
+                                                                        <div class="col-md-6">
+                                                                            <label class="form-label small">User Attribute</label>
+                                                                            <input class="form-control form-control-sm font-monospace" @bind="PMapperUserAttr" />
+                                                                        </div>
+                                                                        <div class="col-md-6">
+                                                                            <label class="form-label small">Claim Name</label>
+                                                                            <input class="form-control form-control-sm font-monospace" @bind="PMapperClaimName" />
+                                                                        </div>
+                                                                        <div class="col-md-4">
+                                                                            <label class="form-label small">JSON Type</label>
+                                                                            <select class="form-select form-select-sm" @bind="PMapperJsonType">
+                                                                                <option value="String">String</option>
+                                                                                <option value="long">long</option>
+                                                                                <option value="int">int</option>
+                                                                                <option value="boolean">boolean</option>
+                                                                                <option value="JSON">JSON</option>
+                                                                            </select>
+                                                                        </div>
+                                                                    }
+                                                                    @if (pNewMapperType == "oidc-usermodel-property-mapper")
+                                                                    {
+                                                                        <div class="col-md-6">
+                                                                            <label class="form-label small">User Property</label>
+                                                                            <select class="form-select form-select-sm" @bind="PMapperUserAttr">
+                                                                                <option value="username">username</option>
+                                                                                <option value="email">email</option>
+                                                                                <option value="firstName">firstName</option>
+                                                                                <option value="lastName">lastName</option>
+                                                                            </select>
+                                                                        </div>
+                                                                        <div class="col-md-6">
+                                                                            <label class="form-label small">Claim Name</label>
+                                                                            <input class="form-control form-control-sm font-monospace" @bind="PMapperClaimName" />
+                                                                        </div>
+                                                                    }
+                                                                    @if (pNewMapperType == "oidc-group-membership-mapper")
+                                                                    {
+                                                                        <div class="col-md-6">
+                                                                            <label class="form-label small">Claim Name</label>
+                                                                            <input class="form-control form-control-sm font-monospace" @bind="PMapperClaimName" />
+                                                                        </div>
+                                                                        <div class="col-md-6 d-flex align-items-end pb-1">
+                                                                            <div class="form-check">
+                                                                                <input class="form-check-input" type="checkbox" id="pFullPathE" @bind="PMapperFullPath" />
+                                                                                <label class="form-check-label small" for="pFullPathE">Full group path</label>
+                                                                            </div>
+                                                                        </div>
+                                                                    }
+                                                                    @if (pNewMapperType == "oidc-hardcoded-claim-mapper")
+                                                                    {
+                                                                        <div class="col-md-6">
+                                                                            <label class="form-label small">Claim Name</label>
+                                                                            <input class="form-control form-control-sm font-monospace" @bind="PMapperClaimName" />
+                                                                        </div>
+                                                                        <div class="col-md-6">
+                                                                            <label class="form-label small">Claim Value</label>
+                                                                            <input class="form-control form-control-sm" @bind="PMapperClaimValue" />
+                                                                        </div>
+                                                                    }
+                                                                    @if (pNewMapperType == "oidc-audience-mapper")
+                                                                    {
+                                                                        <div class="col-md-6">
+                                                                            <label class="form-label small">Included Audience</label>
+                                                                            <input class="form-control form-control-sm font-monospace" @bind="PMapperClientAudience" />
+                                                                        </div>
+                                                                    }
+                                                                    @if (pNewMapperType != "oidc-audience-mapper")
+                                                                    {
+                                                                        <div class="col-12 d-flex flex-wrap gap-3">
+                                                                            <div class="form-check">
+                                                                                <input class="form-check-input" type="checkbox" id="patcE" @bind="PMapperAccessToken" />
+                                                                                <label class="form-check-label small" for="patcE">Access token</label>
+                                                                            </div>
+                                                                            <div class="form-check">
+                                                                                <input class="form-check-input" type="checkbox" id="pitcE" @bind="PMapperIdToken" />
+                                                                                <label class="form-check-label small" for="pitcE">ID token</label>
+                                                                            </div>
+                                                                            <div class="form-check">
+                                                                                <input class="form-check-input" type="checkbox" id="puicE" @bind="PMapperUserinfoToken" />
+                                                                                <label class="form-check-label small" for="puicE">Userinfo</label>
+                                                                            </div>
+                                                                        </div>
+                                                                    }
+                                                                </div>
+                                                                <div class="mt-2 d-flex gap-2">
+                                                                    <button class="btn btn-sm btn-primary" @onclick="SavePortalMapperEdit"
+                                                                            disabled="@(pSavingMapper || string.IsNullOrWhiteSpace(pNewMapperName))">
+                                                                        @if (pSavingMapper) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                                        Save
+                                                                    </button>
+                                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => pEditingMapperId = null">Cancel</button>
+                                                                </div>
+                                                            </div>
+                                                        }
+                                                    </div>
+                                                }
+                                            </div>
+                                        }
+                                    }
+                                }
+                            </div>
                         }
                     </div>
                 }
@@ -357,8 +971,39 @@
     private List<KeycloakIdpInfo>? idps;
     private List<KeycloakGroupInfo>? groups;
     private List<KeycloakOrganizationInfo>? orgs;
+    private List<KeycloakClientInfo>? pClients;
 
-    private bool loadingUsers, loadingIdps, loadingGroups, loadingOrgs;
+    private bool loadingUsers, loadingIdps, loadingGroups, loadingOrgs, pLoadingClients;
+
+    // User edit
+    private string? portalSelectedUserId;
+    private string portalUserEditTab = "profile";
+    private string? portalUserEditError;
+    private bool portalSavingUser;
+    private string portalEditFirstName = "", portalEditLastName = "", portalEditEmail = "";
+    private bool portalEditEnabled, portalEditEmailVerified;
+    private string portalEditNewPassword = "";
+    private bool portalEditPasswordTemporary;
+    private Dictionary<string, string> portalEditAttributes = [];
+    private string portalNewAttrKey = "", portalNewAttrValue = "";
+
+    // Client state
+    private bool pShowAddClient, pSavingClient;
+    private string? pClientError;
+    private string pNewClientId = "", pNewClientName = "", pNewClientPublic = "false";
+    private string? pSelectedClientUuid;
+    private KeycloakClientDetail? pClientDetail;
+    private string pClientEditTab = "settings";
+    private string? pClientEditError;
+    private string? pClientSecret;
+    private bool pShowClientSecret;
+    private List<KeycloakProtocolMapper>? pClientMappers;
+    private bool pLoadingMappers;
+    private bool pShowAddMapper, pSavingMapper;
+    private string? pMapperError;
+    private string? pEditingMapperId;
+    private string pNewMapperName = "", pNewMapperType = "oidc-usermodel-attribute-mapper";
+    private Dictionary<string, string> pNewMapperConfig = [];
 
     // Delete confirm state
     private string? confirmDeleteUserId;
@@ -407,6 +1052,14 @@
                 try { users = await KeycloakService.GetUsersAsync(TenantId, Realm.Id); }
                 catch (Exception ex) { userError = ex.Message; }
                 finally { loadingUsers = false; }
+                break;
+
+            case "clients" when pClients is null:
+                pLoadingClients = true;
+                StateHasChanged();
+                try { pClients = await KeycloakService.GetClientsAsync(TenantId, Realm.Id); }
+                catch (Exception ex) { pClientError = ex.Message; }
+                finally { pLoadingClients = false; }
                 break;
 
             case "idp" when idps is null:
@@ -539,6 +1192,288 @@
         }
         catch (Exception ex) { orgError = ex.Message; }
         finally { savingOrg = false; }
+    }
+
+    // ── Portal mapper config helpers (avoids string literals inside HTML attribute quotes) ──
+
+    private string PMapperUserAttr      { get => pNewMapperConfig.GetValueOrDefault("user.attribute", ""); set => pNewMapperConfig["user.attribute"] = value; }
+    private string PMapperClaimName     { get => pNewMapperConfig.GetValueOrDefault("claim.name", ""); set => pNewMapperConfig["claim.name"] = value; }
+    private string PMapperClaimValue    { get => pNewMapperConfig.GetValueOrDefault("claim.value", ""); set => pNewMapperConfig["claim.value"] = value; }
+    private string PMapperJsonType      { get => pNewMapperConfig.GetValueOrDefault("jsonType.label", "String"); set => pNewMapperConfig["jsonType.label"] = value; }
+    private string PMapperClientAudience { get => pNewMapperConfig.GetValueOrDefault("included.client.audience", ""); set => pNewMapperConfig["included.client.audience"] = value; }
+    private bool   PMapperAccessToken   { get => pNewMapperConfig.GetValueOrDefault("access.token.claim", "true") != "false"; set => pNewMapperConfig["access.token.claim"] = value ? "true" : "false"; }
+    private bool   PMapperIdToken       { get => pNewMapperConfig.GetValueOrDefault("id.token.claim", "true") != "false"; set => pNewMapperConfig["id.token.claim"] = value ? "true" : "false"; }
+    private bool   PMapperUserinfoToken { get => pNewMapperConfig.GetValueOrDefault("userinfo.token.claim", "true") != "false"; set => pNewMapperConfig["userinfo.token.claim"] = value ? "true" : "false"; }
+    private bool   PMapperFullPath      { get => pNewMapperConfig.GetValueOrDefault("full.path", "false") != "false"; set => pNewMapperConfig["full.path"] = value ? "true" : "false"; }
+
+    private void ResetPortalMapper()
+    {
+        pNewMapperName = "";
+        pNewMapperType = "oidc-usermodel-attribute-mapper";
+        pNewMapperConfig = [];
+        pNewMapperConfig["access.token.claim"] = "true";
+        pNewMapperConfig["id.token.claim"] = "true";
+        pNewMapperConfig["userinfo.token.claim"] = "true";
+        pNewMapperConfig["jsonType.label"] = "String";
+    }
+
+    private void ResetPortalMapperConfig()
+    {
+        pNewMapperConfig = [];
+        pNewMapperConfig["access.token.claim"] = "true";
+        pNewMapperConfig["id.token.claim"] = "true";
+        pNewMapperConfig["userinfo.token.claim"] = "true";
+        if (pNewMapperType == "oidc-usermodel-attribute-mapper" || pNewMapperType == "oidc-hardcoded-claim-mapper")
+            pNewMapperConfig["jsonType.label"] = "String";
+        else if (pNewMapperType == "oidc-group-membership-mapper")
+        {
+            pNewMapperConfig["claim.name"] = "groups";
+            pNewMapperConfig["full.path"] = "false";
+        }
+    }
+
+    // ── Portal User Edit ─────────────────────────────────────────────────────
+
+    private void OpenPortalUserEdit(KeycloakUserInfo user)
+    {
+        if (portalSelectedUserId == user.Id) { portalSelectedUserId = null; return; }
+        portalSelectedUserId = user.Id;
+        portalUserEditTab = "profile";
+        portalUserEditError = null;
+        portalEditFirstName = user.FirstName ?? "";
+        portalEditLastName = user.LastName ?? "";
+        portalEditEmail = user.Email ?? "";
+        portalEditEnabled = user.Enabled;
+        portalEditEmailVerified = user.EmailVerified;
+        portalEditNewPassword = "";
+        portalEditPasswordTemporary = false;
+        portalEditAttributes = user.Attributes.ToDictionary(kv => kv.Key, kv => string.Join(", ", kv.Value));
+        portalNewAttrKey = "";
+        portalNewAttrValue = "";
+    }
+
+    private async Task SavePortalUserProfile(string userId)
+    {
+        portalSavingUser = true;
+        portalUserEditError = null;
+        try
+        {
+            Dictionary<string, List<string>> attrs = portalEditAttributes
+                .Where(kv => !string.IsNullOrWhiteSpace(kv.Key))
+                .ToDictionary(kv => kv.Key, kv => new List<string> { kv.Value });
+            await KeycloakService.UpdateUserAsync(TenantId, Realm.Id, userId,
+                portalEditFirstName, portalEditLastName, portalEditEmail,
+                portalEditEnabled, portalEditEmailVerified, attrs);
+            users = await KeycloakService.GetUsersAsync(TenantId, Realm.Id);
+        }
+        catch (Exception ex) { portalUserEditError = ex.Message; }
+        finally { portalSavingUser = false; }
+    }
+
+    private async Task SavePortalUserAttributes(string userId)
+    {
+        portalSavingUser = true;
+        portalUserEditError = null;
+        try
+        {
+            Dictionary<string, List<string>> attrs = portalEditAttributes
+                .Where(kv => !string.IsNullOrWhiteSpace(kv.Key))
+                .ToDictionary(kv => kv.Key, kv => new List<string> { kv.Value });
+            await KeycloakService.UpdateUserAsync(TenantId, Realm.Id, userId,
+                portalEditFirstName, portalEditLastName, portalEditEmail,
+                portalEditEnabled, portalEditEmailVerified, attrs);
+            users = await KeycloakService.GetUsersAsync(TenantId, Realm.Id);
+        }
+        catch (Exception ex) { portalUserEditError = ex.Message; }
+        finally { portalSavingUser = false; }
+    }
+
+    private async Task ResetPortalUserPassword(string userId)
+    {
+        if (string.IsNullOrWhiteSpace(portalEditNewPassword)) return;
+        portalSavingUser = true;
+        portalUserEditError = null;
+        try
+        {
+            await KeycloakService.ResetUserPasswordAsync(TenantId, Realm.Id, userId,
+                portalEditNewPassword, portalEditPasswordTemporary);
+            portalEditNewPassword = "";
+        }
+        catch (Exception ex) { portalUserEditError = ex.Message; }
+        finally { portalSavingUser = false; }
+    }
+
+    private void AddPortalUserAttribute()
+    {
+        if (string.IsNullOrWhiteSpace(portalNewAttrKey)) return;
+        portalEditAttributes[portalNewAttrKey.Trim()] = portalNewAttrValue;
+        portalNewAttrKey = "";
+        portalNewAttrValue = "";
+    }
+
+    // ── Portal Clients ────────────────────────────────────────────────────────
+
+    private async Task AddPortalClient()
+    {
+        if (string.IsNullOrWhiteSpace(pNewClientId)) return;
+        pSavingClient = true;
+        pClientError = null;
+        try
+        {
+            await KeycloakService.CreateClientAsync(TenantId, Realm.Id, pNewClientId,
+                pNewClientPublic == "true",
+                string.IsNullOrWhiteSpace(pNewClientName) ? null : pNewClientName);
+            pClients = await KeycloakService.GetClientsAsync(TenantId, Realm.Id);
+            pShowAddClient = false;
+            pNewClientId = pNewClientName = "";
+        }
+        catch (Exception ex) { pClientError = ex.Message; }
+        finally { pSavingClient = false; }
+    }
+
+    private async Task OpenPortalClientEdit(KeycloakClientInfo client)
+    {
+        if (pSelectedClientUuid == client.Id) { pSelectedClientUuid = null; pClientDetail = null; pClientMappers = null; return; }
+        pSelectedClientUuid = client.Id;
+        pClientEditTab = "settings";
+        pClientEditError = null;
+        pClientDetail = null;
+        pClientMappers = null;
+        pClientSecret = null;
+        pShowClientSecret = false;
+        try { pClientDetail = await KeycloakService.GetClientAsync(TenantId, Realm.Id, client.Id); }
+        catch (Exception ex) { pClientEditError = ex.Message; }
+    }
+
+    private async Task SwitchPortalClientTab(string tab)
+    {
+        pClientEditTab = tab;
+        pClientEditError = null;
+        if (tab == "secret" && pClientSecret is null && pSelectedClientUuid is not null)
+        {
+            try { pClientSecret = await KeycloakService.GetClientSecretAsync(TenantId, Realm.Id, pSelectedClientUuid); }
+            catch (Exception ex) { pClientEditError = ex.Message; }
+        }
+        else if (tab == "mappers" && pClientMappers is null && pSelectedClientUuid is not null)
+        {
+            pLoadingMappers = true;
+            StateHasChanged();
+            try
+            {
+                pClientMappers = await KeycloakService.GetClientMappersAsync(TenantId, Realm.Id, pSelectedClientUuid);
+                ResetPortalMapper();
+            }
+            catch (Exception ex) { pClientEditError = ex.Message; }
+            finally { pLoadingMappers = false; }
+        }
+    }
+
+    private async Task SavePortalClientSettings()
+    {
+        if (pClientDetail is null) return;
+        pSavingClient = true;
+        pClientEditError = null;
+        try
+        {
+            await KeycloakService.UpdateClientAsync(TenantId, Realm.Id, pClientDetail);
+            pClients = await KeycloakService.GetClientsAsync(TenantId, Realm.Id);
+        }
+        catch (Exception ex) { pClientEditError = ex.Message; }
+        finally { pSavingClient = false; }
+    }
+
+    private async Task DeletePortalClient(string clientUuid)
+    {
+        pClientError = null;
+        try
+        {
+            await KeycloakService.DeleteClientAsync(TenantId, Realm.Id, clientUuid);
+            if (pSelectedClientUuid == clientUuid) { pSelectedClientUuid = null; pClientDetail = null; }
+            pClients = await KeycloakService.GetClientsAsync(TenantId, Realm.Id);
+        }
+        catch (Exception ex) { pClientError = ex.Message; }
+    }
+
+    private async Task RegeneratePortalSecret()
+    {
+        if (pSelectedClientUuid is null) return;
+        pSavingClient = true;
+        pClientEditError = null;
+        try
+        {
+            pClientSecret = await KeycloakService.RegenerateClientSecretAsync(TenantId, Realm.Id, pSelectedClientUuid);
+            pShowClientSecret = true;
+        }
+        catch (Exception ex) { pClientEditError = ex.Message; }
+        finally { pSavingClient = false; }
+    }
+
+    private async Task AddPortalMapper()
+    {
+        if (pSelectedClientUuid is null || string.IsNullOrWhiteSpace(pNewMapperName)) return;
+        pSavingMapper = true;
+        pMapperError = null;
+        pEditingMapperId = null;
+        try
+        {
+            KeycloakProtocolMapper mapper = new()
+            {
+                Name = pNewMapperName,
+                ProtocolMapper = pNewMapperType,
+                Config = new Dictionary<string, string>(pNewMapperConfig)
+            };
+            await KeycloakService.CreateClientMapperAsync(TenantId, Realm.Id, pSelectedClientUuid, mapper);
+            pClientMappers = await KeycloakService.GetClientMappersAsync(TenantId, Realm.Id, pSelectedClientUuid);
+            pShowAddMapper = false;
+            ResetPortalMapper();
+        }
+        catch (Exception ex) { pMapperError = ex.Message; }
+        finally { pSavingMapper = false; }
+    }
+
+    private void OpenPortalMapperEdit(KeycloakProtocolMapper mapper)
+    {
+        if (pEditingMapperId == mapper.Id) { pEditingMapperId = null; return; }
+        pEditingMapperId = mapper.Id;
+        pShowAddMapper = false;
+        pNewMapperName = mapper.Name;
+        pNewMapperType = mapper.ProtocolMapper;
+        pNewMapperConfig = new Dictionary<string, string>(mapper.Config);
+        pMapperError = null;
+    }
+
+    private async Task SavePortalMapperEdit()
+    {
+        if (pSelectedClientUuid is null || pEditingMapperId is null) return;
+        pSavingMapper = true;
+        pMapperError = null;
+        try
+        {
+            KeycloakProtocolMapper updated = new()
+            {
+                Id = pEditingMapperId,
+                Name = pNewMapperName,
+                ProtocolMapper = pNewMapperType,
+                Config = new Dictionary<string, string>(pNewMapperConfig)
+            };
+            await KeycloakService.UpdateClientMapperAsync(TenantId, Realm.Id, pSelectedClientUuid, updated);
+            pClientMappers = await KeycloakService.GetClientMappersAsync(TenantId, Realm.Id, pSelectedClientUuid);
+            pEditingMapperId = null;
+            ResetPortalMapper();
+        }
+        catch (Exception ex) { pMapperError = ex.Message; }
+        finally { pSavingMapper = false; }
+    }
+
+    private async Task DeletePortalMapper(string mapperId)
+    {
+        if (pSelectedClientUuid is null) return;
+        try
+        {
+            await KeycloakService.DeleteClientMapperAsync(TenantId, Realm.Id, pSelectedClientUuid, mapperId);
+            pClientMappers = await KeycloakService.GetClientMappersAsync(TenantId, Realm.Id, pSelectedClientUuid);
+        }
+        catch (Exception ex) { pClientEditError = ex.Message; }
     }
 
 }

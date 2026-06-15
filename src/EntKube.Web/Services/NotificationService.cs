@@ -1,8 +1,9 @@
-using System.Net;
-using System.Net.Mail;
 using System.Text;
 using System.Text.Json;
+using MailKit.Net.Smtp;
+using MailKit.Security;
 using Microsoft.EntityFrameworkCore;
+using MimeKit;
 using EntKube.Web.Data;
 
 namespace EntKube.Web.Services;
@@ -21,6 +22,8 @@ public class NotificationService(
     {
         if (!channel.IsEnabled) return;
         if (!MeetsSeverityFilter(incident.Severity, channel.SeverityFilter)) return;
+        if (!MeetsFiringFilter(isFiring, channel.FiringFilter)) return;
+        if (!MeetsAcknowledgeFilter(incident.Status, channel.AcknowledgeFilter)) return;
 
         bool success = false;
         string? error = null;
@@ -358,22 +361,27 @@ public class NotificationService(
 
         string state = isFiring ? "FIRING" : "RESOLVED";
         string subject = $"[EntKube] [{state}] {incident.AlertName} ({incident.Severity})";
-        string body = $"Alert: {incident.AlertName}\n" +
-                      $"Status: {state}\n" +
-                      $"Severity: {incident.Severity}\n" +
-                      $"Cluster: {incident.Cluster?.Name ?? incident.ClusterId.ToString()}\n" +
-                      $"Started: {incident.StartsAt:u}\n" +
-                      $"Summary: {incident.Summary}\n" +
-                      $"Description: {incident.Description}";
+        string bodyText = $"Alert: {incident.AlertName}\n" +
+                          $"Status: {state}\n" +
+                          $"Severity: {incident.Severity}\n" +
+                          $"Cluster: {incident.Cluster?.Name ?? incident.ClusterId.ToString()}\n" +
+                          $"Started: {incident.StartsAt:u}\n" +
+                          $"Summary: {incident.Summary}\n" +
+                          $"Description: {incident.Description}";
 
-        using SmtpClient smtp = new(smtpHost, smtpPort);
-        smtp.EnableSsl = enableSsl;
-        smtp.Timeout = 15000;
+        MimeMessage mail = new();
+        mail.From.Add(MailboxAddress.Parse(from));
+        mail.To.Add(MailboxAddress.Parse(to));
+        mail.Subject = subject;
+        mail.Body = new TextPart("plain") { Text = bodyText };
+
+        using SmtpClient smtp = new();
+        SecureSocketOptions tls = enableSsl ? SecureSocketOptions.Auto : SecureSocketOptions.None;
+        await smtp.ConnectAsync(smtpHost, smtpPort, tls);
         if (!string.IsNullOrEmpty(smtpUser))
-            smtp.Credentials = new NetworkCredential(smtpUser, smtpPass);
-
-        using MailMessage mail = new(from, to, subject, body);
-        await smtp.SendMailAsync(mail);
+            await smtp.AuthenticateAsync(smtpUser, smtpPass ?? "");
+        await smtp.SendAsync(mail);
+        await smtp.DisconnectAsync(true);
         return true;
     }
 
@@ -413,8 +421,22 @@ public class NotificationService(
 
     private static bool MeetsSeverityFilter(string severity, AlertSeverityFilter filter) => filter switch
     {
-        AlertSeverityFilter.CriticalOnly   => severity == "critical",
+        AlertSeverityFilter.CriticalOnly    => severity == "critical",
         AlertSeverityFilter.WarningAndAbove => severity is "critical" or "warning",
+        _ => true
+    };
+
+    private static bool MeetsFiringFilter(bool isFiring, AlertFiringFilter filter) => filter switch
+    {
+        AlertFiringFilter.FiringOnly   => isFiring,
+        AlertFiringFilter.ResolvedOnly => !isFiring,
+        _ => true
+    };
+
+    private static bool MeetsAcknowledgeFilter(IncidentStatus status, AlertAcknowledgeFilter filter) => filter switch
+    {
+        AlertAcknowledgeFilter.UnacknowledgedOnly => status != IncidentStatus.Acknowledged,
+        AlertAcknowledgeFilter.AcknowledgedOnly   => status == IncidentStatus.Acknowledged,
         _ => true
     };
 }

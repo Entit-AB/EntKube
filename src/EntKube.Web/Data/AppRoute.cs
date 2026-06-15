@@ -62,6 +62,13 @@ public class AppDeploymentRoute
     /// <summary>The port on the service to route traffic to.</summary>
     public int ServicePort { get; set; } = 80;
 
+    /// <summary>
+    /// When set, rewrites the matched path prefix to this value before forwarding to the backend.
+    /// Use "/" to strip the prefix entirely (e.g. /int/company-data/foo → /foo).
+    /// Null means the full path is forwarded as-is.
+    /// </summary>
+    public string? RewritePath { get; set; }
+
     /// <summary>Gateway resource name resolved from the cluster's installed ingress controller.</summary>
     public string? GatewayName { get; set; }
 

@@ -900,6 +900,9 @@ public class KubernetesOperationsService(
 
         AppDeploymentRoute? dr = await db.AppDeploymentRoutes
             .Include(r => r.AppRoute)
+                .ThenInclude(ar => ar.DeploymentRoutes)
+                    .ThenInclude(sibDr => sibDr.AppDeployment)
+                        .ThenInclude(d => d.Cluster)
             .Include(r => r.AppDeployment)
                 .ThenInclude(d => d.Cluster)
             .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct);
@@ -911,18 +914,102 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Failure(
                 "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
 
-        string yaml = AppRouteService.GenerateManifestYaml(dr);
-        KubernetesOperationResult<string> result = await ApplyRawYamlAsync(dr.AppDeployment.Cluster.Kubeconfig, yaml, ct);
+        Guid clusterId = dr.AppDeployment.ClusterId;
+        string kubeconfig = dr.AppDeployment.Cluster.Kubeconfig;
+
+        // Apply the Gateway first so the HTTPS listener + cert exist before the HTTPRoute attaches.
+        KubernetesOperationResult<string> gatewayResult = await ApplyGatewayForClusterAsync(clusterId, kubeconfig, db, ct);
+        if (!gatewayResult.IsSuccess)
+            return gatewayResult;
+
+        // Query ALL enabled routes for this hostname on this cluster, across every AppRoute that
+        // shares the hostname. Navigation-property siblings only covers routes in the same AppRoute
+        // record; routes from a different app linking the same hostname would be missed and
+        // overwritten. The HTTPRoute name is hostname-derived so all must live in one resource.
+        string hostname = dr.AppRoute.Hostname;
+        List<AppDeploymentRoute> enabledRoutes = await db.AppDeploymentRoutes
+            .Include(r => r.AppRoute)
+            .Include(r => r.AppDeployment)
+                .ThenInclude(d => d.Cluster)
+            .Where(r => r.AppRoute.Hostname == hostname
+                     && r.AppDeployment.ClusterId == clusterId
+                     && r.IsEnabled)
+            .OrderByDescending(r => r.PathPrefix.Length)
+            .ThenBy(r => r.PathPrefix)
+            .ToListAsync(ct);
+
+        // For Istio clusters: apply a PERMISSIVE PeerAuthentication in every backend namespace.
+        // Without it, Istio's ingress gateway uses mTLS when connecting to backend pods. If those
+        // pods have no Istio sidecar injected, the TLS handshake fails → "remote connection failure".
+        // PERMISSIVE allows both mTLS (sidecar present) and plaintext (no sidecar) so both work.
+        // Apply to ALL namespaces involved — not just the primary — so cross-namespace backends work too.
+        List<ClusterComponent> clusterComponents = await db.ClusterComponents
+            .Where(c => c.ClusterId == clusterId)
+            .ToListAsync(ct);
+        string gatewayClass = ExternalRouteService.ResolveGatewayClass(clusterComponents);
+        (_, string gwNamespace) = ExternalRouteService.ResolveGateway(clusterComponents);
+        if (gatewayClass == "istio")
+        {
+            IEnumerable<string> backendNamespaces = enabledRoutes
+                .Select(r => r.AppDeployment?.Namespace)
+                .Where(n => n != null)
+                .Distinct()!;
+            foreach (string backendNs in backendNamespaces)
+            {
+                string peerAuthYaml =
+                    $"apiVersion: security.istio.io/v1beta1\n" +
+                    $"kind: PeerAuthentication\n" +
+                    $"metadata:\n" +
+                    $"  name: entkube-permissive\n" +
+                    $"  namespace: {backendNs}\n" +
+                    $"spec:\n" +
+                    $"  mtls:\n" +
+                    $"    mode: PERMISSIVE\n";
+                // Ignore errors — cluster may already have PERMISSIVE policy or not need one.
+                await ApplyRawYamlAsync(kubeconfig, peerAuthYaml, ct);
+            }
+
+            // DestinationRule is placed in the gateway's namespace (istio-system / root config
+            // namespace) so the ingress gateway pod picks it up. A DestinationRule in a
+            // non-root namespace is only guaranteed to affect traffic originating from that
+            // namespace, not from gateway pods in istio-system. The FQDN host uniquely
+            // identifies the target service regardless of where the rule is stored.
+            foreach (AppDeploymentRoute enabledRoute in enabledRoutes)
+            {
+                string svc = enabledRoute.ServiceName;
+                string svcNs = enabledRoute.AppDeployment?.Namespace ?? dr.AppDeployment.Namespace;
+                string destinationRuleYaml =
+                    $"apiVersion: networking.istio.io/v1beta1\n" +
+                    $"kind: DestinationRule\n" +
+                    $"metadata:\n" +
+                    $"  name: entkube-disable-mtls-{svc}\n" +
+                    $"  namespace: {gwNamespace}\n" +
+                    $"spec:\n" +
+                    $"  host: {svc}.{svcNs}.svc.cluster.local\n" +
+                    $"  trafficPolicy:\n" +
+                    $"    tls:\n" +
+                    $"      mode: DISABLE\n";
+                await ApplyRawYamlAsync(kubeconfig, destinationRuleYaml, ct);
+            }
+        }
+
+        // GenerateManifestYaml includes the HTTPRoute + Certificate + ReferenceGrants for any
+        // cross-namespace backendRefs (required by Gateway API when services are in other namespaces).
+        string yaml = AppRouteService.GenerateManifestYaml(dr.AppRoute, enabledRoutes);
+        KubernetesOperationResult<string> result = await ApplyRawYamlAsync(kubeconfig, yaml, ct);
 
         if (result.IsSuccess)
         {
+            // Stamp all sibling routes as applied — they're all part of the same HTTPRoute resource.
             using ApplicationDbContext db2 = dbFactory.CreateDbContext();
-            AppDeploymentRoute? toStamp = await db2.AppDeploymentRoutes.FindAsync([deploymentRouteId], ct);
-            if (toStamp is not null)
-            {
-                toStamp.ClusterAppliedAt = DateTime.UtcNow;
-                await db2.SaveChangesAsync(ct);
-            }
+            List<Guid> siblingIds = enabledRoutes.Select(r => r.Id).ToList();
+            List<AppDeploymentRoute> toStamp = await db2.AppDeploymentRoutes
+                .Where(r => siblingIds.Contains(r.Id))
+                .ToListAsync(ct);
+            DateTime now = DateTime.UtcNow;
+            foreach (AppDeploymentRoute s in toStamp)
+                s.ClusterAppliedAt = now;
+            await db2.SaveChangesAsync(ct);
         }
 
         return result;
@@ -940,6 +1027,9 @@ public class KubernetesOperationsService(
 
         AppDeploymentRoute? dr = await db.AppDeploymentRoutes
             .Include(r => r.AppRoute)
+                .ThenInclude(ar => ar.DeploymentRoutes)
+                    .ThenInclude(sibDr => sibDr.AppDeployment)
+                        .ThenInclude(d => d.Cluster)
             .Include(r => r.AppDeployment)
                 .ThenInclude(d => d.Cluster)
             .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct);
@@ -952,35 +1042,93 @@ public class KubernetesOperationsService(
                 "Cluster has no kubeconfig configured.");
 
         string ns = dr.AppDeployment.Namespace;
-        string routeName = ExternalRouteService.ToListenerName(dr.AppRoute.Hostname) + "-route";
         string kubeconfig = dr.AppDeployment.Cluster.Kubeconfig;
+        Guid clusterId = dr.AppDeployment.ClusterId;
 
+        // Query remaining routes for this hostname across all AppRoutes on this cluster.
+        string hostname = dr.AppRoute.Hostname;
+        List<AppDeploymentRoute> remainingRoutes = await db.AppDeploymentRoutes
+            .Include(r => r.AppRoute)
+            .Include(r => r.AppDeployment)
+                .ThenInclude(d => d.Cluster)
+            .Where(r => r.AppRoute.Hostname == hostname
+                     && r.AppDeployment.ClusterId == clusterId
+                     && r.Id != deploymentRouteId
+                     && r.IsEnabled)
+            .OrderByDescending(r => r.PathPrefix.Length)
+            .ThenBy(r => r.PathPrefix)
+            .ToListAsync(ct);
+
+        if (remainingRoutes.Count > 0)
+        {
+            // Re-apply HTTPRoute + ReferenceGrants with only the remaining rules so other deployments stay live.
+            // Gateway stays unchanged — the hostname listener remains for the remaining routes.
+            string yaml = AppRouteService.GenerateManifestYaml(dr.AppRoute, remainingRoutes);
+            return await ApplyRawYamlAsync(kubeconfig, yaml, ct);
+        }
+
+        // Last deployment route for this hostname — delete the HTTPRoute and update the Gateway
+        // to remove the HTTPS listener for this hostname (and its Certificate in cert-manager).
+        string routeName = ExternalRouteService.ToListenerName(dr.AppRoute.Hostname) + "-route";
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
             await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
 
-            HelmExecutionResult result = await RunCliAsync(
+            HelmExecutionResult deleteResult = await RunCliAsync(
                 "kubectl",
                 $"delete httproute {routeName} --namespace {ns} --kubeconfig {tempKubeconfig} --ignore-not-found",
                 ct);
 
-            if (dr.AppRoute.TlsMode == TlsMode.ClusterIssuer)
-            {
-                string certName = ExternalRouteService.ToCertSecretName(dr.AppRoute.Hostname);
-                await RunCliAsync("kubectl",
-                    $"delete certificate {certName} --namespace {ns} --kubeconfig {tempKubeconfig} --ignore-not-found",
-                    ct);
-            }
+            // Regenerate the Gateway without this hostname so the HTTPS listener is removed.
+            // The Certificate in cert-manager namespace is left in place (cert-manager cleans it up
+            // if needed, and deleting it here would break any in-flight ACME challenges).
+            await ApplyGatewayForClusterAsync(clusterId, kubeconfig, db, ct);
 
-            return result.Success
-                ? KubernetesOperationResult<string>.Success(result.Output)
-                : KubernetesOperationResult<string>.Failure(result.Output);
+            return deleteResult.Success
+                ? KubernetesOperationResult<string>.Success(deleteResult.Output)
+                : KubernetesOperationResult<string>.Failure(deleteResult.Output);
         }
         finally
         {
             if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
         }
+    }
+
+    /// <summary>
+    /// Regenerates and applies the full Gateway manifest for a cluster, combining
+    /// all ExternalRoutes and enabled AppRoutes so every hostname has an HTTPS listener
+    /// with a certificateRefs entry. This must be called whenever an AppRoute hostname
+    /// is added or removed so the Gateway tracks the current set of exposed hostnames.
+    /// </summary>
+    private async Task<KubernetesOperationResult<string>> ApplyGatewayForClusterAsync(
+        Guid clusterId, string kubeconfig, ApplicationDbContext db, CancellationToken ct)
+    {
+        KubernetesCluster? cluster = await db.KubernetesClusters
+            .Include(c => c.Components)
+                .ThenInclude(comp => comp.ExternalRoutes)
+            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+
+        if (cluster is null)
+            return KubernetesOperationResult<string>.Failure("Cluster not found.");
+
+        (string gatewayName, string gatewayNamespace) = ExternalRouteService.ResolveGateway(cluster.Components);
+
+        List<ExternalRoute> externalRoutes = cluster.Components
+            .SelectMany(c => c.ExternalRoutes.Select(r => { r.Component = c; return r; }))
+            .ToList();
+
+        List<AppRoute> appRoutes = await db.AppRoutes
+            .Where(r => r.IsEnabled && r.DeploymentRoutes.Any(dr =>
+                dr.IsEnabled && dr.AppDeployment.ClusterId == clusterId))
+            .ToListAsync(ct);
+
+        if (externalRoutes.Count == 0 && appRoutes.Count == 0)
+            return KubernetesOperationResult<string>.Success("No routes to apply.");
+
+        string gatewayClass = ExternalRouteService.ResolveGatewayClass(cluster.Components);
+        string yaml = ExternalRouteService.GenerateGatewayYaml(gatewayName, gatewayNamespace, externalRoutes, appRoutes, gatewayClass: gatewayClass);
+        return await ApplyRawYamlAsync(kubeconfig, yaml, ct);
     }
 
     private async Task<KubernetesOperationResult<string>> ApplyRawYamlAsync(

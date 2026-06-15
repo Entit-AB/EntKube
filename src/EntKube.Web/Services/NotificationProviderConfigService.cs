@@ -1,7 +1,8 @@
-using System.Net;
-using System.Net.Mail;
 using System.Text.Json;
+using MailKit.Net.Smtp;
+using MailKit.Security;
 using Microsoft.EntityFrameworkCore;
+using MimeKit;
 using EntKube.Web.Data;
 
 namespace EntKube.Web.Services;
@@ -73,14 +74,19 @@ public class NotificationProviderConfigService(IDbContextFactory<ApplicationDbCo
         string? password = root.TryGetProperty("password", out JsonElement passEl) ? passEl.GetString() : null;
         bool enableSsl = !root.TryGetProperty("enableSsl", out JsonElement sslEl) || sslEl.GetBoolean();
 
-        using SmtpClient smtp = new(host, port);
-        smtp.EnableSsl = enableSsl;
-        smtp.Timeout = 10000;
-        if (!string.IsNullOrEmpty(username))
-            smtp.Credentials = new NetworkCredential(username, password);
+        MimeMessage mail = new();
+        mail.From.Add(MailboxAddress.Parse(from));
+        mail.To.Add(MailboxAddress.Parse(testRecipient));
+        mail.Subject = "[EntKube] SMTP Test";
+        mail.Body = new TextPart("plain") { Text = "This is a test email from EntKube notification settings." };
 
-        using MailMessage mail = new(from, testRecipient, "[EntKube] SMTP Test", "This is a test email from EntKube notification settings.");
-        await smtp.SendMailAsync(mail, ct);
+        using SmtpClient smtp = new();
+        SecureSocketOptions tls = enableSsl ? SecureSocketOptions.Auto : SecureSocketOptions.None;
+        await smtp.ConnectAsync(host, port, tls, ct);
+        if (!string.IsNullOrEmpty(username))
+            await smtp.AuthenticateAsync(username, password ?? "", ct);
+        await smtp.SendAsync(mail, ct);
+        await smtp.DisconnectAsync(true, ct);
     }
 
     public async Task TestMsTeamsGraphAsync(string configJson, CancellationToken ct = default)

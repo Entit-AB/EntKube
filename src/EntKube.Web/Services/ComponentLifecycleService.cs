@@ -1161,10 +1161,19 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
         (string gatewayName, string gatewayNamespace) = ExternalRouteService.ResolveGateway(
             component.Cluster.Components);
 
+        // Include enabled AppRoutes on this cluster so the Gateway HTTPS listener list is
+        // complete — applying ExternalRoutes must not drop AppRoute listeners.
+        List<AppRoute> appRoutes = await db.AppRoutes
+            .Where(r => r.IsEnabled && r.DeploymentRoutes.Any(dr =>
+                dr.IsEnabled && dr.AppDeployment.ClusterId == component.Cluster.Id))
+            .ToListAsync(ct);
+
+        string gatewayClass = ExternalRouteService.ResolveGatewayClass(component.Cluster.Components);
+
         // Gateway resource (HTTPS listeners + HTTP redirect + per-hostname Certificates
         // in the gateway namespace so the Gateway's certificateRefs can resolve them).
         string gatewayYaml = ExternalRouteService.GenerateGatewayYaml(
-            gatewayName, gatewayNamespace, allRoutes);
+            gatewayName, gatewayNamespace, allRoutes, appRoutes, gatewayClass: gatewayClass);
 
         // One HTTPRoute per route — TLS is terminated at the Gateway, no per-route
         // Certificate needed here.

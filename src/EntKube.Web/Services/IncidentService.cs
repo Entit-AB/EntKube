@@ -252,7 +252,8 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         var rows = await db.AlertIncidents
             .Where(i => ids.Contains(i.ClusterId)
-                     && (i.Status == IncidentStatus.Active || i.Status == IncidentStatus.Acknowledged))
+                     && i.Status == IncidentStatus.Active
+                     && i.Severity == "critical")
             .GroupBy(i => i.ClusterId)
             .Select(g => new { ClusterId = g.Key, Count = g.Count() })
             .ToListAsync(ct);

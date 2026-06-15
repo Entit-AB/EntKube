@@ -822,16 +822,27 @@ public class MongoService(
         // Execute mongosh command on the primary to create the user with readWrite role.
 
         string script = $$"""
-            db.getSiblingDB("{{databaseName}}").createUser({
-              user: "{{owner}}",
-              pwd: "{{password}}",
-              roles: [{ role: "readWrite", db: "{{databaseName}}" }]
-            })
+            try {
+              db.getSiblingDB("admin").createUser({
+                user: "{{owner}}",
+                pwd: "{{password}}",
+                roles: [{ role: "readWrite", db: "{{databaseName}}" }]
+              });
+              print("ENTK_SUCCESS");
+              process.exit(0);
+            } catch(e) {
+              print("ENTK_ERROR: " + e);
+              process.exit(1);
+            }
             """;
 
-        await k8sFactory.ExecuteMongoAsync(
+        string createOutput = await k8sFactory.ExecuteMongoWithOutputAsync(
             mongo.Name, mongo.Namespace, script, mongo.KubernetesCluster.Kubeconfig!,
             username: "admin", password: adminPassword, ct);
+
+        if (!createOutput.Contains("ENTK_SUCCESS"))
+            throw new InvalidOperationException(
+                $"Failed to create MongoDB user '{owner}': {createOutput.Trim()}");
 
         // Mark as ready.
 
@@ -853,7 +864,7 @@ public class MongoService(
         await StoreDatabaseSecretAsync(tenantId, database.Id, "USERNAME", owner, k8sSecretName, mongo.Namespace, ct);
         await StoreDatabaseSecretAsync(tenantId, database.Id, "PASSWORD", password, k8sSecretName, mongo.Namespace, ct);
         await StoreDatabaseSecretAsync(tenantId, database.Id, "CONNECTION_STRING",
-            $"mongodb://{owner}:{password}@{host}:27017/{databaseName}?replicaSet={mongo.Name}&authSource={databaseName}",
+            $"mongodb://{owner}:{password}@{host}:27017/{databaseName}?replicaSet={mongo.Name}&authSource=admin&authMechanism=SCRAM-SHA-256",
             k8sSecretName, mongo.Namespace, ct);
 
         return database;
@@ -884,7 +895,7 @@ public class MongoService(
             tenantId, mongo.Id, "ADMIN_PASSWORD", ct);
 
         string script = $$"""
-            db.getSiblingDB("{{database.Name}}").dropUser("{{database.Owner}}")
+            db.getSiblingDB("admin").dropUser("{{database.Owner}}")
             """;
 
         await k8sFactory.ExecuteMongoAsync(
@@ -1167,19 +1178,39 @@ public class MongoService(
 
         string newPassword = GeneratePassword();
 
-        // Update the user password via mongosh on the primary pod.
-        // Double-braces escape the MongoDB object literal from C# string interpolation.
-        string script = $"db.getSiblingDB('{database.Name}').updateUser('{database.Owner}', {{pwd: '{newPassword}'}});";
+        // Drop the user from both the old location ({dbname}) and the new location (admin),
+        // then recreate in admin. This handles users created by older EntKube versions that
+        // stored users in the database itself rather than admin.
+        string script = $$"""
+            try { db.getSiblingDB('{{database.Name}}').dropUser('{{database.Owner}}') } catch(e) {}
+            try { db.getSiblingDB('admin').dropUser('{{database.Owner}}') } catch(e) {}
+            try {
+              db.getSiblingDB('admin').createUser({
+                user: '{{database.Owner}}',
+                pwd: '{{newPassword}}',
+                roles: [{ role: 'readWrite', db: '{{database.Name}}' }]
+              });
+              print("ENTK_SUCCESS");
+              process.exit(0);
+            } catch(e) {
+              print("ENTK_ERROR: " + e);
+              process.exit(1);
+            }
+            """;
 
-        await k8sFactory.ExecuteMongoAsync(
+        string rotateOutput = await k8sFactory.ExecuteMongoWithOutputAsync(
             mongo.Name, mongo.Namespace, script,
             mongo.KubernetesCluster.Kubeconfig!,
             username: "admin", password: adminPassword, ct: ct);
 
+        if (!rotateOutput.Contains("ENTK_SUCCESS"))
+            throw new InvalidOperationException(
+                $"Failed to rotate password for MongoDB user '{database.Owner}': {rotateOutput.Trim()}");
+
         // Store updated credentials in vault.
         string host = $"{mongo.Name}-svc.{mongo.Namespace}.svc.cluster.local";
         string connectionString =
-            $"mongodb://{database.Owner}:{newPassword}@{host}:27017/{database.Name}?authSource={database.Name}&replicaSet={mongo.Name}";
+            $"mongodb://{database.Owner}:{newPassword}@{host}:27017/{database.Name}?authSource=admin&replicaSet={mongo.Name}&authMechanism=SCRAM-SHA-256";
         string k8sSecretName = $"{mongo.Name}-{database.Name}-credentials";
 
         await StoreDatabaseSecretAsync(tenantId, database.Id, "PASSWORD", newPassword, k8sSecretName, mongo.Namespace, ct);

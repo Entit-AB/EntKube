@@ -452,6 +452,10 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
 
+                    b.Property<string>("RewritePath")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
                     b.Property<string>("ServiceName")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -2355,6 +2359,16 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasColumnType("nvarchar(200)");
 
                     b.Property<string>("SeverityFilter")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<string>("AcknowledgeFilter")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<string>("FiringFilter")
                         .IsRequired()
                         .HasMaxLength(30)
                         .HasColumnType("nvarchar(30)");

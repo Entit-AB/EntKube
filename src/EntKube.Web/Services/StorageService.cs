@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
 using k8s;
@@ -35,7 +36,7 @@ public class MinioBucketInfo
 /// External providers are registered manually — the service stores metadata
 /// in StorageLink entities and credentials in the VaultSecret table.
 /// </summary>
-public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3)
+public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, IKubernetesClientFactory k8sFactory)
 {
     // ──────── Operator Status ────────
 
@@ -1164,6 +1165,63 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     /// Marks all vault secrets for a storage link to sync to K8s with the
     /// given secret name and namespace.
     /// </summary>
+    /// <summary>
+    /// Pushes storage credentials for a deployment binding into its Kubernetes namespace.
+    /// Writes ACCESS_KEY, SECRET_KEY and the static metadata (endpoint, bucket, region)
+    /// into a single K8s Secret named by <see cref="StorageBinding.KubernetesSecretName"/>.
+    /// </summary>
+    public async Task SyncStorageBindingAsync(
+        Guid tenantId, Guid bindingId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        StorageBinding binding = await db.Set<StorageBinding>()
+            .Include(b => b.StorageLink)
+            .Include(b => b.AppDeployment!).ThenInclude(d => d.Cluster)
+            .FirstOrDefaultAsync(b => b.Id == bindingId && b.AppDeploymentId.HasValue, ct)
+            ?? throw new InvalidOperationException("Storage binding not found.");
+
+        string? accessKey = await vaultService.GetStorageLinkSecretValueAsync(
+            tenantId, binding.StorageLinkId, "ACCESS_KEY", ct);
+        string? secretKey = await vaultService.GetStorageLinkSecretValueAsync(
+            tenantId, binding.StorageLinkId, "SECRET_KEY", ct);
+
+        if (string.IsNullOrWhiteSpace(accessKey) || string.IsNullOrWhiteSpace(secretKey))
+            throw new InvalidOperationException("Storage credentials not found in vault.");
+
+        StorageLink link = binding.StorageLink;
+        AppDeployment deployment = binding.AppDeployment!;
+        string kubeconfig = deployment.Cluster.Kubeconfig!;
+        string ns = deployment.Namespace;
+
+        await k8sFactory.EnsureNamespaceAsync(ns, kubeconfig, ct);
+
+        string secretManifest = $"""
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: {binding.KubernetesSecretName}
+              namespace: {ns}
+            type: Opaque
+            data:
+              STORAGE_ACCESS_KEY: {B64(accessKey)}
+              STORAGE_SECRET_KEY: {B64(secretKey)}
+              STORAGE_ENDPOINT: {B64(link.Endpoint ?? "")}
+              STORAGE_BUCKET: {B64(link.BucketName ?? "")}
+              STORAGE_REGION: {B64(link.Region ?? "")}
+            """;
+
+        await k8sFactory.ApplyManifestAsync(secretManifest, kubeconfig, ct);
+
+        binding.LastSyncedAt = DateTime.UtcNow;
+        using ApplicationDbContext db2 = dbFactory.CreateDbContext();
+        db2.Set<StorageBinding>().Update(binding);
+        await db2.SaveChangesAsync(ct);
+    }
+
+    private static string B64(string value) =>
+        Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
+
     private async Task ConfigureSecretsForSyncAsync(
         Guid tenantId, Guid storageLinkId, string secretName, string ns, CancellationToken ct)
     {

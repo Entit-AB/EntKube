@@ -177,6 +177,16 @@ public class Program
                 HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
         });
 
+        // Harbor API client: cookies must be disabled so Harbor's gorilla/csrf middleware
+        // does not require a CSRF token (CSRF is only enforced when a session cookie is present).
+        builder.Services.AddHttpClient("HarborApi", client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(30);
+        }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+        {
+            UseCookies = false
+        });
+
         WebApplication app = builder.Build();
 
         // Apply pending migrations automatically on startup.
@@ -189,6 +199,8 @@ public class Program
             MigrateWithRetry(db, app.Logger);
             await EnsureAppEnvironmentNamespaceAsync(db, app.Logger);
             await EnsureDeploymentRouteClusterAppliedAtAsync(db, app.Logger);
+            await EnsureDeploymentRouteRewritePathAsync(db, app.Logger);
+            await EnsureNotificationChannelFiltersAsync(db, app.Logger);
 
             RoleManager<IdentityRole> roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
             if (!await roleManager.RoleExistsAsync("Admin"))
@@ -357,6 +369,64 @@ public class Program
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Schema repair for AppDeploymentRoutes.ClusterAppliedAt skipped or failed.");
+        }
+    }
+
+    private static async Task EnsureDeploymentRouteRewritePathAsync(DbContext db, ILogger logger)
+    {
+        try
+        {
+            string? provider = db.Database.ProviderName;
+            string? sql = null;
+            if (provider == "Npgsql.EntityFrameworkCore.PostgreSQL")
+                sql = "ALTER TABLE \"AppDeploymentRoutes\" ADD COLUMN IF NOT EXISTS \"RewritePath\" character varying(200) NULL";
+            else if (provider == "Microsoft.EntityFrameworkCore.SqlServer")
+                sql = "IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'AppDeploymentRoutes') AND name = N'RewritePath')" +
+                      " ALTER TABLE [AppDeploymentRoutes] ADD [RewritePath] nvarchar(200) NULL";
+            else if (provider == "Microsoft.EntityFrameworkCore.Sqlite")
+                sql = "ALTER TABLE \"AppDeploymentRoutes\" ADD COLUMN \"RewritePath\" TEXT NULL";
+
+            if (sql is not null)
+                await db.Database.ExecuteSqlRawAsync(sql);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Schema repair for AppDeploymentRoutes.RewritePath skipped or failed.");
+        }
+    }
+
+    private static async Task EnsureNotificationChannelFiltersAsync(DbContext db, ILogger logger)
+    {
+        try
+        {
+            string? provider = db.Database.ProviderName;
+            if (provider == "Npgsql.EntityFrameworkCore.PostgreSQL")
+            {
+                await db.Database.ExecuteSqlRawAsync(
+                    "ALTER TABLE \"NotificationChannels\" ADD COLUMN IF NOT EXISTS \"AcknowledgeFilter\" character varying(30) NOT NULL DEFAULT 'All'");
+                await db.Database.ExecuteSqlRawAsync(
+                    "ALTER TABLE \"NotificationChannels\" ADD COLUMN IF NOT EXISTS \"FiringFilter\" character varying(30) NOT NULL DEFAULT 'All'");
+            }
+            else if (provider == "Microsoft.EntityFrameworkCore.SqlServer")
+            {
+                await db.Database.ExecuteSqlRawAsync(
+                    "IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'NotificationChannels') AND name = N'AcknowledgeFilter')" +
+                    " ALTER TABLE [NotificationChannels] ADD [AcknowledgeFilter] nvarchar(30) NOT NULL DEFAULT 'All'");
+                await db.Database.ExecuteSqlRawAsync(
+                    "IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'NotificationChannels') AND name = N'FiringFilter')" +
+                    " ALTER TABLE [NotificationChannels] ADD [FiringFilter] nvarchar(30) NOT NULL DEFAULT 'All'");
+            }
+            else if (provider == "Microsoft.EntityFrameworkCore.Sqlite")
+            {
+                await db.Database.ExecuteSqlRawAsync(
+                    "ALTER TABLE \"NotificationChannels\" ADD COLUMN \"AcknowledgeFilter\" TEXT NOT NULL DEFAULT 'All'");
+                await db.Database.ExecuteSqlRawAsync(
+                    "ALTER TABLE \"NotificationChannels\" ADD COLUMN \"FiringFilter\" TEXT NOT NULL DEFAULT 'All'");
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Schema repair for NotificationChannels filters skipped or failed (columns may already exist).");
         }
     }
 

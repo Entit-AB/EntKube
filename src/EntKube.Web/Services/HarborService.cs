@@ -29,6 +29,8 @@ public class HarborProjectInfo
     public long StorageUsedBytes { get; set; }
     public long StorageQuotaBytes { get; set; }
     public DateTime CreatedAt { get; set; }
+    public bool IsProxyCache { get; set; }
+    public long? RegistryId { get; set; }
 }
 
 public class HarborRepositoryInfo
@@ -65,6 +67,47 @@ public class HarborSystemInfo
     public string? RegistryUrl { get; set; }
     public bool WithTrivy { get; set; }
     public string? AuthMode { get; set; }
+}
+
+public class HarborRegistryInfo
+{
+    public long Id { get; set; }
+    public string Name { get; set; } = "";
+    public string Type { get; set; } = "";
+    public string? Url { get; set; }
+    public bool Insecure { get; set; }
+    public string Status { get; set; } = "";
+    public string? Description { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+public class HarborReplicationInfo
+{
+    public long Id { get; set; }
+    public string Name { get; set; } = "";
+    public string? Description { get; set; }
+    public bool Enabled { get; set; }
+    public long? SrcRegistryId { get; set; }
+    public string? SrcRegistryName { get; set; }
+    public long? DestRegistryId { get; set; }
+    public string? DestRegistryName { get; set; }
+    public string? DestNamespace { get; set; }
+    public string? TriggerType { get; set; }
+    public string? NameFilter { get; set; }
+    public bool Override { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+public class HarborWebhookInfo
+{
+    public long Id { get; set; }
+    public string Name { get; set; } = "";
+    public bool Enabled { get; set; }
+    public string? Description { get; set; }
+    public List<string> EventTypes { get; set; } = [];
+    public string? TargetUrl { get; set; }
+    public string NotifyType { get; set; } = "http";
+    public DateTime CreatedAt { get; set; }
 }
 
 /// <summary>
@@ -381,11 +424,13 @@ public class HarborService(
             tenantId, clusterComponentId, "HARBOR_ADMIN_PASSWORD", ct);
     }
 
+    // Uses the "HarborApi" named client which has UseCookies=false. Without a session
+    // cookie Harbor does not enforce CSRF for Basic-Auth requests.
     private HttpClient BuildHarborClient(string registryUrl, string username, string password)
     {
-        HttpClient http = httpClientFactory.CreateClient();
+        HttpClient http = httpClientFactory.CreateClient("HarborApi");
         http.BaseAddress = new Uri(registryUrl.TrimEnd('/'));
-        http.Timeout = TimeSpan.FromSeconds(20);
+        http.Timeout = TimeSpan.FromSeconds(30);
         string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"));
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", encoded);
         http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
@@ -403,6 +448,15 @@ public class HarborService(
             throw new InvalidOperationException("Harbor admin password is not stored in vault.");
 
         return BuildHarborClient(config.RegistryUrl, config.AdminUsername, password);
+    }
+
+    private static async Task ThrowIfErrorAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        if (!response.IsSuccessStatusCode)
+        {
+            string detail = await response.Content.ReadAsStringAsync(ct);
+            throw new InvalidOperationException($"Harbor API error ({response.StatusCode}): {detail}");
+        }
     }
 
     // ── System Info ───────────────────────────────────────────────────────────
@@ -444,13 +498,16 @@ public class HarborService(
             RepoCount = p?["repo_count"]?.GetValue<int>() ?? 0,
             StorageUsedBytes = p?["quota"]?["used"]?["storage"]?.GetValue<long>() ?? 0,
             StorageQuotaBytes = p?["quota"]?["hard"]?["storage"]?.GetValue<long>() ?? -1,
-            CreatedAt = p?["creation_time"]?.GetValue<DateTime>() ?? DateTime.MinValue
+            CreatedAt = p?["creation_time"]?.GetValue<DateTime>() ?? DateTime.MinValue,
+            IsProxyCache = p?["registry_id"] is not null,
+            RegistryId = p?["registry_id"]?.GetValue<long>()
         }).OrderBy(p => p.Name).ToList();
     }
 
     public async Task CreateProjectAsync(
         Guid tenantId, HarborComponentConfig config,
         string name, bool isPublic, string? description = null,
+        long? proxyRegistryId = null,
         CancellationToken ct = default)
     {
         using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
@@ -462,17 +519,15 @@ public class HarborService(
         };
         if (!string.IsNullOrWhiteSpace(description))
             body["description"] = description;
+        if (proxyRegistryId.HasValue)
+            body["registry_id"] = proxyRegistryId.Value;
 
         HttpResponseMessage response = await http.PostAsync(
             "/api/v2.0/projects",
             new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
             ct);
 
-        if (!response.IsSuccessStatusCode)
-        {
-            string detail = await response.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException($"Harbor API error ({response.StatusCode}): {detail}");
-        }
+        await ThrowIfErrorAsync(response, ct);
     }
 
     public async Task DeleteProjectAsync(
@@ -480,12 +535,7 @@ public class HarborService(
     {
         using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
         HttpResponseMessage response = await http.DeleteAsync($"/api/v2.0/projects/{projectName}", ct);
-
-        if (!response.IsSuccessStatusCode)
-        {
-            string detail = await response.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException($"Harbor API error ({response.StatusCode}): {detail}");
-        }
+        await ThrowIfErrorAsync(response, ct);
     }
 
     // ── Repositories & Artifacts ─────────────────────────────────────────────
@@ -646,11 +696,7 @@ public class HarborService(
             new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
             ct);
 
-        if (!response.IsSuccessStatusCode)
-        {
-            string detail = await response.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException($"Harbor API error ({response.StatusCode}): {detail}");
-        }
+        await ThrowIfErrorAsync(response, ct);
 
         JsonNode? result = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
         string secret = result?["secret"]?.GetValue<string>()
@@ -669,12 +715,268 @@ public class HarborService(
     {
         using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
         HttpResponseMessage response = await http.DeleteAsync($"/api/v2.0/robots/{robotId}", ct);
+        await ThrowIfErrorAsync(response, ct);
+    }
 
-        if (!response.IsSuccessStatusCode)
+    // ── Remote Registries (proxy cache endpoints) ─────────────────────────────
+
+    public async Task<List<HarborRegistryInfo>> GetRegistriesAsync(
+        Guid tenantId, HarborComponentConfig config, CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+        HttpResponseMessage response = await http.GetAsync("/api/v2.0/registries?page_size=100", ct);
+        response.EnsureSuccessStatusCode();
+
+        JsonArray? arr = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsArray();
+        if (arr is null) return [];
+
+        return arr.Select(r => new HarborRegistryInfo
         {
-            string detail = await response.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException($"Harbor API error ({response.StatusCode}): {detail}");
+            Id = r?["id"]?.GetValue<long>() ?? 0,
+            Name = r?["name"]?.GetValue<string>() ?? "",
+            Type = r?["type"]?.GetValue<string>() ?? "",
+            Url = r?["url"]?.GetValue<string>(),
+            Insecure = r?["insecure"]?.GetValue<bool>() ?? false,
+            Status = r?["status"]?.GetValue<string>() ?? "",
+            Description = r?["description"]?.GetValue<string>(),
+            CreatedAt = r?["creation_time"]?.GetValue<DateTime>() ?? DateTime.MinValue
+        }).OrderBy(r => r.Name).ToList();
+    }
+
+    public async Task<HarborRegistryInfo> CreateRegistryAsync(
+        Guid tenantId, HarborComponentConfig config,
+        string name, string type, string? url,
+        string? accessKey, string? accessSecret,
+        bool insecure, string? description = null,
+        CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+
+        JsonObject body = new()
+        {
+            ["name"] = name,
+            ["type"] = type,
+            ["insecure"] = insecure
+        };
+        if (!string.IsNullOrWhiteSpace(url)) body["url"] = url;
+        if (!string.IsNullOrWhiteSpace(description)) body["description"] = description;
+        if (!string.IsNullOrWhiteSpace(accessKey) || !string.IsNullOrWhiteSpace(accessSecret))
+        {
+            body["credential"] = new JsonObject
+            {
+                ["type"] = "basic",
+                ["access_key"] = accessKey ?? "",
+                ["access_secret"] = accessSecret ?? ""
+            };
         }
+
+        HttpResponseMessage response = await http.PostAsync(
+            "/api/v2.0/registries",
+            new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
+            ct);
+        await ThrowIfErrorAsync(response, ct);
+
+        JsonNode? result = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
+        return new HarborRegistryInfo
+        {
+            Id = result?["id"]?.GetValue<long>() ?? 0,
+            Name = result?["name"]?.GetValue<string>() ?? name,
+            Type = type,
+            Url = url,
+            Status = result?["status"]?.GetValue<string>() ?? ""
+        };
+    }
+
+    public async Task DeleteRegistryAsync(
+        Guid tenantId, HarborComponentConfig config, long registryId, CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+        HttpResponseMessage response = await http.DeleteAsync($"/api/v2.0/registries/{registryId}", ct);
+        await ThrowIfErrorAsync(response, ct);
+    }
+
+    public async Task<string> PingRegistryAsync(
+        Guid tenantId, HarborComponentConfig config, long registryId, CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+        HttpResponseMessage response = await http.GetAsync($"/api/v2.0/registries/{registryId}/ping", ct);
+        if (response.IsSuccessStatusCode) return "healthy";
+        string detail = await response.Content.ReadAsStringAsync(ct);
+        throw new InvalidOperationException($"Registry ping failed ({response.StatusCode}): {detail}");
+    }
+
+    // ── Replication Policies ──────────────────────────────────────────────────
+
+    public async Task<List<HarborReplicationInfo>> GetReplicationsAsync(
+        Guid tenantId, HarborComponentConfig config, CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+        HttpResponseMessage response = await http.GetAsync("/api/v2.0/replication/policies?page_size=100", ct);
+        response.EnsureSuccessStatusCode();
+
+        JsonArray? arr = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsArray();
+        if (arr is null) return [];
+
+        return arr.Select(r =>
+        {
+            string? nameFilter = r?["filters"]?.AsArray()
+                .FirstOrDefault(f => f?["type"]?.GetValue<string>() == "name")
+                ?["value"]?.GetValue<string>();
+
+            return new HarborReplicationInfo
+            {
+                Id = r?["id"]?.GetValue<long>() ?? 0,
+                Name = r?["name"]?.GetValue<string>() ?? "",
+                Description = r?["description"]?.GetValue<string>(),
+                Enabled = r?["enabled"]?.GetValue<bool>() ?? false,
+                SrcRegistryId = r?["src_registry"]?["id"]?.GetValue<long>(),
+                SrcRegistryName = r?["src_registry"]?["name"]?.GetValue<string>(),
+                DestRegistryId = r?["dest_registry"]?["id"]?.GetValue<long>(),
+                DestRegistryName = r?["dest_registry"]?["name"]?.GetValue<string>(),
+                DestNamespace = r?["dest_namespace"]?.GetValue<string>(),
+                TriggerType = r?["trigger"]?["type"]?.GetValue<string>(),
+                NameFilter = nameFilter,
+                Override = r?["override"]?.GetValue<bool>() ?? false,
+                CreatedAt = r?["creation_time"]?.GetValue<DateTime>() ?? DateTime.MinValue
+            };
+        }).OrderBy(r => r.Name).ToList();
+    }
+
+    public async Task CreateReplicationAsync(
+        Guid tenantId, HarborComponentConfig config,
+        string name, string? description,
+        long? srcRegistryId, long? destRegistryId,
+        string? destNamespace, string nameFilter,
+        bool enabled, bool overrideExisting,
+        CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+
+        JsonObject body = new()
+        {
+            ["name"] = name,
+            ["enabled"] = enabled,
+            ["override"] = overrideExisting,
+            ["trigger"] = new JsonObject { ["type"] = "manual" },
+            ["filters"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["type"] = "name",
+                    ["value"] = string.IsNullOrWhiteSpace(nameFilter) ? "**" : nameFilter
+                }
+            }
+        };
+        if (!string.IsNullOrWhiteSpace(description)) body["description"] = description;
+        if (!string.IsNullOrWhiteSpace(destNamespace)) body["dest_namespace"] = destNamespace;
+        if (srcRegistryId.HasValue)
+            body["src_registry"] = new JsonObject { ["id"] = srcRegistryId.Value };
+        if (destRegistryId.HasValue)
+            body["dest_registry"] = new JsonObject { ["id"] = destRegistryId.Value };
+
+        HttpResponseMessage response = await http.PostAsync(
+            "/api/v2.0/replication/policies",
+            new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
+            ct);
+        await ThrowIfErrorAsync(response, ct);
+    }
+
+    public async Task DeleteReplicationAsync(
+        Guid tenantId, HarborComponentConfig config, long policyId, CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+        HttpResponseMessage response = await http.DeleteAsync($"/api/v2.0/replication/policies/{policyId}", ct);
+        await ThrowIfErrorAsync(response, ct);
+    }
+
+    public async Task TriggerReplicationAsync(
+        Guid tenantId, HarborComponentConfig config, long policyId, CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+        JsonObject body = new() { ["policy_id"] = policyId };
+        HttpResponseMessage response = await http.PostAsync(
+            "/api/v2.0/replication/executions",
+            new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
+            ct);
+        await ThrowIfErrorAsync(response, ct);
+    }
+
+    // ── Webhooks ──────────────────────────────────────────────────────────────
+
+    public async Task<List<HarborWebhookInfo>> GetWebhooksAsync(
+        Guid tenantId, HarborComponentConfig config, string projectName, CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+        HttpResponseMessage response = await http.GetAsync(
+            $"/api/v2.0/projects/{projectName}/webhook/policies", ct);
+        response.EnsureSuccessStatusCode();
+
+        JsonArray? arr = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsArray();
+        if (arr is null) return [];
+
+        return arr.Select(w =>
+        {
+            JsonNode? target = w?["targets"]?.AsArray()?.FirstOrDefault();
+            List<string> events = w?["event_types"]?.AsArray()
+                .Select(e => e?.GetValue<string>() ?? "")
+                .Where(e => e != "")
+                .ToList() ?? [];
+
+            return new HarborWebhookInfo
+            {
+                Id = w?["id"]?.GetValue<long>() ?? 0,
+                Name = w?["name"]?.GetValue<string>() ?? "",
+                Enabled = w?["enabled"]?.GetValue<bool>() ?? false,
+                Description = w?["description"]?.GetValue<string>(),
+                EventTypes = events,
+                TargetUrl = target?["address"]?.GetValue<string>(),
+                NotifyType = target?["type"]?.GetValue<string>() ?? "http",
+                CreatedAt = w?["creation_time"]?.GetValue<DateTime>() ?? DateTime.MinValue
+            };
+        }).OrderBy(w => w.Name).ToList();
+    }
+
+    public async Task CreateWebhookAsync(
+        Guid tenantId, HarborComponentConfig config,
+        string projectName, string name, string targetUrl,
+        IEnumerable<string> eventTypes, bool enabled = true,
+        string? authHeader = null, bool skipCertVerify = false,
+        CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+
+        JsonObject target = new()
+        {
+            ["type"] = "http",
+            ["address"] = targetUrl,
+            ["skip_cert_verify"] = skipCertVerify
+        };
+        if (!string.IsNullOrWhiteSpace(authHeader)) target["auth_header"] = authHeader;
+
+        JsonObject body = new()
+        {
+            ["name"] = name,
+            ["enabled"] = enabled,
+            ["targets"] = new JsonArray { target },
+            ["event_types"] = new JsonArray(
+                eventTypes.Select(e => (JsonNode?)JsonValue.Create(e)).ToArray())
+        };
+
+        HttpResponseMessage response = await http.PostAsync(
+            $"/api/v2.0/projects/{projectName}/webhook/policies",
+            new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
+            ct);
+        await ThrowIfErrorAsync(response, ct);
+    }
+
+    public async Task DeleteWebhookAsync(
+        Guid tenantId, HarborComponentConfig config,
+        string projectName, long webhookId, CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+        HttpResponseMessage response = await http.DeleteAsync(
+            $"/api/v2.0/projects/{projectName}/webhook/policies/{webhookId}", ct);
+        await ThrowIfErrorAsync(response, ct);
     }
 
     // ── Project–App linking ───────────────────────────────────────────────────
@@ -734,7 +1036,7 @@ public class HarborService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         HarborProject? project = await db.HarborProjects
-            .FirstOrDefaultAsync(p => p.Id == projectId && p.TenantId == tenantId, ct);
+            .FirstOrDefaultAsync(p => p.Id == projectId && p.TenantId == tenantId);
 
         if (project is null) return;
 

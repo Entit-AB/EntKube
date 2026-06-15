@@ -338,9 +338,18 @@ public class ExternalRouteService(
         string gatewayName,
         string gatewayNamespace,
         IEnumerable<ExternalRoute> routes,
-        string certNamespace = "cert-manager")
+        IEnumerable<AppRoute>? appRoutes = null,
+        string certNamespace = "cert-manager",
+        string gatewayClass = "istio")
     {
-        var grouped = routes
+        // Merge ExternalRoutes and AppRoutes into a unified hostname list.
+        var allHostnames = routes
+            .Select(r => (r.Hostname, r.TlsMode, r.ClusterIssuerName))
+            .Concat((appRoutes ?? [])
+                .Where(r => r.IsEnabled)
+                .Select(r => (r.Hostname, r.TlsMode, r.ClusterIssuerName)));
+
+        var grouped = allHostnames
             .GroupBy(r => r.Hostname)
             .Select(g => (
                 Hostname: g.Key,
@@ -379,6 +388,14 @@ public class ExternalRouteService(
 
         string allListeners = string.Join("\n", httpsListeners.Append(httpListener));
 
+        // Istio needs an explicit address binding to avoid creating a second LoadBalancer service.
+        // Traefik manages its own service — omitting addresses lets Traefik handle it.
+        string addressesYaml = gatewayClass == "istio"
+            ? $"  addresses:\n" +
+              $"    - type: Hostname\n" +
+              $"      value: {gatewayName}.{gatewayNamespace}.svc.cluster.local\n"
+            : "";
+
         string gatewayYaml =
             $"apiVersion: gateway.networking.k8s.io/v1\n" +
             $"kind: Gateway\n" +
@@ -388,10 +405,8 @@ public class ExternalRouteService(
             $"  annotations:\n" +
             $"    app.kubernetes.io/managed-by: entkube\n" +
             $"spec:\n" +
-            $"  gatewayClassName: istio\n" +
-            $"  addresses:\n" +
-            $"    - type: Hostname\n" +
-            $"      value: {gatewayName}.{gatewayNamespace}.svc.cluster.local\n" +
+            $"  gatewayClassName: {gatewayClass}\n" +
+            addressesYaml +
             $"  listeners:\n" +
             allListeners;
 
@@ -501,6 +516,20 @@ public class ExternalRouteService(
         }
 
         return ("default-gateway", "default");
+    }
+
+    /// <summary>
+    /// Returns the Kubernetes GatewayClass name for the installed ingress controller.
+    /// Must match what the controller registers as its GatewayClass — using the wrong
+    /// class causes the controller to silently ignore the Gateway resource.
+    /// </summary>
+    public static string ResolveGatewayClass(IEnumerable<ClusterComponent> components)
+    {
+        bool hasTraefik = components.Any(c =>
+            string.Equals(c.Name, "traefik", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(c.HelmChartName, "traefik", StringComparison.OrdinalIgnoreCase));
+
+        return hasTraefik ? "traefik" : "istio";
     }
 
     /// <summary>

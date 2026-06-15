@@ -18,6 +18,7 @@
 @inject RabbitMQService RabbitMQService
 @inject StorageService StorageService
 @inject RegisteredPostgresService RegisteredPostgresService
+@inject KeycloakService KeycloakService
 @inject VaultService VaultService
 @inject DeploymentStatusNotifier StatusNotifier
 
@@ -148,9 +149,19 @@
         </button>
     </li>
     <li class="nav-item">
+        <button class="nav-link @(section == "identity" ? "active" : "")"
+                @onclick="OpenIdentitySection">
+            <i class="bi bi-shield-lock me-1"></i>Identity
+            @if (identityBindingsByDeployment.Values.Any(b => b.Count > 0))
+            {
+                <span class="badge bg-purple ms-1" style="background-color: #6f42c1 !important;">@identityBindingsByDeployment.Values.Sum(b => b.Count)</span>
+            }
+        </button>
+    </li>
+    <li class="nav-item">
         <button class="nav-link @(section == "vault" ? "active" : "")"
                 @onclick='() => section = "vault"'>
-            <i class="bi bi-shield-lock me-1"></i>Vault
+            <i class="bi bi-key me-1"></i>Vault
         </button>
     </li>
 </ul>
@@ -1905,6 +1916,234 @@
     }
 }
 
+@* ══════════════════════════════════════════════════════
+   Identity tab — Keycloak OIDC client bindings
+   ══════════════════════════════════════════════════════ *@
+@if (section == "identity")
+{
+    @if (!identityBindingsLoaded)
+    {
+        <div class="text-center py-4"><div class="spinner-border text-primary" role="status"></div></div>
+    }
+    else if (identityLoadError is not null)
+    {
+        <div class="alert alert-danger small">
+            <i class="bi bi-exclamation-triangle me-1"></i>
+            Failed to load identity bindings: <code>@identityLoadError</code>
+            <br /><small class="text-muted mt-1 d-block">A pending database migration may not have run yet. Restarting the application will apply it automatically.</small>
+        </div>
+    }
+    else
+    {
+        @if (identityRealm is null)
+        {
+            @if (!IsPortalView && availableRealmsForLinking.Count > 0)
+            {
+                <div class="card shadow-sm mb-3">
+                    <div class="card-header bg-white py-2">
+                        <i class="bi bi-link-45deg me-1 text-primary"></i><strong>Link a Keycloak Realm</strong>
+                    </div>
+                    <div class="card-body">
+                        @if (linkRealmError is not null)
+                        {
+                            <div class="alert alert-danger py-1 small mb-2">@linkRealmError</div>
+                        }
+                        <div class="d-flex align-items-end gap-2">
+                            <div>
+                                <label class="form-label small">Realm</label>
+                                <select class="form-select form-select-sm" @bind="newIdentityLinkRealmId">
+                                    <option value="@Guid.Empty">Select realm…</option>
+                                    @foreach (KeycloakRealm r in availableRealmsForLinking.Where(r => r.LinkedAppId is null))
+                                    {
+                                        <option value="@r.Id">@r.DisplayName (@r.RealmName)</option>
+                                    }
+                                </select>
+                            </div>
+                            <button class="btn btn-sm btn-primary" @onclick="LinkRealmToApp"
+                                    disabled="@(linkingRealm || newIdentityLinkRealmId == Guid.Empty)">
+                                @if (linkingRealm) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Link Realm
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            }
+            else
+            {
+                <div class="alert alert-info small">
+                    <i class="bi bi-info-circle me-1"></i>
+                    No Keycloak realm is linked to this app. Link a realm from the
+                    <strong>Identity</strong> tab in the tenant admin view.
+                </div>
+            }
+        }
+        else if (!IsPortalView)
+        {
+            <div class="card shadow-sm mb-3">
+                <div class="card-header bg-white py-2">
+                    <i class="bi bi-plus-circle me-1 text-primary"></i><strong>Attach OIDC Client</strong>
+                    <small class="text-muted ms-2">Realm: <code>@identityRealm.RealmName</code></small>
+                </div>
+                <div class="card-body">
+                    @if (identityBindingError is not null)
+                    {
+                        <div class="alert alert-danger py-1 small mb-2">@identityBindingError</div>
+                    }
+                    @if (clientsLoadError is not null)
+                    {
+                        <div class="alert alert-warning py-1 small mb-2">
+                            <i class="bi bi-exclamation-triangle me-1"></i>
+                            Could not load OIDC clients from Keycloak: <code>@clientsLoadError</code>
+                        </div>
+                    }
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-3">
+                            <label class="form-label small">Deployment</label>
+                            <select class="form-select form-select-sm" @bind="newIdentityDeploymentId">
+                                <option value="@Guid.Empty">Select deployment…</option>
+                                @foreach (AppDeployment dep in deployments ?? [])
+                                {
+                                    <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">OIDC Client</label>
+                            @if (loadingIdentityClients)
+                            {
+                                <div class="mt-1"><span class="spinner-border spinner-border-sm text-primary"></span></div>
+                            }
+                            else
+                            {
+                                <select class="form-select form-select-sm" @bind="newIdentityClientUuid">
+                                    <option value="">Select client…</option>
+                                    @foreach (KeycloakClientInfo client in availableIdentityClients)
+                                    {
+                                        <option value="@client.Id">@client.ClientId@(string.IsNullOrEmpty(client.Name) ? "" : $" — {client.Name}")</option>
+                                    }
+                                </select>
+                            }
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">K8s Secret name</label>
+                            <input class="form-control form-control-sm" @bind="newIdentitySecretName" placeholder="e.g. oidc-credentials" />
+                        </div>
+                    </div>
+                    <button class="btn btn-sm btn-primary" @onclick="AddIdentityBinding"
+                            disabled="@(addingIdentityBinding || newIdentityDeploymentId == Guid.Empty || string.IsNullOrWhiteSpace(newIdentityClientUuid) || string.IsNullOrWhiteSpace(newIdentitySecretName))">
+                        @if (addingIdentityBinding) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Attach
+                    </button>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="alert alert-info small mb-3">
+                <i class="bi bi-shield-lock me-1"></i>
+                Realm <code>@identityRealm.RealmName</code> is linked to this app.
+                OIDC client bindings are managed by your administrator.
+            </div>
+        }
+
+        @if (!identityBindingsByDeployment.Values.Any(b => b.Count > 0) && (identityRealm is null || IsPortalView))
+        {
+            <EmptyState Icon="bi-shield-lock" Message="No OIDC clients are connected to this app's deployments." />
+        }
+        else
+        {
+            @foreach (AppDeployment deployment in deployments ?? [])
+            {
+                List<IdentityBinding> bindings = identityBindingsByDeployment.GetValueOrDefault(deployment.Id, []);
+                if (bindings.Count == 0) continue;
+                <div class="card shadow-sm mb-3">
+                    <div class="card-header bg-white py-2">
+                        <div class="d-flex align-items-center gap-2">
+                            <i class="bi bi-rocket-takeoff text-primary"></i>
+                            <strong>@deployment.Name</strong>
+                            <span class="text-muted small">
+                                <i class="bi bi-hdd-network me-1"></i>@deployment.Cluster?.Name
+                                <i class="bi bi-box ms-2 me-1"></i>@deployment.Namespace
+                            </span>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Client</th>
+                                        <th>Realm</th>
+                                        <th>K8s Secret</th>
+                                        <th>Last Synced</th>
+                                        <th class="text-end">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (IdentityBinding binding in bindings)
+                                    {
+                                        <tr>
+                                            <td>
+                                                <span class="fw-medium font-monospace small">@binding.ClientId</span>
+                                            </td>
+                                            <td>
+                                                <code class="small">@binding.KeycloakRealm.RealmName</code>
+                                            </td>
+                                            <td>
+                                                <code class="small">@binding.KubernetesSecretName</code>
+                                                <br /><small class="text-muted">@deployment.Namespace</small>
+                                            </td>
+                                            <td>
+                                                @if (binding.LastSyncedAt.HasValue)
+                                                {
+                                                    <small class="text-success"><i class="bi bi-check-circle me-1"></i>@binding.LastSyncedAt.Value.ToString("MMM d, HH:mm")</small>
+                                                }
+                                                else
+                                                {
+                                                    <small class="text-muted">Never</small>
+                                                }
+                                            </td>
+                                            <td class="text-end">
+                                                <button class="btn btn-sm btn-outline-primary me-1"
+                                                        @onclick="() => SyncIdentityBinding(binding)"
+                                                        disabled="@syncingBindingIds.Contains(binding.Id)"
+                                                        title="Sync to K8s">
+                                                    @if (syncingBindingIds.Contains(binding.Id))
+                                                    { <span class="spinner-border spinner-border-sm"></span> }
+                                                    else
+                                                    { <i class="bi bi-cloud-arrow-up"></i> }
+                                                </button>
+                                                @if (identityBindingSyncErrors.TryGetValue(binding.Id, out string? idErr) && idErr is not null)
+                                                {
+                                                    <div class="text-danger small mt-1">@idErr</div>
+                                                }
+                                                @if (!IsPortalView)
+                                                {
+                                                    @if (confirmDetachIdentityId == binding.Id)
+                                                    {
+                                                        <button class="btn btn-sm btn-danger me-1" @onclick="() => DetachIdentityBinding(binding.Id)">Detach</button>
+                                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDetachIdentityId = null">Cancel</button>
+                                                    }
+                                                    else
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDetachIdentityId = binding.Id" title="Detach">
+                                                            <i class="bi bi-x-circle"></i>
+                                                        </button>
+                                                    }
+                                                }
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            }
+        }
+    }
+}
+
 @code {
     [Parameter] public required Data.App App { get; set; }
     [Parameter] public required Data.Environment Environment { get; set; }
@@ -2063,6 +2302,26 @@
     private Guid? confirmUnbindStorageId;
     private Dictionary<Guid, string?> storageBindingSyncErrors = new();
 
+    // ── App-level identity bindings ──────────────────────────────────
+    private Dictionary<Guid, List<IdentityBinding>> identityBindingsByDeployment = new();
+    private bool identityBindingsLoaded;
+    private string? identityLoadError;
+    private KeycloakRealm? identityRealm;
+    private List<KeycloakRealm> availableRealmsForLinking = [];
+    private Guid newIdentityLinkRealmId;
+    private bool linkingRealm;
+    private string? linkRealmError;
+    private List<KeycloakClientInfo> availableIdentityClients = [];
+    private bool loadingIdentityClients;
+    private string? clientsLoadError;
+    private Guid newIdentityDeploymentId;
+    private string newIdentityClientUuid = "";
+    private string newIdentitySecretName = "";
+    private bool addingIdentityBinding;
+    private string? identityBindingError;
+    private Guid? confirmDetachIdentityId;
+    private Dictionary<Guid, string?> identityBindingSyncErrors = new();
+
     // Git Access tab
     private List<CustomerGitRepoPolicy>? gitRepoPolicies;
     private string newRepoPolicyPattern = "";
@@ -2209,6 +2468,7 @@
     {
         selectedDeployment = deploy;
         confirmDeleteDeployment = false;
+        showEditDeployment = false; showEditGitSettings = false; showAddManifest = false;
         helmValuesSaved = false; helmValuesError = null; helmInstallOutput = null; helmInstallSuccess = null;
         yamlApplyOutput = null; yamlApplySuccess = null; savingManifest = false; editingManifestId = null;
         resourceTree = null; resourcesError = null; deploymentMetrics = null; deploymentMetricsError = null;
@@ -2737,6 +2997,122 @@
         storageBindingSyncErrors.Remove(bindingId);
         await StorageService.UnbindStorageAsync(bindingId);
         await LoadAppStorageBindings();
+    }
+
+    // ── Identity bindings ─────────────────────────────────────────
+
+    private async Task OpenIdentitySection()
+    {
+        section = "identity";
+        if (!identityBindingsLoaded) await LoadAppIdentityBindings();
+    }
+
+    private async Task LoadAppIdentityBindings()
+    {
+        identityLoadError = null;
+        try
+        {
+            identityBindingsByDeployment.Clear();
+            foreach (AppDeployment dep in deployments ?? [])
+                identityBindingsByDeployment[dep.Id] = await KeycloakService.GetIdentityBindingsForDeploymentAsync(dep.Id);
+            identityBindingsLoaded = true;
+        }
+        catch (Exception ex)
+        {
+            identityLoadError = ex.Message;
+            identityBindingsLoaded = true;
+            return;
+        }
+
+        if (identityRealm is null)
+        {
+            identityRealm = await KeycloakService.GetRealmForAppAsync(TenantId, App.Id);
+
+            if (identityRealm is null && !IsPortalView)
+            {
+                try { availableRealmsForLinking = await KeycloakService.GetAllRealmsForTenantAsync(TenantId); }
+                catch { availableRealmsForLinking = []; }
+            }
+
+            if (identityRealm is not null && !IsPortalView)
+            {
+                clientsLoadError = null;
+                loadingIdentityClients = true;
+                StateHasChanged();
+                try
+                {
+                    availableIdentityClients = (await KeycloakService.GetClientsAsync(TenantId, identityRealm.Id))
+                        .Where(c => !c.PublicClient && !c.BearerOnly)
+                        .OrderBy(c => c.ClientId)
+                        .ToList();
+                }
+                catch (Exception ex) { availableIdentityClients = []; clientsLoadError = ex.Message; }
+                finally { loadingIdentityClients = false; }
+            }
+        }
+    }
+
+    private async Task LinkRealmToApp()
+    {
+        linkRealmError = null;
+        linkingRealm = true;
+        try
+        {
+            await KeycloakService.LinkRealmToAppAsync(TenantId, newIdentityLinkRealmId, App.Id);
+            identityRealm = null;
+            newIdentityLinkRealmId = Guid.Empty;
+            await LoadAppIdentityBindings();
+        }
+        catch (Exception ex) { linkRealmError = ex.Message; }
+        finally { linkingRealm = false; }
+    }
+
+    private async Task AddIdentityBinding()
+    {
+        identityBindingError = null; addingIdentityBinding = true;
+        try
+        {
+            KeycloakClientInfo? client = availableIdentityClients.FirstOrDefault(c => c.Id == newIdentityClientUuid);
+            if (client is null) { identityBindingError = "Selected client not found."; return; }
+            if (identityRealm is null) { identityBindingError = "No realm linked to this app."; return; }
+
+            IdentityBinding binding = await KeycloakService.CreateIdentityBindingAsync(
+                identityRealm.Id, newIdentityDeploymentId,
+                client.Id, client.ClientId, newIdentitySecretName.Trim());
+
+            try { await KeycloakService.SyncIdentityBindingAsync(TenantId, binding.Id); }
+            catch (Exception syncEx) { identityBindingError = $"Attached, but sync failed: {syncEx.Message}"; }
+
+            newIdentityDeploymentId = Guid.Empty; newIdentityClientUuid = ""; newIdentitySecretName = "";
+            await LoadAppIdentityBindings();
+        }
+        catch (Exception ex) { identityBindingError = ex.Message; }
+        finally { addingIdentityBinding = false; }
+    }
+
+    private async Task DetachIdentityBinding(Guid bindingId)
+    {
+        confirmDetachIdentityId = null;
+        identityBindingSyncErrors.Remove(bindingId);
+        try
+        {
+            await KeycloakService.RemoveIdentityBindingAsync(bindingId);
+            await LoadAppIdentityBindings();
+        }
+        catch (Exception ex) { identityBindingError = ex.Message; }
+    }
+
+    private async Task SyncIdentityBinding(IdentityBinding binding)
+    {
+        syncingBindingIds.Add(binding.Id);
+        identityBindingSyncErrors.Remove(binding.Id);
+        try
+        {
+            await KeycloakService.SyncIdentityBindingAsync(TenantId, binding.Id);
+            await LoadAppIdentityBindings();
+        }
+        catch (Exception ex) { identityBindingSyncErrors[binding.Id] = ex.Message; }
+        finally { syncingBindingIds.Remove(binding.Id); }
     }
 
     // ── Metrics ───────────────────────────────────────────────────

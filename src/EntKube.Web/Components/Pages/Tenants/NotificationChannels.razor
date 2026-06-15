@@ -36,8 +36,10 @@ else
                                        @onchange="() => ToggleEnabled(channel)" />
                             </div>
                         </div>
-                        <div class="text-muted small mb-2">
-                            Severity: <span class="badge bg-light text-dark">@FormatSeverityFilter(channel.SeverityFilter)</span>
+                        <div class="d-flex flex-wrap gap-1 mb-2">
+                            <span class="badge bg-light text-dark">@FormatSeverityFilter(channel.SeverityFilter)</span>
+                            <span class="badge bg-light text-dark">@FormatFiringFilter(channel.FiringFilter)</span>
+                            <span class="badge bg-light text-dark">@FormatAcknowledgeFilter(channel.AcknowledgeFilter)</span>
                         </div>
 
                         @if (deliveries.TryGetValue(channel.Id, out List<NotificationDelivery>? recent) && recent.Count > 0)
@@ -168,11 +170,27 @@ else
                         }
 
                         <div class="mb-3">
-                            <label class="form-label">Alert Severity Filter</label>
+                            <label class="form-label">Severity</label>
                             <select class="form-select" @bind="newSeverityFilter">
                                 <option value="@AlertSeverityFilter.All">All severities</option>
                                 <option value="@AlertSeverityFilter.WarningAndAbove">Warning and above</option>
                                 <option value="@AlertSeverityFilter.CriticalOnly">Critical only</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Alert state</label>
+                            <select class="form-select" @bind="newFiringFilter">
+                                <option value="@AlertFiringFilter.All">Firing and resolved</option>
+                                <option value="@AlertFiringFilter.FiringOnly">Firing only</option>
+                                <option value="@AlertFiringFilter.ResolvedOnly">Resolved only</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Acknowledgement</label>
+                            <select class="form-select" @bind="newAcknowledgeFilter">
+                                <option value="@AlertAcknowledgeFilter.All">Acknowledged and unacknowledged</option>
+                                <option value="@AlertAcknowledgeFilter.UnacknowledgedOnly">Unacknowledged only</option>
+                                <option value="@AlertAcknowledgeFilter.AcknowledgedOnly">Acknowledged only</option>
                             </select>
                         </div>
 
@@ -213,6 +231,8 @@ else
     private string newTeamId = "";
     private string newChannelId = "";
     private AlertSeverityFilter newSeverityFilter = AlertSeverityFilter.All;
+    private AlertFiringFilter newFiringFilter = AlertFiringFilter.All;
+    private AlertAcknowledgeFilter newAcknowledgeFilter = AlertAcknowledgeFilter.All;
     private string? modalError;
     private Guid? testingId;
     private Dictionary<Guid, string> testResults = new();
@@ -255,6 +275,8 @@ else
         newTeamId = "";
         newChannelId = "";
         newSeverityFilter = AlertSeverityFilter.All;
+        newFiringFilter = AlertFiringFilter.All;
+        newAcknowledgeFilter = AlertAcknowledgeFilter.All;
         modalError = null;
     }
 
@@ -293,7 +315,9 @@ else
             Name = newName.Trim(),
             Type = newType,
             ConfigurationJson = configJson,
-            SeverityFilter = newSeverityFilter
+            SeverityFilter = newSeverityFilter,
+            FiringFilter = newFiringFilter,
+            AcknowledgeFilter = newAcknowledgeFilter
         });
         await db.SaveChangesAsync();
         CloseModal();
@@ -398,9 +422,23 @@ else
 
     private static string FormatSeverityFilter(AlertSeverityFilter filter) => filter switch
     {
-        AlertSeverityFilter.All             => "All",
+        AlertSeverityFilter.All             => "All severities",
         AlertSeverityFilter.WarningAndAbove => "Warning+",
-        AlertSeverityFilter.CriticalOnly    => "Critical",
+        AlertSeverityFilter.CriticalOnly    => "Critical only",
         _ => filter.ToString()
+    };
+
+    private static string FormatFiringFilter(AlertFiringFilter filter) => filter switch
+    {
+        AlertFiringFilter.FiringOnly   => "Firing only",
+        AlertFiringFilter.ResolvedOnly => "Resolved only",
+        _ => "Firing + resolved"
+    };
+
+    private static string FormatAcknowledgeFilter(AlertAcknowledgeFilter filter) => filter switch
+    {
+        AlertAcknowledgeFilter.UnacknowledgedOnly => "Unacknowledged only",
+        AlertAcknowledgeFilter.AcknowledgedOnly   => "Acknowledged only",
+        _ => "All states"
     };
 }

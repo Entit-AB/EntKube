@@ -452,6 +452,10 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
+                    b.Property<string>("RewritePath")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
                     b.Property<string>("ServiceName")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -2354,6 +2358,16 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasColumnType("character varying(200)");
 
                     b.Property<string>("SeverityFilter")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.Property<string>("AcknowledgeFilter")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.Property<string>("FiringFilter")
                         .IsRequired()
                         .HasMaxLength(30)
                         .HasColumnType("character varying(30)");

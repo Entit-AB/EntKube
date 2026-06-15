@@ -18,6 +18,7 @@ public class AppDeploymentRouteRequest
     public required string ServiceName { get; set; }
     public int ServicePort { get; set; } = 80;
     public string PathPrefix { get; set; } = "/";
+    public string? RewritePath { get; set; }
     public bool IsEnabled { get; set; } = true;
 }
 
@@ -166,6 +167,7 @@ public class AppRouteService(
             AppRouteId = appRouteId,
             AppDeploymentId = deploymentId,
             PathPrefix = string.IsNullOrWhiteSpace(request.PathPrefix) ? "/" : request.PathPrefix.Trim(),
+            RewritePath = string.IsNullOrWhiteSpace(request.RewritePath) ? null : request.RewritePath.Trim(),
             ServiceName = request.ServiceName.Trim(),
             ServicePort = request.ServicePort,
             GatewayName = gatewayName,
@@ -191,6 +193,7 @@ public class AppRouteService(
             ?? throw new InvalidOperationException("Deployment route not found.");
 
         dr.PathPrefix = string.IsNullOrWhiteSpace(request.PathPrefix) ? "/" : request.PathPrefix.Trim();
+        dr.RewritePath = string.IsNullOrWhiteSpace(request.RewritePath) ? null : request.RewritePath.Trim();
         dr.ServiceName = request.ServiceName.Trim();
         dr.ServicePort = request.ServicePort;
         dr.IsEnabled = request.IsEnabled;
@@ -228,63 +231,139 @@ public class AppRouteService(
         return GenerateManifestYaml(dr);
     }
 
-    public static string GenerateManifestYaml(AppDeploymentRoute dr)
+    /// <summary>
+    /// Generates the full manifest (HTTPRoute + optional Certificate) for an AppRoute, combining
+    /// ALL enabled deployment routes as rules in a single HTTPRoute resource. This is the correct
+    /// form to apply to the cluster — a per-deployment-route manifest would overwrite other rules.
+    /// Requires AppRoute.DeploymentRoutes.AppDeployment to be loaded.
+    /// </summary>
+    public static string GenerateManifestYaml(AppRoute route)
     {
-        string httpRoute = GenerateHttpRouteYaml(dr);
-        string certificate = GenerateCertificateYaml(dr);
-
-        return string.IsNullOrEmpty(certificate)
-            ? httpRoute
-            : $"{httpRoute}\n---\n{certificate}";
+        List<AppDeploymentRoute> enabled = route.DeploymentRoutes
+            .Where(dr => dr.IsEnabled)
+            .OrderByDescending(dr => dr.PathPrefix.Length)
+            .ThenBy(dr => dr.PathPrefix)
+            .ToList();
+        return GenerateManifestYaml(route, enabled);
     }
 
-    public static string GenerateHttpRouteYaml(AppDeploymentRoute dr)
+    public static string GenerateManifestYaml(AppRoute route, IReadOnlyList<AppDeploymentRoute> deploymentRoutes)
     {
-        AppRoute appRoute = dr.AppRoute;
-        string ns = dr.AppDeployment?.Namespace ?? "default";
-        string routeName = ExternalRouteService.ToListenerName(appRoute.Hostname) + "-route";
+        string httpRouteNs = deploymentRoutes.Count > 0
+            ? deploymentRoutes[0].AppDeployment?.Namespace ?? "default"
+            : "default";
 
-        string pathMatch = dr.PathPrefix != "/"
-            ? $"""
-                      - matches:
-                          - path:
-                              type: PathPrefix
-                              value: {dr.PathPrefix}
-                        backendRefs:
-                          - name: {dr.ServiceName}
-                            port: {dr.ServicePort}
-               """
-            : $"""
-                      - backendRefs:
-                          - name: {dr.ServiceName}
-                            port: {dr.ServicePort}
-               """;
+        List<string> parts = [
+            GenerateHttpRouteYaml(route, deploymentRoutes),
+            GenerateCertificateYaml(route, deploymentRoutes),
+            GenerateReferenceGrantsYaml(httpRouteNs, deploymentRoutes),
+        ];
 
-        return $"""
-            apiVersion: gateway.networking.k8s.io/v1
-            kind: HTTPRoute
-            metadata:
-              name: {routeName}
-              namespace: {ns}
-            spec:
-              parentRefs:
-                - name: {dr.GatewayName}
-                  namespace: {dr.GatewayNamespace}
-              hostnames:
-                - {appRoute.Hostname}
-              rules:
-            {pathMatch}
-            """;
+        return string.Join("\n---\n", parts.Where(p => !string.IsNullOrEmpty(p)));
     }
 
-    public static string GenerateCertificateYaml(AppDeploymentRoute dr)
+    /// <summary>
+    /// Generates ReferenceGrant resources for each namespace that differs from the HTTPRoute's
+    /// namespace, allowing the HTTPRoute to cross-reference Services in those namespaces.
+    /// Required by Gateway API when backendRefs span multiple namespaces.
+    /// </summary>
+    public static string GenerateReferenceGrantsYaml(string httpRouteNamespace, IReadOnlyList<AppDeploymentRoute> deploymentRoutes)
     {
-        AppRoute appRoute = dr.AppRoute;
-        if (appRoute.TlsMode != TlsMode.ClusterIssuer || string.IsNullOrWhiteSpace(appRoute.ClusterIssuerName))
+        List<string> otherNamespaces = deploymentRoutes
+            .Select(dr => dr.AppDeployment?.Namespace ?? "default")
+            .Where(n => n != httpRouteNamespace)
+            .Distinct()
+            .ToList();
+
+        if (otherNamespaces.Count == 0) return "";
+
+        var sb = new System.Text.StringBuilder();
+        foreach (string targetNs in otherNamespaces)
+        {
+            if (sb.Length > 0) sb.AppendLine("---");
+            sb.AppendLine("apiVersion: gateway.networking.k8s.io/v1beta1");
+            sb.AppendLine("kind: ReferenceGrant");
+            sb.AppendLine("metadata:");
+            sb.AppendLine($"  name: entkube-httproute-ref");
+            sb.AppendLine($"  namespace: {targetNs}");
+            sb.AppendLine("spec:");
+            sb.AppendLine("  from:");
+            sb.AppendLine("    - group: gateway.networking.k8s.io");
+            sb.AppendLine("      kind: HTTPRoute");
+            sb.AppendLine($"      namespace: {httpRouteNamespace}");
+            sb.AppendLine("  to:");
+            sb.AppendLine("    - group: \"\"");
+            sb.Append("      kind: Service");
+        }
+        return sb.ToString();
+    }
+
+    public static string GenerateHttpRouteYaml(AppRoute route, IReadOnlyList<AppDeploymentRoute> deploymentRoutes)
+    {
+        if (deploymentRoutes.Count == 0) return "";
+
+        AppDeploymentRoute primary = deploymentRoutes[0];
+        string ns = primary.AppDeployment?.Namespace ?? "default";
+        string routeName = ExternalRouteService.ToListenerName(route.Hostname) + "-route";
+
+        var rules = new System.Text.StringBuilder();
+        foreach (AppDeploymentRoute dr in deploymentRoutes)
+        {
+            string drNs = dr.AppDeployment?.Namespace ?? ns;
+            if (dr.PathPrefix != "/")
+            {
+                rules.AppendLine($"    - matches:");
+                rules.AppendLine($"        - path:");
+                rules.AppendLine($"            type: PathPrefix");
+                rules.AppendLine($"            value: {dr.PathPrefix}");
+                if (dr.RewritePath is not null)
+                {
+                    rules.AppendLine($"      filters:");
+                    rules.AppendLine($"        - type: URLRewrite");
+                    rules.AppendLine($"          urlRewrite:");
+                    rules.AppendLine($"            path:");
+                    rules.AppendLine($"              type: ReplacePrefixMatch");
+                    rules.AppendLine($"              replacePrefixMatch: {dr.RewritePath}");
+                }
+                rules.AppendLine($"      backendRefs:");
+                rules.AppendLine($"        - name: {dr.ServiceName}");
+                rules.AppendLine($"          namespace: {drNs}");
+                rules.AppendLine($"          port: {dr.ServicePort}");
+            }
+            else
+            {
+                rules.AppendLine($"    - backendRefs:");
+                rules.AppendLine($"        - name: {dr.ServiceName}");
+                rules.AppendLine($"          namespace: {drNs}");
+                rules.AppendLine($"          port: {dr.ServicePort}");
+            }
+        }
+
+        return
+            $"apiVersion: gateway.networking.k8s.io/v1\n" +
+            $"kind: HTTPRoute\n" +
+            $"metadata:\n" +
+            $"  name: {routeName}\n" +
+            $"  namespace: {ns}\n" +
+            $"spec:\n" +
+            $"  parentRefs:\n" +
+            $"    - name: {primary.GatewayName}\n" +
+            $"      namespace: {primary.GatewayNamespace}\n" +
+            $"  hostnames:\n" +
+            $"    - {route.Hostname}\n" +
+            $"  rules:\n" +
+            rules.ToString().TrimEnd();
+    }
+
+    public static string GenerateCertificateYaml(AppRoute route, IReadOnlyList<AppDeploymentRoute> deploymentRoutes)
+    {
+        if (route.TlsMode != TlsMode.ClusterIssuer || string.IsNullOrWhiteSpace(route.ClusterIssuerName))
             return "";
 
-        string ns = dr.AppDeployment?.Namespace ?? "default";
-        string secretName = ExternalRouteService.ToCertSecretName(appRoute.Hostname);
+        // Certificate must live in cert-manager namespace so the Gateway's certificateRefs
+        // can resolve the resulting TLS Secret (cross-namespace via ReferenceGrant).
+        const string ns = "cert-manager";
+        string secretName = ExternalRouteService.ToCertSecretName(route.Hostname);
 
         return $"""
             apiVersion: cert-manager.io/v1
@@ -295,10 +374,20 @@ public class AppRouteService(
             spec:
               secretName: {secretName}
               issuerRef:
-                name: {appRoute.ClusterIssuerName}
+                name: {route.ClusterIssuerName}
                 kind: ClusterIssuer
               dnsNames:
-                - {appRoute.Hostname}
+                - {route.Hostname}
             """;
     }
+
+    // Kept for backward compatibility (e.g. manifest preview for a single route).
+    public static string GenerateManifestYaml(AppDeploymentRoute dr)
+        => GenerateManifestYaml(dr.AppRoute, [dr]);
+
+    public static string GenerateHttpRouteYaml(AppDeploymentRoute dr)
+        => GenerateHttpRouteYaml(dr.AppRoute, [dr]);
+
+    public static string GenerateCertificateYaml(AppDeploymentRoute dr)
+        => GenerateCertificateYaml(dr.AppRoute, [dr]);
 }
