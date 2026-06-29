@@ -2423,6 +2423,99 @@ public class KeycloakService(
     /// so Keycloak picks up the new theme files (subPath mounts require a restart).
     /// No-op for external Keycloak instances (ClusterComponentId not set).
     /// </summary>
+    // Theme copier init container, shared by the live StatefulSet patch
+    // (DeployNamedThemeToClusterAsync) and the Helm-values builder
+    // (BuildKeycloakThemeHelmExtrasAsync) so both emit an identical container.
+    private const string ThemeCopierImage = "busybox:1.36";
+    private const string ThemeCopierCommandRaw =
+        "mkdir -p /dest/resources/css /dest/resources/img; " +
+        "cp /src/theme.properties /dest/theme.properties; " +
+        "cp /src/login.css /dest/resources/css/login.css; " +
+        "find /src/imgs -maxdepth 1 -type f -exec cp {} /dest/resources/img/ \\; 2>/dev/null; true";
+
+    /// <summary>
+    /// Builds the keycloakx Helm values fragment (<c>extraVolumes</c> /
+    /// <c>extraInitContainers</c> / <c>extraVolumeMounts</c>) that wires every named theme of
+    /// this Keycloak component into the StatefulSet.
+    ///
+    /// Themes were previously applied only as an out-of-band strategic patch on the live
+    /// StatefulSet. The keycloakx chart renders <c>volumes</c> (Helm-managed) but not
+    /// <c>initContainers</c> (chart leaves it alone), so a later <c>helm upgrade</c> reset the
+    /// volumes back to the chart's set — dropping the theme volumes — while the out-of-band
+    /// init container survived, leaving volumeMounts pointing at volumes that no longer existed
+    /// and failing the upgrade. Rendering all three pieces through these <c>extra*</c> values
+    /// makes Helm manage them together, so upgrades stay consistent.
+    ///
+    /// The emitted spec mirrors the live patch exactly (same names, item order, optional
+    /// ConfigMap, copier command) so the two paths produce no churn. Returns an empty string
+    /// when the component has no themes.
+    /// </summary>
+    public async Task<string> BuildKeycloakThemeHelmExtrasAsync(
+        Guid componentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<KeycloakTheme> themes = await db.KeycloakThemes
+            .Include(t => t.ComponentConfig)
+            .Where(t => t.ComponentConfig.ClusterComponentId == componentId)
+            .OrderBy(t => t.Name)
+            .ToListAsync(ct);
+
+        if (themes.Count == 0)
+            return "";
+
+        // JSON-escaped copier command, identical to the one spliced into the live patch.
+        string copierCmd = JsonSerializer.Serialize(ThemeCopierCommandRaw)[1..^1];
+
+        var volumes = new StringBuilder();
+        var initContainers = new StringBuilder();
+        var volumeMounts = new StringBuilder();
+
+        foreach (KeycloakTheme theme in themes)
+        {
+            string cmName       = $"entkube-theme-{theme.Id:N}";
+            string srcVolName   = $"{cmName}-src";
+            string loginVolName = $"{cmName}-login";
+            string copierName   = $"{cmName}-copier";
+            string deploySlug   = "theme-" + ToThemeSlug(theme.Name);
+
+            // Same source (vault) and ordering (alphabetical) as the live patch, so the
+            // ConfigMap items list matches byte-for-byte.
+            List<string> resourceNames = await ListThemeResourcesAsync(theme.TenantId, componentId, theme.Id, ct);
+            List<string> imageNames = resourceNames.Where(IsImageResource).ToList();
+
+            // extraVolumes: optional ConfigMap source (never blocks startup if the theme hasn't
+            // been deployed yet) + emptyDir target the init container populates.
+            volumes.Append($"  - name: {srcVolName}\n");
+            volumes.Append("    configMap:\n");
+            volumes.Append($"      name: {cmName}\n");
+            volumes.Append("      optional: true\n");
+            volumes.Append("      items:\n");
+            volumes.Append("        - key: login-theme.properties\n          path: theme.properties\n");
+            volumes.Append("        - key: login.css\n          path: login.css\n");
+            foreach (string n in imageNames)
+                volumes.Append($"        - key: img-{n}\n          path: imgs/{n}\n");
+            volumes.Append($"  - name: {loginVolName}\n    emptyDir: {{}}\n");
+
+            // extraInitContainers: copier that turns the ConfigMap symlinks into real files.
+            initContainers.Append($"  - name: {copierName}\n");
+            initContainers.Append($"    image: {ThemeCopierImage}\n");
+            initContainers.Append($"    command: [\"sh\", \"-c\", \"{copierCmd}\"]\n");
+            initContainers.Append("    volumeMounts:\n");
+            initContainers.Append($"      - name: {srcVolName}\n        mountPath: /src\n");
+            initContainers.Append($"      - name: {loginVolName}\n        mountPath: /dest\n");
+
+            // extraVolumeMounts: mount the populated emptyDir at the theme's login directory.
+            volumeMounts.Append($"  - name: {loginVolName}\n    mountPath: /opt/keycloak/themes/{deploySlug}/login\n");
+        }
+
+        var sb = new StringBuilder();
+        sb.Append("extraVolumes: |\n").Append(volumes);
+        sb.Append("extraInitContainers: |\n").Append(initContainers);
+        sb.Append("extraVolumeMounts: |\n").Append(volumeMounts);
+        return sb.ToString();
+    }
+
     public async Task DeployNamedThemeToClusterAsync(
         Guid tenantId, KeycloakTheme theme, CancellationToken ct = default)
     {
@@ -2538,14 +2631,11 @@ public class KeycloakService(
             : "";
 
         // Init-container shell command: copy theme files and any uploaded images.
-        // copierCmdJson is the value already JSON-string-escaped (without surrounding quotes)
-        // so it can be safely spliced into the JSON patch literal.
-        string copierCmdRaw =
-            "mkdir -p /dest/resources/css /dest/resources/img; " +
-            "cp /src/theme.properties /dest/theme.properties; " +
-            "cp /src/login.css /dest/resources/css/login.css; " +
-            "find /src/imgs -maxdepth 1 -type f -exec cp {} /dest/resources/img/ \\; 2>/dev/null; true";
-        string copierCmd = JsonSerializer.Serialize(copierCmdRaw)[1..^1]; // strip surrounding quotes
+        // copierCmd is the value already JSON-string-escaped (without surrounding quotes)
+        // so it can be safely spliced into the JSON patch literal. Shared with the Helm-values
+        // builder (BuildKeycloakThemeHelmExtrasAsync) so both renderings emit an identical
+        // init container and a `helm upgrade` produces no spec churn.
+        string copierCmd = JsonSerializer.Serialize(ThemeCopierCommandRaw)[1..^1]; // strip surrounding quotes
 
         // Strategic merge patch:
         //  • Delete all previous volume/mount variants (subPath, directory, and legacy names).
@@ -2567,6 +2657,7 @@ public class KeycloakService(
                         "name": "{{srcVolName}}",
                         "configMap": {
                           "name": "{{cmName}}",
+                          "optional": true,
                           "items": [
                             { "key": "login-theme.properties", "path": "theme.properties" },
                             { "key": "login.css",              "path": "login.css" }{{imageItems}}
@@ -2581,7 +2672,7 @@ public class KeycloakService(
                     "initContainers": [
                       {
                         "name": "{{copierName}}",
-                        "image": "busybox:1.36",
+                        "image": "{{ThemeCopierImage}}",
                         "command": ["sh", "-c", "{{copierCmd}}"],
                         "volumeMounts": [
                           { "name": "{{srcVolName}}",   "mountPath": "/src" },

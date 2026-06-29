@@ -58,7 +58,7 @@ public class ComponentLifecycleServiceTests : IDisposable
         byte[] testRootKey = Convert.FromBase64String("dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
         VaultEncryptionService encryption = new(testRootKey);
         vaultService = new VaultService(dbFactory, encryption);
-        sut = new ComponentLifecycleService(dbFactory, vaultService);
+        sut = new ComponentLifecycleService(dbFactory, vaultService, TestServices.BuildKeycloak(dbFactory, vaultService));
     }
 
     public void Dispose()

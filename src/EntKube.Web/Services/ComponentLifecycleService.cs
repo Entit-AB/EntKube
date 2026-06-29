@@ -66,7 +66,10 @@ public class HelmCommand
 /// 7. ExecuteHelmAsync          → runs helm uninstall
 /// 8. MarkUninstallResultAsync  → removes or resets the component
 /// </summary>
-public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService)
+public class ComponentLifecycleService(
+    IDbContextFactory<ApplicationDbContext> dbFactory,
+    VaultService vaultService,
+    KeycloakService keycloakService)
 {
     /// <summary>
     /// Registers a new component on a cluster. The component starts in NotInstalled
@@ -646,6 +649,17 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
             }
         }
 
+        // Keycloak: render any named-theme volumes / copier init container / login mount into
+        // the chart's extra* values so Helm manages them alongside the StatefulSet. Without
+        // this, `helm upgrade` resets the chart-managed volumes (dropping the out-of-band theme
+        // volumes) while the theme init container survives — leaving volumeMounts that point at
+        // missing volumes and failing the upgrade.
+        if (component.HelmChartName == "keycloakx")
+        {
+            string themeExtras = await keycloakService.BuildKeycloakThemeHelmExtrasAsync(component.Id, ct);
+            valuesYaml = MergeYamlBlocks(valuesYaml, themeExtras);
+        }
+
         string releaseName = component.ReleaseName ?? component.Name;
         string chartRef = !string.IsNullOrWhiteSpace(component.HelmRepoUrl)
             ? $"{component.HelmRepoUrl}/{component.HelmChartName}"
@@ -667,6 +681,21 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
             ValuesYaml = valuesYaml,
             Timeout = installTimeout
         };
+    }
+
+    /// <summary>
+    /// Appends a YAML block of additional top-level keys to a values document, ensuring a
+    /// newline separates them. Returns the base unchanged when there is nothing to add.
+    /// </summary>
+    private static string? MergeYamlBlocks(string? baseYaml, string extra)
+    {
+        if (string.IsNullOrEmpty(extra))
+            return baseYaml;
+
+        if (string.IsNullOrEmpty(baseYaml))
+            return extra;
+
+        return baseYaml.EndsWith('\n') ? baseYaml + extra : baseYaml + "\n" + extra;
     }
 
     /// <summary>
