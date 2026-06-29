@@ -9,7 +9,14 @@ public enum TlsMode
     ClusterIssuer,
 
     /// <summary>Manual TLS — operator uploads a certificate (and optionally a private key).</summary>
-    Manual
+    Manual,
+
+    /// <summary>
+    /// TLS passthrough — the gateway routes TCP by SNI without terminating TLS.
+    /// The backend pod handles TLS itself (e.g. via an nginx sidecar).
+    /// No certificate is managed at the gateway level.
+    /// </summary>
+    Passthrough
 }
 
 /// <summary>

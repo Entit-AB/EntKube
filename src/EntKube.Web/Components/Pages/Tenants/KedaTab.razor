@@ -1,0 +1,422 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject KedaScalerService KedaService
+
+@* ═══════════════════════════════════════════════════════════════════
+   KedaTab — KEDA autoscaler management at app+environment scope.
+   ScaledObjects (structured) and Custom YAML (ScaledObject/ScaledJob)
+   are applied to the app's namespace on every cluster it runs on.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3 mt-4">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <div>
+            <i class="bi bi-arrows-angle-expand me-2 text-primary"></i>
+            <strong>Autoscaling (KEDA)</strong>
+            <span class="text-muted small ms-2">Event-driven autoscalers applied to this app's namespace in this environment.</span>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+            @if (scalers.Count > 0)
+            {
+                <span class="badge bg-primary-subtle text-primary border border-primary-subtle">@scalers.Count configured</span>
+            }
+            else
+            {
+                <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">none</span>
+            }
+            <button class="btn btn-sm btn-success" @onclick="ApplyToClusters" disabled="@(applying || scalers.Count == 0)">
+                @if (applying) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                else { <i class="bi bi-cloud-upload me-1"></i> }
+                Apply to clusters
+            </button>
+        </div>
+    </div>
+    <div class="card-body pt-2">
+        @if (loading)
+        {
+            <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+        }
+        else if (loadError is not null)
+        {
+            <div class="alert alert-danger py-2 small">
+                <i class="bi bi-exclamation-triangle me-1"></i>
+                <strong>Failed to load autoscalers:</strong> @loadError
+                <button class="btn btn-sm btn-outline-danger ms-2" @onclick="LoadAsync">Retry</button>
+            </div>
+        }
+        else
+        {
+            @if (applyResults is not null)
+            {
+                <div class="alert @(applyAllOk ? "alert-success" : "alert-danger") py-2 small mb-3">
+                    <div class="d-flex align-items-start justify-content-between">
+                        <div>
+                            <i class="bi @(applyAllOk ? "bi-check-circle" : "bi-exclamation-triangle") me-1"></i>
+                            <strong>@(applyAllOk ? "Applied to all targets" : "Some targets had errors")</strong>
+                        </div>
+                        <button class="btn-close btn-close-sm" @onclick="() => applyResults = null"></button>
+                    </div>
+                    <ul class="mb-0 mt-1 ps-3">
+                        @foreach ((string target, bool ok, string output) in applyResults)
+                        {
+                            <li class="@(ok ? "text-success" : "text-danger")">
+                                <code>@target</code>: @(ok ? "✓ applied" : output)
+                            </li>
+                        }
+                    </ul>
+                </div>
+            }
+
+            @if (!kedaAvailable)
+            {
+                <div class="alert alert-warning py-2 small mb-3 d-flex align-items-center gap-2">
+                    <i class="bi bi-exclamation-triangle-fill text-warning flex-shrink-0"></i>
+                    <div>
+                        <strong>KEDA is not installed</strong> on any cluster in this environment.
+                        Install it from the <strong>Cluster → Components</strong> page (Autoscaling category).
+                        Saved autoscalers will take effect once KEDA is running.
+                    </div>
+                </div>
+            }
+            else
+            {
+                <p class="text-muted small mb-3">
+                    <i class="bi bi-check-circle-fill text-success me-1"></i>
+                    KEDA is installed. Autoscalers are applied to the app's namespace on every cluster it's deployed to.
+                </p>
+            }
+
+            @* ── Existing scalers ── *@
+            @if (scalers.Count == 0)
+            {
+                <p class="text-muted small fst-italic mb-3">No autoscalers yet. Add a ScaledObject to autoscale a workload, or use Custom YAML for a ScaledJob.</p>
+            }
+            else
+            {
+                <div class="list-group list-group-flush mb-3">
+                    @foreach (KedaScaler s in scalers)
+                    {
+                        <div class="list-group-item px-0 d-flex align-items-center justify-content-between">
+                            <div>
+                                <code class="text-primary">@s.Name</code>
+                                @if (s.Kind == KedaScalerKind.ScaledObject)
+                                {
+                                    <span class="badge bg-info-subtle text-info border border-info-subtle ms-2">ScaledObject</span>
+                                    <span class="text-muted small ms-2">
+                                        → @s.ScaleTargetKind/@s.ScaleTargetName
+                                        @if (s.MinReplicaCount is not null || s.MaxReplicaCount is not null)
+                                        {
+                                            <text> (@(s.MinReplicaCount?.ToString() ?? "0")–@(s.MaxReplicaCount?.ToString() ?? "100") replicas)</text>
+                                        }
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle ms-2">Custom YAML</span>
+                                }
+                            </div>
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => EditScaler(s)">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteScaler(s)">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+
+            @* ── Editor ── *@
+            @if (editorOpen)
+            {
+                <div class="border rounded p-3 mb-2 bg-light-subtle">
+                    <div class="d-flex align-items-center justify-content-between mb-2">
+                        <strong>@(editId is null ? "New autoscaler" : "Edit autoscaler")</strong>
+                        <button class="btn-close btn-close-sm" @onclick="CancelEdit"></button>
+                    </div>
+
+                    @if (saveError is not null)
+                    {
+                        <div class="alert alert-danger py-2 small mb-2">@saveError</div>
+                    }
+
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-6">
+                            <label class="form-label small mb-1">Name</label>
+                            <input class="form-control form-control-sm font-monospace" @bind="fName"
+                                   placeholder="e.g. billing-api-cpu" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small mb-1">Type</label>
+                            <select class="form-select form-select-sm" @bind="editKind">
+                                <option value="@KedaScalerKind.ScaledObject">ScaledObject (autoscale a workload)</option>
+                                <option value="@KedaScalerKind.Custom">Custom YAML (ScaledObject / ScaledJob)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    @if (editKind == KedaScalerKind.ScaledObject)
+                    {
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-4">
+                                <label class="form-label small mb-1">Target kind</label>
+                                <select class="form-select form-select-sm" @bind="fTargetKind">
+                                    <option>Deployment</option>
+                                    <option>StatefulSet</option>
+                                </select>
+                            </div>
+                            <div class="col-md-8">
+                                <label class="form-label small mb-1">Target name</label>
+                                <input class="form-control form-control-sm font-monospace" @bind="fTargetName"
+                                       placeholder="workload name to scale" />
+                            </div>
+                        </div>
+                        <div class="row g-2 mb-2">
+                            <div class="col">
+                                <label class="form-label small mb-1">Min replicas</label>
+                                <input type="number" class="form-control form-control-sm" @bind="fMin" placeholder="0" />
+                            </div>
+                            <div class="col">
+                                <label class="form-label small mb-1">Max replicas</label>
+                                <input type="number" class="form-control form-control-sm" @bind="fMax" placeholder="100" />
+                            </div>
+                            <div class="col">
+                                <label class="form-label small mb-1">Polling (s)</label>
+                                <input type="number" class="form-control form-control-sm" @bind="fPolling" placeholder="30" />
+                            </div>
+                            <div class="col">
+                                <label class="form-label small mb-1">Cooldown (s)</label>
+                                <input type="number" class="form-control form-control-sm" @bind="fCooldown" placeholder="300" />
+                            </div>
+                        </div>
+                        <label class="form-label small mb-1">
+                            Triggers <span class="text-muted">(YAML list — one item per scaler)</span>
+                        </label>
+                        <YamlEditor @bind-Value="fTriggers" />
+                    }
+                    else
+                    {
+                        <label class="form-label small mb-1">
+                            KEDA resource YAML <span class="text-muted">(namespace is set automatically on apply)</span>
+                        </label>
+                        <YamlEditor @bind-Value="fCustom" />
+                    }
+
+                    <div class="d-flex gap-2 mt-2">
+                        <button class="btn btn-sm btn-primary" @onclick="Save" disabled="@saving">
+                            @if (saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Save
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelEdit">Cancel</button>
+                    </div>
+                </div>
+            }
+            else
+            {
+                <div class="d-flex gap-2">
+                    <button class="btn btn-sm btn-outline-primary" @onclick="NewScaledObject">
+                        <i class="bi bi-plus-lg me-1"></i>Add ScaledObject
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="NewCustom">
+                        <i class="bi bi-filetype-yml me-1"></i>Add Custom YAML
+                    </button>
+                </div>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid AppId { get; set; }
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter, EditorRequired] public Guid EnvironmentId { get; set; }
+
+    private bool loading = true;
+    private string? loadError;
+    private bool kedaAvailable;
+    private List<KedaScaler> scalers = [];
+
+    // Apply
+    private bool applying;
+    private List<(string Target, bool Success, string Output)>? applyResults;
+    private bool applyAllOk;
+
+    // Editor state
+    private bool editorOpen;
+    private bool saving;
+    private string? saveError;
+    private Guid? editId;
+    private KedaScalerKind editKind = KedaScalerKind.ScaledObject;
+    private string fName = "";
+    private string fTargetKind = "Deployment";
+    private string fTargetName = "";
+    private int? fMin;
+    private int? fMax;
+    private int? fPolling;
+    private int? fCooldown;
+    private string fTriggers = "";
+    private string fCustom = "";
+
+    private const string DefaultTriggers =
+        "- type: cpu\n" +
+        "  metricType: Utilization\n" +
+        "  metadata:\n" +
+        "    value: \"60\"\n";
+
+    private const string DefaultCustomYaml =
+        "apiVersion: keda.sh/v1alpha1\n" +
+        "kind: ScaledJob\n" +
+        "metadata:\n" +
+        "  name: my-scaledjob\n" +
+        "spec:\n" +
+        "  jobTargetRef:\n" +
+        "    template:\n" +
+        "      spec:\n" +
+        "        containers:\n" +
+        "          - name: worker\n" +
+        "            image: busybox:latest\n" +
+        "            command: [\"/bin/sh\", \"-c\", \"echo working; sleep 10\"]\n" +
+        "        restartPolicy: Never\n" +
+        "  pollingInterval: 30\n" +
+        "  maxReplicaCount: 10\n" +
+        "  triggers:\n" +
+        "    - type: rabbitmq\n" +
+        "      metadata:\n" +
+        "        queueName: jobs\n" +
+        "        hostFromEnv: RABBITMQ_HOST\n" +
+        "        queueLength: \"5\"\n";
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        loadError = null;
+        try
+        {
+            scalers = await KedaService.GetScalersAsync(AppId, EnvironmentId);
+            kedaAvailable = await KedaService.IsKedaAvailableAsync(TenantId, EnvironmentId);
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private void NewScaledObject()
+    {
+        editId = null;
+        editKind = KedaScalerKind.ScaledObject;
+        fName = "";
+        fTargetKind = "Deployment";
+        fTargetName = "";
+        fMin = 1;
+        fMax = 10;
+        fPolling = null;
+        fCooldown = null;
+        fTriggers = DefaultTriggers;
+        saveError = null;
+        editorOpen = true;
+    }
+
+    private void NewCustom()
+    {
+        editId = null;
+        editKind = KedaScalerKind.Custom;
+        fName = "";
+        fCustom = DefaultCustomYaml;
+        saveError = null;
+        editorOpen = true;
+    }
+
+    private void EditScaler(KedaScaler s)
+    {
+        editId = s.Id;
+        editKind = s.Kind;
+        fName = s.Name;
+        fTargetKind = string.IsNullOrWhiteSpace(s.ScaleTargetKind) ? "Deployment" : s.ScaleTargetKind;
+        fTargetName = s.ScaleTargetName ?? "";
+        fMin = s.MinReplicaCount;
+        fMax = s.MaxReplicaCount;
+        fPolling = s.PollingInterval;
+        fCooldown = s.CooldownPeriod;
+        fTriggers = s.TriggersYaml ?? DefaultTriggers;
+        fCustom = s.CustomYaml ?? "";
+        saveError = null;
+        editorOpen = true;
+    }
+
+    private void CancelEdit() => editorOpen = false;
+
+    private async Task Save()
+    {
+        saving = true;
+        saveError = null;
+        try
+        {
+            if (editKind == KedaScalerKind.ScaledObject)
+            {
+                if (string.IsNullOrWhiteSpace(fTargetName))
+                    throw new InvalidOperationException("Target name is required.");
+                if (string.IsNullOrWhiteSpace(fTriggers))
+                    throw new InvalidOperationException("At least one trigger is required.");
+
+                await KedaService.SaveScaledObjectAsync(
+                    TenantId, AppId, EnvironmentId, editId,
+                    fName, fTargetKind, fTargetName,
+                    fMin, fMax, fPolling, fCooldown, fTriggers);
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(fCustom))
+                    throw new InvalidOperationException("YAML is required.");
+
+                await KedaService.SaveCustomAsync(
+                    TenantId, AppId, EnvironmentId, editId, fName, fCustom);
+            }
+
+            editorOpen = false;
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            saveError = ex.Message;
+        }
+        finally
+        {
+            saving = false;
+        }
+    }
+
+    private async Task DeleteScaler(KedaScaler s)
+    {
+        await KedaService.DeleteScalerAsync(s.Id);
+        await LoadAsync();
+    }
+
+    private async Task ApplyToClusters()
+    {
+        applying = true;
+        applyResults = null;
+        try
+        {
+            applyResults = await KedaService.ApplyToEnvironmentAsync(AppId, EnvironmentId);
+            applyAllOk = applyResults.All(r => r.Success);
+        }
+        catch (Exception ex)
+        {
+            applyResults = [("error", false, ex.Message)];
+            applyAllOk = false;
+        }
+        finally
+        {
+            applying = false;
+        }
+    }
+}

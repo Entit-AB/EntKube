@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 
@@ -67,16 +68,20 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
     /// name already exists for this app, its value is updated in place.
     /// </summary>
     public async Task<VaultSecret> SetAppSecretAsync(
-        Guid tenantId, Guid appId, string name, string value, CancellationToken ct = default)
+        Guid tenantId, Guid appId, string name, string value,
+        CancellationToken ct = default, Guid? environmentId = null)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         // Unseal the vault to get the tenant's DEK.
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
-        // Check if a secret with this name already exists for this app.
+        // Check if a secret with this name already exists for this app in the
+        // same environment scope (a shared secret and an env-bound secret with
+        // the same name are distinct entries).
         VaultSecret? existing = await db.Set<VaultSecret>()
-            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId && s.AppId == appId && s.Name == name, ct);
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId && s.AppId == appId
+                && s.EnvironmentId == environmentId && s.Name == name, ct);
 
         // Encrypt the value with the tenant's DEK.
         (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, value);
@@ -102,7 +107,8 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
             Name = name,
             EncryptedValue = ciphertext,
             Nonce = nonce,
-            AppId = appId
+            AppId = appId,
+            EnvironmentId = environmentId
         };
 
         db.Set<VaultSecret>().Add(secret);
@@ -142,6 +148,325 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
             .Where(s => s.Vault.TenantId == tenantId && s.AppId == appId)
             .OrderBy(s => s.Name)
             .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Lists the app secrets visible within a single environment: secrets bound
+    /// to that environment plus "shared" secrets (null EnvironmentId). Secrets
+    /// bound to other environments are never returned, so e.g. prod secrets are
+    /// invisible while operating in the test environment. Values stay encrypted.
+    /// </summary>
+    public async Task<List<VaultSecret>> GetAppSecretsForEnvironmentAsync(
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.Set<VaultSecret>()
+            .Where(s => s.Vault.TenantId == tenantId && s.AppId == appId
+                && (s.EnvironmentId == null || s.EnvironmentId == environmentId))
+            .OrderBy(s => s.Name)
+            .ToListAsync(ct);
+    }
+
+    // --- App Certificate Secrets ---
+
+    private static readonly JsonSerializerOptions CertificateJsonOptions = new()
+    {
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+    };
+
+    /// <summary>
+    /// Stores or updates a TLS certificate secret for an app. The bundle (certificate,
+    /// optional key, optional CA, optional chain) is validated, serialized to JSON, and
+    /// stored as a single encrypted value with <see cref="VaultSecretType.Certificate"/>.
+    /// Upserts by (app, environment, name) like <see cref="SetAppSecretAsync"/>.
+    /// </summary>
+    /// <returns>(true, secret) on success; (false, null) with the reason in <paramref name="error"/> on validation failure.</returns>
+    public async Task<(bool Ok, string? Error)> SetAppCertificateAsync(
+        Guid tenantId, Guid appId, string name, CertificateBundle bundle,
+        Guid? environmentId = null, string? updatedBy = null, CancellationToken ct = default)
+    {
+        (bool valid, string? validationError) = CertificateParser.Validate(bundle);
+        if (!valid)
+        {
+            return (false, validationError);
+        }
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+
+        VaultSecret? existing = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId && s.AppId == appId
+                && s.EnvironmentId == environmentId && s.Name == name, ct);
+
+        string json = JsonSerializer.Serialize(bundle, CertificateJsonOptions);
+        (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, json);
+
+        if (existing is not null)
+        {
+            await ArchiveVersionAsync(db, existing, ct);
+            existing.SecretType = VaultSecretType.Certificate;
+            existing.EncryptedValue = ciphertext;
+            existing.Nonce = nonce;
+            existing.UpdatedAt = DateTime.UtcNow;
+            existing.UpdatedBy = updatedBy;
+            await db.SaveChangesAsync(ct);
+            return (true, null);
+        }
+
+        SecretVault vault = (await GetVaultAsync(tenantId, ct))!;
+
+        VaultSecret secret = new()
+        {
+            Id = Guid.NewGuid(),
+            VaultId = vault.Id,
+            Name = name,
+            SecretType = VaultSecretType.Certificate,
+            EncryptedValue = ciphertext,
+            Nonce = nonce,
+            AppId = appId,
+            EnvironmentId = environmentId,
+            UpdatedBy = updatedBy
+        };
+
+        db.Set<VaultSecret>().Add(secret);
+        await db.SaveChangesAsync(ct);
+        return (true, null);
+    }
+
+    /// <summary>
+    /// Decrypts a certificate secret and returns its parsed bundle, or null when the
+    /// secret does not exist or is not a certificate.
+    /// </summary>
+    public async Task<CertificateBundle?> GetCertificateBundleByIdAsync(Guid secretId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        VaultSecret? secret = await db.Set<VaultSecret>()
+            .Include(s => s.Vault)
+            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+
+        if (secret is null || secret.SecretType != VaultSecretType.Certificate)
+        {
+            return null;
+        }
+
+        byte[] dataKey = await UnsealVaultAsync(secret.Vault.TenantId, ct);
+        string json = encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
+        return DeserializeBundle(json);
+    }
+
+    /// <summary>
+    /// Decrypts a certificate secret and returns the parsed metadata of its leaf
+    /// certificate (subject, validity, etc.), or null when it is not a parseable
+    /// certificate secret. Used to show expiry status in lists.
+    /// </summary>
+    public async Task<CertificateInfo?> GetCertificateInfoByIdAsync(Guid secretId, CancellationToken ct = default)
+    {
+        CertificateBundle? bundle = await GetCertificateBundleByIdAsync(secretId, ct);
+        return bundle is null ? null : CertificateParser.TryParse(bundle.Certificate);
+    }
+
+    private static CertificateBundle DeserializeBundle(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<CertificateBundle>(json, CertificateJsonOptions) ?? new CertificateBundle();
+        }
+        catch
+        {
+            return new CertificateBundle();
+        }
+    }
+
+    // --- App OAuth/OIDC Client Secrets ---
+
+    /// <summary>
+    /// Stores or updates an OAuth/OIDC client credential (app registration) for an app.
+    /// The bundle is validated, serialized to JSON, and stored as a single encrypted
+    /// value with <see cref="VaultSecretType.OAuthClient"/>. Upserts by (app, environment, name).
+    /// </summary>
+    public async Task<(bool Ok, string? Error)> SetAppOAuthClientAsync(
+        Guid tenantId, Guid appId, string name, OAuthClientBundle bundle,
+        Guid? environmentId = null, string? updatedBy = null, CancellationToken ct = default)
+    {
+        (bool valid, string? validationError) = OAuthClientHelper.Validate(bundle);
+        if (!valid)
+        {
+            return (false, validationError);
+        }
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+
+        VaultSecret? existing = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId && s.AppId == appId
+                && s.EnvironmentId == environmentId && s.Name == name, ct);
+
+        string json = JsonSerializer.Serialize(bundle, CertificateJsonOptions);
+        (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, json);
+
+        if (existing is not null)
+        {
+            await ArchiveVersionAsync(db, existing, ct);
+            existing.SecretType = VaultSecretType.OAuthClient;
+            existing.EncryptedValue = ciphertext;
+            existing.Nonce = nonce;
+            existing.UpdatedAt = DateTime.UtcNow;
+            existing.UpdatedBy = updatedBy;
+            await db.SaveChangesAsync(ct);
+            return (true, null);
+        }
+
+        SecretVault vault = (await GetVaultAsync(tenantId, ct))!;
+
+        VaultSecret secret = new()
+        {
+            Id = Guid.NewGuid(),
+            VaultId = vault.Id,
+            Name = name,
+            SecretType = VaultSecretType.OAuthClient,
+            EncryptedValue = ciphertext,
+            Nonce = nonce,
+            AppId = appId,
+            EnvironmentId = environmentId,
+            UpdatedBy = updatedBy
+        };
+
+        db.Set<VaultSecret>().Add(secret);
+        await db.SaveChangesAsync(ct);
+        return (true, null);
+    }
+
+    /// <summary>
+    /// Decrypts an OAuth client secret and returns its full bundle (including the
+    /// client secret), or null when the secret does not exist or is not an OAuth client.
+    /// </summary>
+    public async Task<OAuthClientBundle?> GetOAuthClientBundleByIdAsync(Guid secretId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        VaultSecret? secret = await db.Set<VaultSecret>()
+            .Include(s => s.Vault)
+            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+
+        if (secret is null || secret.SecretType != VaultSecretType.OAuthClient)
+        {
+            return null;
+        }
+
+        byte[] dataKey = await UnsealVaultAsync(secret.Vault.TenantId, ct);
+        string json = encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
+        return DeserializeOAuthBundle(json);
+    }
+
+    /// <summary>
+    /// Decrypts an OAuth client secret and returns its non-secret metadata (provider,
+    /// client id, issuer, scopes, expiry) for list display. Excludes the client secret.
+    /// </summary>
+    public async Task<OAuthClientInfo?> GetOAuthClientInfoByIdAsync(Guid secretId, CancellationToken ct = default)
+    {
+        OAuthClientBundle? bundle = await GetOAuthClientBundleByIdAsync(secretId, ct);
+        return bundle?.ToInfo();
+    }
+
+    private static OAuthClientBundle DeserializeOAuthBundle(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<OAuthClientBundle>(json, CertificateJsonOptions) ?? new OAuthClientBundle();
+        }
+        catch
+        {
+            return new OAuthClientBundle();
+        }
+    }
+
+    /// <summary>
+    /// Enumerates every certificate and OAuth/OIDC client secret in the tenant's vault,
+    /// decrypting each just far enough to read its expiry, and projects the non-secret
+    /// metadata (scope, expiry, days remaining) used by the expiry-notification scanner
+    /// and the management UI. Returns an empty list when the tenant has no vault.
+    /// When <paramref name="customerId"/> is supplied, only secrets belonging to that
+    /// customer's apps are returned (used by the customer portal).
+    /// </summary>
+    public async Task<List<ExpiringSecretInfo>> GetExpiringSecretCandidatesAsync(
+        Guid tenantId, Guid? customerId = null, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        SecretVault? vault = await db.Set<SecretVault>()
+            .FirstOrDefaultAsync(v => v.TenantId == tenantId, ct);
+        if (vault is null)
+        {
+            return [];
+        }
+
+        List<VaultSecret> secrets = await db.Set<VaultSecret>()
+            .Include(s => s.App)
+            .Include(s => s.Environment)
+            .Where(s => s.VaultId == vault.Id
+                && (s.SecretType == VaultSecretType.Certificate || s.SecretType == VaultSecretType.OAuthClient)
+                && (customerId == null || (s.AppId != null && s.App!.CustomerId == customerId)))
+            .OrderBy(s => s.Name)
+            .ToListAsync(ct);
+
+        if (secrets.Count == 0)
+        {
+            return [];
+        }
+
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+        List<ExpiringSecretInfo> result = new(secrets.Count);
+
+        foreach (VaultSecret secret in secrets)
+        {
+            DateTime? expiresAt = null;
+            string? detail = null;
+
+            try
+            {
+                string json = encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
+
+                if (secret.SecretType == VaultSecretType.Certificate)
+                {
+                    CertificateInfo? info = CertificateParser.TryParse(DeserializeBundle(json).Certificate);
+                    if (info is not null)
+                    {
+                        expiresAt = info.NotAfter;
+                        detail = info.Subject;
+                    }
+                }
+                else // OAuthClient
+                {
+                    OAuthClientBundle bundle = DeserializeOAuthBundle(json);
+                    expiresAt = bundle.ExpiresAt;
+                    detail = $"{OAuthClientHelper.DisplayName(bundle.Provider)}{(string.IsNullOrWhiteSpace(bundle.ClientId) ? "" : $" · {bundle.ClientId}")}";
+                }
+            }
+            catch
+            {
+                // A secret that fails to decrypt/parse is surfaced with no expiry rather
+                // than aborting the whole scan.
+            }
+
+            result.Add(new ExpiringSecretInfo
+            {
+                SecretId = secret.Id,
+                Name = secret.Name,
+                SecretType = secret.SecretType,
+                AppId = secret.AppId,
+                AppName = secret.App?.Name,
+                EnvironmentId = secret.EnvironmentId,
+                EnvironmentName = secret.Environment?.Name,
+                ExpiresAt = expiresAt,
+                Detail = detail
+            });
+        }
+
+        return result;
     }
 
     // --- Component Secrets ---
@@ -1021,6 +1346,79 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
         return true;
     }
 
+    /// <summary>
+    /// Changes the environment scope of an app-scoped secret. Pass
+    /// <paramref name="environmentId"/> = null to make the secret "shared" across
+    /// every environment, or an environment id to bind it to that environment only.
+    /// </summary>
+    /// <returns>
+    /// (true, null) on success; (false, reason) when the secret is not app-scoped,
+    /// already in the requested scope, or another secret with the same name already
+    /// occupies the target scope (the unique (VaultId, AppId, EnvironmentId, Name)
+    /// index would be violated).
+    /// </returns>
+    public async Task<(bool Ok, string? Reason)> ChangeAppSecretScopeAsync(
+        Guid secretId, Guid? environmentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        VaultSecret? secret = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+
+        if (secret is null)
+        {
+            return (false, "Secret not found.");
+        }
+
+        if (secret.AppId is null)
+        {
+            return (false, "Only app secrets have an environment scope.");
+        }
+
+        if (secret.EnvironmentId == environmentId)
+        {
+            return (false, "Secret is already in that scope.");
+        }
+
+        // Guard the unique (VaultId, AppId, EnvironmentId, Name) index: refuse if
+        // another secret already occupies the target scope under the same name.
+        bool collision = await db.Set<VaultSecret>()
+            .AnyAsync(s => s.Id != secret.Id
+                && s.VaultId == secret.VaultId
+                && s.AppId == secret.AppId
+                && s.EnvironmentId == environmentId
+                && s.Name == secret.Name, ct);
+
+        if (collision)
+        {
+            return (false, $"A secret named '{secret.Name}' already exists in the target scope.");
+        }
+
+        // If the secret syncs to a cluster, an environment-bound scope must match
+        // that cluster's environment — otherwise the sync guard would later refuse
+        // it. Clear the now-mismatched sync target rather than leave it broken.
+        if (secret.SyncToKubernetes && environmentId is not null && secret.KubernetesClusterId is not null)
+        {
+            Guid? clusterEnv = await db.Set<KubernetesCluster>()
+                .Where(c => c.Id == secret.KubernetesClusterId)
+                .Select(c => (Guid?)c.EnvironmentId)
+                .FirstOrDefaultAsync(ct);
+
+            if (clusterEnv != environmentId)
+            {
+                secret.SyncToKubernetes = false;
+                secret.KubernetesClusterId = null;
+                secret.KubernetesSecretName = null;
+                secret.KubernetesNamespace = null;
+            }
+        }
+
+        secret.EnvironmentId = environmentId;
+        secret.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return (true, null);
+    }
+
     // --- Version History ---
 
     /// <summary>
@@ -1178,17 +1576,25 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
     /// (KubernetesSecretName, KubernetesNamespace) and written as Opaque Secrets.
     /// Secrets without a <see cref="VaultSecret.KubernetesClusterId"/> are reported
     /// in the output as needing cluster configuration but do not block the rest.
+    ///
+    /// When <paramref name="environmentId"/> is supplied, only secrets visible in
+    /// that environment (shared secrets plus secrets bound to it) are synced.
+    /// Regardless of the entry point, an environment-bound secret is only ever
+    /// written to a cluster belonging to its own environment — cross-environment
+    /// targets are refused so e.g. a prod secret can never land on a test cluster.
     /// </summary>
     public async Task<HelmExecutionResult> SyncAppSecretsToKubernetesAsync(
-        Guid tenantId, Guid appId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, CancellationToken ct = default, Guid? environmentId = null)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         // Load ALL sync-enabled secrets — including those missing a cluster reference,
-        // so we can report them clearly instead of silently skipping.
+        // so we can report them clearly instead of silently skipping. When scoped to
+        // an environment, only that environment's secrets and shared secrets apply.
         List<VaultSecret> allSecrets = await db.Set<VaultSecret>()
             .Include(s => s.KubernetesCluster)
-            .Where(s => s.AppId == appId && s.SyncToKubernetes)
+            .Where(s => s.AppId == appId && s.SyncToKubernetes
+                && (environmentId == null || s.EnvironmentId == null || s.EnvironmentId == environmentId))
             .ToListAsync(ct);
 
         if (allSecrets.Count == 0)
@@ -1212,9 +1618,22 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
             results.Add($"⚠ '{s.Name}' → '{s.KubernetesSecretName}' has no target cluster — open K8s sync settings to assign one.");
         }
 
-        // Only process secrets that are fully configured.
+        // Safety invariant: an environment-bound secret may only be written to a
+        // cluster in that same environment. Refuse (don't silently skip) any
+        // misconfigured cross-environment target so prod secrets never reach test.
+        foreach (VaultSecret s in allSecrets.Where(s =>
+            s.EnvironmentId != null && s.KubernetesCluster != null
+            && s.KubernetesCluster.EnvironmentId != s.EnvironmentId))
+        {
+            results.Add($"✗ '{s.Name}' is bound to a different environment than its target cluster '{s.KubernetesCluster!.Name}' — refusing to sync (cross-environment).");
+        }
+
+        // Only process secrets that are fully configured AND whose target cluster
+        // is in the secret's environment (shared secrets — null EnvironmentId — may
+        // target any of the app's clusters).
         List<VaultSecret> actionable = allSecrets
-            .Where(s => s.KubernetesClusterId != null && !string.IsNullOrWhiteSpace(s.KubernetesSecretName))
+            .Where(s => s.KubernetesClusterId != null && !string.IsNullOrWhiteSpace(s.KubernetesSecretName)
+                && (s.EnvironmentId == null || s.KubernetesCluster?.EnvironmentId == s.EnvironmentId))
             .ToList();
 
         if (actionable.Count == 0)
@@ -1225,6 +1644,11 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
                 Output = results.Count > 0 ? string.Join("\n", results) : "No app secrets with both a K8s Secret name and a target cluster."
             };
         }
+
+        // Unseal once; we decrypt each secret directly from its entity below
+        // (a name lookup would be ambiguous now that shared and environment-bound
+        // secrets can share a name).
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
         // Group by cluster so we only write one kubeconfig temp file per cluster.
         IEnumerable<IGrouping<Guid, VaultSecret>> clusterGroups =
@@ -1245,12 +1669,17 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
             {
                 await File.WriteAllTextAsync(tempKubeconfig, cluster.Kubeconfig, ct);
 
-                // Within this cluster, group secrets by (K8sSecretName, Namespace).
+                // Within this cluster, group OPAQUE secrets by (K8sSecretName, Namespace)
+                // so multiple values land as keys in one generic Secret. Certificate
+                // secrets are handled separately below — each is its own kubernetes.io/tls
+                // Secret and is never merged with opaque keys.
                 IEnumerable<IGrouping<(string SecretName, string Namespace), VaultSecret>> secretGroups =
-                    clusterGroup.GroupBy(s => (
-                        SecretName: s.KubernetesSecretName!,
-                        Namespace: s.KubernetesNamespace ?? "default"
-                    ));
+                    clusterGroup
+                        .Where(s => s.SecretType == VaultSecretType.Opaque)
+                        .GroupBy(s => (
+                            SecretName: s.KubernetesSecretName!,
+                            Namespace: s.KubernetesNamespace ?? "default"
+                        ));
 
                 foreach (IGrouping<(string SecretName, string Namespace), VaultSecret> group in secretGroups)
                 {
@@ -1261,20 +1690,23 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
                     await RunProcessAsync("kubectl",
                         $"create namespace {ns} --kubeconfig {tempKubeconfig}", ct);
 
-                    // Decrypt each secret value.
+                    // Decrypt each secret value. If a shared and an environment-bound
+                    // secret share the same key name in this target, the environment
+                    // -bound value wins (an explicit per-environment override).
                     List<string> literals = [];
 
-                    foreach (VaultSecret vaultSecret in group)
-                    {
-                        string? plainValue = await GetAppSecretValueAsync(tenantId, appId, vaultSecret.Name, ct);
+                    IEnumerable<VaultSecret> effective = group
+                        .GroupBy(s => s.Name)
+                        .Select(g => g.OrderByDescending(s => s.EnvironmentId.HasValue).First());
 
-                        if (plainValue is not null)
-                        {
-                            // Shell-safe: write value to a temp file so we avoid quoting issues.
-                            string tmpVal = Path.Combine(Path.GetTempPath(), $"entkube-val-{Guid.NewGuid()}");
-                            await File.WriteAllTextAsync(tmpVal, plainValue, ct);
-                            literals.Add($"--from-file={vaultSecret.Name}={tmpVal}");
-                        }
+                    foreach (VaultSecret vaultSecret in effective)
+                    {
+                        string plainValue = encryption.Decrypt(dataKey, vaultSecret.EncryptedValue, vaultSecret.Nonce);
+
+                        // Shell-safe: write value to a temp file so we avoid quoting issues.
+                        string tmpVal = Path.Combine(Path.GetTempPath(), $"entkube-val-{Guid.NewGuid()}");
+                        await File.WriteAllTextAsync(tmpVal, plainValue, ct);
+                        literals.Add($"--from-file={vaultSecret.Name}={tmpVal}");
                     }
 
                     if (literals.Count == 0)
@@ -1311,6 +1743,18 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
                         results.Add($"✗ Secret '{k8sSecretName}' failed on '{cluster.Name}': {createResult.Output}");
                     }
                 }
+
+                // Certificate secrets → one kubernetes.io/tls Secret each.
+                foreach (VaultSecret certSecret in clusterGroup.Where(s => s.SecretType == VaultSecretType.Certificate))
+                {
+                    await SyncCertificateSecretAsync(certSecret, dataKey, cluster!, tempKubeconfig, results, ct);
+                }
+
+                // OAuth/OIDC client secrets → one Opaque Secret each (named keys).
+                foreach (VaultSecret oauthSecret in clusterGroup.Where(s => s.SecretType == VaultSecretType.OAuthClient))
+                {
+                    await SyncOAuthClientSecretAsync(oauthSecret, dataKey, cluster!, tempKubeconfig, results, ct);
+                }
             }
             finally
             {
@@ -1324,6 +1768,175 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
             Success = allSucceeded,
             Output = string.Join("\n", results)
         };
+    }
+
+    /// <summary>
+    /// Writes a single certificate secret to its target cluster as a
+    /// <c>kubernetes.io/tls</c> Secret: <c>tls.crt</c> (leaf + chain), <c>tls.key</c>
+    /// (private key), and <c>ca.crt</c> when a CA is present. A certificate with no
+    /// private key cannot form a valid TLS Secret and is reported, not synced.
+    /// </summary>
+    private async Task SyncCertificateSecretAsync(
+        VaultSecret certSecret, byte[] dataKey, KubernetesCluster cluster,
+        string tempKubeconfig, List<string> results, CancellationToken ct)
+    {
+        string ns = certSecret.KubernetesNamespace ?? "default";
+        string k8sSecretName = certSecret.KubernetesSecretName!;
+
+        CertificateBundle bundle;
+        try
+        {
+            string json = encryption.Decrypt(dataKey, certSecret.EncryptedValue, certSecret.Nonce);
+            bundle = DeserializeBundle(json);
+        }
+        catch (Exception ex)
+        {
+            results.Add($"✗ Certificate '{certSecret.Name}' could not be decrypted: {ex.Message}");
+            return;
+        }
+
+        if (!bundle.HasCertificate)
+        {
+            results.Add($"⚠ Certificate '{certSecret.Name}' has no certificate body — skipping.");
+            return;
+        }
+
+        if (!bundle.HasPrivateKey)
+        {
+            results.Add($"⚠ Certificate '{certSecret.Name}' has no private key — a kubernetes.io/tls Secret requires tls.key, skipping.");
+            return;
+        }
+
+        // Ensure namespace exists.
+        await RunProcessAsync("kubectl", $"create namespace {ns} --kubeconfig {tempKubeconfig}", ct);
+
+        string crtFile = Path.Combine(Path.GetTempPath(), $"entkube-tls-crt-{Guid.NewGuid()}");
+        string keyFile = Path.Combine(Path.GetTempPath(), $"entkube-tls-key-{Guid.NewGuid()}");
+        string fullChainFile = Path.Combine(Path.GetTempPath(), $"entkube-tls-fullchain-{Guid.NewGuid()}");
+        string? caFile = bundle.HasCaCertificate ? Path.Combine(Path.GetTempPath(), $"entkube-tls-ca-{Guid.NewGuid()}") : null;
+
+        try
+        {
+            await File.WriteAllTextAsync(crtFile, bundle.CombinedCertificateChain, ct);
+            await File.WriteAllTextAsync(keyFile, bundle.PrivateKey!.Trim() + "\n", ct);
+            // fullchain.crt = leaf + intermediates + CA (everything but the private key),
+            // for consumers that want the complete chain in a single file.
+            await File.WriteAllTextAsync(fullChainFile, bundle.FullChain, ct);
+
+            List<string> fromFiles =
+            [
+                $"--from-file=tls.crt={crtFile}",
+                $"--from-file=tls.key={keyFile}",
+                $"--from-file=fullchain.crt={fullChainFile}",
+            ];
+            if (caFile is not null)
+            {
+                await File.WriteAllTextAsync(caFile, bundle.CaCertificate!.Trim() + "\n", ct);
+                fromFiles.Add($"--from-file=ca.crt={caFile}");
+            }
+
+            await RunProcessAsync("kubectl",
+                $"delete secret {k8sSecretName} --namespace {ns} --ignore-not-found --kubeconfig {tempKubeconfig}", ct);
+
+            HelmExecutionResult createResult = await RunProcessAsync("kubectl",
+                $"create secret generic {k8sSecretName} --namespace {ns} --type=kubernetes.io/tls {string.Join(" ", fromFiles)} --kubeconfig {tempKubeconfig}", ct);
+
+            if (createResult.Success)
+            {
+                results.Add($"✓ Certificate '{k8sSecretName}' synced to '{ns}' on '{cluster.Name}' (kubernetes.io/tls, tls.crt + tls.key + fullchain.crt{(caFile is not null ? " + ca.crt" : "")})");
+            }
+            else
+            {
+                results.Add($"✗ Certificate '{k8sSecretName}' failed on '{cluster.Name}': {createResult.Output}");
+            }
+        }
+        finally
+        {
+            if (File.Exists(crtFile)) File.Delete(crtFile);
+            if (File.Exists(keyFile)) File.Delete(keyFile);
+            if (File.Exists(fullChainFile)) File.Delete(fullChainFile);
+            if (caFile is not null && File.Exists(caFile)) File.Delete(caFile);
+        }
+    }
+
+    /// <summary>
+    /// Writes a single OAuth/OIDC client secret to its target cluster as an Opaque
+    /// Secret with named keys: <c>client-id</c>, <c>client-secret</c>, <c>issuer</c>,
+    /// <c>tenant-id</c>, and <c>scopes</c> (only the keys that have values are written;
+    /// client-secret is required).
+    /// </summary>
+    private async Task SyncOAuthClientSecretAsync(
+        VaultSecret oauthSecret, byte[] dataKey, KubernetesCluster cluster,
+        string tempKubeconfig, List<string> results, CancellationToken ct)
+    {
+        string ns = oauthSecret.KubernetesNamespace ?? "default";
+        string k8sSecretName = oauthSecret.KubernetesSecretName!;
+
+        OAuthClientBundle bundle;
+        try
+        {
+            string json = encryption.Decrypt(dataKey, oauthSecret.EncryptedValue, oauthSecret.Nonce);
+            bundle = DeserializeOAuthBundle(json);
+        }
+        catch (Exception ex)
+        {
+            results.Add($"✗ OAuth client '{oauthSecret.Name}' could not be decrypted: {ex.Message}");
+            return;
+        }
+
+        if (!bundle.HasClientSecret)
+        {
+            results.Add($"⚠ OAuth client '{oauthSecret.Name}' has no client secret — skipping.");
+            return;
+        }
+
+        // Map the bundle to K8s data keys, skipping any that are empty.
+        Dictionary<string, string> data = new()
+        {
+            ["client-secret"] = bundle.ClientSecret!.Trim(),
+        };
+        if (!string.IsNullOrWhiteSpace(bundle.ClientId)) data["client-id"] = bundle.ClientId.Trim();
+        if (!string.IsNullOrWhiteSpace(bundle.EffectiveIssuer)) data["issuer"] = bundle.EffectiveIssuer!;
+        if (!string.IsNullOrWhiteSpace(bundle.TenantId)) data["tenant-id"] = bundle.TenantId.Trim();
+        if (!string.IsNullOrWhiteSpace(bundle.Scopes)) data["scopes"] = bundle.Scopes.Trim();
+
+        // Ensure namespace exists.
+        await RunProcessAsync("kubectl", $"create namespace {ns} --kubeconfig {tempKubeconfig}", ct);
+
+        List<string> fromFiles = [];
+        List<string> tmpFiles = [];
+        try
+        {
+            foreach ((string key, string value) in data)
+            {
+                string tmp = Path.Combine(Path.GetTempPath(), $"entkube-oauth-{Guid.NewGuid()}");
+                await File.WriteAllTextAsync(tmp, value, ct);
+                tmpFiles.Add(tmp);
+                fromFiles.Add($"--from-file={key}={tmp}");
+            }
+
+            await RunProcessAsync("kubectl",
+                $"delete secret {k8sSecretName} --namespace {ns} --ignore-not-found --kubeconfig {tempKubeconfig}", ct);
+
+            HelmExecutionResult createResult = await RunProcessAsync("kubectl",
+                $"create secret generic {k8sSecretName} --namespace {ns} {string.Join(" ", fromFiles)} --kubeconfig {tempKubeconfig}", ct);
+
+            if (createResult.Success)
+            {
+                results.Add($"✓ OAuth client '{k8sSecretName}' synced to '{ns}' on '{cluster.Name}' ({data.Count} keys)");
+            }
+            else
+            {
+                results.Add($"✗ OAuth client '{k8sSecretName}' failed on '{cluster.Name}': {createResult.Output}");
+            }
+        }
+        finally
+        {
+            foreach (string tmp in tmpFiles)
+            {
+                if (File.Exists(tmp)) File.Delete(tmp);
+            }
+        }
     }
 
     // --- Git Repository Secrets ---

@@ -1,0 +1,302 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject LokiService LokiService
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+@* Customer-scoped aggregated log viewer. Unlike LogBrowser (single cluster +
+   single namespace), this queries logs across every deployment of a chosen app
+   — which may span multiple namespaces and clusters — and merges them by time. *@
+
+@if (Customer is null)
+{
+    <EmptyState Icon="bi-people"
+                Title="Select a customer"
+                Message="Choose a customer above to browse their logs." />
+}
+else if (deployments.Count == 0)
+{
+    <EmptyState Icon="bi-journal-x"
+                Title="No deployments"
+                Message="This customer has no app deployments to pull logs from yet." />
+}
+else
+{
+    @* ── Controls ── *@
+    <div class="row g-2 mb-3 align-items-end">
+        <div class="col-md-3">
+            <label class="form-label small text-muted mb-1">Application</label>
+            <select class="form-select form-select-sm" @bind="selectedAppId" @bind:after="OnAppChanged">
+                <option value="">— select app —</option>
+                @foreach (var app in AppsWithDeployments)
+                {
+                    <option value="@app.Id">@app.Name</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label small text-muted mb-1">Environment</label>
+            <select class="form-select form-select-sm" @bind="selectedEnvId"
+                    disabled="@(selectedAppId is null)">
+                <option value="">All environments</option>
+                @foreach (var env in EnvironmentsForApp)
+                {
+                    <option value="@env.Id">@env.Name</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label small text-muted mb-1">Time range</label>
+            <select class="form-select form-select-sm" @bind="timeRangeMinutes">
+                <option value="15">Last 15 minutes</option>
+                <option value="60">Last 1 hour</option>
+                <option value="180">Last 3 hours</option>
+                <option value="720">Last 12 hours</option>
+                <option value="1440">Last 24 hours</option>
+            </select>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label small text-muted mb-1">Pod</label>
+            <input class="form-control form-control-sm font-monospace" @bind="podFilter"
+                   placeholder="optional prefix" />
+        </div>
+        <div class="col-md-2">
+            <label class="form-label small text-muted mb-1">Lines</label>
+            <select class="form-select form-select-sm" @bind="limit">
+                <option value="100">100</option>
+                <option value="200">200</option>
+                <option value="500">500</option>
+                <option value="1000">1000</option>
+            </select>
+        </div>
+        <div class="col-12 col-md-9">
+            <label class="form-label small text-muted mb-1">Filter text</label>
+            <input class="form-control form-control-sm font-monospace" @bind="textFilter"
+                   placeholder="e.g. error, connection refused" />
+        </div>
+        <div class="col-12 col-md-3">
+            <button class="btn btn-sm btn-primary w-100" @onclick="Search"
+                    disabled="@(isQuerying || selectedAppId is null)">
+                @if (isQuerying) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                <span class="bi bi-search me-1"></span>Search logs
+            </button>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(queryError))
+    {
+        <div class="alert alert-warning small py-2">
+            <span class="bi bi-exclamation-triangle me-1"></span>@queryError
+        </div>
+    }
+
+    @* ── Log output ── *@
+    @if (entries.Count > 0)
+    {
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <span class="text-muted small">
+                @FilteredEntries.Count() of @entries.Count entries · @queried.ToLocalTime().ToString("HH:mm:ss")
+            </span>
+            <div class="d-flex gap-2 align-items-center">
+                <select class="form-select form-select-sm" style="width:auto" @bind="levelFilter">
+                    <option value="">All levels</option>
+                    <option value="Error">Error + Fatal</option>
+                    <option value="Warn">Warn+</option>
+                    <option value="Info">Info+</option>
+                </select>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => entries = []">
+                    <span class="bi bi-x-lg"></span>
+                </button>
+            </div>
+        </div>
+
+        <div class="border rounded font-monospace" style="background:#1e1e1e;max-height:560px;overflow-y:auto">
+            @foreach (LogRow entry in FilteredEntries)
+            {
+                <div class="px-3 py-0" style="line-height:1.45;border-bottom:1px solid #2d2d2d">
+                    <span style="color:#888;font-size:0.72rem;user-select:none">
+                        @entry.Timestamp.ToLocalTime().ToString("MMM d HH:mm:ss.fff")
+                    </span>
+                    <span class="ms-2" style="color:#569cd6;font-size:0.72rem;user-select:none" title="@entry.Namespace">@entry.Pod</span>
+                    <span class="ms-2" style="@LineStyle(entry.Level); font-size:0.8rem; white-space:pre-wrap; word-break:break-all">@entry.Line</span>
+                </div>
+            }
+        </div>
+    }
+    else if (hasQueried && !isQuerying)
+    {
+        <div class="text-center py-4 text-muted">
+            <span class="bi bi-journal display-4 d-block mb-2"></span>
+            <div>No logs found for the selected criteria.</div>
+            <div class="small mt-2">
+                If logs never appear, the cluster needs both <strong>Loki</strong> (log storage) and a
+                log collector such as <strong>Grafana Alloy</strong> (ships pod logs to Loki) installed
+                from the cluster components catalog.
+            </div>
+        </div>
+    }
+    else if (!isQuerying)
+    {
+        <div class="text-muted small">
+            <span class="bi bi-info-circle me-1"></span>
+            Pick an application and press <strong>Search logs</strong> to aggregate logs across all its deployments.
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public Customer? Customer { get; set; }
+
+    private Guid? loadedCustomerId;
+    private List<DeploymentRow> deployments = [];
+    private List<EnvRow> environments = [];
+
+    private Guid? selectedAppId;
+    private Guid? selectedEnvId;
+    private string podFilter = "";
+    private string textFilter = "";
+    private string levelFilter = "";
+    private int timeRangeMinutes = 60;
+    private int limit = 200;
+
+    private List<LogRow> entries = [];
+    private bool isQuerying;
+    private bool hasQueried;
+    private string? queryError;
+    private DateTime queried;
+
+    private IEnumerable<EntKube.Web.Data.App> AppsWithDeployments =>
+        (Customer?.Apps ?? [])
+            .Where(a => deployments.Any(d => d.AppId == a.Id))
+            .OrderBy(a => a.Name);
+
+    private IEnumerable<EnvRow> EnvironmentsForApp =>
+        selectedAppId is null
+            ? []
+            : environments
+                .Where(e => deployments.Any(d => d.AppId == selectedAppId && d.EnvironmentId == e.Id))
+                .OrderBy(e => e.Name);
+
+    private IEnumerable<LogRow> FilteredEntries => entries.Where(e => levelFilter switch
+    {
+        "Error" => e.Level >= LogLevel.Error,
+        "Warn"  => e.Level >= LogLevel.Warn,
+        "Info"  => e.Level >= LogLevel.Info,
+        _ => true
+    });
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Customer is null || Customer.Id == loadedCustomerId) return;
+        loadedCustomerId = Customer.Id;
+
+        // Reset selection when the customer changes.
+        selectedAppId = null;
+        selectedEnvId = null;
+        entries = [];
+        hasQueried = false;
+        queryError = null;
+
+        List<Guid> appIds = Customer.Apps.Select(a => a.Id).ToList();
+
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        deployments = await db.AppDeployments
+            .Where(d => appIds.Contains(d.AppId))
+            .Select(d => new DeploymentRow(d.AppId, d.EnvironmentId, d.ClusterId, d.Namespace))
+            .ToListAsync();
+
+        List<Guid> envIds = deployments.Select(d => d.EnvironmentId).Distinct().ToList();
+        environments = await db.Environments
+            .Where(e => envIds.Contains(e.Id))
+            .Select(e => new EnvRow(e.Id, e.Name))
+            .ToListAsync();
+    }
+
+    private void OnAppChanged()
+    {
+        selectedEnvId = null;
+        entries = [];
+        hasQueried = false;
+        queryError = null;
+    }
+
+    private async Task Search()
+    {
+        if (selectedAppId is null) return;
+
+        isQuerying = true;
+        queryError = null;
+        entries = [];
+        StateHasChanged();
+
+        DateTime to   = DateTime.UtcNow;
+        DateTime from = to.AddMinutes(-timeRangeMinutes);
+        string? pod   = string.IsNullOrWhiteSpace(podFilter) ? null : podFilter.Trim();
+        string? text  = string.IsNullOrWhiteSpace(textFilter) ? null : textFilter.Trim();
+
+        // Resolve the target deployments, optionally narrowed to one environment.
+        IEnumerable<DeploymentRow> targets = deployments.Where(d => d.AppId == selectedAppId);
+        if (selectedEnvId is Guid envId)
+            targets = targets.Where(d => d.EnvironmentId == envId);
+
+        // Group namespaces by cluster — one Loki query per cluster.
+        var byCluster = targets
+            .GroupBy(d => d.ClusterId)
+            .Select(g => new { ClusterId = g.Key, Namespaces = g.Select(d => d.Namespace).Distinct().ToList() })
+            .ToList();
+
+        List<LogRow> collected = [];
+        List<string> errors = [];
+
+        foreach (var cluster in byCluster)
+        {
+            KubernetesOperationResult<List<LokiLogStream>> result =
+                await LokiService.QueryRangeMultiAsync(
+                    cluster.ClusterId, cluster.Namespaces, pod, null, text, from, to, limit);
+
+            if (result.IsSuccess && result.Data is not null)
+            {
+                foreach (LokiLogStream stream in result.Data)
+                {
+                    stream.Labels.TryGetValue("namespace", out string? ns);
+                    stream.Labels.TryGetValue("pod", out string? podName);
+                    foreach (LokiLogEntry e in stream.Entries)
+                        collected.Add(new LogRow(
+                            e.Timestamp, e.Line, e.DetectedLevel,
+                            ns ?? "", podName ?? ""));
+                }
+            }
+            else if (!string.IsNullOrEmpty(result.Error))
+            {
+                errors.Add(result.Error);
+            }
+        }
+
+        entries = collected
+            .OrderByDescending(e => e.Timestamp)
+            .Take(limit)
+            .OrderBy(e => e.Timestamp)
+            .ToList();
+
+        // Only surface errors if we got nothing — partial success shouldn't nag.
+        if (entries.Count == 0 && errors.Count > 0)
+            queryError = string.Join(" · ", errors.Distinct());
+
+        queried = DateTime.UtcNow;
+        hasQueried = true;
+        isQuerying = false;
+    }
+
+    private static string LineStyle(LogLevel level) => level switch
+    {
+        LogLevel.Fatal or LogLevel.Error => "color:#f48771",
+        LogLevel.Warn  => "color:#cca700",
+        LogLevel.Info  => "color:#9cdcfe",
+        LogLevel.Debug => "color:#808080",
+        _ => "color:#d4d4d4"
+    };
+
+    private record DeploymentRow(Guid AppId, Guid EnvironmentId, Guid ClusterId, string Namespace);
+    private record EnvRow(Guid Id, string Name);
+    private record LogRow(DateTime Timestamp, string Line, LogLevel Level, string Namespace, string Pod);
+}

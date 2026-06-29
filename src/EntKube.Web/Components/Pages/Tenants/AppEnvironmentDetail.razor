@@ -1,6 +1,7 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using EntKube.Web.Components.Pages.Portal
+@using EntKube.Web.Components.Pages.Shared
 @using Microsoft.EntityFrameworkCore
 @implements IAsyncDisposable
 @inject DeploymentService DeploymentService
@@ -17,6 +18,7 @@
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject RabbitMQService RabbitMQService
 @inject StorageService StorageService
+
 @inject RegisteredPostgresService RegisteredPostgresService
 @inject KeycloakService KeycloakService
 @inject VaultService VaultService
@@ -44,18 +46,6 @@
                 <h5 class="mb-0">@Environment.Name</h5>
                 <small class="text-muted">@App.Name</small>
             </div>
-            @if (deployments is not null)
-            {
-                <div class="ms-auto d-flex gap-2">
-                    @foreach (AppDeployment d in deployments)
-                    {
-                        <span class="d-flex align-items-center gap-1">
-                            @GetSyncBadge(d.SyncStatus)
-                            @GetHealthBadge(d.HealthStatus)
-                        </span>
-                    }
-                </div>
-            }
         </div>
     </div>
 </div>
@@ -84,6 +74,15 @@
             <button class="nav-link @(section == "governance" ? "active" : "")"
                     @onclick='() => section = "governance"'>
                 <i class="bi bi-shield-check me-1"></i>Governance
+            </button>
+        </li>
+    }
+    @if (!IsPortalView)
+    {
+        <li class="nav-item">
+            <button class="nav-link @(section == "autoscaling" ? "active" : "")"
+                    @onclick='() => section = "autoscaling"'>
+                <i class="bi bi-arrows-angle-expand me-1"></i>Autoscaling
             </button>
         </li>
     }
@@ -162,6 +161,18 @@
         <button class="nav-link @(section == "vault" ? "active" : "")"
                 @onclick='() => section = "vault"'>
             <i class="bi bi-key me-1"></i>Vault
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(section == "registries" ? "active" : "")"
+                @onclick='() => section = "registries"'>
+            <i class="bi bi-box-seam me-1"></i>Registries
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(section == "vpn" ? "active" : "")"
+                @onclick='() => section = "vpn"'>
+            <i class="bi bi-shield-lock me-1"></i>VPN
         </button>
     </li>
 </ul>
@@ -907,7 +918,9 @@
    ══════════════════════════════════════════════════════ *@
 @if (section == "resources")
 {
-    <AppResourcesPanel AppId="App.Id" EnvironmentId="Environment.Id" />
+    <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
+        <AppResourcesPanel AppId="App.Id" EnvironmentId="Environment.Id" />
+    </div>
 }
 
 @* ══════════════════════════════════════════════════════
@@ -924,6 +937,16 @@
         <GovernanceTab AppId="App.Id" TenantId="TenantId" EnvironmentId="Environment.Id" />
     }
 }
+
+
+@* ══════════════════════════════════════════════════════
+   Autoscaling tab — KEDA ScaledObjects / ScaledJobs (tenant admins only)
+   ══════════════════════════════════════════════════════ *@
+@if (section == "autoscaling")
+{
+    <KedaTab AppId="App.Id" TenantId="TenantId" EnvironmentId="Environment.Id" />
+}
+
 
 @* ══════════════════════════════════════════════════════
    Env-aggregate metrics tab
@@ -1204,9 +1227,17 @@
 @if (section == "vault")
 {
     <PortalSecretsDetail App="App"
+                         Environment="Environment"
                          TenantId="TenantId"
                          AccessRole="AccessRole"
                          InitialScope="app" />
+}
+
+@if (section == "registries")
+{
+    <DockerRegistriesPanel TenantId="TenantId"
+                           AppId="App.Id"
+                           IsAdmin="AccessRole >= CustomerAccessRole.Admin" />
 }
 
 @* ══════════════════════════════════════════════════════
@@ -2142,6 +2173,14 @@
             }
         }
     }
+}
+
+@* ══════════════════════════════════════════════════════
+   VPN tab — Tailscale Kubernetes Operator
+   ══════════════════════════════════════════════════════ *@
+@if (section == "vpn")
+{
+    <TailscaleVpnTab TenantId="TenantId" AppId="App.Id" EnvironmentId="Environment.Id" />
 }
 
 @code {

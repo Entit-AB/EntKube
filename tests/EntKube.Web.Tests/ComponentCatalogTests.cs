@@ -89,9 +89,15 @@ public class ComponentCatalogTests : IDisposable
             entry.Description.Should().NotBeNullOrWhiteSpace($"{entry.Key} must have a description");
             entry.Icon.Should().NotBeNullOrWhiteSpace($"{entry.Key} must have an icon");
             entry.Category.Should().NotBeNullOrWhiteSpace($"{entry.Key} must have a category");
-            entry.HelmRepoUrl.Should().NotBeNullOrWhiteSpace($"{entry.Key} must have a Helm repo URL");
-            entry.HelmChartName.Should().NotBeNullOrWhiteSpace($"{entry.Key} must have a Helm chart name");
             entry.DefaultNamespace.Should().NotBeNullOrWhiteSpace($"{entry.Key} must have a default namespace");
+
+            // Helm-specific fields are only required for HelmChart components.
+            // Manifest / ManifestUrl components install raw YAML and have no chart.
+            if (entry.ComponentType == "HelmChart")
+            {
+                entry.HelmRepoUrl.Should().NotBeNullOrWhiteSpace($"{entry.Key} must have a Helm repo URL");
+                entry.HelmChartName.Should().NotBeNullOrWhiteSpace($"{entry.Key} must have a Helm chart name");
+            }
         }
     }
 
@@ -320,7 +326,9 @@ public class ComponentCatalogTests : IDisposable
     {
         CatalogEntry entry = ComponentCatalog.GetByKey("istio")!;
 
-        DependencyCheckResult result = ComponentCatalog.CheckDependencies(entry, ["istio-base"]);
+        // istio depends on both gateway-api-crds and istio-base.
+        DependencyCheckResult result = ComponentCatalog.CheckDependencies(
+            entry, ["gateway-api-crds", "istio-base"]);
 
         result.IsSatisfied.Should().BeTrue();
     }
@@ -352,10 +360,11 @@ public class ComponentCatalogTests : IDisposable
     public void Catalog_IstioBaseExists()
     {
         // Ensure the istio-base entry exists since istio depends on it.
+        // It installs the istio "base" chart (CRDs) with istiod as a subchart.
 
         CatalogEntry? entry = ComponentCatalog.GetByKey("istio-base");
         entry.Should().NotBeNull();
-        entry!.HelmChartName.Should().Be("istiod");
+        entry!.HelmChartName.Should().Be("base");
     }
 
     [Fact]

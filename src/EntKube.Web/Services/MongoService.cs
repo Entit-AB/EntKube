@@ -2466,32 +2466,47 @@ public class MongoService(
         sb.AppendLine("          db: admin");
         sb.AppendLine("  statefulSet:");
         sb.AppendLine("    spec:");
+        sb.AppendLine("      template:");
+        sb.AppendLine("        spec:");
 
-        bool hasCpuOrMemory = !string.IsNullOrWhiteSpace(mongo.CpuRequest)
-            || !string.IsNullOrWhiteSpace(mongo.CpuLimit)
-            || !string.IsNullOrWhiteSpace(mongo.MemoryRequest)
+        // Spread replica members across nodes so they don't all land on one node
+        // (the operator sets no anti-affinity by default). Preferred, so it won't
+        // block scheduling when there are fewer nodes than members. The community
+        // operator labels each member pod app=<name>-svc.
+        sb.AppendLine("          affinity:");
+        sb.AppendLine("            podAntiAffinity:");
+        sb.AppendLine("              preferredDuringSchedulingIgnoredDuringExecution:");
+        sb.AppendLine("                - weight: 100");
+        sb.AppendLine("                  podAffinityTerm:");
+        sb.AppendLine("                    topologyKey: kubernetes.io/hostname");
+        sb.AppendLine("                    labelSelector:");
+        sb.AppendLine("                      matchLabels:");
+        sb.AppendLine($"                        app: {mongo.Name}-svc");
+
+        // Effective requests. Kubernetes defaults a container's request to its limit
+        // when only a limit is set, so a limit-only spec reserves the full limit on a
+        // node — over-booking it. Fall back to a modest request so the limit stays a
+        // ceiling, not a reservation. (Mongo limits are DB-sized, so these floors fit.)
+        string? cpuReq = !string.IsNullOrWhiteSpace(mongo.CpuRequest) ? mongo.CpuRequest
+            : !string.IsNullOrWhiteSpace(mongo.CpuLimit) ? "100m" : null;
+        string? memReq = !string.IsNullOrWhiteSpace(mongo.MemoryRequest) ? mongo.MemoryRequest
+            : !string.IsNullOrWhiteSpace(mongo.MemoryLimit) ? "256Mi" : null;
+        bool hasLimits = !string.IsNullOrWhiteSpace(mongo.CpuLimit)
             || !string.IsNullOrWhiteSpace(mongo.MemoryLimit);
 
-        if (hasCpuOrMemory)
+        if (cpuReq is not null || memReq is not null || hasLimits)
         {
-            sb.AppendLine("      template:");
-            sb.AppendLine("        spec:");
             sb.AppendLine("          containers:");
             sb.AppendLine("            - name: mongod");
             sb.AppendLine("              resources:");
 
-            bool hasRequests = !string.IsNullOrWhiteSpace(mongo.CpuRequest)
-                || !string.IsNullOrWhiteSpace(mongo.MemoryRequest);
-            bool hasLimits = !string.IsNullOrWhiteSpace(mongo.CpuLimit)
-                || !string.IsNullOrWhiteSpace(mongo.MemoryLimit);
-
-            if (hasRequests)
+            if (cpuReq is not null || memReq is not null)
             {
                 sb.AppendLine("                requests:");
-                if (!string.IsNullOrWhiteSpace(mongo.CpuRequest))
-                    sb.AppendLine($"                  cpu: \"{mongo.CpuRequest}\"");
-                if (!string.IsNullOrWhiteSpace(mongo.MemoryRequest))
-                    sb.AppendLine($"                  memory: \"{mongo.MemoryRequest}\"");
+                if (cpuReq is not null)
+                    sb.AppendLine($"                  cpu: \"{cpuReq}\"");
+                if (memReq is not null)
+                    sb.AppendLine($"                  memory: \"{memReq}\"");
             }
 
             if (hasLimits)

@@ -1111,6 +1111,19 @@ public class RabbitMQService(
         sb.AppendLine("      cpu: '2'");
         sb.AppendLine("      memory: 2Gi");
 
+        // Spread broker replicas across nodes (the operator adds no anti-affinity by
+        // default). Preferred, so it won't block scheduling when nodes < replicas.
+        // The operator labels broker pods app.kubernetes.io/name=<cluster-name>.
+        sb.AppendLine("  affinity:");
+        sb.AppendLine("    podAntiAffinity:");
+        sb.AppendLine("      preferredDuringSchedulingIgnoredDuringExecution:");
+        sb.AppendLine("        - weight: 100");
+        sb.AppendLine("          podAffinityTerm:");
+        sb.AppendLine("            topologyKey: kubernetes.io/hostname");
+        sb.AppendLine("            labelSelector:");
+        sb.AppendLine("              matchLabels:");
+        sb.AppendLine($"                app.kubernetes.io/name: {cluster.Name}");
+
         // Enable the management plugin (included in the -management image tag).
         sb.AppendLine("  rabbitmq:");
         sb.AppendLine("    additionalPlugins:");

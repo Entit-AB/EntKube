@@ -1,0 +1,115 @@
+@using EntKube.Web.Services
+
+@* ═══════════════════════════════════════════════════════════════════
+   Read-only display of parsed certificate metadata. In Compact mode it
+   renders just a one-line subject + expiry badge (for table cells); in
+   full mode it shows subject, issuer, SANs, and validity dates.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+@if (Info is null)
+{
+    <span class="badge bg-warning text-dark" title="The certificate could not be parsed">
+        <i class="bi bi-exclamation-triangle me-1"></i>Unparseable
+    </span>
+}
+else if (Compact)
+{
+    <div class="d-flex align-items-center gap-2">
+        <span class="text-truncate" style="max-width: 220px;" title="@Info.Subject">@CommonName(Info.Subject)</span>
+        @ExpiryBadge(Info)
+    </div>
+}
+else
+{
+    <div class="small">
+        <div class="row g-1">
+            <div class="col-3 text-muted">Subject</div>
+            <div class="col-9"><code class="user-select-all">@Info.Subject</code></div>
+
+            <div class="col-3 text-muted">Issuer</div>
+            <div class="col-9">@Info.Issuer @if (Info.IsSelfSigned) { <span class="badge bg-secondary ms-1">self-signed</span> }</div>
+
+            @if (Info.SubjectAlternativeNames.Count > 0)
+            {
+                <div class="col-3 text-muted">SANs</div>
+                <div class="col-9">
+                    @foreach (string san in Info.SubjectAlternativeNames)
+                    {
+                        <span class="badge bg-light text-dark border me-1 mb-1">@san</span>
+                    }
+                </div>
+            }
+
+            <div class="col-3 text-muted">Valid</div>
+            <div class="col-9">
+                @Info.NotBefore.ToString("yyyy-MM-dd") → @Info.NotAfter.ToString("yyyy-MM-dd")
+                <span class="ms-2">@ExpiryBadge(Info)</span>
+            </div>
+
+            <div class="col-3 text-muted">Serial</div>
+            <div class="col-9"><small class="text-muted">@Info.SerialNumber</small></div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public CertificateInfo? Info { get; set; }
+
+    /// <summary>When true, render a single-line subject + expiry badge for table cells.</summary>
+    [Parameter] public bool Compact { get; set; }
+
+    private static string CommonName(string subject)
+    {
+        // Pull "CN=..." out of the DN for a compact label; fall back to the full DN.
+        foreach (string part in subject.Split(','))
+        {
+            string trimmed = part.Trim();
+            if (trimmed.StartsWith("CN=", StringComparison.OrdinalIgnoreCase))
+            {
+                return trimmed[3..];
+            }
+        }
+        return subject;
+    }
+
+    private static RenderFragment ExpiryBadge(CertificateInfo info) => builder =>
+    {
+        string cls;
+        string icon;
+        string text;
+
+        if (info.IsExpired)
+        {
+            cls = "bg-danger";
+            icon = "bi-x-octagon";
+            text = $"Expired {-info.DaysUntilExpiry}d ago";
+        }
+        else if (info.NotYetValid)
+        {
+            cls = "bg-secondary";
+            icon = "bi-hourglass";
+            text = "Not yet valid";
+        }
+        else if (info.ExpiringSoon)
+        {
+            cls = "bg-warning text-dark";
+            icon = "bi-exclamation-triangle";
+            text = $"Expires in {info.DaysUntilExpiry}d";
+        }
+        else
+        {
+            cls = "bg-success";
+            icon = "bi-check-circle";
+            text = $"Valid · {info.DaysUntilExpiry}d left";
+        }
+
+        builder.OpenElement(0, "span");
+        builder.AddAttribute(1, "class", $"badge {cls}");
+        builder.AddAttribute(2, "title", $"Expires {info.NotAfter:yyyy-MM-dd HH:mm} UTC");
+        builder.OpenElement(3, "i");
+        builder.AddAttribute(4, "class", $"bi {icon} me-1");
+        builder.CloseElement();
+        builder.AddContent(5, text);
+        builder.CloseElement();
+    };
+}

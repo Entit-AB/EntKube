@@ -234,6 +234,36 @@ public class ExternalRouteService(
     }
 
     /// <summary>
+    /// Generates a TLSRoute YAML for passthrough-mode routes. The gateway routes by SNI
+    /// without terminating TLS — the backend pod must handle TLS itself.
+    /// </summary>
+    public static string GenerateTlsRouteYaml(ExternalRoute route)
+    {
+        string ns = route.Component?.Namespace ?? "default";
+        string routeName = ToListenerName(route.Hostname) + "-route";
+        string sectionName = ToListenerName(route.Hostname);
+
+        return $"""
+            apiVersion: gateway.networking.k8s.io/v1alpha2
+            kind: TLSRoute
+            metadata:
+              name: {routeName}
+              namespace: {ns}
+            spec:
+              parentRefs:
+                - name: {route.GatewayName}
+                  namespace: {route.GatewayNamespace}
+                  sectionName: {sectionName}
+              hostnames:
+                - {route.Hostname}
+              rules:
+                - backendRefs:
+                    - name: {route.ServiceName}
+                      port: {route.ServicePort}
+            """;
+    }
+
+    /// <summary>
     /// Generates a cert-manager Certificate resource for ClusterIssuer TLS mode.
     /// cert-manager will provision and renew the TLS secret automatically.
     /// Returns empty string for Manual TLS (user supplies the certificate).
@@ -356,25 +386,37 @@ public class ExternalRouteService(
                 ListenerName: ToListenerName(g.Key),
                 CertSecretName: ToCertSecretName(g.Key),
                 ClusterIssuerName: g.Select(r => r.ClusterIssuerName).FirstOrDefault(n => n != null),
-                IsCertIssuer: g.Any(r => r.TlsMode == TlsMode.ClusterIssuer)
+                IsCertIssuer: g.Any(r => r.TlsMode == TlsMode.ClusterIssuer),
+                IsPassthrough: g.All(r => r.TlsMode == TlsMode.Passthrough)
             ))
             .ToList();
 
         // certificateRefs include namespace so the Gateway can cross-reference Secrets
         // in certNamespace. Istio honours cross-namespace refs when a ReferenceGrant exists.
+        // Passthrough-mode hostnames use TLS/Passthrough listeners (no cert at gateway level).
         IEnumerable<string> httpsListeners = grouped.Select(g =>
-            $"    - name: {g.ListenerName}\n" +
-            $"      hostname: {g.Hostname}\n" +
-            $"      port: 443\n" +
-            $"      protocol: HTTPS\n" +
-            $"      tls:\n" +
-            $"        mode: Terminate\n" +
-            $"        certificateRefs:\n" +
-            $"          - name: {g.CertSecretName}\n" +
-            $"            namespace: {certNamespace}\n" +
-            $"      allowedRoutes:\n" +
-            $"        namespaces:\n" +
-            $"          from: All");
+            g.IsPassthrough
+                ? $"    - name: {g.ListenerName}\n" +
+                  $"      hostname: {g.Hostname}\n" +
+                  $"      port: 443\n" +
+                  $"      protocol: TLS\n" +
+                  $"      tls:\n" +
+                  $"        mode: Passthrough\n" +
+                  $"      allowedRoutes:\n" +
+                  $"        namespaces:\n" +
+                  $"          from: All"
+                : $"    - name: {g.ListenerName}\n" +
+                  $"      hostname: {g.Hostname}\n" +
+                  $"      port: 443\n" +
+                  $"      protocol: HTTPS\n" +
+                  $"      tls:\n" +
+                  $"        mode: Terminate\n" +
+                  $"        certificateRefs:\n" +
+                  $"          - name: {g.CertSecretName}\n" +
+                  $"            namespace: {certNamespace}\n" +
+                  $"      allowedRoutes:\n" +
+                  $"        namespaces:\n" +
+                  $"          from: All");
 
         // HTTP listener allows routes from All namespaces so cert-manager can attach
         // its ACME HTTP-01 challenge HTTPRoute (created in the cert-manager namespace).

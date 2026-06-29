@@ -1,0 +1,138 @@
+@using EntKube.Web.Services
+
+@* ═══════════════════════════════════════════════════════════════════
+   Editor for the component parts of a TLS certificate secret. Binds
+   directly to the (mutable) CertificateBundle passed in and shows a live
+   parse preview of the certificate as the user types/pastes.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="border rounded p-2 mb-2 bg-light">
+    <label class="form-label small mb-1">
+        <i class="bi bi-upload me-1"></i>Import from file
+        <span class="text-muted">— .crt / .cer / .pem (with or without key) or .pfx / .p12</span>
+    </label>
+    <div class="row g-2 align-items-center">
+        <div class="col-md-7">
+            <InputFile class="form-control form-control-sm" OnChange="OnFileSelected"
+                       accept=".crt,.cer,.pem,.der,.pfx,.p12" />
+        </div>
+        <div class="col-md-5">
+            <input type="password" class="form-control form-control-sm"
+                   placeholder="Password (PFX/P12 or encrypted PEM key)" @bind="importPassword" />
+        </div>
+    </div>
+    @if (importError is not null)
+    {
+        <div class="text-danger small mt-1"><i class="bi bi-exclamation-triangle me-1"></i>@importError</div>
+    }
+    else if (importMessage is not null)
+    {
+        <div class="text-success small mt-1"><i class="bi bi-check-circle me-1"></i>@importMessage</div>
+    }
+</div>
+
+<div class="row g-2">
+    <div class="col-12">
+        <label class="form-label small mb-1">
+            Certificate (PEM) <span class="text-danger">*</span>
+            <span class="text-muted">— leaf, or full chain</span>
+        </label>
+        <textarea class="form-control form-control-sm font-monospace" rows="5" style="font-size: 0.72rem;"
+                  placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"
+                  @bind="Bundle.Certificate" @bind:event="oninput" @bind:after="Reparse"></textarea>
+    </div>
+
+    <div class="col-12">
+        <label class="form-label small mb-1">
+            Private key (PEM) <span class="text-muted">— optional</span>
+        </label>
+        <textarea class="form-control form-control-sm font-monospace" rows="4" style="font-size: 0.72rem;"
+                  placeholder="-----BEGIN PRIVATE KEY-----"
+                  @bind="Bundle.PrivateKey" @bind:event="oninput"></textarea>
+        <div class="form-text">Required to sync as a <code>kubernetes.io/tls</code> Secret (provides <code>tls.key</code>).</div>
+    </div>
+
+    <div class="col-md-6">
+        <label class="form-label small mb-1">CA certificate (PEM) <span class="text-muted">— optional</span></label>
+        <textarea class="form-control form-control-sm font-monospace" rows="3" style="font-size: 0.72rem;"
+                  placeholder="-----BEGIN CERTIFICATE-----"
+                  @bind="Bundle.CaCertificate" @bind:event="oninput"></textarea>
+        <div class="form-text">Synced as <code>ca.crt</code> when present.</div>
+    </div>
+
+    <div class="col-md-6">
+        <label class="form-label small mb-1">Chain / intermediates (PEM) <span class="text-muted">— optional</span></label>
+        <textarea class="form-control form-control-sm font-monospace" rows="3" style="font-size: 0.72rem;"
+                  placeholder="-----BEGIN CERTIFICATE-----"
+                  @bind="Bundle.Chain" @bind:event="oninput"></textarea>
+        <div class="form-text">Appended to the leaf to form <code>tls.crt</code>.</div>
+    </div>
+
+    <div class="col-12">
+        @if (parsed is not null)
+        {
+            <div class="alert alert-light border py-2 mb-0">
+                <CertificateInfoDisplay Info="parsed" />
+            </div>
+        }
+        else if (!string.IsNullOrWhiteSpace(Bundle.Certificate))
+        {
+            <div class="alert alert-warning py-1 small mb-0">
+                <i class="bi bi-exclamation-triangle me-1"></i>This doesn't parse as a certificate yet — paste the full PEM block.
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    /// <summary>The bundle being edited. Mutated in place; the parent reads it back on save.</summary>
+    [Parameter] public required CertificateBundle Bundle { get; set; }
+
+    private CertificateInfo? parsed;
+
+    private string importPassword = "";
+    private string? importError;
+    private string? importMessage;
+
+    protected override void OnParametersSet() => Reparse();
+
+    private void Reparse() => parsed = CertificateParser.TryParse(Bundle.Certificate);
+
+    private async Task OnFileSelected(InputFileChangeEventArgs e)
+    {
+        importError = null;
+        importMessage = null;
+
+        try
+        {
+            using MemoryStream ms = new();
+            // PFX with a full chain can be a few hundred KB; 4 MB is plenty of headroom.
+            await e.File.OpenReadStream(4 * 1024 * 1024).CopyToAsync(ms);
+
+            (bool ok, string? error, CertificateBundle? imported) =
+                CertificateImporter.Import(ms.ToArray(), e.File.Name, importPassword);
+
+            if (!ok || imported is null)
+            {
+                importError = error ?? "Could not read the file.";
+                return;
+            }
+
+            // Copy into the bound bundle in place so the textareas reflect the import.
+            Bundle.Certificate = imported.Certificate;
+            Bundle.PrivateKey = imported.PrivateKey;
+            Bundle.CaCertificate = imported.CaCertificate;
+            Bundle.Chain = imported.Chain;
+            Reparse();
+
+            string parts = (Bundle.HasPrivateKey ? "certificate + key" : "certificate")
+                + (Bundle.HasChain ? " + chain" : "")
+                + (Bundle.HasCaCertificate ? " + CA" : "");
+            importMessage = $"Imported {e.File.Name} ({parts}). Review below and save.";
+        }
+        catch (Exception ex)
+        {
+            importError = $"Import failed: {ex.Message}";
+        }
+    }
+}

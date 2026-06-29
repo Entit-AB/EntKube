@@ -1,0 +1,15 @@
+@* A collapsible, monospace display of one PEM component. Renders nothing when empty. *@
+
+@if (!string.IsNullOrWhiteSpace(Pem))
+{
+    <details class="mb-1">
+        <summary class="small text-muted">@Label</summary>
+        <pre class="bg-dark text-white rounded p-2 mt-1 mb-0 user-select-all"
+             style="white-space: pre-wrap; word-break: break-all; font-size: 0.7rem; max-height: 220px; overflow-y: auto;">@Pem.Trim()</pre>
+    </details>
+}
+
+@code {
+    [Parameter] public string? Label { get; set; }
+    [Parameter] public string? Pem { get; set; }
+}

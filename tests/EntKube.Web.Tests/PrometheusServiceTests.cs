@@ -3,6 +3,7 @@ using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace EntKube.Web.Tests;
 
@@ -32,7 +33,7 @@ public class PrometheusServiceTests : IDisposable
         dbFactory = new TestDbContextFactory(connection);
         db.Database.EnsureCreated();
 
-        sut = new PrometheusService(dbFactory);
+        sut = new PrometheusService(dbFactory, NullLogger<PrometheusService>.Instance);
     }
 
     public void Dispose()
@@ -289,11 +290,12 @@ public class PrometheusServiceTests : IDisposable
 
         PrometheusConfig? config = PrometheusService.GetPrometheusConfig(component);
 
-        // Assert — defaults for standard kube-prometheus-stack helm install.
+        // Assert — service names are derived from the release name
+        // (component name "kube-prometheus-stack" → "{release}-prometheus").
 
         config.Should().NotBeNull();
         config!.Namespace.Should().Be("monitoring");
-        config.ServiceName.Should().Be("prometheus-kube-prometheus-prometheus");
+        config.ServiceName.Should().Be("kube-prometheus-stack-prometheus");
         config.ServicePort.Should().Be(9090);
     }
 

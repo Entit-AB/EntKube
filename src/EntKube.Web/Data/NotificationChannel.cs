@@ -9,6 +9,16 @@ public class NotificationChannel
 {
     public Guid Id { get; set; }
     public Guid TenantId { get; set; }
+
+    /// <summary>
+    /// When set, this channel is owned and managed by a customer (via the portal) and
+    /// only receives that customer's notifications (e.g. expiring-secret notices for
+    /// their apps). When null, it's a tenant/ops-level channel managed by tenant admins
+    /// and used for cluster alerts. Not a foreign key so the column is provider-portable
+    /// and avoids multiple-cascade-path constraints.
+    /// </summary>
+    public Guid? CustomerId { get; set; }
+
     public required string Name { get; set; }
     public NotificationChannelType Type { get; set; }
     public required string ConfigurationJson { get; set; }

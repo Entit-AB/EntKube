@@ -196,7 +196,19 @@ public static class YamlFormMerger
         }
 
         YamlStream stream = new();
-        stream.Load(new StringReader(yaml));
+
+        try
+        {
+            stream.Load(new StringReader(yaml));
+        }
+        catch
+        {
+            // The stored YAML may contain un-substituted %%PLACEHOLDER%% tokens
+            // (e.g. Manifest-type components like wg-easy), which are not valid YAML.
+            // Treat unparseable input as an empty document rather than throwing,
+            // so callers like ExtractValue degrade gracefully instead of crashing.
+            return new YamlMappingNode();
+        }
 
         if (stream.Documents.Count == 0 || stream.Documents[0].RootNode is not YamlMappingNode mapping)
         {
@@ -383,5 +395,93 @@ public static class YamlFormMerger
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Ensures an Istio gateway's Helm values expose the WireGuard UDP port (51820)
+    /// on its LoadBalancer Service, so the wg-easy component can ride the gateway's
+    /// existing external IP. Because specifying service.ports overrides the chart
+    /// defaults, when no ports are present yet we also add the gateway's standard
+    /// ports (status-port/http2/https). No-op if a 51820 entry already exists.
+    /// Done as explicit node manipulation (not dot-path merge) because the merger
+    /// cannot create a brand-new sequence from numeric paths.
+    /// </summary>
+    public static string EnsureWireGuardGatewayPort(string yaml)
+    {
+        YamlMappingNode root = ParseOrCreateRoot(yaml);
+        YamlMappingNode service = GetOrCreateMapping(root, "service");
+
+        YamlScalarNode? portsKey = service.Children.Keys
+            .OfType<YamlScalarNode>()
+            .FirstOrDefault(k => k.Value == "ports");
+
+        YamlSequenceNode ports = portsKey is not null && service.Children[portsKey] is YamlSequenceNode existing
+            ? existing
+            : new YamlSequenceNode();
+
+        bool hasWireguard = ports.Children
+            .OfType<YamlMappingNode>()
+            .Any(m => m.Children.Keys.OfType<YamlScalarNode>()
+                .Any(k => k.Value == "port"
+                    && m.Children[k] is YamlScalarNode v && v.Value == "51820"));
+
+        if (!hasWireguard)
+        {
+            // No ports listed yet → seed the gateway's standard ports first, since
+            // setting service.ports replaces the chart defaults.
+            if (ports.Children.Count == 0)
+            {
+                ports.Children.Add(PortNode("status-port", 15021, "TCP"));
+                ports.Children.Add(PortNode("http2", 80, "TCP"));
+                ports.Children.Add(PortNode("https", 443, "TCP"));
+            }
+
+            ports.Children.Add(PortNode("wireguard", 51820, "UDP"));
+        }
+
+        if (portsKey is not null)
+        {
+            service.Children[portsKey] = ports;
+        }
+        else
+        {
+            service.Children[new YamlScalarNode("ports")] = ports;
+        }
+
+        return SerializeToYaml(root);
+    }
+
+    private static YamlMappingNode GetOrCreateMapping(YamlMappingNode parent, string key)
+    {
+        YamlScalarNode? existing = parent.Children.Keys
+            .OfType<YamlScalarNode>()
+            .FirstOrDefault(k => k.Value == key);
+
+        if (existing is not null && parent.Children[existing] is YamlMappingNode mapping)
+        {
+            return mapping;
+        }
+
+        YamlMappingNode created = new();
+
+        if (existing is not null)
+        {
+            parent.Children.Remove(existing);
+        }
+
+        parent.Children.Add(new YamlScalarNode(key), created);
+        return created;
+    }
+
+    private static YamlMappingNode PortNode(string name, int port, string protocol)
+    {
+        YamlMappingNode node = new();
+        node.Children.Add(new YamlScalarNode("name"), new YamlScalarNode(name));
+        node.Children.Add(new YamlScalarNode("port"),
+            new YamlScalarNode(port.ToString()) { Style = YamlDotNet.Core.ScalarStyle.Plain });
+        node.Children.Add(new YamlScalarNode("protocol"), new YamlScalarNode(protocol));
+        node.Children.Add(new YamlScalarNode("targetPort"),
+            new YamlScalarNode(port.ToString()) { Style = YamlDotNet.Core.ScalarStyle.Plain });
+        return node;
     }
 }

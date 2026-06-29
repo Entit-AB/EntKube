@@ -161,6 +161,9 @@ else if (selectedEnv is not null)
         </div>
     }
     </LoadingPanel>
+
+    @* --- Policy Enforcement (tenant-wide for this environment) --- *@
+    <TenantKyvernoPoliciesTab TenantId="TenantId" EnvironmentId="selectedEnv.Id" />
 }
 else
 {

@@ -11,190 +11,87 @@ namespace EntKube.Web.Data.Migrations.SqlServer
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropForeignKey(
-                name: "FK_KeycloakRealms_KeycloakConnections_KeycloakConnectionId",
-                table: "KeycloakRealms");
+            // KeycloakConnections and KeycloakRealms were originally created by a migration
+            // removed from history. This migration recreates them in their final form
+            // (KeycloakComponentConfigId instead of KeycloakConnectionId) using IF NOT EXISTS
+            // guards so it is a no-op on databases that were already migrated correctly.
 
-            migrationBuilder.DropForeignKey(
-                name: "FK_VaultSecrets_KeycloakConnections_KeycloakConnectionId",
-                table: "VaultSecrets");
+            migrationBuilder.Sql("""
+                IF OBJECT_ID('[KeycloakComponentConfigs]', 'U') IS NULL
+                BEGIN
+                    CREATE TABLE [KeycloakComponentConfigs] (
+                        [Id] uniqueidentifier NOT NULL,
+                        [TenantId] uniqueidentifier NOT NULL,
+                        [ClusterComponentId] uniqueidentifier NOT NULL,
+                        [CnpgDatabaseId] uniqueidentifier NULL,
+                        [AdminUsername] nvarchar(100) NOT NULL DEFAULT N'',
+                        [AdminUrl] nvarchar(500) NULL,
+                        [CreatedAt] datetime2 NOT NULL,
+                        CONSTRAINT [PK_KeycloakComponentConfigs] PRIMARY KEY ([Id]),
+                        CONSTRAINT [FK_KeycloakComponentConfigs_ClusterComponents_ClusterComponentId]
+                            FOREIGN KEY ([ClusterComponentId]) REFERENCES [ClusterComponents] ([Id]) ON DELETE CASCADE,
+                        CONSTRAINT [FK_KeycloakComponentConfigs_CnpgDatabases_CnpgDatabaseId]
+                            FOREIGN KEY ([CnpgDatabaseId]) REFERENCES [CnpgDatabases] ([Id]) ON DELETE SET NULL,
+                        CONSTRAINT [FK_KeycloakComponentConfigs_Tenants_TenantId]
+                            FOREIGN KEY ([TenantId]) REFERENCES [Tenants] ([Id]) ON DELETE CASCADE
+                    );
+                END
+                """);
 
-            migrationBuilder.DropTable(
-                name: "KeycloakConnections");
+            migrationBuilder.Sql("""
+                IF OBJECT_ID('[KeycloakRealms]', 'U') IS NULL
+                BEGIN
+                    CREATE TABLE [KeycloakRealms] (
+                        [Id] uniqueidentifier NOT NULL,
+                        [AccountTheme] nvarchar(max) NULL,
+                        [CreatedAt] datetime2 NOT NULL,
+                        [DisplayName] nvarchar(200) NOT NULL DEFAULT N'',
+                        [Enabled] bit NOT NULL DEFAULT 0,
+                        [KeycloakComponentConfigId] uniqueidentifier NOT NULL,
+                        [LinkedAppId] uniqueidentifier NULL,
+                        [LoginTheme] nvarchar(max) NULL,
+                        [RealmName] nvarchar(100) NOT NULL DEFAULT N'',
+                        [TenantId] uniqueidentifier NOT NULL,
+                        CONSTRAINT [PK_KeycloakRealms] PRIMARY KEY ([Id]),
+                        CONSTRAINT [FK_KeycloakRealms_Apps_LinkedAppId]
+                            FOREIGN KEY ([LinkedAppId]) REFERENCES [Apps] ([Id]) ON DELETE SET NULL,
+                        CONSTRAINT [FK_KeycloakRealms_KeycloakComponentConfigs_KeycloakComponentConfigId]
+                            FOREIGN KEY ([KeycloakComponentConfigId]) REFERENCES [KeycloakComponentConfigs] ([Id]) ON DELETE CASCADE
+                    );
+                END
+                """);
 
-            migrationBuilder.DropIndex(
-                name: "IX_VaultSecrets_KeycloakConnectionId",
-                table: "VaultSecrets");
+            migrationBuilder.Sql("""
+                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_KeycloakComponentConfigs_ClusterComponentId' AND object_id = OBJECT_ID(N'[KeycloakComponentConfigs]'))
+                    CREATE INDEX [IX_KeycloakComponentConfigs_ClusterComponentId] ON [KeycloakComponentConfigs] ([ClusterComponentId]);
+                """);
 
-            migrationBuilder.DropColumn(
-                name: "KeycloakConnectionId",
-                table: "VaultSecrets");
+            migrationBuilder.Sql("""
+                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_KeycloakComponentConfigs_CnpgDatabaseId' AND object_id = OBJECT_ID(N'[KeycloakComponentConfigs]'))
+                    CREATE INDEX [IX_KeycloakComponentConfigs_CnpgDatabaseId] ON [KeycloakComponentConfigs] ([CnpgDatabaseId]);
+                """);
 
-            migrationBuilder.RenameColumn(
-                name: "KeycloakConnectionId",
-                table: "KeycloakRealms",
-                newName: "KeycloakComponentConfigId");
+            migrationBuilder.Sql("""
+                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_KeycloakComponentConfigs_TenantId' AND object_id = OBJECT_ID(N'[KeycloakComponentConfigs]'))
+                    CREATE INDEX [IX_KeycloakComponentConfigs_TenantId] ON [KeycloakComponentConfigs] ([TenantId]);
+                """);
 
-            migrationBuilder.RenameIndex(
-                name: "IX_KeycloakRealms_KeycloakConnectionId_RealmName",
-                table: "KeycloakRealms",
-                newName: "IX_KeycloakRealms_KeycloakComponentConfigId_RealmName");
+            migrationBuilder.Sql("""
+                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_KeycloakRealms_LinkedAppId' AND object_id = OBJECT_ID(N'[KeycloakRealms]'))
+                    CREATE INDEX [IX_KeycloakRealms_LinkedAppId] ON [KeycloakRealms] ([LinkedAppId]);
+                """);
 
-            migrationBuilder.CreateTable(
-                name: "KeycloakComponentConfigs",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    TenantId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    ClusterComponentId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    CnpgDatabaseId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
-                    AdminUsername = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    AdminUrl = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_KeycloakComponentConfigs", x => x.Id);
-                    table.ForeignKey(
-                        name: "FK_KeycloakComponentConfigs_ClusterComponents_ClusterComponentId",
-                        column: x => x.ClusterComponentId,
-                        principalTable: "ClusterComponents",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_KeycloakComponentConfigs_CnpgDatabases_CnpgDatabaseId",
-                        column: x => x.CnpgDatabaseId,
-                        principalTable: "CnpgDatabases",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.SetNull);
-                    table.ForeignKey(
-                        name: "FK_KeycloakComponentConfigs_Tenants_TenantId",
-                        column: x => x.TenantId,
-                        principalTable: "Tenants",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                });
-
-            migrationBuilder.CreateIndex(
-                name: "IX_KeycloakComponentConfigs_ClusterComponentId",
-                table: "KeycloakComponentConfigs",
-                column: "ClusterComponentId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_KeycloakComponentConfigs_CnpgDatabaseId",
-                table: "KeycloakComponentConfigs",
-                column: "CnpgDatabaseId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_KeycloakComponentConfigs_TenantId",
-                table: "KeycloakComponentConfigs",
-                column: "TenantId");
-
-            migrationBuilder.AddForeignKey(
-                name: "FK_KeycloakRealms_KeycloakComponentConfigs_KeycloakComponentConfigId",
-                table: "KeycloakRealms",
-                column: "KeycloakComponentConfigId",
-                principalTable: "KeycloakComponentConfigs",
-                principalColumn: "Id",
-                onDelete: ReferentialAction.Cascade);
+            migrationBuilder.Sql("""
+                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_KeycloakRealms_KeycloakComponentConfigId_RealmName' AND object_id = OBJECT_ID(N'[KeycloakRealms]'))
+                    CREATE UNIQUE INDEX [IX_KeycloakRealms_KeycloakComponentConfigId_RealmName] ON [KeycloakRealms] ([KeycloakComponentConfigId], [RealmName]);
+                """);
         }
 
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropForeignKey(
-                name: "FK_KeycloakRealms_KeycloakComponentConfigs_KeycloakComponentConfigId",
-                table: "KeycloakRealms");
-
-            migrationBuilder.DropTable(
-                name: "KeycloakComponentConfigs");
-
-            migrationBuilder.RenameColumn(
-                name: "KeycloakComponentConfigId",
-                table: "KeycloakRealms",
-                newName: "KeycloakConnectionId");
-
-            migrationBuilder.RenameIndex(
-                name: "IX_KeycloakRealms_KeycloakComponentConfigId_RealmName",
-                table: "KeycloakRealms",
-                newName: "IX_KeycloakRealms_KeycloakConnectionId_RealmName");
-
-            migrationBuilder.AddColumn<Guid>(
-                name: "KeycloakConnectionId",
-                table: "VaultSecrets",
-                type: "uniqueidentifier",
-                nullable: true);
-
-            migrationBuilder.CreateTable(
-                name: "KeycloakConnections",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    AdminPasswordSecretId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
-                    KubernetesClusterId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    TenantId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    AdminUrl = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: false),
-                    AdminUsername = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_KeycloakConnections", x => x.Id);
-                    table.ForeignKey(
-                        name: "FK_KeycloakConnections_KubernetesClusters_KubernetesClusterId",
-                        column: x => x.KubernetesClusterId,
-                        principalTable: "KubernetesClusters",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Restrict);
-                    table.ForeignKey(
-                        name: "FK_KeycloakConnections_Tenants_TenantId",
-                        column: x => x.TenantId,
-                        principalTable: "Tenants",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_KeycloakConnections_VaultSecrets_AdminPasswordSecretId",
-                        column: x => x.AdminPasswordSecretId,
-                        principalTable: "VaultSecrets",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.SetNull);
-                });
-
-            migrationBuilder.CreateIndex(
-                name: "IX_VaultSecrets_KeycloakConnectionId",
-                table: "VaultSecrets",
-                column: "KeycloakConnectionId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_KeycloakConnections_AdminPasswordSecretId",
-                table: "KeycloakConnections",
-                column: "AdminPasswordSecretId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_KeycloakConnections_KubernetesClusterId",
-                table: "KeycloakConnections",
-                column: "KubernetesClusterId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_KeycloakConnections_TenantId",
-                table: "KeycloakConnections",
-                column: "TenantId");
-
-            migrationBuilder.AddForeignKey(
-                name: "FK_KeycloakRealms_KeycloakConnections_KeycloakConnectionId",
-                table: "KeycloakRealms",
-                column: "KeycloakConnectionId",
-                principalTable: "KeycloakConnections",
-                principalColumn: "Id",
-                onDelete: ReferentialAction.Cascade);
-
-            migrationBuilder.AddForeignKey(
-                name: "FK_VaultSecrets_KeycloakConnections_KeycloakConnectionId",
-                table: "VaultSecrets",
-                column: "KeycloakConnectionId",
-                principalTable: "KeycloakConnections",
-                principalColumn: "Id",
-                onDelete: ReferentialAction.Cascade);
+            migrationBuilder.DropTable(name: "KeycloakRealms");
+            migrationBuilder.DropTable(name: "KeycloakComponentConfigs");
         }
     }
 }

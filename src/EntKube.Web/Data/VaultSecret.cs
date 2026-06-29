@@ -1,6 +1,32 @@
 namespace EntKube.Web.Data;
 
 /// <summary>
+/// The kind of payload a <see cref="VaultSecret"/> holds.
+/// </summary>
+public enum VaultSecretType
+{
+    /// <summary>A single opaque value (the default for all legacy secrets).</summary>
+    Opaque = 0,
+
+    /// <summary>
+    /// A TLS certificate. The encrypted value holds a JSON
+    /// <see cref="EntKube.Web.Services.CertificateBundle"/> with the certificate,
+    /// optional private key, optional CA certificate, and optional chain. When
+    /// synced, it produces a <c>kubernetes.io/tls</c> Secret.
+    /// </summary>
+    Certificate = 1,
+
+    /// <summary>
+    /// An OAuth/OIDC client (app registration) credential. The encrypted value holds
+    /// a JSON <see cref="EntKube.Web.Services.OAuthClientBundle"/> with the client id,
+    /// client secret, issuer/authority, optional tenant id, scopes, and a manually
+    /// entered expiry date. When synced, it produces an Opaque Secret with the
+    /// credential parts as named keys.
+    /// </summary>
+    OAuthClient = 2,
+}
+
+/// <summary>
 /// An individual secret stored in a tenant's vault. The value is encrypted
 /// with the tenant's DEK (AES-256-GCM). A secret is scoped to either an App
 /// or a ClusterComponent — never both, never neither.
@@ -13,6 +39,13 @@ public class VaultSecret
     public Guid Id { get; set; }
 
     public Guid VaultId { get; set; }
+
+    /// <summary>
+    /// What kind of payload <see cref="EncryptedValue"/> holds. For
+    /// <see cref="VaultSecretType.Certificate"/> the decrypted value is a JSON
+    /// <see cref="EntKube.Web.Services.CertificateBundle"/> rather than a raw string.
+    /// </summary>
+    public VaultSecretType SecretType { get; set; } = VaultSecretType.Opaque;
 
     /// <summary>
     /// The secret key name (e.g. "DATABASE_PASSWORD", "API_KEY").
@@ -35,6 +68,16 @@ public class VaultSecret
     /// If set, this secret belongs to a customer app.
     /// </summary>
     public Guid? AppId { get; set; }
+
+    /// <summary>
+    /// For app-scoped secrets only: the environment this secret is bound to.
+    /// When null, the secret is "shared" — visible and syncable across all of
+    /// the app's environments. When set, the secret is only visible and syncable
+    /// within that environment (e.g. a prod secret is never shown in, nor synced
+    /// to, the test environment). Ignored for non-app scopes, whose environment
+    /// is already implied by their owning cluster/component.
+    /// </summary>
+    public Guid? EnvironmentId { get; set; }
 
     /// <summary>
     /// If set, this secret belongs to a cluster component.
@@ -139,6 +182,7 @@ public class VaultSecret
     // Navigation
     public SecretVault Vault { get; set; } = null!;
     public App? App { get; set; }
+    public Environment? Environment { get; set; }
     public ClusterComponent? Component { get; set; }
     public StorageLink? StorageLink { get; set; }
     public CnpgCluster? CnpgCluster { get; set; }

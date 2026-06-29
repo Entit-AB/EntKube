@@ -8,6 +8,7 @@
 @inject CnpgService CnpgService
 @inject MongoService MongoService
 @inject RegisteredPostgresService RegisteredPostgresService
+@inject AppGovernanceService AppGovernanceService
 
 <div class="d-flex align-items-center mb-2">
     <i class="bi bi-shield-lock fs-4 me-2 text-primary"></i>
@@ -242,28 +243,129 @@ else
                 @* Add secret form — hidden for read-only DB scopes *@
                 @if (scope is not "mongodb" and not "regpostgres")
                 {
-                <div class="row g-2 mb-3">
-                    <div class="col-md-4">
-                        <div class="input-group input-group-sm">
-                            <span class="input-group-text"><i class="bi bi-tag"></i></span>
-                            <input type="text" class="form-control" placeholder="SECRET_NAME"
-                                   @bind="newSecretName" @bind:event="oninput" />
+                    @* Certificates and OAuth clients are only meaningful for app secrets. *@
+                    @if (scope == "app")
+                    {
+                        <div class="btn-group btn-group-sm mb-2">
+                            <button type="button" class="btn @(addMode == "opaque" ? "btn-primary" : "btn-outline-primary")"
+                                    @onclick='() => addMode = "opaque"'>
+                                <i class="bi bi-key me-1"></i>Opaque value
+                            </button>
+                            <button type="button" class="btn @(addMode == "certificate" ? "btn-primary" : "btn-outline-primary")"
+                                    @onclick='() => addMode = "certificate"'>
+                                <i class="bi bi-patch-check me-1"></i>Certificate
+                            </button>
+                            <button type="button" class="btn @(addMode == "oauth" ? "btn-primary" : "btn-outline-primary")"
+                                    @onclick='() => addMode = "oauth"'>
+                                <i class="bi bi-shield-lock me-1"></i>OAuth / OIDC
+                            </button>
                         </div>
-                    </div>
-                    <div class="col-md-5">
-                        <div class="input-group input-group-sm">
-                            <span class="input-group-text"><i class="bi bi-key"></i></span>
-                            <input type="password" class="form-control" placeholder="Secret value"
-                                   @bind="newSecretValue" @bind:event="oninput" />
+                    }
+
+                    @if (scope == "app" && addMode == "certificate")
+                    {
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-4">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text"><i class="bi bi-tag"></i></span>
+                                    <input type="text" class="form-control" placeholder="PROD_TLS, ingress-cert"
+                                           @bind="newSecretName" @bind:event="oninput" />
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="input-group input-group-sm" title="Bind this certificate to a single environment, or leave shared across all of the app's environments.">
+                                    <span class="input-group-text"><i class="bi bi-diagram-3"></i></span>
+                                    <select class="form-select" @bind="newSecretEnvironmentId">
+                                        <option value="@Guid.Empty">Shared (all environments)</option>
+                                        @foreach ((string label, Guid id) in appEnvironmentOptions)
+                                        {
+                                            <option value="@id">@label</option>
+                                        }
+                                    </select>
+                                </div>
+                            </div>
                         </div>
-                    </div>
-                    <div class="col-md-auto">
-                        <button class="btn btn-sm btn-primary" @onclick="AddSecret"
-                                disabled="@(string.IsNullOrWhiteSpace(newSecretName) || string.IsNullOrWhiteSpace(newSecretValue))">
-                            <i class="bi bi-plus-lg me-1"></i>Set Secret
-                        </button>
-                    </div>
-                </div>
+                        <CertificateFields Bundle="newCertBundle" />
+                        <div class="mb-3 mt-2">
+                            <button class="btn btn-sm btn-primary" @onclick="AddCertificate"
+                                    disabled="@(string.IsNullOrWhiteSpace(newSecretName) || string.IsNullOrWhiteSpace(newCertBundle.Certificate) || savingCertificate)">
+                                @if (savingCertificate) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                <i class="bi bi-plus-lg me-1"></i>Save Certificate
+                            </button>
+                        </div>
+                    }
+                    else if (scope == "app" && addMode == "oauth")
+                    {
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-4">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text"><i class="bi bi-tag"></i></span>
+                                    <input type="text" class="form-control" placeholder="ENTRA_APP, google-oidc"
+                                           @bind="newSecretName" @bind:event="oninput" />
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="input-group input-group-sm" title="Bind this credential to a single environment, or leave shared across all of the app's environments.">
+                                    <span class="input-group-text"><i class="bi bi-diagram-3"></i></span>
+                                    <select class="form-select" @bind="newSecretEnvironmentId">
+                                        <option value="@Guid.Empty">Shared (all environments)</option>
+                                        @foreach ((string label, Guid id) in appEnvironmentOptions)
+                                        {
+                                            <option value="@id">@label</option>
+                                        }
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <OAuthClientFields Bundle="newOAuthBundle" />
+                        <div class="mb-3 mt-2">
+                            <button class="btn btn-sm btn-primary" @onclick="AddOAuthClient"
+                                    disabled="@(string.IsNullOrWhiteSpace(newSecretName) || string.IsNullOrWhiteSpace(newOAuthBundle.ClientSecret) || savingCertificate)">
+                                @if (savingCertificate) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                <i class="bi bi-plus-lg me-1"></i>Save OAuth Client
+                            </button>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="row g-2 mb-3">
+                            <div class="col-md-3">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text"><i class="bi bi-tag"></i></span>
+                                    <input type="text" class="form-control" placeholder="SECRET_NAME"
+                                           @bind="newSecretName" @bind:event="oninput" />
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text"><i class="bi bi-key"></i></span>
+                                    <input type="password" class="form-control" placeholder="Secret value"
+                                           @bind="newSecretValue" @bind:event="oninput" />
+                                </div>
+                            </div>
+                            @if (scope == "app")
+                            {
+                                <div class="col-md-3">
+                                    <div class="input-group input-group-sm" title="Bind this secret to a single environment, or leave shared across all of the app's environments.">
+                                        <span class="input-group-text"><i class="bi bi-diagram-3"></i></span>
+                                        <select class="form-select" @bind="newSecretEnvironmentId">
+                                            <option value="@Guid.Empty">Shared (all environments)</option>
+                                            @foreach ((string label, Guid id) in appEnvironmentOptions)
+                                            {
+                                                <option value="@id">@label</option>
+                                            }
+                                        </select>
+                                    </div>
+                                </div>
+                            }
+                            <div class="col-md-auto">
+                                <button class="btn btn-sm btn-primary" @onclick="AddSecret"
+                                        disabled="@(string.IsNullOrWhiteSpace(newSecretName) || string.IsNullOrWhiteSpace(newSecretValue))">
+                                    <i class="bi bi-plus-lg me-1"></i>Set Secret
+                                </button>
+                            </div>
+                        </div>
+                    }
                 }
 
                 @if (!string.IsNullOrEmpty(errorMessage))
@@ -309,7 +411,40 @@ else
                                 @foreach (VaultSecret secret in secrets)
                                 {
                                     <tr>
-                                        <td><code>@secret.Name</code></td>
+                                        <td>
+                                            <code>@secret.Name</code>
+                                            @if (secret.SecretType == VaultSecretType.Certificate)
+                                            {
+                                                <span class="badge bg-primary-subtle text-primary border border-primary-subtle ms-2" title="TLS certificate"><i class="bi bi-patch-check me-1"></i>TLS</span>
+                                            }
+                                            else if (secret.SecretType == VaultSecretType.OAuthClient)
+                                            {
+                                                <span class="badge bg-primary-subtle text-primary border border-primary-subtle ms-2" title="OAuth / OIDC client"><i class="bi bi-shield-lock me-1"></i>OAuth</span>
+                                            }
+                                            @if (scope == "app")
+                                            {
+                                                @if (secret.EnvironmentId is null)
+                                                {
+                                                    <span class="badge bg-light text-dark border ms-2" title="Visible in every environment of this app"><i class="bi bi-globe me-1"></i>Shared</span>
+                                                }
+                                                else
+                                                {
+                                                    <span class="badge bg-info-subtle text-info-emphasis border border-info-subtle ms-2" title="Bound to a single environment"><i class="bi bi-diagram-3 me-1"></i>@environmentNames.GetValueOrDefault(secret.EnvironmentId.Value, "Unknown env")</span>
+                                                }
+                                            }
+                                            @if (secret.SecretType == VaultSecretType.Certificate)
+                                            {
+                                                <div class="mt-1">
+                                                    <CertificateInfoDisplay Info="@certInfos.GetValueOrDefault(secret.Id)" Compact="true" />
+                                                </div>
+                                            }
+                                            else if (secret.SecretType == VaultSecretType.OAuthClient)
+                                            {
+                                                <div class="mt-1">
+                                                    <OAuthClientDisplay Info="@oauthInfos.GetValueOrDefault(secret.Id)" Compact="true" />
+                                                </div>
+                                            }
+                                        </td>
                                         @if (scope is "cnpg" or "mongodb" or "regpostgres")
                                         {
                                             <td>
@@ -352,6 +487,12 @@ else
                                             <button class="btn btn-sm btn-outline-warning me-1" @onclick="() => StartEdit(secret)" title="Edit value">
                                                 <i class="bi bi-pencil"></i>
                                             </button>
+                                            @if (scope == "app")
+                                            {
+                                                <button class="btn btn-sm btn-outline-primary me-1" @onclick="() => StartScopeEdit(secret)" title="Change scope">
+                                                    <i class="bi bi-diagram-3"></i>
+                                                </button>
+                                            }
                                             <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => ToggleHistory(secret.Id)" title="Version history">
                                                 <i class="bi bi-clock-history"></i>
                                             </button>
@@ -370,10 +511,32 @@ else
                                     {
                                         <tr>
                                             <td colspan="6" class="bg-light">
-                                                <div class="p-2">
-                                                    <span class="text-muted small me-2">Value:</span>
-                                                    <code class="user-select-all">@revealedValue</code>
-                                                </div>
+                                                @if (secret.SecretType == VaultSecretType.Certificate && revealedBundle is not null)
+                                                {
+                                                    <div class="p-2">
+                                                        <CertificateInfoDisplay Info="@certInfos.GetValueOrDefault(secret.Id)" />
+                                                        <div class="mt-2">
+                                                            <PemBlock Label="Certificate" Pem="@revealedBundle.Certificate" />
+                                                            <PemBlock Label="Private key" Pem="@revealedBundle.PrivateKey" />
+                                                            <PemBlock Label="CA certificate" Pem="@revealedBundle.CaCertificate" />
+                                                            <PemBlock Label="Chain" Pem="@revealedBundle.Chain" />
+                                                            <PemBlock Label="Full chain (synced as fullchain.crt)" Pem="@revealedBundle.FullChain" />
+                                                        </div>
+                                                    </div>
+                                                }
+                                                else if (secret.SecretType == VaultSecretType.OAuthClient && revealedOAuthBundle is not null)
+                                                {
+                                                    <div class="p-2">
+                                                        <OAuthClientDisplay Info="@revealedOAuthBundle.ToInfo()" ClientSecret="@revealedOAuthBundle.ClientSecret" />
+                                                    </div>
+                                                }
+                                                else
+                                                {
+                                                    <div class="p-2">
+                                                        <span class="text-muted small me-2">Value:</span>
+                                                        <code class="user-select-all">@revealedValue</code>
+                                                    </div>
+                                                }
                                             </td>
                                         </tr>
                                     }
@@ -383,21 +546,94 @@ else
                                     {
                                         <tr>
                                             <td colspan="6" class="bg-light">
+                                                @if (secret.SecretType == VaultSecretType.Certificate && editCertBundle is not null)
+                                                {
+                                                    <div class="p-2">
+                                                        <CertificateFields Bundle="editCertBundle" />
+                                                        <div class="mt-2">
+                                                            <button class="btn btn-sm btn-success" @onclick="() => SaveCertEdit(secret)"
+                                                                    disabled="@(string.IsNullOrWhiteSpace(editCertBundle.Certificate) || savingCertificate)">
+                                                                @if (savingCertificate) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                                <i class="bi bi-check-lg me-1"></i>Update Certificate
+                                                            </button>
+                                                            <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="CancelEdit">
+                                                                Cancel
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                }
+                                                else if (secret.SecretType == VaultSecretType.OAuthClient && editOAuthBundle is not null)
+                                                {
+                                                    <div class="p-2">
+                                                        <OAuthClientFields Bundle="editOAuthBundle" />
+                                                        <div class="mt-2">
+                                                            <button class="btn btn-sm btn-success" @onclick="() => SaveOAuthEdit(secret)"
+                                                                    disabled="@(string.IsNullOrWhiteSpace(editOAuthBundle.ClientSecret) || savingCertificate)">
+                                                                @if (savingCertificate) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                                <i class="bi bi-check-lg me-1"></i>Update OAuth Client
+                                                            </button>
+                                                            <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="CancelEdit">
+                                                                Cancel
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                }
+                                                else
+                                                {
+                                                    <div class="row g-2 p-2 align-items-center">
+                                                        <div class="col-md-6">
+                                                            <input type="password" class="form-control form-control-sm"
+                                                                   placeholder="New secret value" @bind="editSecretValue" />
+                                                        </div>
+                                                        <div class="col-auto">
+                                                            <button class="btn btn-sm btn-success" @onclick="SaveEdit"
+                                                                    disabled="@string.IsNullOrWhiteSpace(editSecretValue)">
+                                                                <i class="bi bi-check-lg me-1"></i>Update
+                                                            </button>
+                                                            <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="CancelEdit">
+                                                                Cancel
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                }
+                                            </td>
+                                        </tr>
+                                    }
+
+                                    @* Change scope row *@
+                                    @if (scopeEditSecretId == secret.Id)
+                                    {
+                                        <tr>
+                                            <td colspan="6" class="bg-light">
                                                 <div class="row g-2 p-2 align-items-center">
-                                                    <div class="col-md-6">
-                                                        <input type="password" class="form-control form-control-sm"
-                                                               placeholder="New secret value" @bind="editSecretValue" />
+                                                    <div class="col-auto">
+                                                        <label class="form-label small mb-0">Scope</label>
+                                                    </div>
+                                                    <div class="col-md-5">
+                                                        <select class="form-select form-select-sm" @bind="scopeEditValue">
+                                                            <option value="">Shared across all environments</option>
+                                                            @foreach ((string Label, Guid Id) opt in appEnvironmentOptions)
+                                                            {
+                                                                <option value="@opt.Id">@opt.Label (this environment only)</option>
+                                                            }
+                                                        </select>
                                                     </div>
                                                     <div class="col-auto">
-                                                        <button class="btn btn-sm btn-success" @onclick="SaveEdit"
-                                                                disabled="@string.IsNullOrWhiteSpace(editSecretValue)">
-                                                            <i class="bi bi-check-lg me-1"></i>Update
+                                                        <button class="btn btn-sm btn-success" @onclick="() => SaveScopeEdit(secret)" disabled="@savingScope">
+                                                            @if (savingScope) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                            <i class="bi bi-check-lg me-1"></i>Save
                                                         </button>
-                                                        <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="CancelEdit">
+                                                        <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="CancelScopeEdit">
                                                             Cancel
                                                         </button>
                                                     </div>
                                                 </div>
+                                                @if (secret.SyncToKubernetes)
+                                                {
+                                                    <div class="px-2 pb-1">
+                                                        <small class="text-muted"><i class="bi bi-info-circle me-1"></i>If the new environment doesn't match this secret's sync target cluster, K8s sync will be turned off.</small>
+                                                    </div>
+                                                }
                                             </td>
                                         </tr>
                                     }
@@ -562,6 +798,12 @@ else
     // Cluster options (used in app-scope sync config)
     private List<(string Label, Guid Id)>? clusterOptions;
 
+    // Environment scoping (app scope): names for badges + per-app options for the
+    // add form. newSecretEnvironmentId == Guid.Empty means "shared across envs".
+    private Dictionary<Guid, string> environmentNames = new();
+    private List<(string Label, Guid Id)> appEnvironmentOptions = [];
+    private Guid newSecretEnvironmentId;
+
     // Secrets
     private List<VaultSecret>? secrets;
     private string newSecretName = "";
@@ -572,6 +814,28 @@ else
     private string syncSecretName = "";
     private string syncNamespace = "";
     private Guid syncClusterId;
+
+    // Change-scope state (app secrets). scopeEditValue == "" means "shared".
+    private Guid? scopeEditSecretId;
+    private string scopeEditValue = "";
+    private bool savingScope;
+
+    // Add-form mode for app secrets: "opaque" | "certificate" | "oauth".
+    private string addMode = "opaque";
+    // Shared busy flag for saving a structured (certificate/oauth) secret.
+    private bool savingCertificate;
+
+    // Certificate state (app secrets only).
+    private CertificateBundle newCertBundle = new();
+    private CertificateBundle? revealedBundle;
+    private CertificateBundle? editCertBundle;
+    private Dictionary<Guid, CertificateInfo?> certInfos = new();
+
+    // OAuth/OIDC client state (app secrets only).
+    private OAuthClientBundle newOAuthBundle = new();
+    private OAuthClientBundle? revealedOAuthBundle;
+    private OAuthClientBundle? editOAuthBundle;
+    private Dictionary<Guid, OAuthClientInfo?> oauthInfos = new();
 
     // Sync-to-K8s state (app scope)
     private bool syncingSecrets;
@@ -623,6 +887,9 @@ else
             }
         }
 
+        environmentNames = (await TenantService.GetEnvironmentsAsync(TenantId))
+            .ToDictionary(e => e.Id, e => e.Name);
+
         List<KubernetesCluster> clusters = await TenantService.GetClustersAsync(TenantId);
         clusterOptions = clusters.Select(c => (c.Name, c.Id)).ToList();
         componentOptions = [];
@@ -669,6 +936,8 @@ else
         scope = newScope;
         secrets = null;
         selectedAppId = Guid.Empty;
+        newSecretEnvironmentId = Guid.Empty;
+        appEnvironmentOptions = [];
         selectedComponentId = Guid.Empty;
         selectedStorageLinkId = Guid.Empty;
         selectedCnpgClusterId = Guid.Empty;
@@ -678,6 +947,9 @@ else
         successMessage = null;
         syncClusterId = Guid.Empty;
         syncOutput = null;
+        addMode = "opaque";
+        newCertBundle = new();
+        newOAuthBundle = new();
         // Docker registries panel manages its own state; no reset needed here.
     }
 
@@ -699,6 +971,15 @@ else
         if (scope == "app" && selectedAppId != Guid.Empty)
         {
             secrets = await VaultService.GetAppSecretsAsync(TenantId, selectedAppId);
+
+            // Offer only the environments this app is linked to (plus "shared").
+            List<AppEnvironment> appEnvs = await AppGovernanceService.GetAppEnvironmentsAsync(selectedAppId);
+            appEnvironmentOptions = appEnvs
+                .Select(ae => (environmentNames.GetValueOrDefault(ae.EnvironmentId, "Unknown env"), ae.EnvironmentId))
+                .ToList();
+            // Reset the add-form scope if the previously selected env isn't valid here.
+            if (newSecretEnvironmentId != Guid.Empty && appEnvironmentOptions.All(o => o.Item2 != newSecretEnvironmentId))
+                newSecretEnvironmentId = Guid.Empty;
         }
         else if (scope == "component" && selectedComponentId != Guid.Empty)
         {
@@ -724,6 +1005,135 @@ else
         {
             secrets = null;
         }
+
+        // Parse certificate / OAuth rows so the list can show metadata + expiry status.
+        certInfos = new();
+        oauthInfos = new();
+        if (secrets is not null)
+        {
+            foreach (VaultSecret cert in secrets.Where(s => s.SecretType == VaultSecretType.Certificate))
+            {
+                certInfos[cert.Id] = await VaultService.GetCertificateInfoByIdAsync(cert.Id);
+            }
+            foreach (VaultSecret oauth in secrets.Where(s => s.SecretType == VaultSecretType.OAuthClient))
+            {
+                oauthInfos[oauth.Id] = await VaultService.GetOAuthClientInfoByIdAsync(oauth.Id);
+            }
+        }
+    }
+
+    private async Task AddCertificate()
+    {
+        errorMessage = null;
+        successMessage = null;
+        savingCertificate = true;
+
+        try
+        {
+            Guid? environmentId = newSecretEnvironmentId != Guid.Empty ? newSecretEnvironmentId : null;
+            (bool ok, string? error) = await VaultService.SetAppCertificateAsync(
+                TenantId, selectedAppId, newSecretName.Trim(), newCertBundle, environmentId);
+
+            if (!ok)
+            {
+                errorMessage = error;
+                return;
+            }
+
+            successMessage = $"Certificate '{newSecretName.Trim()}' saved.";
+            newSecretName = "";
+            newCertBundle = new();
+            await LoadSecrets();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+        }
+        finally { savingCertificate = false; }
+    }
+
+    private async Task SaveCertEdit(VaultSecret secret)
+    {
+        if (editCertBundle is null || string.IsNullOrWhiteSpace(editCertBundle.Certificate)) return;
+
+        errorMessage = null;
+        savingCertificate = true;
+
+        try
+        {
+            (bool ok, string? error) = await VaultService.SetAppCertificateAsync(
+                TenantId, selectedAppId, secret.Name, editCertBundle, secret.EnvironmentId);
+
+            if (ok)
+            {
+                editSecretId = null;
+                editCertBundle = null;
+                successMessage = "Certificate updated.";
+                await LoadSecrets();
+            }
+            else
+            {
+                errorMessage = error;
+            }
+        }
+        finally { savingCertificate = false; }
+    }
+
+    private async Task AddOAuthClient()
+    {
+        errorMessage = null;
+        successMessage = null;
+        savingCertificate = true;
+
+        try
+        {
+            Guid? environmentId = newSecretEnvironmentId != Guid.Empty ? newSecretEnvironmentId : null;
+            (bool ok, string? error) = await VaultService.SetAppOAuthClientAsync(
+                TenantId, selectedAppId, newSecretName.Trim(), newOAuthBundle, environmentId);
+
+            if (!ok)
+            {
+                errorMessage = error;
+                return;
+            }
+
+            successMessage = $"OAuth client '{newSecretName.Trim()}' saved.";
+            newSecretName = "";
+            newOAuthBundle = new();
+            await LoadSecrets();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+        }
+        finally { savingCertificate = false; }
+    }
+
+    private async Task SaveOAuthEdit(VaultSecret secret)
+    {
+        if (editOAuthBundle is null || string.IsNullOrWhiteSpace(editOAuthBundle.ClientSecret)) return;
+
+        errorMessage = null;
+        savingCertificate = true;
+
+        try
+        {
+            (bool ok, string? error) = await VaultService.SetAppOAuthClientAsync(
+                TenantId, selectedAppId, secret.Name, editOAuthBundle, secret.EnvironmentId);
+
+            if (ok)
+            {
+                editSecretId = null;
+                editOAuthBundle = null;
+                successMessage = "OAuth client updated.";
+                await LoadSecrets();
+            }
+            else
+            {
+                errorMessage = error;
+            }
+        }
+        finally { savingCertificate = false; }
     }
 
     private async Task AddSecret()
@@ -735,7 +1145,8 @@ else
         {
             if (scope == "app")
             {
-                await VaultService.SetAppSecretAsync(TenantId, selectedAppId, newSecretName.Trim(), newSecretValue.Trim());
+                Guid? environmentId = newSecretEnvironmentId != Guid.Empty ? newSecretEnvironmentId : null;
+                await VaultService.SetAppSecretAsync(TenantId, selectedAppId, newSecretName.Trim(), newSecretValue.Trim(), environmentId: environmentId);
             }
             else if (scope == "component")
             {
@@ -789,27 +1200,58 @@ else
         {
             revealedSecretId = null;
             revealedValue = null;
+            revealedBundle = null;
+            revealedOAuthBundle = null;
             return;
         }
 
-        // Decrypt and reveal the value.
+        // Decrypt and reveal the value (or certificate / OAuth bundle).
 
-        revealedValue = await VaultService.GetSecretValueByIdAsync(secret.Id);
+        revealedValue = null;
+        revealedBundle = null;
+        revealedOAuthBundle = null;
+        if (secret.SecretType == VaultSecretType.Certificate)
+        {
+            revealedBundle = await VaultService.GetCertificateBundleByIdAsync(secret.Id);
+        }
+        else if (secret.SecretType == VaultSecretType.OAuthClient)
+        {
+            revealedOAuthBundle = await VaultService.GetOAuthClientBundleByIdAsync(secret.Id);
+        }
+        else
+        {
+            revealedValue = await VaultService.GetSecretValueByIdAsync(secret.Id);
+        }
         revealedSecretId = secret.Id;
     }
 
-    private void StartEdit(VaultSecret secret)
+    private async Task StartEdit(VaultSecret secret)
     {
         editSecretId = secret.Id;
         editSecretValue = "";
+        editCertBundle = null;
+        editOAuthBundle = null;
         revealedSecretId = null;
         revealedValue = null;
+        revealedBundle = null;
+        revealedOAuthBundle = null;
+
+        if (secret.SecretType == VaultSecretType.Certificate)
+        {
+            editCertBundle = await VaultService.GetCertificateBundleByIdAsync(secret.Id) ?? new CertificateBundle();
+        }
+        else if (secret.SecretType == VaultSecretType.OAuthClient)
+        {
+            editOAuthBundle = await VaultService.GetOAuthClientBundleByIdAsync(secret.Id) ?? new OAuthClientBundle();
+        }
     }
 
     private void CancelEdit()
     {
         editSecretId = null;
         editSecretValue = "";
+        editCertBundle = null;
+        editOAuthBundle = null;
     }
 
     private async Task SaveEdit()
@@ -835,6 +1277,49 @@ else
         editSecretId = null;
         editSecretValue = "";
         await LoadSecrets();
+    }
+
+    // ── Change scope (app secrets) ───────────────────────────────────
+
+    private void StartScopeEdit(VaultSecret secret)
+    {
+        scopeEditSecretId = secret.Id;
+        scopeEditValue = secret.EnvironmentId?.ToString() ?? "";
+        editSecretId = null;
+        revealedSecretId = null;
+        errorMessage = null;
+    }
+
+    private void CancelScopeEdit()
+    {
+        scopeEditSecretId = null;
+        scopeEditValue = "";
+    }
+
+    private async Task SaveScopeEdit(VaultSecret secret)
+    {
+        errorMessage = null;
+        savingScope = true;
+
+        try
+        {
+            Guid? environmentId = Guid.TryParse(scopeEditValue, out Guid id) ? id : (Guid?)null;
+            (bool ok, string? reason) = await VaultService.ChangeAppSecretScopeAsync(secret.Id, environmentId);
+            if (ok)
+            {
+                scopeEditSecretId = null;
+                await LoadSecrets();
+                string scopeLabel = environmentId is null
+                    ? "shared"
+                    : environmentNames.GetValueOrDefault(environmentId.Value, "environment");
+                successMessage = $"Secret '{secret.Name}' scope changed to {scopeLabel}.";
+            }
+            else
+            {
+                errorMessage = reason;
+            }
+        }
+        finally { savingScope = false; }
     }
 
     private void ToggleSync(VaultSecret secret)

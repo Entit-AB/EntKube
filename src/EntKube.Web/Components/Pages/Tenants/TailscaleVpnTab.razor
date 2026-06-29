@@ -1,0 +1,583 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject TailscaleService TailscaleService
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+    <div>
+        <h5 class="mb-0"><i class="bi bi-shield-lock me-2 text-primary"></i>VPN Access (Tailscale)</h5>
+        <small class="text-muted">
+            Expose cluster services to your Tailscale network. Install the
+            <a href="https://tailscale.com/download" target="_blank">Tailscale client</a>
+            on any device to reach exposed services — ACLs and permissions are managed in the
+            <a href="https://login.tailscale.com/admin" target="_blank">Tailscale admin console</a>.
+        </small>
+    </div>
+    <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync" disabled="@loading">
+        <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+    </button>
+</div>
+
+@if (loading)
+{
+    <div class="d-flex align-items-center gap-2 text-muted small py-3">
+        <span class="spinner-border spinner-border-sm"></span>Loading…
+    </div>
+}
+else if (error is not null)
+{
+    <div class="alert alert-danger py-2 small">
+        <i class="bi bi-exclamation-triangle me-1"></i>@error
+    </div>
+}
+else if (operators.Count == 0)
+{
+    <div class="card border-0 bg-light">
+        <div class="card-body text-center py-4">
+            <i class="bi bi-shield-lock fs-2 text-muted mb-2 d-block"></i>
+            <p class="mb-1 fw-medium">No Tailscale Operator found</p>
+            <p class="text-muted small mb-0">
+                Install the <strong>Tailscale Operator</strong> from the cluster Components catalog to enable VPN access here.
+            </p>
+        </div>
+    </div>
+}
+else
+{
+    @if (operators.Count > 1)
+    {
+        <div class="mb-3">
+            <label class="form-label small fw-medium">Cluster</label>
+            <select class="form-select form-select-sm w-auto" @bind="selectedOperatorIndex"
+                    @bind:after="LoadClusterDataAsync">
+                @for (int i = 0; i < operators.Count; i++)
+                {
+                    int idx = i;
+                    <option value="@idx">@operators[idx].ClusterName</option>
+                }
+            </select>
+        </div>
+    }
+
+    @if (clusterError is not null)
+    {
+        <div class="alert alert-warning py-2 small mb-3">
+            <i class="bi bi-exclamation-triangle me-1"></i>@clusterError
+        </div>
+    }
+
+    @* ── L3: Service Exposure ── *@
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+            <div>
+                <strong><i class="bi bi-diagram-3 me-1 text-primary"></i>Service Exposure (L3)</strong>
+                <span class="text-muted small ms-2">Expose Kubernetes services directly to your tailnet</span>
+            </div>
+            @if (exposedCount > 0)
+            {
+                <span class="badge bg-success">@exposedCount exposed</span>
+            }
+        </div>
+        <div class="card-body pb-2">
+            <div class="d-flex gap-2 mb-2">
+                <select class="form-select form-select-sm w-auto" @bind="svcNamespaceFilter">
+                    <option value="">All namespaces (@allServices.Count)</option>
+                    @foreach (string ns in ServiceNamespaces)
+                    {
+                        int count = allServices.Count(s => s.Namespace == ns);
+                        <option value="@ns">@ns (@count)</option>
+                    }
+                </select>
+                <input class="form-control form-control-sm" placeholder="Filter by name or IP…"
+                       @bind="svcFilter" @bind:event="oninput" />
+            </div>
+
+            @if (loadingServices)
+            {
+                <div class="text-muted small d-flex align-items-center gap-2 py-2">
+                    <span class="spinner-border spinner-border-sm"></span>Loading services…
+                </div>
+            }
+            else if (VisibleServices.Any())
+            {
+                <div style="max-height:300px;overflow-y:auto" class="border rounded">
+                    <table class="table table-sm table-hover mb-0 small">
+                        <thead class="table-light sticky-top">
+                            <tr>
+                                <th>Service</th>
+                                <th>Namespace</th>
+                                <th>ClusterIP</th>
+                                <th>Ports</th>
+                                <th>Tailnet</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (TailscaleExposedService svc in VisibleServices)
+                            {
+                                <tr @key="@($"{svc.Namespace}/{svc.ServiceName}")">
+                                    <td class="font-monospace">@svc.ServiceName</td>
+                                    <td class="text-muted">@svc.Namespace</td>
+                                    <td class="font-monospace text-muted">@svc.ClusterIp</td>
+                                    <td class="text-muted" style="font-size:.8em">@svc.Ports</td>
+                                    <td>
+                                        @if (svc.Exposed)
+                                        {
+                                            @if (!string.IsNullOrEmpty(svc.DnsName))
+                                            {
+                                                <code class="small text-success">@svc.DnsName</code>
+                                            }
+                                            else if (!string.IsNullOrEmpty(svc.TailnetIp))
+                                            {
+                                                <code class="small text-success">@svc.TailnetIp</code>
+                                            }
+                                            else
+                                            {
+                                                <span class="text-muted small">
+                                                    <span class="spinner-border spinner-border-sm me-1" style="width:.6em;height:.6em"></span>Registering…
+                                                </span>
+                                            }
+                                        }
+                                    </td>
+                                    <td class="text-end">
+                                        @if (pendingService == $"{svc.Namespace}/{svc.ServiceName}")
+                                        {
+                                            <span class="spinner-border spinner-border-sm text-primary" style="width:.9em;height:.9em"></span>
+                                        }
+                                        else if (svc.Exposed)
+                                        {
+                                            <button class="btn btn-sm btn-outline-danger py-0 px-2"
+                                                    @onclick="() => UnexposeAsync(svc)">
+                                                Remove
+                                            </button>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-outline-primary py-0 px-2"
+                                                    @onclick="() => StartExposeAsync(svc)">
+                                                Expose
+                                            </button>
+                                        }
+                                    </td>
+                                </tr>
+                                @if (exposeFormService == $"{svc.Namespace}/{svc.ServiceName}")
+                                {
+                                    <tr>
+                                        <td colspan="6" class="bg-light py-2 px-3">
+                                            <div class="d-flex align-items-center gap-2">
+                                                <label class="small mb-0">Tailnet device name <span class="text-muted">(optional)</span></label>
+                                                <input class="form-control form-control-sm w-auto font-monospace"
+                                                       placeholder="@svc.ServiceName"
+                                                       @bind="exposeHostname" style="min-width:200px" />
+                                                <button class="btn btn-sm btn-primary py-0 px-2"
+                                                        @onclick="() => ConfirmExposeAsync(svc)">
+                                                    Expose
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                                                        @onclick="CancelExpose">
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                            @if (exposeError is not null)
+                                            {
+                                                <div class="text-danger small mt-1">@exposeError</div>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+            else
+            {
+                <div class="text-muted small py-2">No services match the current filter.</div>
+            }
+        </div>
+    </div>
+
+    @* ── L7: Tailscale Ingresses ── *@
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+            <div>
+                <strong><i class="bi bi-globe me-1 text-primary"></i>HTTP Endpoints (L7)</strong>
+                <span class="text-muted small ms-2">Expose HTTP services via Tailscale Ingress</span>
+            </div>
+            <button class="btn btn-sm btn-outline-primary py-0"
+                    @onclick="() => showCreateIngress = !showCreateIngress">
+                <i class="bi bi-plus me-1"></i>New Ingress
+            </button>
+        </div>
+
+        @if (showCreateIngress)
+        {
+            <div class="card-body border-bottom bg-light py-2">
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-2">
+                        <label class="form-label small mb-1">Ingress name</label>
+                        <input class="form-control form-control-sm font-monospace"
+                               placeholder="my-app" @bind="newIngressName" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small mb-1">Namespace</label>
+                        <input class="form-control form-control-sm font-monospace"
+                               placeholder="default" @bind="newIngressNamespace" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small mb-1">Service</label>
+                        <input class="form-control form-control-sm font-monospace"
+                               placeholder="my-service" @bind="newIngressService" />
+                    </div>
+                    <div class="col-md-1">
+                        <label class="form-label small mb-1">Port</label>
+                        <input class="form-control form-control-sm" type="number"
+                               @bind="newIngressPort" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small mb-1">
+                            Device hostname <span class="text-muted">(optional)</span>
+                        </label>
+                        <input class="form-control form-control-sm font-monospace"
+                               placeholder="@(newIngressName)" @bind="newIngressHostname" />
+                        <div class="form-text" style="font-size:.7rem">
+                            Appears as <em>hostname.tailnet.ts.net</em>. Defaults to ingress name.
+                        </div>
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-sm btn-primary"
+                                @onclick="CreateIngressAsync"
+                                disabled="@(creatingIngress || string.IsNullOrWhiteSpace(newIngressName) || string.IsNullOrWhiteSpace(newIngressService))">
+                            @if (creatingIngress)
+                            {
+                                <span class="spinner-border spinner-border-sm me-1"></span>
+                            }
+                            Create
+                        </button>
+                    </div>
+                </div>
+                @if (ingressError is not null)
+                {
+                    <div class="alert alert-danger py-1 small mt-2 mb-0">@ingressError</div>
+                }
+            </div>
+        }
+
+        <div class="card-body p-0">
+            @if (loadingIngresses)
+            {
+                <div class="text-muted small d-flex align-items-center gap-2 p-3">
+                    <span class="spinner-border spinner-border-sm"></span>Loading ingresses…
+                </div>
+            }
+            else if (ingresses.Count == 0)
+            {
+                <div class="text-muted small p-3">No Tailscale Ingresses found. Create one above to expose an HTTP service.</div>
+            }
+            else
+            {
+                <table class="table table-sm table-hover mb-0 small">
+                    <thead class="table-light">
+                        <tr>
+                            <th class="ps-3">Name</th>
+                            <th>Namespace</th>
+                            <th>Service</th>
+                            <th>Tailnet hostname</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (TailscaleIngress ing in ingresses)
+                        {
+                            <tr @key="@($"{ing.Namespace}/{ing.Name}")">
+                                <td class="ps-3 font-monospace">@ing.Name</td>
+                                <td class="text-muted">@ing.Namespace</td>
+                                <td class="font-monospace">@ing.ServiceName:@ing.ServicePort</td>
+                                <td>
+                                    @if (!string.IsNullOrEmpty(ing.LoadBalancerHostname))
+                                    {
+                                        <code class="text-success">@ing.LoadBalancerHostname</code>
+                                    }
+                                    else if (!string.IsNullOrEmpty(ing.TailscaleHostname))
+                                    {
+                                        <span class="text-muted small">
+                                            <span class="spinner-border spinner-border-sm me-1" style="width:.6em;height:.6em"></span>@ing.TailscaleHostname (registering…)
+                                        </span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted small">
+                                            <span class="spinner-border spinner-border-sm me-1" style="width:.6em;height:.6em"></span>Registering…
+                                        </span>
+                                    }
+                                </td>
+                                <td class="text-end pe-3">
+                                    @if (confirmDeleteIngress == $"{ing.Namespace}/{ing.Name}")
+                                    {
+                                        <span class="text-danger small me-1">Delete?</span>
+                                        <button class="btn btn-sm btn-danger py-0 px-2"
+                                                @onclick="() => DeleteIngressConfirmedAsync(ing)">Yes</button>
+                                        <button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-1"
+                                                @onclick="() => confirmDeleteIngress = null">No</button>
+                                    }
+                                    else
+                                    {
+                                        <button class="btn btn-sm btn-link text-danger p-0"
+                                                @onclick="() => StartDeleteIngress(ing)"
+                                                title="Delete ingress">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+    </div>
+
+    @* ── Info callout ── *@
+    <div class="card border-info border-opacity-50">
+        <div class="card-body py-2">
+            <div class="d-flex align-items-start gap-2">
+                <i class="bi bi-info-circle text-info mt-1 flex-shrink-0"></i>
+                <div class="small">
+                    <strong>L3 vs L7:</strong>
+                    <strong>Service Exposure (L3)</strong> registers a Kubernetes service as a device in your tailnet — any TCP traffic (databases, gRPC, etc.) is routed by IP. It takes 30–60 seconds for the Tailscale Operator to create the proxy pod and for a tailnet IP to appear.
+                    <strong>HTTP Endpoints (L7)</strong> create a Tailscale Ingress that proxies HTTP/HTTPS to a service and gives it a <code>hostname.tailnet.ts.net</code> DNS name.
+                    ACL policies that control which users can reach which devices are managed in the
+                    <a href="https://login.tailscale.com/admin/acls" target="_blank">Tailscale ACL editor</a>.
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter] public Guid AppId { get; set; }
+    [Parameter] public Guid EnvironmentId { get; set; }
+
+    private bool loading;
+    private string? error;
+    private string? clusterError;
+    private List<TailscaleOperator> operators = [];
+    private int selectedOperatorIndex;
+
+    // ── Services state ────────────────────────────────────────────────────────
+    private bool loadingServices;
+    private List<TailscaleExposedService> allServices = [];
+    private string svcNamespaceFilter = "";
+    private string svcFilter = "";
+    private string? pendingService;
+    private string? exposeFormService;
+    private string exposeHostname = "";
+    private string? exposeError;
+
+    // ── Ingress state ─────────────────────────────────────────────────────────
+    private bool loadingIngresses;
+    private List<TailscaleIngress> ingresses = [];
+    private bool showCreateIngress;
+    private string newIngressName = "";
+    private string newIngressNamespace = "";
+    private string newIngressService = "";
+    private int newIngressPort = 80;
+    private string newIngressHostname = "";
+    private bool creatingIngress;
+    private string? ingressError;
+    private string? confirmDeleteIngress;
+
+    private int exposedCount => allServices.Count(s => s.Exposed);
+
+    private IEnumerable<string> ServiceNamespaces =>
+        allServices.Select(s => s.Namespace).Distinct().OrderBy(n => n);
+
+    private IEnumerable<TailscaleExposedService> VisibleServices =>
+        allServices.Where(s =>
+            (string.IsNullOrEmpty(svcNamespaceFilter) || s.Namespace == svcNamespaceFilter)
+         && (string.IsNullOrEmpty(svcFilter)
+             || s.ServiceName.Contains(svcFilter, StringComparison.OrdinalIgnoreCase)
+             || s.ClusterIp.Contains(svcFilter, StringComparison.OrdinalIgnoreCase)));
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+        StateHasChanged();
+        try
+        {
+            operators = await TailscaleService.GetOperatorsAsync(TenantId);
+            selectedOperatorIndex = 0;
+            if (operators.Count > 0)
+                await LoadClusterDataAsync();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task LoadClusterDataAsync()
+    {
+        if (operators.Count == 0) return;
+        clusterError = null;
+        await Task.WhenAll(LoadServicesAsync(), LoadIngressesAsync());
+    }
+
+    private async Task LoadServicesAsync()
+    {
+        loadingServices = true;
+        StateHasChanged();
+        try
+        {
+            string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
+            allServices = await TailscaleService.ListServicesAsync(kubeconfig);
+        }
+        catch (Exception ex)
+        {
+            clusterError = $"Failed to load services: {ex.Message}";
+        }
+        finally
+        {
+            loadingServices = false;
+        }
+    }
+
+    private async Task LoadIngressesAsync()
+    {
+        loadingIngresses = true;
+        StateHasChanged();
+        try
+        {
+            string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
+            ingresses = await TailscaleService.ListIngressesAsync(kubeconfig);
+        }
+        catch (Exception ex)
+        {
+            clusterError ??= $"Failed to load ingresses: {ex.Message}";
+        }
+        finally
+        {
+            loadingIngresses = false;
+        }
+    }
+
+    // ── L3 ────────────────────────────────────────────────────────────────────
+
+    private void StartExposeAsync(TailscaleExposedService svc)
+    {
+        exposeFormService = $"{svc.Namespace}/{svc.ServiceName}";
+        exposeHostname = "";
+        exposeError = null;
+    }
+
+    private void CancelExpose()
+    {
+        exposeFormService = null;
+        exposeHostname = "";
+        exposeError = null;
+    }
+
+    private async Task ConfirmExposeAsync(TailscaleExposedService svc)
+    {
+        exposeError = null;
+        pendingService = $"{svc.Namespace}/{svc.ServiceName}";
+        exposeFormService = null;
+        StateHasChanged();
+        try
+        {
+            string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
+            string? hostname = string.IsNullOrWhiteSpace(exposeHostname) ? null : exposeHostname.Trim();
+            await TailscaleService.ExposeServiceAsync(svc.ServiceName, svc.Namespace, hostname, kubeconfig);
+            await LoadServicesAsync();
+        }
+        catch (Exception ex)
+        {
+            exposeError = ex.Message;
+        }
+        finally
+        {
+            pendingService = null;
+            exposeHostname = "";
+        }
+    }
+
+    private async Task UnexposeAsync(TailscaleExposedService svc)
+    {
+        pendingService = $"{svc.Namespace}/{svc.ServiceName}";
+        StateHasChanged();
+        try
+        {
+            string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
+            await TailscaleService.UnexposeServiceAsync(svc.ServiceName, svc.Namespace, kubeconfig);
+            await LoadServicesAsync();
+        }
+        catch (Exception ex)
+        {
+            clusterError = $"Failed to remove exposure: {ex.Message}";
+        }
+        finally
+        {
+            pendingService = null;
+        }
+    }
+
+    // ── L7 ────────────────────────────────────────────────────────────────────
+
+    private async Task CreateIngressAsync()
+    {
+        ingressError = null;
+        creatingIngress = true;
+        StateHasChanged();
+        try
+        {
+            string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
+            string? hostname = string.IsNullOrWhiteSpace(newIngressHostname) ? null : newIngressHostname.Trim();
+            await TailscaleService.CreateIngressAsync(
+                newIngressName.Trim(), newIngressNamespace.Trim(),
+                newIngressService.Trim(), newIngressPort, hostname, kubeconfig);
+
+            showCreateIngress = false;
+            newIngressName = newIngressNamespace = newIngressService = newIngressHostname = "";
+            newIngressPort = 80;
+            await LoadIngressesAsync();
+        }
+        catch (Exception ex)
+        {
+            ingressError = ex.Message;
+        }
+        finally
+        {
+            creatingIngress = false;
+        }
+    }
+
+    private void StartDeleteIngress(TailscaleIngress ing)
+    {
+        confirmDeleteIngress = $"{ing.Namespace}/{ing.Name}";
+    }
+
+    private async Task DeleteIngressConfirmedAsync(TailscaleIngress ing)
+    {
+        confirmDeleteIngress = null;
+        StateHasChanged();
+        try
+        {
+            string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
+            await TailscaleService.DeleteIngressAsync(ing.Name, ing.Namespace, kubeconfig);
+            await LoadIngressesAsync();
+        }
+        catch (Exception ex)
+        {
+            clusterError = $"Failed to delete ingress: {ex.Message}";
+        }
+    }
+}

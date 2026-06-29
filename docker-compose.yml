@@ -48,6 +48,11 @@ services:
       # Required — set VAULT__ROOTKEY in your .env file (openssl rand -base64 32)
       Vault__RootKey: "${VAULT__ROOTKEY}"
 
+      # --- DataProtection keys ---
+      # Persist the key ring on the existing entkube-data volume so antiforgery/auth
+      # cookies survive restarts (otherwise every deploy forces all users to re-login).
+      DataProtection__KeyPath: "/app/Data/keys"
+
       # --- Reverse proxy ---
       # Tells ASP.NET Core to trust X-Forwarded-For / X-Forwarded-Proto from Caddy.
       # Required for Blazor Server SignalR (WebSocket) to work correctly behind a proxy.

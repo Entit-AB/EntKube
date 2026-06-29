@@ -1,0 +1,83 @@
+@using EntKube.Web.Services
+
+@* ═══════════════════════════════════════════════════════════════════
+   Read-only display of an OAuth/OIDC client credential. Compact mode shows
+   provider + client id + expiry badge for table cells; full mode shows all
+   metadata, including the client secret when one is supplied (reveal).
+   ═══════════════════════════════════════════════════════════════════ *@
+
+@if (Info is null)
+{
+    <span class="text-muted small">—</span>
+}
+else if (Compact)
+{
+    <div class="d-flex align-items-center gap-2">
+        <span title="@OAuthClientHelper.DisplayName(Info.Provider)">
+            <i class="bi @OAuthClientHelper.Icon(Info.Provider) me-1"></i>@OAuthClientHelper.DisplayName(Info.Provider)
+        </span>
+        @if (!string.IsNullOrWhiteSpace(Info.ClientId))
+        {
+            <code class="text-truncate" style="max-width: 160px;" title="@Info.ClientId">@Info.ClientId</code>
+        }
+        <ExpiryBadge ExpiresAt="Info.ExpiresAt" />
+    </div>
+}
+else
+{
+    <div class="small">
+        <div class="row g-1">
+            <div class="col-3 text-muted">Provider</div>
+            <div class="col-9"><i class="bi @OAuthClientHelper.Icon(Info.Provider) me-1"></i>@OAuthClientHelper.DisplayName(Info.Provider)</div>
+
+            @if (!string.IsNullOrWhiteSpace(Info.ClientId))
+            {
+                <div class="col-3 text-muted">Client ID</div>
+                <div class="col-9"><code class="user-select-all">@Info.ClientId</code></div>
+            }
+
+            @if (ClientSecret is not null)
+            {
+                <div class="col-3 text-muted">Client secret</div>
+                <div class="col-9"><code class="user-select-all">@ClientSecret</code></div>
+            }
+
+            @if (!string.IsNullOrWhiteSpace(Info.TenantId))
+            {
+                <div class="col-3 text-muted">Tenant ID</div>
+                <div class="col-9"><code class="user-select-all">@Info.TenantId</code></div>
+            }
+
+            @if (!string.IsNullOrWhiteSpace(Info.Issuer))
+            {
+                <div class="col-3 text-muted">Issuer</div>
+                <div class="col-9"><code class="user-select-all">@Info.Issuer</code></div>
+            }
+
+            @if (!string.IsNullOrWhiteSpace(Info.Scopes))
+            {
+                <div class="col-3 text-muted">Scopes</div>
+                <div class="col-9">@Info.Scopes</div>
+            }
+
+            <div class="col-3 text-muted">Secret expiry</div>
+            <div class="col-9">
+                <ExpiryBadge ExpiresAt="Info.ExpiresAt" />
+                @if (Info.ExpiresAt is not null)
+                {
+                    <span class="text-muted ms-2">@Info.ExpiresAt.Value.ToString("yyyy-MM-dd")</span>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public OAuthClientInfo? Info { get; set; }
+
+    /// <summary>When supplied (reveal), the decrypted client secret is shown.</summary>
+    [Parameter] public string? ClientSecret { get; set; }
+
+    /// <summary>When true, render a single-line provider + client id + expiry badge.</summary>
+    [Parameter] public bool Compact { get; set; }
+}

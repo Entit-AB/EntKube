@@ -15,7 +15,8 @@ public class RegisteredPostgresService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
     IKubernetesClientFactory k8sFactory,
-    StorageBrowserService storageBrowserService)
+    StorageBrowserService storageBrowserService,
+    ILogger<RegisteredPostgresService> logger)
 {
     // ──────── Instance Queries ────────
 
@@ -590,29 +591,50 @@ public class RegisteredPostgresService(
         Guid tenantId, Guid instanceId, Guid databaseId,
         Guid cnpgClusterId, string newDatabaseName, CancellationToken ct = default)
     {
+        logger.LogInformation("Migrate→CNPG: start instance={InstanceId} db={DatabaseId} target={CnpgClusterId} newName={NewName}",
+            instanceId, databaseId, cnpgClusterId, newDatabaseName);
+
         (RegisteredPostgresInstance instance, KubernetesCluster cluster, string adminPassword) =
             await LoadInstanceAsync(tenantId, instanceId, ct);
+        logger.LogInformation("Migrate→CNPG: loaded instance pod={Pod} ns={Ns}", instance.AdminPodName, instance.Namespace);
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresDatabase database = await db.RegisteredPostgresDatabases
             .FirstAsync(d => d.Id == databaseId, ct);
 
+        logger.LogInformation("Migrate→CNPG: running pg_dump of '{DbName}' on pod {Pod}", database.Name, instance.AdminPodName);
         string dumpSql = await k8sFactory.RunCommandOnPodAsync(
             instance.AdminPodName, instance.Namespace,
             [
                 "pg_dump", "--format=plain", "--no-owner", "--no-privileges",
+                // -w: never prompt for a password (fail fast instead of blocking on a
+                //     hidden prompt). --lock-wait-timeout: if a shared table lock can't be
+                //     acquired within 30s (e.g. a conflicting ALTER/VACUUM FULL holds it),
+                //     abort with a clear error instead of hanging the migration forever.
+                "-w", "--lock-wait-timeout=30000",
                 "-U", instance.AdminUsername, "-h", "127.0.0.1", "-d", database.Name
             ],
             cluster.Kubeconfig!,
-            new Dictionary<string, string> { ["PGPASSWORD"] = adminPassword },
-            ct);
+            new Dictionary<string, string>
+            {
+                ["PGPASSWORD"] = adminPassword,
+                // Fail fast (10s) if pg_dump can't establish the DB connection over
+                // 127.0.0.1, rather than blocking forever on libpq's infinite default.
+                ["PGCONNECT_TIMEOUT"] = "10"
+            },
+            ct,
+            // Don't let a wedged kubectl exec hang the migration forever; surface
+            // kubectl -v=6 diagnostics if the exec to the source pod never completes.
+            timeoutSeconds: 120, verbose: true);
+        logger.LogInformation("Migrate→CNPG: pg_dump complete, {Bytes} bytes", dumpSql.Length);
 
         CnpgCluster cnpgCluster = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
             .FirstAsync(c => c.Id == cnpgClusterId, ct);
 
         await RestoreSqlToCnpgAsync(tenantId, dumpSql, cnpgCluster, newDatabaseName, ct);
+        logger.LogInformation("Migrate→CNPG: done, database '{NewName}' created on cluster {Cluster}", newDatabaseName, cnpgCluster.Name);
     }
 
     private async Task RestoreSqlToCnpgAsync(
@@ -623,6 +645,7 @@ public class RegisteredPostgresService(
         string password = GeneratePassword();
 
         // Create the owner role and the database on the CNPG cluster.
+        logger.LogInformation("Migrate→CNPG: creating role+database '{NewName}' on cluster {Cluster}", newDatabaseName, cnpgCluster.Name);
         await k8sFactory.ExecuteSqlAsync(
             cnpgCluster.Name, cnpgCluster.Namespace,
             $"""
@@ -630,6 +653,7 @@ public class RegisteredPostgresService(
             CREATE DATABASE "{newDatabaseName}" OWNER "{owner}";
             """,
             kubeconfig, ct);
+        logger.LogInformation("Migrate→CNPG: role+database created, restoring dump ({Bytes} bytes)", dumpSql.Length);
 
         // Restore the dump connected directly to the new database.
         // Using ExecuteSqlInCnpgDatabaseAsync (psql -d {db}) instead of \c avoids
@@ -638,6 +662,7 @@ public class RegisteredPostgresService(
         await k8sFactory.ExecuteSqlInCnpgDatabaseAsync(
             cnpgCluster.Name, cnpgCluster.Namespace,
             newDatabaseName, dumpSql, kubeconfig, ct);
+        logger.LogInformation("Migrate→CNPG: dump restored into '{NewName}', registering database", newDatabaseName);
 
         // Register the database in EntKube so it appears in the UI and credentials
         // can be managed and synced to Kubernetes Secrets.

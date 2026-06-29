@@ -1,0 +1,515 @@
+@using System.Text.Json
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject SecretExpiryService SecretExpiry
+@inject CustomerNotificationService CustomerNotifications
+
+@*
+   Customer-wide notifications view: expiring secrets across all of the customer's apps,
+   lead-time settings, and self-managed notification channels. Configuration is gated to
+   customer Admins; everyone else sees the expiring-secrets list read-only.
+*@
+
+<div class="d-flex align-items-center mb-3">
+    <i class="bi bi-bell fs-3 me-2 text-primary"></i>
+    <div>
+        <h2 class="mb-0">Notifications</h2>
+        <small class="text-muted">@CustomerName</small>
+    </div>
+</div>
+
+@if (!IsAdmin)
+{
+    <div class="alert alert-light border small">
+        <i class="bi bi-info-circle me-1"></i>
+        You can view upcoming secret expirations here. Ask a customer administrator to configure
+        notification channels and lead times.
+    </div>
+}
+
+@* ─────────── Lead-time settings (admins) ─────────── *@
+@if (IsAdmin)
+{
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-white py-2">
+            <i class="bi bi-shield-exclamation me-2 text-primary"></i><strong>Expiry notifications</strong>
+        </div>
+        <div class="card-body pt-3">
+            <p class="text-muted small mb-3">
+                Get notified before your certificates and OAuth/OIDC client secrets expire, through the
+                channels you configure below.
+            </p>
+            <div class="row g-3 align-items-end">
+                <div class="col-auto">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="custExpiryEnabled" @bind="enabled" />
+                        <label class="form-check-label" for="custExpiryEnabled">Enable automatic notifications</label>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small mb-1">Lead times (days before expiry)</label>
+                    <input class="form-control form-control-sm" @bind="thresholdsCsv" placeholder="30,14,7,1" />
+                    <div class="form-text">Comma-separated. A notice fires once per band as a secret nears expiry; expired secrets always notify.</div>
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-sm btn-primary" @onclick="SaveConfigAsync" disabled="@savingConfig">
+                        @if (savingConfig) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Save
+                    </button>
+                </div>
+                @if (configMessage is not null)
+                {
+                    <div class="col-auto"><span class="small @(configOk ? "text-success" : "text-danger")">@configMessage</span></div>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@* ─────────── Notification channels (admins) ─────────── *@
+@if (IsAdmin)
+{
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+            <span><i class="bi bi-broadcast me-2 text-primary"></i><strong>Notification channels</strong></span>
+            @if (!channelFormOpen)
+            {
+                <button class="btn btn-sm btn-success" @onclick="OpenNewChannel"><i class="bi bi-plus-lg me-1"></i>Add channel</button>
+            }
+        </div>
+        <div class="card-body pt-2">
+            @if (channelFormOpen)
+            {
+                <div class="border rounded p-3 mb-3 bg-light-subtle">
+                    <strong class="d-block mb-2">@(editChannelId is null ? "New channel" : "Edit channel")</strong>
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <label class="form-label small mb-1">Name</label>
+                            <input class="form-control form-control-sm" @bind="formName" placeholder="e.g. Ops Slack" />
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small mb-1">Type</label>
+                            <select class="form-select form-select-sm" @bind="formType">
+                                @foreach (NotificationChannelType t in CustomerNotificationService.AllowedTypes)
+                                {
+                                    <option value="@t">@TypeLabel(t)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small mb-1">Severity</label>
+                            <select class="form-select form-select-sm" @bind="formSeverity">
+                                <option value="@AlertSeverityFilter.All">All</option>
+                                <option value="@AlertSeverityFilter.WarningAndAbove">Warning &amp; above</option>
+                                <option value="@AlertSeverityFilter.CriticalOnly">Critical only</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="row g-2 mt-1">
+                        @if (formType == NotificationChannelType.Email)
+                        {
+                            <div class="col-md-7">
+                                <label class="form-label small mb-1">Recipient email</label>
+                                <input class="form-control form-control-sm" @bind="formEmail" placeholder="ops@example.com" />
+                                <div class="form-text">Sent via the system mail server.</div>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="col-md-7">
+                                <label class="form-label small mb-1">@WebhookLabel(formType)</label>
+                                <input class="form-control form-control-sm" @bind="formWebhookUrl" placeholder="https://…" />
+                            </div>
+                            @if (formType == NotificationChannelType.Webhook)
+                            {
+                                <div class="col-md-5">
+                                    <label class="form-label small mb-1">Bearer token (optional)</label>
+                                    <input class="form-control form-control-sm" @bind="formBearerToken" />
+                                </div>
+                            }
+                        }
+                    </div>
+                    @if (formError is not null)
+                    {
+                        <div class="text-danger small mt-2">@formError</div>
+                    }
+                    <div class="mt-2 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="SaveChannelAsync" disabled="@savingChannel">
+                            @if (savingChannel) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Save
+                        </button>
+                        <button class="btn btn-sm btn-secondary" @onclick="() => channelFormOpen = false">Cancel</button>
+                    </div>
+                </div>
+            }
+
+            @if (channels.Count == 0)
+            {
+                <p class="text-muted small mb-0">No channels yet. Add one to start receiving notifications.</p>
+            }
+            else
+            {
+                <div class="list-group">
+                    @foreach (NotificationChannel ch in channels)
+                    {
+                        <div class="list-group-item px-2 d-flex align-items-center justify-content-between">
+                            <div class="me-2">
+                                <span class="fw-semibold">@ch.Name</span>
+                                <span class="badge bg-light text-dark border ms-1">@TypeLabel(ch.Type)</span>
+                                @if (!ch.IsEnabled) { <span class="badge bg-secondary ms-1">disabled</span> }
+                                <div class="text-muted small text-truncate" style="max-width: 28rem;">@Destination(ch)</div>
+                            </div>
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => TestChannelAsync(ch)" disabled="@(testingId == ch.Id)">
+                                    @if (testingId == ch.Id) { <span class="spinner-border spinner-border-sm"></span> } else { <span>Test</span> }
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => ToggleAsync(ch)">@(ch.IsEnabled ? "Disable" : "Enable")</button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => EditChannel(ch)">Edit</button>
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteAsync(ch)">Delete</button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+            @if (channelMessage is not null)
+            {
+                <div class="small mt-2 @(channelOk ? "text-success" : "text-danger")">@channelMessage</div>
+            }
+        </div>
+    </div>
+}
+
+@* ─────────── Expiring secrets (all roles) ─────────── *@
+<div class="card shadow-sm mb-3">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span><i class="bi bi-clock-history me-2 text-primary"></i><strong>Secrets with an expiry</strong></span>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="ReloadAsync" disabled="@loading">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+        </button>
+    </div>
+    <div class="card-body pt-2">
+        @if (loading)
+        {
+            <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div>
+        }
+        else if (loadError is not null)
+        {
+            <div class="alert alert-danger mb-0">Failed to load: @loadError</div>
+        }
+        else if (secrets.Count == 0)
+        {
+            <p class="text-muted small mb-0">No certificates or OAuth client secrets found.</p>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead>
+                        <tr class="text-muted small">
+                            <th>Secret</th>
+                            <th>Type</th>
+                            <th>Scope</th>
+                            <th>Expires</th>
+                            <th>Status</th>
+                            <th>Last notified</th>
+                            @if (IsAdmin) { <th class="text-end">Actions</th> }
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (ExpiringSecretInfo s in secrets)
+                        {
+                            SecretExpiryNotification? last = LastNotified(s.SecretId);
+                            <tr>
+                                <td>
+                                    <div class="fw-semibold">@s.Name</div>
+                                    @if (!string.IsNullOrEmpty(s.Detail))
+                                    {
+                                        <div class="text-muted small text-truncate" style="max-width: 22rem;">@s.Detail</div>
+                                    }
+                                </td>
+                                <td class="small">@s.TypeLabel</td>
+                                <td class="small">@s.ScopeLabel</td>
+                                <td class="small">@(s.ExpiresAt?.ToString("yyyy-MM-dd") ?? "—")</td>
+                                <td><span class="badge @StatusBadgeClass(s)">@StatusText(s)</span></td>
+                                <td class="small">
+                                    @if (last is not null)
+                                    {
+                                        <span title="@last.SentAt.ToString("u")">
+                                            @last.SentAt.ToString("yyyy-MM-dd")
+                                            @if (!last.Success) { <i class="bi bi-exclamation-triangle-fill text-danger ms-1" title="@last.Error"></i> }
+                                        </span>
+                                    }
+                                    else { <span class="text-muted">never</span> }
+                                </td>
+                                @if (IsAdmin)
+                                {
+                                    <td class="text-end">
+                                        <button class="btn btn-sm btn-outline-primary" @onclick="() => SendNowAsync(s)" disabled="@(sendingId == s.SecretId)">
+                                            @if (sendingId == s.SecretId) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            <i class="bi bi-send me-1"></i>Send now
+                                        </button>
+                                    </td>
+                                }
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            @if (sendMessage is not null)
+            {
+                <div class="small mt-2 @(sendOk ? "text-success" : "text-danger")">@sendMessage</div>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public Guid CustomerId { get; set; }
+    [Parameter] public string CustomerName { get; set; } = "";
+    [Parameter] public CustomerAccessRole AccessRole { get; set; }
+
+    private bool IsAdmin => AccessRole >= CustomerAccessRole.Admin;
+
+    private bool enabled;
+    private string thresholdsCsv = "30,14,7,1";
+    private bool savingConfig;
+    private string? configMessage;
+    private bool configOk;
+
+    private List<NotificationChannel> channels = [];
+    private bool channelFormOpen;
+    private Guid? editChannelId;
+    private string formName = "";
+    private NotificationChannelType formType = NotificationChannelType.Slack;
+    private AlertSeverityFilter formSeverity = AlertSeverityFilter.All;
+    private string? formWebhookUrl;
+    private string? formEmail;
+    private string? formBearerToken;
+    private string? formError;
+    private bool savingChannel;
+    private Guid? testingId;
+    private string? channelMessage;
+    private bool channelOk;
+
+    private List<ExpiringSecretInfo> secrets = [];
+    private List<SecretExpiryNotification> history = [];
+    private bool loading = true;
+    private string? loadError;
+    private Guid? sendingId;
+    private string? sendMessage;
+    private bool sendOk;
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        loading = true;
+        loadError = null;
+        try
+        {
+            SecretExpiryNotificationConfig config = await SecretExpiry.GetConfigAsync(TenantId, CustomerId);
+            enabled = config.IsEnabled;
+            thresholdsCsv = config.ThresholdDaysCsv;
+            secrets = await SecretExpiry.GetExpiringSecretsAsync(TenantId, CustomerId);
+            history = await SecretExpiry.GetHistoryAsync(TenantId, CustomerId);
+            if (IsAdmin)
+                channels = await CustomerNotifications.GetChannelsAsync(TenantId, CustomerId);
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task SaveConfigAsync()
+    {
+        savingConfig = true;
+        configMessage = null;
+        try
+        {
+            await SecretExpiry.SaveConfigAsync(TenantId, CustomerId, enabled, thresholdsCsv);
+            configOk = true;
+            configMessage = "Saved";
+        }
+        catch (Exception ex)
+        {
+            configOk = false;
+            configMessage = ex.Message;
+        }
+        finally
+        {
+            savingConfig = false;
+        }
+    }
+
+    private void OpenNewChannel()
+    {
+        editChannelId = null;
+        formName = "";
+        formType = NotificationChannelType.Slack;
+        formSeverity = AlertSeverityFilter.All;
+        formWebhookUrl = formEmail = formBearerToken = null;
+        formError = null;
+        channelFormOpen = true;
+    }
+
+    private void EditChannel(NotificationChannel ch)
+    {
+        editChannelId = ch.Id;
+        formName = ch.Name;
+        formType = ch.Type;
+        formSeverity = ch.SeverityFilter;
+        formWebhookUrl = formEmail = formBearerToken = null;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(ch.ConfigurationJson);
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("webhookUrl", out JsonElement w)) formWebhookUrl = w.GetString();
+            if (root.TryGetProperty("url", out JsonElement u)) formWebhookUrl = u.GetString();
+            if (root.TryGetProperty("token", out JsonElement t)) formBearerToken = t.GetString();
+            if (root.TryGetProperty("to", out JsonElement to)) formEmail = to.GetString();
+        }
+        catch { }
+        formError = null;
+        channelFormOpen = true;
+    }
+
+    private async Task SaveChannelAsync()
+    {
+        savingChannel = true;
+        formError = null;
+        try
+        {
+            (bool ok, string? error) = await CustomerNotifications.SaveChannelAsync(
+                TenantId, CustomerId, editChannelId, formName, formType,
+                formWebhookUrl, formEmail, formBearerToken, formSeverity);
+            if (!ok)
+            {
+                formError = error;
+                return;
+            }
+            channelFormOpen = false;
+            channels = await CustomerNotifications.GetChannelsAsync(TenantId, CustomerId);
+        }
+        catch (Exception ex)
+        {
+            formError = ex.Message;
+        }
+        finally
+        {
+            savingChannel = false;
+        }
+    }
+
+    private async Task ToggleAsync(NotificationChannel ch)
+    {
+        await CustomerNotifications.ToggleEnabledAsync(TenantId, CustomerId, ch.Id);
+        channels = await CustomerNotifications.GetChannelsAsync(TenantId, CustomerId);
+    }
+
+    private async Task DeleteAsync(NotificationChannel ch)
+    {
+        await CustomerNotifications.DeleteChannelAsync(TenantId, CustomerId, ch.Id);
+        channels = await CustomerNotifications.GetChannelsAsync(TenantId, CustomerId);
+    }
+
+    private async Task TestChannelAsync(NotificationChannel ch)
+    {
+        testingId = ch.Id;
+        channelMessage = null;
+        try
+        {
+            await CustomerNotifications.TestChannelAsync(TenantId, CustomerId, ch.Id);
+            channelOk = true;
+            channelMessage = $"Test sent to \"{ch.Name}\".";
+        }
+        catch (Exception ex)
+        {
+            channelOk = false;
+            channelMessage = $"Test failed for \"{ch.Name}\": {ex.Message}";
+        }
+        finally
+        {
+            testingId = null;
+        }
+    }
+
+    private async Task SendNowAsync(ExpiringSecretInfo secret)
+    {
+        sendingId = secret.SecretId;
+        sendMessage = null;
+        try
+        {
+            (int notified, bool success, string? error) = await SecretExpiry.SendNowAsync(TenantId, secret.SecretId, CustomerId);
+            sendOk = success;
+            sendMessage = success
+                ? $"Sent \"{secret.Name}\" to {notified} channel(s)."
+                : $"Failed to send \"{secret.Name}\": {error}";
+            history = await SecretExpiry.GetHistoryAsync(TenantId, CustomerId);
+        }
+        catch (Exception ex)
+        {
+            sendOk = false;
+            sendMessage = ex.Message;
+        }
+        finally
+        {
+            sendingId = null;
+        }
+    }
+
+    private SecretExpiryNotification? LastNotified(Guid secretId) =>
+        history.Where(n => n.SecretId == secretId).MaxBy(n => n.SentAt);
+
+    private static string TypeLabel(NotificationChannelType t) => t switch
+    {
+        NotificationChannelType.Slack => "Slack",
+        NotificationChannelType.Teams => "Teams",
+        NotificationChannelType.Webhook => "Webhook",
+        NotificationChannelType.Email => "Email",
+        _ => t.ToString()
+    };
+
+    private static string WebhookLabel(NotificationChannelType t) => t switch
+    {
+        NotificationChannelType.Slack => "Slack webhook URL",
+        NotificationChannelType.Teams => "Teams webhook URL",
+        _ => "Webhook URL"
+    };
+
+    private static string Destination(NotificationChannel ch)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(ch.ConfigurationJson);
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("to", out JsonElement to)) return to.GetString() ?? "";
+            if (root.TryGetProperty("webhookUrl", out JsonElement w)) return w.GetString() ?? "";
+            if (root.TryGetProperty("url", out JsonElement u)) return u.GetString() ?? "";
+        }
+        catch { }
+        return "";
+    }
+
+    private static string StatusText(ExpiringSecretInfo s)
+    {
+        if (!s.ExpiresAt.HasValue) return "No expiry set";
+        int days = s.DaysUntilExpiry ?? 0;
+        if (s.IsExpired) return $"Expired {Math.Abs(days)}d ago";
+        return $"{days}d left";
+    }
+
+    private static string StatusBadgeClass(ExpiringSecretInfo s)
+    {
+        if (!s.ExpiresAt.HasValue) return "bg-secondary";
+        int days = s.DaysUntilExpiry ?? 0;
+        if (s.IsExpired || days <= 7) return "bg-danger";
+        if (days <= 30) return "bg-warning text-dark";
+        return "bg-success";
+    }
+}

@@ -37,6 +37,13 @@ public class CatalogEntry
     /// <summary>Recommended/tested version. Null means latest.</summary>
     public string? HelmChartVersion { get; init; }
 
+    /// <summary>
+    /// Overrides the Helm <c>--wait</c> timeout (Go duration, e.g. "30m0s"). Null uses the
+    /// default 10m. Extend it for heavy charts or DaemonSets that roll out node-by-node and
+    /// may take longer to become Ready on busy/constrained clusters.
+    /// </summary>
+    public string? InstallTimeout { get; init; }
+
     /// <summary>Default namespace where this should be deployed.</summary>
     public required string DefaultNamespace { get; init; }
 
@@ -255,10 +262,10 @@ public static class ComponentCatalog
             DefaultValues = """
                 # Istio External Gateway — internet-facing LoadBalancer
                 # Requires istio-base (istiod) to be installed first
-                
+
                 service:
                   type: LoadBalancer
-                
+
                 # Resource allocation
                 resources:
                   requests:
@@ -538,6 +545,8 @@ public static class ComponentCatalog
             HelmChartName = "kube-prometheus-stack",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "kube-prometheus-stack",
+            // Heavy: Prometheus + Grafana + Alertmanager + a node-exporter DaemonSet + CRDs.
+            InstallTimeout = "30m0s",
             RequiresOneOf =
             [
                 new DependencyRequirement
@@ -563,6 +572,13 @@ public static class ComponentCatalog
                     Key = "grafana-enabled", Label = "Enable Grafana",
                     YamlPath = "grafana.enabled", Type = FormFieldType.Toggle,
                     DefaultValue = "true"
+                },
+                new ComponentFormField
+                {
+                    Key = "grafana-version", Label = "Grafana Version",
+                    YamlPath = "grafana.image.tag", Type = FormFieldType.Text,
+                    DefaultValue = "13.1.0", Placeholder = "e.g. 13.1.0",
+                    HelpText = "Grafana application image tag to run. Pinned by default; change to upgrade/downgrade."
                 },
                 new ComponentFormField
                 {
@@ -595,6 +611,8 @@ public static class ComponentCatalog
                 grafana:
                   enabled: true
                   adminPassword: admin
+                  image:
+                    tag: "13.1.0"
                 
                 # Alertmanager configuration
                 alertmanager:
@@ -650,8 +668,17 @@ public static class ComponentCatalog
             HelmChartVersion = "6.30.0",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "loki",
+            // Stateful (persistence + optional S3) — can be slow to become Ready.
+            InstallTimeout = "20m0s",
             FormFields =
             [
+                new ComponentFormField
+                {
+                    Key = "loki-version", Label = "Loki Version",
+                    YamlPath = "loki.image.tag", Type = FormFieldType.Text,
+                    DefaultValue = "3.7.0", Placeholder = "e.g. 3.7.0",
+                    HelpText = "Loki application image tag to run. Pinned by default; change to upgrade/downgrade."
+                },
                 new ComponentFormField
                 {
                     Key = "deployment-mode", Label = "Deployment Mode",
@@ -704,12 +731,26 @@ public static class ComponentCatalog
                 deploymentMode: SingleBinary
 
                 loki:
+                  image:
+                    tag: "3.7.0"
                   auth_enabled: false
                   commonConfig:
                     replication_factor: 1
                   storage:
                     type: filesystem
                   useTestSchema: true
+                  # The chart already hardens Loki (non-root 10001, drop ALL, read-only
+                  # rootfs); only seccompProfile is missing — add it without disturbing
+                  # the chart's fsGroup/uid defaults (deep-merged).
+                  podSecurityContext:
+                    seccompProfile:
+                      type: RuntimeDefault
+
+                # Same seccomp gap on the gateway (nginx) pod.
+                gateway:
+                  podSecurityContext:
+                    seccompProfile:
+                      type: RuntimeDefault
 
                 singleBinary:
                   replicas: 1
@@ -735,6 +776,150 @@ public static class ComponentCatalog
                   enabled: false
                 resultsCache:
                   enabled: false
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "grafana-alloy",
+            DisplayName = "Grafana Alloy (Log Collector)",
+            Description = "Node-level log collector. Runs as a DaemonSet, tails container logs on every node, and ships them to Loki tagged with namespace/pod/container labels so the EntKube log viewer can filter them. Required for the Operations → Logs view to show any data — Loki on its own only stores logs, it does not collect them.",
+            Icon = "bi-arrow-down-up",
+            Category = "Monitoring",
+            HelmRepoUrl = "https://grafana.github.io/helm-charts",
+            HelmChartName = "alloy",
+            // Version intentionally unpinned (latest). The chart's value schema
+            // (alloy.configMap.content, alloy.mounts.varlog) is stable across recent releases.
+            DefaultNamespace = "monitoring",
+            DefaultReleaseName = "alloy",
+            // Rolls out as a DaemonSet (one pod per node) and can be slow to become Ready on
+            // busy/constrained clusters — give the --wait more headroom before failing.
+            InstallTimeout = "30m0s",
+            // Alloy ships logs to Loki — installing it before Loki exists is pointless.
+            Dependencies = ["loki"],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "alloy-version", Label = "Alloy Version",
+                    YamlPath = "image.tag", Type = FormFieldType.Text,
+                    DefaultValue = "v1.17.0", Placeholder = "e.g. v1.17.0",
+                    HelpText = "Grafana Alloy image tag to run (tags are 'v'-prefixed). Pinned by default; change to upgrade/downgrade."
+                },
+                new ComponentFormField
+                {
+                    Key = "cpu-request", Label = "CPU Request",
+                    YamlPath = "alloy.resources.requests.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "50m", Placeholder = "e.g. 50m, 100m"
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-request", Label = "Memory Request",
+                    YamlPath = "alloy.resources.requests.memory", Type = FormFieldType.Text,
+                    DefaultValue = "128Mi", Placeholder = "e.g. 128Mi, 256Mi"
+                },
+                new ComponentFormField
+                {
+                    Key = "cpu-limit", Label = "CPU Limit",
+                    YamlPath = "alloy.resources.limits.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "200m", Placeholder = "e.g. 200m, 500m",
+                    HelpText = "Required on clusters that enforce a LimitRange — pods without limits are rejected."
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-limit", Label = "Memory Limit",
+                    YamlPath = "alloy.resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "256Mi", Placeholder = "e.g. 256Mi, 512Mi",
+                    HelpText = "Hard memory cap. Keep comfortably above the request to avoid OOMKills under log bursts."
+                }
+            ],
+            // The Alloy pipeline below discovers every pod, relabels Kubernetes
+            // metadata into the EXACT Loki stream labels the UI queries on
+            // (namespace, pod, container), tails the on-disk CRI logs under
+            // /var/log/pods, and pushes to the in-cluster Loki gateway.
+            //
+            // The push URL targets the default Loki release (release "loki" in
+            // "monitoring", which is this catalog's Loki default). If Loki was
+            // installed under a different name/namespace, edit loki.write below.
+            DefaultValues = """
+                image:
+                  # Grafana Alloy application image tag to run. Pinned here; also
+                  # editable via the "Alloy Version" form field.
+                  tag: v1.17.0
+
+                controller:
+                  type: daemonset
+
+                alloy:
+                  mounts:
+                    # Mount host /var/log so Alloy can read /var/log/pods/*.
+                    varlog: true
+                  resources:
+                    requests:
+                      cpu: 50m
+                      memory: 128Mi
+                    limits:
+                      cpu: 200m
+                      memory: 256Mi
+                  configMap:
+                    content: |-
+                      discovery.kubernetes "pods" {
+                        role = "pod"
+                      }
+
+                      discovery.relabel "pod_logs" {
+                        targets = discovery.kubernetes.pods.targets
+
+                        rule {
+                          source_labels = ["__meta_kubernetes_namespace"]
+                          target_label  = "namespace"
+                        }
+                        rule {
+                          source_labels = ["__meta_kubernetes_pod_name"]
+                          target_label  = "pod"
+                        }
+                        rule {
+                          source_labels = ["__meta_kubernetes_pod_container_name"]
+                          target_label  = "container"
+                        }
+                        rule {
+                          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+                          target_label  = "app"
+                        }
+                        rule {
+                          source_labels = ["__meta_kubernetes_node_name"]
+                          target_label  = "node"
+                        }
+                        // Build the on-disk log path: /var/log/pods/<ns>_<pod>_<uid>/<container>/*.log
+                        rule {
+                          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+                          separator     = "/"
+                          action        = "replace"
+                          replacement   = "/var/log/pods/*$1/*.log"
+                          target_label  = "__path__"
+                        }
+                      }
+
+                      local.file_match "pod_logs" {
+                        path_targets = discovery.relabel.pod_logs.output
+                      }
+
+                      loki.source.file "pod_logs" {
+                        targets    = local.file_match.pod_logs.targets
+                        forward_to = [loki.process.default.receiver]
+                      }
+
+                      loki.process "default" {
+                        // Parse the containerd/CRI-O log envelope (timestamp, stream, flags).
+                        stage.cri {}
+                        forward_to = [loki.write.default.receiver]
+                      }
+
+                      loki.write "default" {
+                        endpoint {
+                          url = "http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push"
+                        }
+                      }
                 """
         },
 
@@ -805,12 +990,24 @@ public static class ComponentCatalog
                 persistence:
                   enabled: true
                   size: 50Gi
-                
+
                 # Resource allocation
                 resources:
                   requests:
                     memory: 512Mi
                     cpu: 250m
+
+                # Container hardening. MinIO already runs as non-root uid 1000 with
+                # fsGroup 1000 (pod-level securityContext, left untouched). readOnly
+                # rootfs is kept off — MinIO writes to local paths.
+                containerSecurityContext:
+                  runAsNonRoot: true
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop: ["ALL"]
+                  seccompProfile:
+                    type: RuntimeDefault
+                  readOnlyRootFilesystem: false
                 """
         },
 
@@ -933,6 +1130,16 @@ public static class ComponentCatalog
                     requests:
                       memory: 256Mi
                       cpu: 100m
+                  # Container hardening for the operator pod (chart's operator.securityContext
+                  # default is empty). Pod-level already defaults to runAsNonRoot/uid 2000.
+                  # The managed mongod pods are handled separately in MongoService.
+                  securityContext:
+                    runAsNonRoot: true
+                    allowPrivilegeEscalation: false
+                    capabilities:
+                      drop: ["ALL"]
+                    seccompProfile:
+                      type: RuntimeDefault
                 """
         },
 
@@ -949,6 +1156,8 @@ public static class ComponentCatalog
             HelmChartName = "keycloakx",
             DefaultNamespace = "keycloak",
             DefaultReleaseName = "keycloak",
+            // Slow startup: DB schema init/migration before the server reports Ready.
+            InstallTimeout = "30m0s",
             RequiresOneOf =
             [
                 new DependencyRequirement
@@ -1101,6 +1310,8 @@ public static class ComponentCatalog
             HelmChartVersion = "1.16.1",
             DefaultNamespace = "harbor",
             DefaultReleaseName = "harbor",
+            // Very heavy: core, registry, jobservice, portal, trivy, database, redis.
+            InstallTimeout = "30m0s",
             Dependencies = ["cert-manager", "letsencrypt-issuer", "cloudnative-pg"],
             FormFields =
             [
@@ -1278,7 +1489,164 @@ public static class ComponentCatalog
             DefaultNamespace = "redis-operator",
             DefaultReleaseName = "redis-operator",
             FormFields = [],
-            DefaultValues = ""
+            // This chart ships empty securityContext/podSecurityContext by default,
+            // so apply the full baseline. The operator is a static controller and runs
+            // fine as non-root; read-only rootfs is left off per house policy.
+            DefaultValues = """
+                podSecurityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  runAsGroup: 1000
+                  seccompProfile:
+                    type: RuntimeDefault
+                securityContext:
+                  runAsNonRoot: true
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop: ["ALL"]
+                  seccompProfile:
+                    type: RuntimeDefault
+                """
+        },
+
+        // ── Security ──
+
+        new CatalogEntry
+        {
+            Key = "kyverno",
+            DisplayName = "Kyverno",
+            Description = "Kubernetes-native policy engine that enforces admission policies as webhook rules — no new language to learn. Required for Policy Enforcement in the Governance tab. Install on every cluster where you want governance policies applied.",
+            Icon = "bi-shield-lock",
+            Category = "Security",
+            HelmRepoUrl = "https://kyverno.github.io/kyverno/",
+            HelmChartName = "kyverno",
+            HelmChartVersion = "3.8.1",
+            DefaultNamespace = "kyverno",
+            DefaultReleaseName = "kyverno",
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "replicas", Label = "Replicas",
+                    YamlPath = "admissionController.replicas", Type = FormFieldType.Number,
+                    DefaultValue = "1",
+                    HelpText = "Number of admission controller replicas. 1 replica shows an expected HA warning — use 3 for production."
+                },
+                new ComponentFormField
+                {
+                    Key = "cpu-request", Label = "CPU Request",
+                    YamlPath = "admissionController.container.resources.requests.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "100m", Placeholder = "e.g. 100m, 250m"
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-request", Label = "Memory Request",
+                    YamlPath = "admissionController.container.resources.requests.memory", Type = FormFieldType.Text,
+                    DefaultValue = "256Mi", Placeholder = "e.g. 256Mi, 512Mi"
+                }
+            ],
+            DefaultValues = """
+                # Admission controller — validates and mutates incoming resources
+                # Use replicas: 3 for high-availability production clusters
+                admissionController:
+                  replicas: 1
+                  container:
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 256Mi
+
+                # Background controller — audits existing resources against policies
+                backgroundController:
+                  resources:
+                    requests:
+                      cpu: 50m
+                      memory: 128Mi
+
+                # Cleanup controller — removes generated resources when a policy is deleted
+                cleanupController:
+                  resources:
+                    requests:
+                      cpu: 50m
+                      memory: 128Mi
+
+                # Reports controller — generates PolicyReport and ClusterPolicyReport objects
+                reportsController:
+                  resources:
+                    requests:
+                      cpu: 50m
+                      memory: 128Mi
+
+                # Enable PolicyException resources so workloads can opt out of specific policies
+                features:
+                  policyExceptions:
+                    enabled: true
+                """
+        },
+
+        // ── Autoscaling ──
+
+        new CatalogEntry
+        {
+            Key = "keda",
+            DisplayName = "KEDA",
+            Description = "Kubernetes Event-Driven Autoscaling. Scales workloads based on event sources (queues, streams, metrics, cron) in addition to CPU/memory — including scale-to-zero. Installs the keda.sh CRDs (ScaledObject, ScaledJob, TriggerAuthentication) and the operator, metrics adapter, and admission webhooks.",
+            Icon = "bi-arrows-angle-expand",
+            Category = "Autoscaling",
+            HelmRepoUrl = "https://kedacore.github.io/charts",
+            HelmChartName = "keda",
+            HelmChartVersion = "2.20.0",
+            DefaultNamespace = "keda",
+            DefaultReleaseName = "keda",
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "install-crds", Label = "Install CRDs",
+                    YamlPath = "crds.install", Type = FormFieldType.Toggle,
+                    DefaultValue = "true",
+                    HelpText = "Install the KEDA Custom Resource Definitions (ScaledObject, ScaledJob, TriggerAuthentication) with the chart"
+                },
+                new ComponentFormField
+                {
+                    Key = "operator-replicas", Label = "Operator Replicas",
+                    YamlPath = "operator.replicaCount", Type = FormFieldType.Number,
+                    DefaultValue = "1",
+                    HelpText = "Number of KEDA operator replicas. Use 2 for high-availability production clusters (leader election handles failover)."
+                },
+                new ComponentFormField
+                {
+                    Key = "cpu-request", Label = "CPU Request",
+                    YamlPath = "resources.operator.requests.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "100m", Placeholder = "e.g. 100m, 250m"
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-request", Label = "Memory Request",
+                    YamlPath = "resources.operator.requests.memory", Type = FormFieldType.Text,
+                    DefaultValue = "128Mi", Placeholder = "e.g. 128Mi, 256Mi"
+                }
+            ],
+            DefaultValues = """
+                # Install the KEDA CRDs with the chart
+                crds:
+                  install: true
+
+                # KEDA operator — watches ScaledObject/ScaledJob resources
+                operator:
+                  replicaCount: 1
+
+                # Resource allocation for the core KEDA pods
+                resources:
+                  operator:
+                    requests:
+                      cpu: 100m
+                      memory: 128Mi
+                  metricServer:
+                    requests:
+                      cpu: 100m
+                      memory: 128Mi
+                """
         },
 
         // ── Networking ──
@@ -1410,7 +1778,7 @@ public static class ComponentCatalog
         {
             Key = "wg-easy",
             DisplayName = "WireGuard Easy (wg-easy)",
-            Description = "WireGuard VPN server with web UI. Routes WireGuard UDP 51820 through the existing Istio external gateway via an Envoy UDP proxy (EnvoyFilter), and exposes the web UI as an HTTPRoute on the same gateway. A dedicated LoadBalancer Service shares the Istio gateway's existing external IP (MetalLB: allow-shared-ip; cloud providers: set loadBalancerIP). All resources are lifecycle-managed — uninstall removes everything including the LB rule.",
+            Description = "WireGuard VPN server with web UI. Reuses the existing Istio external gateway's LoadBalancer (no new LB Service): the gateway exposes UDP 51820 and an EnvoyFilter proxies it to the wg-easy pod, so WireGuard rides the gateway's existing external IP. The web UI is exposed as an HTTPRoute on the same gateway. Requires the Istio External Gateway to expose the WireGuard UDP port (its Helm values include it). All resources are lifecycle-managed.",
             Icon = "bi-shield-check",
             Category = "Networking",
             ComponentType = "Manifest",
@@ -1437,7 +1805,8 @@ public static class ComponentCatalog
                     requests:
                       storage: 1Gi
                 ---
-                # Internal ClusterIP — target for both the Envoy UDP proxy and the HTTPRoute web UI.
+                # Internal ClusterIP — upstream for the gateway's Envoy UDP proxy (51820)
+                # and backend for the HTTPRoute web UI (51821).
                 apiVersion: v1
                 kind: Service
                 metadata:
@@ -1504,9 +1873,9 @@ public static class ComponentCatalog
                             - name: WG_DEFAULT_ADDRESS
                               value: "10.8.0.x"
                             - name: WG_DEFAULT_DNS
-                              value: "10.96.0.10"
+                              value: "%%WG_DNS%%"
                             - name: WG_ALLOWED_IPS
-                              value: "10.96.0.0/12,10.244.0.0/16"
+                              value: "%%WG_ALLOWED_IPS%%"
                             - name: WG_MTU
                               value: "1480"
                           volumeMounts:
@@ -1531,9 +1900,22 @@ public static class ComponentCatalog
                       restartPolicy: Always
                       terminationGracePeriodSeconds: 30
                 ---
-                # EnvoyFilter: adds a UDP proxy listener on 51820 to the Istio gateway pods.
-                # %%WG_GATEWAY%% is substituted at apply-time with the release name of the
-                # gateway chosen in the component's FormFields (e.g. istio-ingress-external).
+                # EnvoyFilter: makes the existing Istio gateway forward WireGuard UDP 51820
+                # to the wg-easy pod, reusing the gateway's LoadBalancer IP (no new LB
+                # Service). The gateway's LoadBalancer must already expose UDP 51820 — the
+                # Istio External Gateway component adds that port to its Helm values.
+                #
+                # %%WG_GATEWAY%% is substituted at apply-time with the gateway's release
+                # name (e.g. istio-ingress-external), which is also the gateway pods' 'app'
+                # label, so the workloadSelector targets exactly those pods.
+                #
+                # Two patches are required:
+                #   1. CLUSTER — Istio does NOT auto-generate an outbound cluster for a UDP
+                #      service port, so we define one explicitly (STRICT_DNS to wg-easy-svc).
+                #      The previous version pointed at outbound|51820|... which never existed,
+                #      which is why no UDP ever reached the pod.
+                #   2. LISTENER — a UDP listener on 0.0.0.0:51820 whose udp_proxy filter
+                #      forwards to the explicit cluster above.
                 apiVersion: networking.istio.io/v1alpha3
                 kind: EnvoyFilter
                 metadata:
@@ -1544,13 +1926,33 @@ public static class ComponentCatalog
                     labels:
                       app: %%WG_GATEWAY%%
                   configPatches:
+                    - applyTo: CLUSTER
+                      match:
+                        context: GATEWAY
+                      patch:
+                        operation: ADD
+                        value:
+                          name: wg_easy_udp_cluster
+                          connect_timeout: 5s
+                          type: STRICT_DNS
+                          lb_policy: ROUND_ROBIN
+                          load_assignment:
+                            cluster_name: wg_easy_udp_cluster
+                            endpoints:
+                              - lb_endpoints:
+                                  - endpoint:
+                                      address:
+                                        socket_address:
+                                          protocol: UDP
+                                          address: wg-easy-svc.wg-easy.svc.cluster.local
+                                          port_value: 51820
                     - applyTo: LISTENER
                       match:
                         context: GATEWAY
                       patch:
                         operation: ADD
                         value:
-                          name: udp_0.0.0.0_51820
+                          name: wg_easy_udp_51820
                           address:
                             socket_address:
                               protocol: UDP
@@ -1563,45 +1965,24 @@ public static class ComponentCatalog
                               typed_config:
                                 "@type": type.googleapis.com/envoy.extensions.filters.udp.udp_proxy.v3.UdpProxyConfig
                                 stat_prefix: wg_easy_wireguard
-                                cluster: outbound|51820||wg-easy-svc.wg-easy.svc.cluster.local
-                                idle_timeout: 90s
-                ---
-                # Dedicated LoadBalancer Service that exposes UDP 51820 on the SAME external IP
-                # as the Istio gateway, so no new LB IP is provisioned.
-                #
-                # MetalLB (on-prem): 'allow-shared-ip' tells MetalLB to assign the same IP
-                # as the istio-ingress-external Service. No other changes needed.
-                #
-                # Cloud providers (AKS/GKE/EKS): set spec.loadBalancerIP to the Istio
-                # gateway's existing external IP. Most cloud LB implementations will add
-                # the UDP rule to the same backend pool rather than allocating a new IP.
-                #   Azure example annotation: service.beta.kubernetes.io/azure-pip-name: <pip-name>
-                #   GKE: set loadBalancerIP below
-                #
-                # This Service is a proper manifest resource — 'kubectl delete' on uninstall
-                # removes it cleanly and the LB rule is released automatically.
-                apiVersion: v1
-                kind: Service
-                metadata:
-                  name: istio-ingress-wireguard
-                  namespace: istio-system
-                  annotations:
-                    metallb.universe.tf/allow-shared-ip: %%WG_GATEWAY%%
-                    # Uncomment and set for cloud providers:
-                    # service.beta.kubernetes.io/azure-pip-name: "<your-pip-name>"
-                spec:
-                  type: LoadBalancer
-                  # loadBalancerIP: ""  # set to the Istio gateway's existing external IP for cloud providers
-                  selector:
-                    app: %%WG_GATEWAY%%
-                  ports:
-                    - name: wireguard
-                      port: 51820
-                      targetPort: 51820
-                      protocol: UDP
+                                # 'matcher' (not the deprecated 'cluster' field) — this
+                                # solution installs the latest Istio/Envoy, where udp_proxy
+                                # routing is matcher-based. on_no_match routes all packets
+                                # to the explicit cluster defined above.
+                                matcher:
+                                  on_no_match:
+                                    action:
+                                      name: route
+                                      typed_config:
+                                        "@type": type.googleapis.com/envoy.extensions.filters.udp.udp_proxy.v3.Route
+                                        cluster: wg_easy_udp_cluster
+                                idle_timeout: 120s
                 ---
                 # HTTPRoute: exposes the wg-easy web UI through the Istio external gateway.
-                # Update 'hostnames' to match your WG_HOST value (the gateway's external DNS name).
+                # %%WG_HOST%% is substituted at apply-time with the Public Hostname / IP
+                # entered in the component's FormFields. Note: an HTTPRoute hostname must be
+                # a DNS name — if WG_HOST is a bare IP, edit this to a real hostname in the
+                # advanced YAML editor (WireGuard UDP itself works fine with an IP).
                 # Requires the Gateway to allow routes from outside its own namespace —
                 # standard Istio setup includes allowedRoutes.namespaces.from: All.
                 apiVersion: gateway.networking.k8s.io/v1
@@ -1614,7 +1995,7 @@ public static class ComponentCatalog
                     - name: %%WG_GATEWAY%%
                       namespace: istio-system
                   hostnames:
-                    - "vpn.example.com"
+                    - "%%WG_HOST%%"
                   rules:
                     - matches:
                         - path:
@@ -1647,8 +2028,9 @@ public static class ComponentCatalog
                     SecretName = "WG_HOST",
                     KubernetesSecretName = "wg-easy-env",
                     KubernetesSecretNamespace = "wg-easy",
+                    ManifestPlaceholder = "%%WG_HOST%%",
                     Placeholder = "vpn.example.com",
-                    HelpText = "Auto-detected from the selected gateway's LoadBalancer IP. You can override this with a DNS hostname — just make sure it resolves to the same IP. Also update the HTTPRoute hostnames in the advanced YAML editor to match."
+                    HelpText = "The public address WireGuard clients connect to, and the web-UI hostname. Enter a DNS hostname (recommended) that resolves to the selected gateway's LoadBalancer IP — the gateway IP is auto-filled only as a starting point, but a hostname is preferred so clients aren't pinned to a literal IP. It's substituted into the web-UI HTTPRoute automatically."
                 },
                 new ComponentFormField
                 {
@@ -1662,8 +2044,342 @@ public static class ComponentCatalog
                     KubernetesSecretNamespace = "wg-easy",
                     BcryptOnSync = true,
                     HelpText = "Plain-text password stored in vault. EntKube automatically bcrypt-hashes it (cost 12) when syncing to the wg-easy-env K8s Secret as PASSWORD_HASH."
+                },
+                new ComponentFormField
+                {
+                    Key = "wg-allowed-ips",
+                    Label = "Allowed IPs (cluster CIDRs)",
+                    YamlPath = "",
+                    Type = FormFieldType.Text,
+                    StoreAsSecret = true,
+                    SecretName = "WG_ALLOWED_IPS",
+                    ManifestPlaceholder = "%%WG_ALLOWED_IPS%%",
+                    DefaultValue = "100.96.0.0/11,10.250.0.0/16,100.64.0.0/13",
+                    Placeholder = "100.96.0.0/11,10.250.0.0/16,100.64.0.0/13",
+                    HelpText = "Comma-separated CIDRs that VPN clients route through the tunnel — must cover your cluster's Pod, Service, and node networks. The Service CIDR (where Cluster DNS lives) MUST be included or in-cluster name resolution fails over the VPN."
+                },
+                new ComponentFormField
+                {
+                    Key = "wg-dns",
+                    Label = "Cluster DNS (CoreDNS ClusterIP)",
+                    YamlPath = "",
+                    Type = FormFieldType.Text,
+                    StoreAsSecret = true,
+                    SecretName = "WG_DNS",
+                    ManifestPlaceholder = "%%WG_DNS%%",
+                    DefaultValue = "100.64.0.10",
+                    Placeholder = "100.64.0.10",
+                    HelpText = "The in-cluster DNS (CoreDNS/kube-dns) Service ClusterIP, so VPN clients can resolve *.svc.cluster.local. Usually the .10 address of your Service CIDR (e.g. 100.64.0.10). Its CIDR must also appear in Allowed IPs above."
                 }
             ]
+        },
+
+        new CatalogEntry
+        {
+            Key = "tailscale-operator",
+            DisplayName = "Tailscale Operator",
+            Description = "The official Tailscale Kubernetes Operator. Exposes Kubernetes services and Ingresses directly into your Tailscale network — no manual WireGuard config, no self-hosted coordination server. ACLs and access policies are managed in the Tailscale admin console. Supports both L3 (per-service proxy pods) and L7 (Ingress with HTTPS).",
+            Icon = "bi-shield-lock",
+            Category = "Networking",
+            HelmRepoUrl = "https://pkgs.tailscale.com/helmcharts",
+            HelmChartName = "tailscale-operator",
+            HelmChartVersion = "1.82.0",
+            DefaultNamespace = "tailscale",
+            DefaultReleaseName = "tailscale-operator",
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "oauth-client-id",
+                    Label = "OAuth Client ID",
+                    YamlPath = "oauth.clientId",
+                    Type = FormFieldType.Text,
+                    Placeholder = "kXXXXXXXXXXXXX",
+                    HelpText = "Create an OAuth client in the Tailscale admin console (Settings → OAuth clients) with 'Devices: Read/Write' and 'Routes: Read/Write' scopes. Tag it with the same tag you put in defaultTags below."
+                },
+                new ComponentFormField
+                {
+                    Key = "oauth-client-secret",
+                    Label = "OAuth Client Secret",
+                    YamlPath = "oauth.clientSecret",
+                    Type = FormFieldType.Password,
+                    Placeholder = "tskey-client-...",
+                    HelpText = "The secret key shown once when you create the OAuth client."
+                },
+                new ComponentFormField
+                {
+                    Key = "operator-hostname",
+                    Label = "Operator hostname",
+                    YamlPath = "operatorConfig.hostname",
+                    Type = FormFieldType.Text,
+                    DefaultValue = "k8s-operator",
+                    Placeholder = "k8s-operator",
+                    HelpText = "Device name the operator registers itself under in your tailnet."
+                },
+                new ComponentFormField
+                {
+                    Key = "default-tags",
+                    Label = "Default device tags",
+                    YamlPath = "operatorConfig.defaultTags",
+                    Type = FormFieldType.Text,
+                    DefaultValue = "tag:k8s",
+                    Placeholder = "tag:k8s",
+                    HelpText = "Comma-separated Tailscale ACL tags applied to every proxy device. The OAuth client must have permission to apply these tags."
+                },
+                new ComponentFormField
+                {
+                    Key = "cpu-request",
+                    Label = "CPU Request",
+                    YamlPath = "resources.requests.cpu",
+                    Type = FormFieldType.Text,
+                    DefaultValue = "100m"
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-request",
+                    Label = "Memory Request",
+                    YamlPath = "resources.requests.memory",
+                    Type = FormFieldType.Text,
+                    DefaultValue = "128Mi"
+                }
+            ],
+            DefaultValues = """
+                oauth:
+                  clientId: ""
+                  clientSecret: ""
+
+                operatorConfig:
+                  hostname: "k8s-operator"
+                  defaultTags:
+                    - "tag:k8s"
+
+                resources:
+                  requests:
+                    cpu: 100m
+                    memory: 128Mi
+                  limits:
+                    memory: 256Mi
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "headscale",
+            DisplayName = "Headscale (VPN coordinator)",
+            Description = "Self-hosted Tailscale control plane. Runs the coordination server that nodes register against. Once installed, create a subnet router to advertise the cluster service CIDR into your VPN — so Tailscale clients can reach in-cluster services without a per-service tunnel.",
+            Icon = "bi-shield-lock-fill",
+            Category = "Networking",
+            ComponentType = "Manifest",
+            HelmRepoUrl = "",
+            HelmChartName = "",
+            DefaultNamespace = "headscale",
+            DefaultReleaseName = "headscale",
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "server-url",
+                    Label = "Public server URL",
+                    YamlPath = "headscale:server-url",
+                    Type = FormFieldType.Text,
+                    Placeholder = "https://headscale.example.com",
+                    StoreAsSecret = true,
+                    ManifestPlaceholder = "%%SERVER_URL%%",
+                    HelpText = "The public HTTPS URL where headscale is reachable. Must match the hostname you expose via an external route — headscale uses this in coordination messages and magic-DNS records."
+                },
+                new ComponentFormField
+                {
+                    Key = "base-domain",
+                    Label = "Magic DNS base domain",
+                    YamlPath = "headscale:base-domain",
+                    Type = FormFieldType.Text,
+                    Placeholder = "ts.example.com",
+                    DefaultValue = "ts.internal",
+                    StoreAsSecret = true,
+                    ManifestPlaceholder = "%%BASE_DOMAIN%%",
+                    HelpText = "Suffix for Magic DNS hostnames assigned to nodes. Nodes become reachable as <machine>.<user>.<base-domain> within the VPN."
+                },
+                new ComponentFormField
+                {
+                    Key = "cluster-issuer",
+                    Label = "TLS cluster issuer",
+                    YamlPath = "headscale:cluster-issuer",
+                    Type = FormFieldType.ClusterIssuer,
+                    StoreAsSecret = true,
+                    HelpText = "cert-manager ClusterIssuer used to issue the TLS certificate for the public server URL."
+                },
+                new ComponentFormField
+                {
+                    Key = "api-key",
+                    Label = "API key",
+                    YamlPath = "headscale:api-key",
+                    Type = FormFieldType.Password,
+                    StoreAsSecret = true,
+                    HelpText = "Generated after first install by clicking 'Generate API Key' in the VPN tab. Leave blank for initial install."
+                }
+            ],
+            DefaultValues = """
+                apiVersion: v1
+                kind: Namespace
+                metadata:
+                  name: headscale
+                  labels:
+                    app.kubernetes.io/managed-by: entkube
+                ---
+                apiVersion: v1
+                kind: PersistentVolumeClaim
+                metadata:
+                  name: headscale-data
+                  namespace: headscale
+                spec:
+                  accessModes: [ReadWriteOnce]
+                  resources:
+                    requests:
+                      storage: 2Gi
+                ---
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: headscale-config
+                  namespace: headscale
+                data:
+                  config.yaml: |
+                    server_url: %%SERVER_URL%%
+                    listen_addr: 0.0.0.0:8080
+                    grpc_listen_addr: 127.0.0.1:50443
+                    metrics_listen_addr: 0.0.0.0:9090
+                    noise:
+                      private_key_path: /var/lib/headscale/noise_private.key
+                    prefixes:
+                      v4: 100.64.0.0/10
+                      v6: fd7a:115c:a1e0::/48
+                      allocation: sequential
+                    derp:
+                      server:
+                        enabled: false
+                        region_id: 999
+                        region_code: "headscale"
+                        region_name: "Headscale Embedded DERP"
+                        stun_listen_addr: "0.0.0.0:3478"
+                      urls:
+                        - https://controlplane.tailscale.com/derpmap/default
+                      paths: []
+                      auto_update_enabled: true
+                      update_frequency: 24h
+                    database:
+                      type: sqlite
+                      sqlite:
+                        path: /var/lib/headscale/db.sqlite
+                        write_ahead_log: true
+                    policy:
+                      mode: database
+                    dns:
+                      magic_dns: true
+                      base_domain: %%BASE_DOMAIN%%
+                      nameservers:
+                        global:
+                          - 1.1.1.1
+                          - 1.0.0.1
+                    log:
+                      level: info
+                ---
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: headscale-policy
+                  namespace: headscale
+                data:
+                  policy.hujson: |
+                    {
+                      "groups": {
+                        "group:infra": [],
+                        "group:admin": []
+                      },
+                      "acls": [
+                        {"action": "accept", "src": ["*"], "dst": ["*:*"]}
+                      ]
+                    }
+                ---
+                apiVersion: apps/v1
+                kind: Deployment
+                metadata:
+                  name: headscale
+                  namespace: headscale
+                  labels:
+                    app: headscale
+                    app.kubernetes.io/managed-by: entkube
+                spec:
+                  replicas: 1
+                  selector:
+                    matchLabels:
+                      app: headscale
+                  template:
+                    metadata:
+                      labels:
+                        app: headscale
+                    spec:
+                      securityContext:
+                        fsGroup: 999
+                      containers:
+                      - name: headscale
+                        image: ghcr.io/juanfont/headscale:0.23.0
+                        args: ["serve"]
+                        ports:
+                        - name: http
+                          containerPort: 8080
+                        - name: metrics
+                          containerPort: 9090
+                        volumeMounts:
+                        - name: data
+                          mountPath: /var/lib/headscale
+                        - name: config
+                          mountPath: /etc/headscale/config.yaml
+                          subPath: config.yaml
+                        - name: policy
+                          mountPath: /etc/headscale/policy.hujson
+                          subPath: policy.hujson
+                        livenessProbe:
+                          httpGet:
+                            path: /health
+                            port: 8080
+                          initialDelaySeconds: 15
+                          periodSeconds: 30
+                        resources:
+                          requests:
+                            cpu: 100m
+                            memory: 128Mi
+                          limits:
+                            memory: 256Mi
+                      volumes:
+                      - name: data
+                        persistentVolumeClaim:
+                          claimName: headscale-data
+                      - name: config
+                        configMap:
+                          name: headscale-config
+                      - name: policy
+                        configMap:
+                          name: headscale-policy
+                ---
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: headscale
+                  namespace: headscale
+                  labels:
+                    app: headscale
+                    app.kubernetes.io/managed-by: entkube
+                spec:
+                  selector:
+                    app: headscale
+                  ports:
+                  - name: http
+                    port: 80
+                    targetPort: 8080
+                  - name: grpc
+                    port: 50443
+                    targetPort: 50443
+                """
         },
 
         new CatalogEntry

@@ -92,8 +92,58 @@ public record KubeEndpointSummary(List<string> Ready, List<string> NotReady)
 public class KubernetesOperationsService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     AuditService auditService,
+    KyvernoPolicyService kyvernoPolicyService,
     ILogger<KubernetesOperationsService> logger)
 {
+    /// <summary>
+    /// Applies the tenant+environment's enabled Kyverno policies to a deployment's namespace.
+    /// Runs after a successful deploy so a newly-created customer app namespace inherits the same
+    /// admission policies as the rest of the environment. Best-effort: failures are logged but never
+    /// fail the deployment itself, and a cluster without Kyverno simply has the manifests rejected.
+    /// </summary>
+    private async Task ApplyKyvernoPoliciesAsync(AppDeployment deployment, CancellationToken ct)
+    {
+        try
+        {
+            if (deployment.Cluster is null || string.IsNullOrWhiteSpace(deployment.Cluster.Kubeconfig))
+                return;
+
+            Guid tenantId;
+            using (ApplicationDbContext db = dbFactory.CreateDbContext())
+            {
+                tenantId = await db.Apps
+                    .Where(a => a.Id == deployment.AppId)
+                    .Select(a => a.Customer.TenantId)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            if (tenantId == Guid.Empty) return;
+
+            List<KyvernoPolicy> policies =
+                await kyvernoPolicyService.GetPoliciesAsync(tenantId, deployment.EnvironmentId, ct);
+            if (policies.Count == 0) return;
+
+            (bool ok, string output) = await kyvernoPolicyService.ApplyToNamespaceAsync(
+                policies, deployment.Cluster, deployment.Namespace, ct);
+
+            if (ok)
+                logger.LogInformation(
+                    "Applied {Count} Kyverno policies to namespace {Namespace} for deployment {DeploymentId}",
+                    policies.Count, deployment.Namespace, deployment.Id);
+            else
+                logger.LogWarning(
+                    "Kyverno policy apply to namespace {Namespace} for deployment {DeploymentId} reported errors: {Output}",
+                    deployment.Namespace, deployment.Id, output);
+        }
+        catch (Exception ex)
+        {
+            // Never let policy application break a deployment.
+            logger.LogWarning(ex,
+                "Failed to apply Kyverno policies to namespace {Namespace} for deployment {DeploymentId}",
+                deployment.Namespace, deployment.Id);
+        }
+    }
+
     /// <summary>
     /// Loads a deployment with its cluster attached, so we know where
     /// to connect for Kubernetes API calls.
@@ -847,8 +897,17 @@ public class KubernetesOperationsService(
 
         // Prepend a Namespace manifest so the namespace is created automatically
         // if it doesn't exist yet — mirrors Helm's --create-namespace behaviour.
+        // Strip any leading "---" document marker from individual manifests — some
+        // Git-managed files start with "---" and the split preserves it, which would
+        // produce a double "---\n---" separator in the combined output.
         string nsManifest = $"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {deployment.Namespace}";
-        string combined = nsManifest + "\n---\n" + string.Join("\n---\n", manifests.Select(m => m.YamlContent));
+        string combined = nsManifest + "\n---\n" + string.Join("\n---\n", manifests.Select(m =>
+        {
+            string content = m.YamlContent.TrimStart();
+            return content.StartsWith("---", StringComparison.Ordinal)
+                ? content["---".Length..].TrimStart('\n', '\r')
+                : content;
+        }));
 
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-manifest-{Guid.NewGuid()}.yaml");
@@ -869,6 +928,9 @@ public class KubernetesOperationsService(
                     deploymentId, deployment.Namespace, performedBy ?? "system");
                 await auditService.RecordAsync(deploymentId, "ApplyYaml", "Deployment",
                     deployment.Name, performedBy: performedBy, ct: ct);
+
+                // Ensure the (possibly brand-new) namespace inherits the environment's Kyverno policies.
+                await ApplyKyvernoPoliciesAsync(deployment, ct);
             }
             else
             {
@@ -1266,6 +1328,9 @@ public class KubernetesOperationsService(
                     deployment.Namespace, deploymentId, performedBy ?? "system");
                 await auditService.RecordAsync(deploymentId, "HelmInstallOrUpgrade", "HelmRelease",
                     deployment.Name, $"{deployment.HelmChartName}@{deployment.HelmChartVersion}", performedBy, ct);
+
+                // Ensure the (possibly brand-new) namespace inherits the environment's Kyverno policies.
+                await ApplyKyvernoPoliciesAsync(deployment, ct);
             }
             else
             {
@@ -1310,6 +1375,8 @@ public class KubernetesOperationsService(
         Dictionary<string, DeploymentResource> byUid = new();
         // Resources whose OwnerReferences need to be resolved after all types are fetched.
         List<(DeploymentResource Node, string[] OwnerUids)> pendingWire = [];
+        // HTTPRoute → Service links parsed from spec.rules[].backendRefs, wired after all nodes exist.
+        List<(DeploymentResource HttpRoute, string ServiceName)> httpRouteBackends = [];
 
         // Create a resource node, record its UID, and register its owner refs for later wiring.
         DeploymentResource MakeNode(string? uid, IList<V1OwnerReference>? owners,
@@ -1459,11 +1526,28 @@ public class KubernetesOperationsService(
                     if (name is null) continue;
 
                     string? hostnames = null;
-                    if (item.TryGetProperty("spec", out JsonElement spec)
-                        && spec.TryGetProperty("hostnames", out JsonElement hh))
+                    List<string> backendSvcNames = [];
+
+                    if (item.TryGetProperty("spec", out JsonElement itemSpec))
                     {
-                        hostnames = string.Join(", ", hh.EnumerateArray()
-                            .Select(x => x.GetString()).OfType<string>());
+                        if (itemSpec.TryGetProperty("hostnames", out JsonElement hh))
+                            hostnames = string.Join(", ", hh.EnumerateArray()
+                                .Select(x => x.GetString()).OfType<string>());
+
+                        if (itemSpec.TryGetProperty("rules", out JsonElement rules))
+                        {
+                            foreach (JsonElement rule in rules.EnumerateArray())
+                            {
+                                if (!rule.TryGetProperty("backendRefs", out JsonElement backendRefs)) continue;
+                                foreach (JsonElement backendRef in backendRefs.EnumerateArray())
+                                {
+                                    string? svcName = backendRef.TryGetProperty("name", out JsonElement nm)
+                                        ? nm.GetString() : null;
+                                    if (!string.IsNullOrEmpty(svcName))
+                                        backendSvcNames.Add(svcName);
+                                }
+                            }
+                        }
                     }
 
                     // Collect owner UIDs if present
@@ -1478,8 +1562,12 @@ public class KubernetesOperationsService(
                             .ToList();
                     }
 
-                    MakeNode(uid, ownerRefs, "gateway.networking.k8s.io", "v1", "HTTPRoute", name,
+                    DeploymentResource routeNode = MakeNode(uid, ownerRefs,
+                        "gateway.networking.k8s.io", "v1", "HTTPRoute", name,
                         HealthStatus.Healthy, hostnames);
+
+                    foreach (string svcName in backendSvcNames)
+                        httpRouteBackends.Add((routeNode, svcName));
                 }
             }, "HTTPRoute");
 
@@ -1511,6 +1599,22 @@ public class KubernetesOperationsService(
                 {
                     MakeNode(cm.Metadata.Uid, null,
                         "", "v1", "ConfigMap", cm.Metadata.Name, HealthStatus.Healthy, null);
+                }
+            });
+
+            // ── Secrets (exclude service-account tokens and system-owned) ────────
+            await TryFetch(async () =>
+            {
+                V1SecretList list = await client.CoreV1.ListNamespacedSecretAsync(ns, cancellationToken: ct);
+                foreach (V1Secret secret in list.Items.Where(s =>
+                    s.Metadata.OwnerReferences?.Any() != true &&
+                    s.Type != "kubernetes.io/service-account-token" &&
+                    s.Type != "bootstrap.kubernetes.io/token"))
+                {
+                    string? msg = string.IsNullOrEmpty(secret.Type) || secret.Type == "Opaque"
+                        ? null : secret.Type;
+                    MakeNode(secret.Metadata.Uid, null,
+                        "", "v1", "Secret", secret.Metadata.Name, HealthStatus.Healthy, msg);
                 }
             });
 
@@ -1580,6 +1684,23 @@ public class KubernetesOperationsService(
                         parent.ChildResources.Add(node);
                         break;
                     }
+                }
+            }
+
+            // ── Wire HTTPRoute → Service links via backendRefs ────────────
+            // Services have no OwnerReferences to HTTPRoutes; we derive the link
+            // from the HTTPRoute's spec.rules[].backendRefs parsed during fetch.
+            Dictionary<string, DeploymentResource> servicesByName = byUid.Values
+                .Where(r => r.Kind == "Service")
+                .ToDictionary(r => r.Name, r => r);
+
+            foreach ((DeploymentResource httpRoute, string svcName) in httpRouteBackends)
+            {
+                if (servicesByName.TryGetValue(svcName, out DeploymentResource? svc)
+                    && svc.ParentResourceId == null)
+                {
+                    svc.ParentResourceId = httpRoute.Id;
+                    httpRoute.ChildResources.Add(svc);
                 }
             }
 
@@ -1719,19 +1840,59 @@ public class KubernetesOperationsService(
     /// Returns a set of (Kind, Name) pairs from the deployment's stored manifests,
     /// used to filter live namespace resources to just those belonging to this deployment.
     /// Returns null if the deployment has no manifests (Helm or new Manual deployment).
+    ///
+    /// A single manifest row may contain multiple YAML documents (separated by "---"),
+    /// so we parse the YamlContent of each row to extract ALL resources, not just the
+    /// stored Kind/Name columns which only capture the first resource in the row.
     /// </summary>
     private async Task<HashSet<(string Kind, string Name)>?> LoadManifestFilterAsync(
         Guid deploymentId, CancellationToken ct)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        List<(string Kind, string Name)> pairs = await db.DeploymentManifests
+        List<DeploymentManifest> manifests = await db.DeploymentManifests
             .Where(m => m.DeploymentId == deploymentId)
-            .Select(m => new { m.Kind, m.Name })
-            .ToListAsync(ct)
-            .ContinueWith(t => t.Result.Select(m => (m.Kind, m.Name)).ToList(), ct);
+            .ToListAsync(ct);
 
-        return pairs.Count == 0 ? null : pairs.ToHashSet();
+        if (manifests.Count == 0) return null;
+
+        HashSet<(string Kind, string Name)> filter = [];
+
+        foreach (DeploymentManifest manifest in manifests)
+        {
+            // Always include the stored Kind/Name (fast path, no parsing needed).
+            filter.Add((manifest.Kind, manifest.Name));
+
+            // Also parse the full YAML content — a single manifest row can contain
+            // multiple documents separated by "---" (e.g. when pasted manually).
+            foreach (string doc in manifest.YamlContent.Split("\n---", StringSplitOptions.RemoveEmptyEntries))
+            {
+                string trimmed = doc.Trim();
+                if (string.IsNullOrWhiteSpace(trimmed)) continue;
+
+                (string kind, string name) = ExtractKindAndName(trimmed);
+                if (kind != "Unknown" && name != "unnamed")
+                    filter.Add((kind, name));
+            }
+        }
+
+        return filter;
+    }
+
+    private static (string Kind, string Name) ExtractKindAndName(string yaml)
+    {
+        string kind = "Unknown";
+        string name = "unnamed";
+
+        foreach (string line in yaml.Split('\n'))
+        {
+            if (line.StartsWith("kind:", StringComparison.Ordinal))
+                kind = line["kind:".Length..].Trim();
+            else if (line.TrimStart().StartsWith("name:", StringComparison.Ordinal) && name == "unnamed")
+                name = line.Split(':')[1].Trim().Trim('"');
+        }
+
+        return (kind, name);
     }
 
     /// <summary>
@@ -1794,8 +1955,9 @@ public class KubernetesOperationsService(
         "HTTPRoute"             => 7,
         "PersistentVolumeClaim" => 8,
         "ConfigMap"             => 9,
-        "ReplicaSet"            => 10,
-        "Pod"                   => 11,
+        "Secret"                => 10,
+        "ReplicaSet"            => 11,
+        "Pod"                   => 12,
         _                      => 99
     };
 
@@ -2055,6 +2217,7 @@ public class KubernetesOperationsService(
             UseShellExecute = false,
             CreateNoWindow = true
         };
+        psi.EnvironmentVariables["HOME"] = "/tmp";
 
         using System.Diagnostics.Process process = new() { StartInfo = psi };
 

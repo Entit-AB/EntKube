@@ -65,17 +65,45 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         string resource, string name, string ns, string jsonPatch, string kubeconfig, CancellationToken ct = default)
     {
         string kubeconfigPath = Path.GetTempFileName();
+        string patchPath = Path.GetTempFileName();
 
         try
         {
             await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+            await File.WriteAllTextAsync(patchPath, jsonPatch, ct);
 
             await RunKubectlAsync(
-                $"patch {resource} {name} -n {ns} --type=merge -p {jsonPatch} --kubeconfig={kubeconfigPath}", ct);
+                $"patch {resource} {name} -n {ns} --type=merge --patch-file={patchPath} --kubeconfig={kubeconfigPath}", ct);
         }
         finally
         {
             File.Delete(kubeconfigPath);
+            File.Delete(patchPath);
+        }
+    }
+
+    /// <summary>
+    /// Applies a strategic merge patch. Writes the patch JSON to a temp file
+    /// so special characters (quotes, braces) are not mangled by shell argument parsing.
+    /// </summary>
+    public async Task PatchStrategicAsync(
+        string resource, string name, string ns, string jsonPatch, string kubeconfig, CancellationToken ct = default)
+    {
+        string kubeconfigPath = Path.GetTempFileName();
+        string patchPath = Path.GetTempFileName();
+
+        try
+        {
+            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+            await File.WriteAllTextAsync(patchPath, jsonPatch, ct);
+
+            await RunKubectlAsync(
+                $"patch {resource} {name} -n {ns} --type=strategic --patch-file={patchPath} --kubeconfig={kubeconfigPath}", ct);
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+            File.Delete(patchPath);
         }
     }
 
@@ -111,6 +139,23 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         }
     }
 
+    public async Task<string> GetJsonAllNamespacesAsync(
+        string resource, string kubeconfig, string labelSelector = "", CancellationToken ct = default)
+    {
+        string kubeconfigPath = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+            string selector = string.IsNullOrEmpty(labelSelector) ? "" : $" -l {labelSelector}";
+            return await RunKubectlAsync(
+                $"get {resource} -A --kubeconfig={kubeconfigPath}{selector} -o json", ct);
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+        }
+    }
+
     /// <summary>
     /// Executes SQL on the CNPG primary pod via kubectl exec + psql.
     /// The primary pod is identified by the CNPG naming convention: {cluster}-1.
@@ -124,8 +169,7 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         {
             await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
 
-            // CNPG primary pod follows the naming pattern: {cluster}-1
-            string primaryPod = $"{clusterName}-1";
+            string primaryPod = await ResolveCnpgPrimaryPodAsync(clusterName, ns, kubeconfigPath, ct);
 
             // Pipe SQL via stdin to avoid shell argument splitting issues.
             // The -i flag tells kubectl exec to pass stdin to the container.
@@ -207,7 +251,8 @@ public class KubernetesClientFactory : IKubernetesClientFactory
 
     public async Task<string> RunCommandOnPodAsync(
         string podName, string ns, IReadOnlyList<string> command, string kubeconfig,
-        IReadOnlyDictionary<string, string>? envVars = null, CancellationToken ct = default)
+        IReadOnlyDictionary<string, string>? envVars = null, CancellationToken ct = default,
+        int timeoutSeconds = 0, bool verbose = false)
     {
         string kubeconfigPath = Path.GetTempFileName();
 
@@ -223,8 +268,12 @@ public class KubernetesClientFactory : IKubernetesClientFactory
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            // The container user's real HOME (/home/appuser) is not writable, so point
+            // kubectl's cache at /tmp. Auth uses embedded certs, so HOME doesn't affect it.
+            startInfo.EnvironmentVariables["HOME"] = "/tmp";
 
             startInfo.ArgumentList.Add("exec");
+            if (verbose) startInfo.ArgumentList.Add("--v=6");
             startInfo.ArgumentList.Add(podName);
             startInfo.ArgumentList.Add("-n");
             startInfo.ArgumentList.Add(ns);
@@ -247,7 +296,32 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             Task<string> outputTask = process.StandardOutput.ReadToEndAsync(ct);
             Task<string> errorTask = process.StandardError.ReadToEndAsync(ct);
 
-            await process.WaitForExitAsync(ct);
+            // Bound the wait when a timeout is requested so a wedged `kubectl exec`
+            // (e.g. an unreachable API server or stalled streaming upgrade) fails with
+            // diagnostics instead of hanging the caller forever.
+            using CancellationTokenSource? timeoutCts = timeoutSeconds > 0
+                ? CancellationTokenSource.CreateLinkedTokenSource(ct)
+                : null;
+            timeoutCts?.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+
+            try
+            {
+                await process.WaitForExitAsync(timeoutCts?.Token ?? ct);
+            }
+            catch (OperationCanceledException) when (
+                timeoutCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { /* already gone */ }
+
+                string diag = "";
+                try { diag = await errorTask.WaitAsync(TimeSpan.FromSeconds(5), ct); }
+                catch { /* best-effort */ }
+
+                throw new InvalidOperationException(
+                    $"kubectl exec timed out after {timeoutSeconds}s (pod {podName}, ns {ns}). " +
+                    "The exec never completed — the source cluster API/kubelet streaming path is " +
+                    $"likely unreachable from this container. kubectl -v=6 diagnostics:\n{diag}");
+            }
 
             string output = await outputTask;
             string error = await errorTask;
@@ -278,7 +352,7 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         {
             await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
 
-            string primaryPod = $"{clusterName}-1";
+            string primaryPod = await ResolveCnpgPrimaryPodAsync(clusterName, ns, kubeconfigPath, ct);
 
             return await RunKubectlWithStdinAsync(
                 $"exec -i {primaryPod} -n {ns} --kubeconfig={kubeconfigPath} -- psql -U postgres -d \"{database}\" -t -A",
@@ -324,12 +398,14 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             using Process process = new() { StartInfo = startInfo };
             process.Start();
 
+            // Drain stdout/stderr before writing stdin to avoid a pipe-buffer deadlock
+            // on large payloads (see RunKubectlWithStdinAsync for the full explanation).
+            Task<string> outputTask = process.StandardOutput.ReadToEndAsync(ct);
+            Task<string> errorTask = process.StandardError.ReadToEndAsync(ct);
+
             await process.StandardInput.WriteAsync(stdin.AsMemory(), ct);
             await process.StandardInput.FlushAsync(ct);
             process.StandardInput.Close();
-
-            Task<string> outputTask = process.StandardOutput.ReadToEndAsync(ct);
-            Task<string> errorTask = process.StandardError.ReadToEndAsync(ct);
 
             await process.WaitForExitAsync(ct);
 
@@ -394,12 +470,14 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             using Process process = new() { StartInfo = startInfo };
             process.Start();
 
+            // Drain stdout/stderr before writing stdin to avoid a pipe-buffer deadlock
+            // on large payloads (see RunKubectlWithStdinAsync for the full explanation).
+            Task<string> outputTask = process.StandardOutput.ReadToEndAsync(ct);
+            Task<string> errorTask = process.StandardError.ReadToEndAsync(ct);
+
             await process.StandardInput.WriteAsync(sql.AsMemory(), ct);
             await process.StandardInput.FlushAsync(ct);
             process.StandardInput.Close();
-
-            Task<string> outputTask = process.StandardOutput.ReadToEndAsync(ct);
-            Task<string> errorTask = process.StandardError.ReadToEndAsync(ct);
 
             await process.WaitForExitAsync(ct);
 
@@ -419,6 +497,35 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         }
     }
 
+    /// <summary>
+    /// Resolves the current CNPG primary pod by label. CNPG names pods with an
+    /// incrementing serial ({cluster}-1, {cluster}-2, …) and the primary moves on every
+    /// failover, switchover, or rolling restart — so {cluster}-1 is only the primary
+    /// right after first creation and will not exist after the serial advances.
+    /// Falls back to the historical {cluster}-1 assumption if the label lookup yields nothing.
+    /// </summary>
+    private static async Task<string> ResolveCnpgPrimaryPodAsync(
+        string clusterName, string ns, string kubeconfigPath, CancellationToken ct)
+    {
+        // cnpg.io/instanceRole is the current label (CNPG ≥1.22); role is the legacy one.
+        foreach (string roleSelector in new[] { "cnpg.io/instanceRole=primary", "role=primary" })
+        {
+            try
+            {
+                string name = (await RunKubectlAsync(
+                    $"get pods -n {ns} -l cnpg.io/cluster={clusterName},{roleSelector} " +
+                    $"--kubeconfig={kubeconfigPath} -o jsonpath={{.items[0].metadata.name}}", ct)).Trim();
+                if (!string.IsNullOrEmpty(name)) return name;
+            }
+            catch (InvalidOperationException)
+            {
+                // Selector unsupported or lookup failed — try the next label scheme.
+            }
+        }
+
+        return $"{clusterName}-1";
+    }
+
     private static async Task<string> RunKubectlAsync(string arguments, CancellationToken ct)
     {
         using Process process = new()
@@ -433,6 +540,9 @@ public class KubernetesClientFactory : IKubernetesClientFactory
                 CreateNoWindow = true
             }
         };
+        // The container user's real HOME (/home/appuser) is not writable, so point
+        // kubectl's cache at /tmp. Auth uses embedded certs, so HOME doesn't affect it.
+        process.StartInfo.EnvironmentVariables["HOME"] = "/tmp";
 
         process.Start();
 
@@ -477,17 +587,22 @@ public class KubernetesClientFactory : IKubernetesClientFactory
                 CreateNoWindow = true
             }
         };
+        // The container user's real HOME (/home/appuser) is not writable, so point
+        // kubectl's cache at /tmp. Auth uses embedded certs, so HOME doesn't affect it.
+        process.StartInfo.EnvironmentVariables["HOME"] = "/tmp";
 
         process.Start();
 
-        // Write the script/SQL to stdin and close it so the process knows input is done.
+        // Start draining stdout/stderr BEFORE writing stdin. Otherwise a large
+        // stdin payload (e.g. a multi-MB pg_dump) deadlocks: the child fills its
+        // stdout pipe, blocks, stops reading stdin, and our WriteAsync blocks too.
+        Task<string> outputTask = process.StandardOutput.ReadToEndAsync(ct);
+        Task<string> errorTask = process.StandardError.ReadToEndAsync(ct);
 
+        // Write the script/SQL to stdin and close it so the process knows input is done.
         await process.StandardInput.WriteAsync(stdinContent.AsMemory(), ct);
         await process.StandardInput.FlushAsync(ct);
         process.StandardInput.Close();
-
-        Task<string> outputTask = process.StandardOutput.ReadToEndAsync(ct);
-        Task<string> errorTask = process.StandardError.ReadToEndAsync(ct);
 
         await process.WaitForExitAsync(ct);
 

@@ -663,7 +663,7 @@
                     <label class="form-label small fw-semibold">Account Console Theme</label>
                     <select class="form-select form-select-sm" @bind="editAccountTheme">
                         <option value="">(default)</option>
-                        @foreach (string t in realmDetails.Themes)
+                        @foreach (string t in (realmDetails.AccountThemes.Count > 0 ? realmDetails.AccountThemes : realmDetails.Themes))
                         {
                             <option value="@t">@t</option>
                         }
@@ -1937,7 +1937,7 @@ else if (selectedKeycloak is not null)
                                     </div>
                                 }
                             </div>
-                            <div class="d-flex gap-2 align-items-center mb-4">
+                            <div class="d-flex gap-2 align-items-center mb-4 flex-wrap">
                                 <button class="btn btn-sm btn-primary" @onclick="SaveNamedThemeMeta"
                                         disabled="@(savingThemeMeta || string.IsNullOrWhiteSpace(editThemeName))">
                                     @if (savingThemeMeta) { <span class="spinner-border spinner-border-sm me-1"></span> }
@@ -1951,44 +1951,30 @@ else if (selectedKeycloak is not null)
                                 {
                                     <span class="text-danger small">@themeMetaError</span>
                                 }
-                                <button class="btn btn-sm btn-outline-danger ms-auto" @onclick="DeleteNamedTheme"
-                                        disabled="@deletingTheme">
-                                    @if (deletingTheme) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                    <i class="bi bi-trash me-1"></i>Delete Theme
-                                </button>
+                                <div class="d-flex gap-2 ms-auto">
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="DuplicateNamedTheme"
+                                            disabled="@duplicatingTheme" title="Clone this theme including all CSS, variables, and resources">
+                                        @if (duplicatingTheme) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        <i class="bi bi-copy me-1"></i>Duplicate
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-danger" @onclick="DeleteNamedTheme"
+                                            disabled="@deletingTheme">
+                                        @if (deletingTheme) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        <i class="bi bi-trash me-1"></i>Delete
+                                    </button>
+                                </div>
+                                @if (duplicateThemeError is not null)
+                                {
+                                    <span class="text-danger small w-100">@duplicateThemeError</span>
+                                }
                             </div>
 
-                            @* CSS overrides per type *@
-                            <label class="form-label small fw-semibold">CSS Overrides</label>
-                            <div class="d-flex gap-2 mb-2 flex-wrap">
-                                @foreach (string type in new[] { "login", "account", "admin", "email" })
-                                {
-                                    <button class="btn btn-sm @(themeType == type ? "btn-primary" : "btn-outline-secondary")"
-                                            @onclick="() => SwitchThemeType(type)">
-                                        @(char.ToUpper(type[0]) + type[1..])
-                                    </button>
-                                }
-                            </div>
-                            <textarea class="form-control font-monospace mb-2"
-                                      rows="14"
-                                      style="font-size:0.78rem; resize:vertical"
-                                      placeholder="/* Custom CSS for @themeType theme */"
-                                      @bind="themeCss"
-                                      @bind:event="oninput"></textarea>
-                            <div class="d-flex gap-2 align-items-center">
-                                <button class="btn btn-sm btn-primary" @onclick="SaveThemeCss" disabled="@savingTheme">
-                                    @if (savingTheme) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                    <i class="bi bi-floppy me-1"></i>Save CSS
-                                </button>
-                                @if (themeSaved)
-                                {
-                                    <span class="text-success small"><i class="bi bi-check-circle me-1"></i>Saved</span>
-                                }
-                                @if (themeError is not null)
-                                {
-                                    <span class="text-danger small">@themeError</span>
-                                }
-                            </div>
+                            @* Visual / CSS theme editor — keyed by theme ID so switching themes creates a fresh instance *@
+                            <KeycloakThemeEditor @key="selectedNamedTheme.Id"
+                                                 TenantId="TenantId"
+                                                 ComponentId="selectedKeycloak!.ComponentId"
+                                                 Theme="selectedNamedTheme"
+                                                 IsManagedKeycloak="!selectedKeycloak.IsExternal" />
                         </div>
                     </div>
                 }
@@ -2043,14 +2029,18 @@ else if (selectedKeycloak is not null)
                                 @if (migrateCssCopied > 0)
                                 {
                                     <div><i class="bi bi-check-circle me-1"></i>
-                                        Theme CSS: <strong>@migrateCssCopied / 4 types</strong> copied to target. Edit them in the Themes tab.</div>
+                                        Legacy CSS: <strong>@migrateCssCopied / 4 types</strong> copied.</div>
                                 }
-                                else
+                                @if (migrateNamedThemesCopied > 0)
+                                {
+                                    <div><i class="bi bi-check-circle me-1"></i>
+                                        Named themes: <strong>@migrateNamedThemesCopied</strong> copied (variables &amp; resources).
+                                        Open each theme in the Themes tab and click <em>Save &amp; Deploy</em> to push to Keycloak.</div>
+                                }
+                                @if (migrateCssCopied == 0 && migrateNamedThemesCopied == 0)
                                 {
                                     <div><i class="bi bi-exclamation-triangle me-1"></i>
-                                        Theme CSS: nothing to copy — the source instance has no CSS saved in EntKube yet.
-                                        EntKube stores CSS overrides separately from the themes installed in Keycloak itself.
-                                        Open the Themes tab on the source instance to add CSS, then copy again.</div>
+                                        Theme CSS &amp; named themes: nothing to copy — the source instance has no theme data saved in EntKube yet.</div>
                                 }
                             }
                             @if (anyErrors)
@@ -2088,7 +2078,7 @@ else if (selectedKeycloak is not null)
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" id="migrateCopyThemeCss" @bind="migrateCopyThemeCss" />
-                                <label class="form-check-label small" for="migrateCopyThemeCss">Copy theme CSS overrides <span class="text-muted">(EntKube-stored CSS, not Keycloak theme providers)</span></label>
+                                <label class="form-check-label small" for="migrateCopyThemeCss">Copy theme data <span class="text-muted">(CSS overrides, visual editor settings &amp; resources)</span></label>
                             </div>
                         </div>
 
@@ -2423,15 +2413,10 @@ else
     private string instanceTab = "realms";
 
     // ── Themes tab ───────────────────────────────────────────────────────────
-    private string themeType = "login";
     private Dictionary<string, List<string>>? availableThemes;
     private List<KeycloakTheme> namedThemes = [];
     private KeycloakTheme? selectedNamedTheme;
     private bool loadingThemes;
-    private string? themeCss;
-    private bool savingTheme;
-    private bool themeSaved;
-    private string? themeError;
 
     // ── Named theme create form ───────────────────────────────────────────────
     private bool showCreateTheme;
@@ -2449,6 +2434,8 @@ else
     private string editThemeLoginTheme = "";
     private string editThemeAccountTheme = "";
     private bool deletingTheme;
+    private bool duplicatingTheme;
+    private string? duplicateThemeError;
 
     // ── Per-tab lazy data ─────────────────────────────────────────────────────
     private List<KeycloakUserInfo>? users;
@@ -2625,6 +2612,7 @@ else
     private bool migrating;
     private CopyResult? migrateResult;
     private int migrateCssCopied;
+    private int migrateNamedThemesCopied;
     private string? migrateError;
 
     protected override async Task OnInitializedAsync()
@@ -2649,9 +2637,6 @@ else
         namedThemes = [];
         selectedNamedTheme = null;
         showCreateTheme = false;
-        themeCss = null;
-        themeSaved = false;
-        themeError = null;
         realmSyncError = null;
 
         if (kc.IsConfigured)
@@ -2695,8 +2680,6 @@ else
     private async Task SwitchInstanceTab(string tab)
     {
         instanceTab = tab;
-        themeSaved = false;
-        themeError = null;
 
         if (tab == "themes" && selectedKeycloak?.Config is not null)
         {
@@ -2713,14 +2696,6 @@ else
         }
     }
 
-    private async Task SwitchThemeType(string type)
-    {
-        themeType = type;
-        themeSaved = false;
-        themeError = null;
-        await LoadThemeCss();
-    }
-
     private async Task LoadThemesTab()
     {
         if (selectedKeycloak?.Config is null) return;
@@ -2735,13 +2710,7 @@ else
 
             // Re-select the same named theme if it still exists after a reload.
             if (selectedNamedTheme is not null)
-            {
                 selectedNamedTheme = namedThemes.FirstOrDefault(t => t.Id == selectedNamedTheme.Id);
-                if (selectedNamedTheme is not null)
-                    await LoadThemeCss();
-                else
-                    themeCss = null;
-            }
         }
         catch
         {
@@ -2754,26 +2723,15 @@ else
         }
     }
 
-    private async Task LoadThemeCss()
-    {
-        if (selectedKeycloak is null || selectedNamedTheme is null) { themeCss = null; return; }
-        themeCss = await KeycloakService.GetNamedThemeCssAsync(
-            TenantId, selectedKeycloak.ComponentId, selectedNamedTheme.Id, themeType);
-    }
-
-    private async Task SelectNamedTheme(KeycloakTheme theme)
+    private void SelectNamedTheme(KeycloakTheme theme)
     {
         selectedNamedTheme = theme;
         editThemeName = theme.Name;
         editThemeLoginTheme = theme.LoginTheme ?? "";
         editThemeAccountTheme = theme.AccountTheme ?? "";
-        themeType = "login";
-        themeSaved = false;
-        themeError = null;
         themeMetaSaved = false;
         themeMetaError = null;
         showCreateTheme = false;
-        await LoadThemeCss();
     }
 
     private async Task CreateNamedTheme()
@@ -2796,7 +2754,7 @@ else
             newThemeName = "";
             newThemeLoginTheme = "";
             newThemeAccountTheme = "";
-            await SelectNamedTheme(created);
+            SelectNamedTheme(created);
         }
         catch (Exception ex)
         {
@@ -2837,27 +2795,35 @@ else
         }
     }
 
-    private async Task SaveNamedThemeCss()
+    private async Task DuplicateNamedTheme()
     {
         if (selectedKeycloak is null || selectedNamedTheme is null) return;
 
-        savingTheme = true;
-        themeSaved = false;
-        themeError = null;
+        duplicatingTheme = true;
+        duplicateThemeError = null;
 
         try
         {
-            await KeycloakService.SaveNamedThemeCssAsync(
-                TenantId, selectedKeycloak.ComponentId, selectedNamedTheme.Id, themeType, themeCss ?? "");
-            themeSaved = true;
+            KeycloakTheme dup = await KeycloakService.DuplicateNamedThemeAsync(
+                TenantId, selectedNamedTheme.Id, selectedKeycloak.ComponentId);
+
+            namedThemes = await KeycloakService.GetNamedThemesAsync(TenantId, selectedKeycloak.Config!.Id);
+            // Switch to the newly created duplicate
+            selectedNamedTheme = namedThemes.FirstOrDefault(t => t.Id == dup.Id);
+            if (selectedNamedTheme is not null)
+            {
+                editThemeName = selectedNamedTheme.Name;
+                editThemeLoginTheme = selectedNamedTheme.LoginTheme ?? "";
+                editThemeAccountTheme = selectedNamedTheme.AccountTheme ?? "";
+            }
         }
         catch (Exception ex)
         {
-            themeError = ex.Message;
+            duplicateThemeError = ex.Message;
         }
         finally
         {
-            savingTheme = false;
+            duplicatingTheme = false;
         }
     }
 
@@ -2875,7 +2841,6 @@ else
 
             namedThemes = await KeycloakService.GetNamedThemesAsync(TenantId, selectedKeycloak.Config!.Id);
             selectedNamedTheme = null;
-            themeCss = null;
         }
         catch (Exception ex)
         {
@@ -2886,8 +2851,6 @@ else
             deletingTheme = false;
         }
     }
-
-    private Task SaveThemeCss() => SaveNamedThemeCss();
 
     // ── Register external ─────────────────────────────────────────────────────
 
@@ -2960,6 +2923,7 @@ else
         migrating = true;
         migrateResult = null;
         migrateCssCopied = 0;
+        migrateNamedThemesCopied = 0;
         migrateError = null;
 
         try
@@ -2978,6 +2942,8 @@ else
             if (migrateCopyThemeCss)
             {
                 migrateCssCopied = await KeycloakService.CopyThemeCssAsync(
+                    TenantId, migrateSourceKcId, selectedKeycloak.ComponentId);
+                migrateNamedThemesCopied = await KeycloakService.CopyNamedThemesAsync(
                     TenantId, migrateSourceKcId, selectedKeycloak.ComponentId);
             }
 
@@ -3461,11 +3427,13 @@ else
 
             if (realmDetails is not null)
             {
-                KeycloakTheme? applied = editRealmNamedThemeId is not null
-                    ? namedThemes.FirstOrDefault(t => t.Id == editRealmNamedThemeId)
-                    : null;
-                editLoginTheme = applied?.LoginTheme ?? realmDetails.LoginTheme ?? "";
-                editAccountTheme = applied?.AccountTheme ?? realmDetails.AccountTheme ?? "";
+                // Refresh realm details from Keycloak so editLoginTheme reflects the slug that
+                // AssignNamedThemeToRealmAsync just wrote. Without this, editLoginTheme keeps the
+                // stale in-memory value (e.g. "theme-salesdata") and a subsequent Save click
+                // reverts the realm back to the wrong slug.
+                realmDetails = await KeycloakService.GetRealmDetailsAsync(TenantId, selectedRealm.Id);
+                editLoginTheme = realmDetails.LoginTheme ?? "";
+                editAccountTheme = realmDetails.AccountTheme ?? "";
             }
         }
         catch (Exception ex)

@@ -10,6 +10,7 @@
 @inject HarborService HarborService
 @inject LokiService LokiService
 @inject StorageService StorageService
+@inject HeadscaleService HeadscaleService
 
 @* ═══════════════════════════════════════════════════════════════════
    Cluster Detail — a full-page view for a single cluster.
@@ -88,6 +89,11 @@
             <i class="bi bi-journal-text me-1"></i>Logs
         </button>
     </li>
+    <li class="nav-item">
+        <button class="nav-link @(section == "vpn" ? "active" : "")" @onclick='() => section = "vpn"'>
+            <i class="bi bi-shield-lock-fill me-1"></i>VPN
+        </button>
+    </li>
 </ul>
 
 @if (section == "monitoring")
@@ -101,6 +107,10 @@ else if (section == "nodes")
 else if (section == "logs")
 {
     <LogBrowser ClusterId="Cluster.Id" />
+}
+else if (section == "vpn")
+{
+    <HeadscaleVpnTab ClusterId="Cluster.Id" TenantId="TenantId" />
 }
 else if (section == "components")
 {
@@ -424,6 +434,14 @@ else if (section == "components")
                                     {
                                         <small class="text-muted">@field.HelpText</small>
                                     }
+                                    @if (field.Key == "wg-host" && !string.IsNullOrEmpty(regDetectedGatewayIp))
+                                    {
+                                        <small class="text-muted d-block"><i class="bi bi-hdd-network me-1"></i>Gateway LoadBalancer IP: <code>@regDetectedGatewayIp</code> — create a DNS record (e.g. an A record) pointing your hostname here, then enter that hostname above.</small>
+                                    }
+                                    @if (field.Key == "wg-host" && LooksLikeIpAddress(GetFormFieldValue(field.Key)))
+                                    {
+                                        <small class="text-warning d-block"><i class="bi bi-exclamation-triangle me-1"></i>This is an IP address. Clients will connect to the VPN at this literal IP, and the web-UI route won't work (an HTTPRoute hostname must be a DNS name). Enter a hostname that resolves to this IP instead.</small>
+                                    }
                                 </div>
                                 }
                             }
@@ -642,6 +660,16 @@ else if (section == "components")
                                             {
                                                 <small class="text-muted"><i class="bi bi-tag me-1"></i>v@(comp.HelmChartVersion)</small>
                                             }
+                                            @if (headerCatalog is not null
+                                                && !string.IsNullOrEmpty(headerCatalog.HelmChartVersion)
+                                                && comp.Status == ComponentStatus.Installed
+                                                && comp.HelmChartVersion != headerCatalog.HelmChartVersion)
+                                            {
+                                                <span class="badge bg-info text-dark"
+                                                      title="Catalog version: @headerCatalog.HelmChartVersion — click Apply to upgrade">
+                                                    <i class="bi bi-arrow-up-circle me-1"></i>Update available
+                                                </span>
+                                            }
                                             @if (comp.InstalledAt.HasValue)
                                             {
                                                 <small class="text-muted"><i class="bi bi-clock me-1"></i>@comp.InstalledAt.Value.ToString("g")</small>
@@ -693,8 +721,10 @@ else if (section == "components")
                                                 <i class="bi bi-wrench me-1"></i>Enable Gateway API
                                             </button>
                                         }
-                                        <button class="btn btn-sm btn-outline-primary" @onclick="() => UpgradeComponent(comp.Id)" title="Apply configuration changes">
-                                            <i class="bi bi-arrow-clockwise me-1"></i>Apply
+                                        <button class="btn btn-sm @(HasCatalogUpdate(comp, headerCatalog) ? "btn-primary" : "btn-outline-primary")"
+                                                @onclick="() => UpgradeComponent(comp.Id)"
+                                                title="@(HasCatalogUpdate(comp, headerCatalog) ? $"Upgrade to v{headerCatalog!.HelmChartVersion}" : "Apply configuration changes")">
+                                            <i class="bi @(HasCatalogUpdate(comp, headerCatalog) ? "bi-arrow-up-circle-fill" : "bi-arrow-clockwise") me-1"></i>@(HasCatalogUpdate(comp, headerCatalog) ? "Upgrade" : "Apply")
                                         </button>
                                         <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteComponentId = comp.Id" title="Uninstall">
                                             <i class="bi bi-stop-fill me-1"></i>Uninstall
@@ -930,6 +960,14 @@ else if (section == "components")
                                                     @if (!string.IsNullOrEmpty(field.HelpText))
                                                     {
                                                         <small class="text-muted">@field.HelpText</small>
+                                                    }
+                                                    @if (field.Key == "wg-host" && !string.IsNullOrEmpty(editDetectedGatewayIp))
+                                                    {
+                                                        <small class="text-muted d-block"><i class="bi bi-hdd-network me-1"></i>Gateway LoadBalancer IP: <code>@editDetectedGatewayIp</code> — create a DNS record (e.g. an A record) pointing your hostname here, then enter that hostname above.</small>
+                                                    }
+                                                    @if (field.Key == "wg-host" && LooksLikeIpAddress(GetEditFormFieldValue(field.Key)))
+                                                    {
+                                                        <small class="text-warning d-block"><i class="bi bi-exclamation-triangle me-1"></i>This is an IP address. Clients will connect to the VPN at this literal IP, and the web-UI route won't work (an HTTPRoute hostname must be a DNS name). Enter a hostname that resolves to this IP instead.</small>
                                                     }
                                                 </div>
                                                 }
@@ -1382,6 +1420,12 @@ else if (section == "components")
     private List<string>? keycloakAvailableIssuers;
     private List<StorageLink>? harborStorageLinks;
 
+    // Gateway LoadBalancer IP detected when a GatewaySelector field is chosen.
+    // Shown as a hint so the user can point a DNS record at it and enter a hostname
+    // (rather than the IP) for fields like wg-easy's WG_HOST.
+    private string? regDetectedGatewayIp;
+    private string? editDetectedGatewayIp;
+
     // Config editor
     private string editRepoUrl = "";
     private string editChartName = "";
@@ -1668,6 +1712,7 @@ else if (section == "components")
 
             await SaveLokiConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
 
+
             showRegisterForm = false;
             ResetRegisterForm();
             await LoadComponents();
@@ -1738,6 +1783,28 @@ else if (section == "components")
             // then override with any values that exist in the current YAML.
 
             InitEditFormFields(comp);
+
+            // Reload secret-backed field values from the vault so they re-populate the
+            // form when reopening the component (e.g. wg-easy's gateway / hostname).
+            // Password fields are left blank — we never echo secrets back into the UI.
+            CatalogEntry? secretCatalog = ComponentCatalog.GetByKey(comp.Name);
+            if (secretCatalog is not null)
+            {
+                foreach (ComponentFormField field in secretCatalog.FormFields)
+                {
+                    if (!field.StoreAsSecret || field.Type == FormFieldType.Password)
+                    {
+                        continue;
+                    }
+
+                    string secretName = field.SecretName ?? field.Key;
+                    string? secretValue = await VaultService.GetComponentSecretValueAsync(TenantId, componentId, secretName);
+                    if (!string.IsNullOrEmpty(secretValue))
+                    {
+                        editFormFieldValues[field.Key] = secretValue;
+                    }
+                }
+            }
 
             // For components with a CnpgDatabase field (e.g. Keycloak), load available
             // databases and pre-populate config fields from the existing KeycloakComponentConfig.
@@ -1941,6 +2008,10 @@ else if (section == "components")
                     };
                 }
 
+                // For components that self-expose (e.g. headscale): ensure the external route
+                // record exists before applying so it's included in the Gateway manifest.
+                await HeadscaleService.EnsureExternalRouteAfterInstallAsync(componentId);
+
                 // Apply HTTPRoute + Certificate manifests for any configured external routes.
                 HelmExecutionResult routeResult = await LifecycleService.ApplyExternalRoutesAsync(componentId);
                 if (!string.IsNullOrWhiteSpace(routeResult.Output))
@@ -1950,6 +2021,22 @@ else if (section == "components")
                         Success = result.Success && routeResult.Success,
                         Output = result.Output + "\n\n--- Route Apply ---\n" + routeResult.Output
                     };
+                }
+
+                // wg-easy: automatically re-apply its target Istio gateway so the
+                // gateway's LoadBalancer exposes the WireGuard UDP port — no manual
+                // Save & Apply on the gateway required.
+                if (components?.FirstOrDefault(c => c.Id == componentId)?.Name == "wg-easy")
+                {
+                    HelmExecutionResult? gwResult = await LifecycleService.EnsureGatewayWireGuardPortAsync(componentId);
+                    if (gwResult is not null && !string.IsNullOrWhiteSpace(gwResult.Output))
+                    {
+                        result = new HelmExecutionResult
+                        {
+                            Success = result.Success && gwResult.Success,
+                            Output = result.Output + "\n\n--- Gateway UDP Port ---\n" + gwResult.Output
+                        };
+                    }
                 }
             }
 
@@ -2044,6 +2131,8 @@ else if (section == "components")
                     };
                 }
 
+                await HeadscaleService.EnsureExternalRouteAfterInstallAsync(componentId);
+
                 HelmExecutionResult routeResult = await LifecycleService.ApplyExternalRoutesAsync(componentId);
                 if (!string.IsNullOrWhiteSpace(routeResult.Output))
                 {
@@ -2079,6 +2168,13 @@ else if (section == "components")
         {
             await LifecycleService.PrepareUninstallAsync(componentId);
 
+            // wg-easy: capture its target Istio gateway BEFORE uninstalling (while the
+            // WG_GATEWAY_NAME secret still exists) so we can re-apply it afterwards to
+            // strip the WireGuard UDP port from the gateway's LoadBalancer.
+            Guid? wgGatewayId = components?.FirstOrDefault(c => c.Id == componentId)?.Name == "wg-easy"
+                ? await LifecycleService.ResolveWireGuardGatewayIdAsync(componentId)
+                : null;
+
             // Uninstall any subcharts (e.g. Barman Cloud Plugin) before the parent.
 
             HelmExecutionResult subResult = await LifecycleService.UninstallSubchartsAsync(componentId);
@@ -2093,6 +2189,17 @@ else if (section == "components")
             bool success = result.Success && subResult.Success;
 
             await LifecycleService.MarkUninstallResultAsync(componentId, success, success ? null : combinedOutput);
+
+            // Now that wg-easy is NotInstalled, re-apply its gateway so the UDP port is
+            // removed (GetInstallCommandAsync no longer injects it).
+            if (success && wgGatewayId is not null)
+            {
+                HelmExecutionResult? gwResult = await LifecycleService.ReapplyGatewayAsync(wgGatewayId.Value);
+                if (gwResult is not null && !string.IsNullOrWhiteSpace(gwResult.Output))
+                {
+                    combinedOutput += "\n\n--- Gateway UDP Port (removed) ---\n" + gwResult.Output;
+                }
+            }
 
             operationOutput = combinedOutput;
             operationComponentId = componentId;
@@ -2296,7 +2403,12 @@ else if (section == "components")
     {
         string? ip = await LifecycleService.GetServiceExternalIpAsync(
             Cluster.Id, gatewayReleaseName, "istio-system");
-        if (!string.IsNullOrEmpty(ip))
+        regDetectedGatewayIp = ip;
+
+        // Only seed the field when it's empty — never overwrite a hostname the user
+        // has typed. WG_HOST becomes the WireGuard client endpoint, so a DNS name is
+        // preferred; the detected IP is surfaced as a hint instead of forced in.
+        if (!string.IsNullOrEmpty(ip) && string.IsNullOrWhiteSpace(GetFormFieldValue("wg-host")))
             regFormFieldValues["wg-host"] = ip;
     }
 
@@ -2304,7 +2416,9 @@ else if (section == "components")
     {
         string? ip = await LifecycleService.GetServiceExternalIpAsync(
             Cluster.Id, gatewayReleaseName, "istio-system");
-        if (!string.IsNullOrEmpty(ip))
+        editDetectedGatewayIp = ip;
+
+        if (!string.IsNullOrEmpty(ip) && string.IsNullOrWhiteSpace(GetEditFormFieldValue("wg-host")))
             editFormFieldValues["wg-host"] = ip;
     }
 
@@ -2398,7 +2512,8 @@ else if (section == "components")
 
             if (field.YamlPath.StartsWith("cnpg:", StringComparison.Ordinal)
                 || field.YamlPath.StartsWith("harbor:", StringComparison.Ordinal)
-                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal))
+                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal)
+)
             {
                 continue;
             }
@@ -2474,7 +2589,8 @@ else if (section == "components")
 
             if (field.YamlPath.StartsWith("cnpg:", StringComparison.Ordinal)
                 || field.YamlPath.StartsWith("harbor:", StringComparison.Ordinal)
-                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal))
+                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal)
+)
             {
                 continue;
             }
@@ -2605,6 +2721,15 @@ else if (section == "components")
         }
     }
 
+    /// <summary>
+    /// True when the value parses as a bare IPv4/IPv6 address. Used to warn that a
+    /// field feeding an HTTPRoute hostname (e.g. wg-easy's WG_HOST) needs a DNS name.
+    /// </summary>
+    private static bool LooksLikeIpAddress(string? value)
+    {
+        return !string.IsNullOrWhiteSpace(value) && System.Net.IPAddress.TryParse(value.Trim(), out _);
+    }
+
     private void InitEditFormFields(ClusterComponent comp)
     {
         // Look up the catalog entry to get form field definitions,
@@ -2648,11 +2773,19 @@ else if (section == "components")
                     continue;
                 }
 
-                // cnpg:/harbor:/loki: fields are not in YAML — loaded from component configs in ToggleComponentDetail.
+                // Secret-backed / manifest-placeholder fields have no YAML path —
+                // their values live in the vault and are loaded in ToggleComponentDetail.
+                if (string.IsNullOrEmpty(field.YamlPath))
+                {
+                    continue;
+                }
+
+                // cnpg:/harbor:/loki:/headscale: fields are not in YAML — loaded from component configs in ToggleComponentDetail.
 
                 if (field.YamlPath.StartsWith("cnpg:", StringComparison.Ordinal)
                     || field.YamlPath.StartsWith("harbor:", StringComparison.Ordinal)
-                    || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal))
+                    || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal)
+    )
                 {
                     continue;
                 }
@@ -2764,6 +2897,7 @@ else if (section == "components")
         await RouteService.AddRouteAsync(componentId, routeRequest);
     }
 
+
     private async Task RepairMissingGatewayApiCrds()
     {
         componentError = null;
@@ -2802,6 +2936,12 @@ else if (section == "components")
         await LoadComponents();
         await UpgradeComponent(certManager.Id, noWait: true);
     }
+
+    private static bool HasCatalogUpdate(ClusterComponent comp, CatalogEntry? entry) =>
+        entry is not null
+        && !string.IsNullOrEmpty(entry.HelmChartVersion)
+        && comp.Status == ComponentStatus.Installed
+        && comp.HelmChartVersion != entry.HelmChartVersion;
 
     private static bool IsKeycloakComponent(ClusterComponent comp) =>
         comp.Name == "keycloak"

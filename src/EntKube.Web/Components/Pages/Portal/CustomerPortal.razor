@@ -98,7 +98,7 @@ else
     @* ════════════════════════════════════════════════════════════════
        Level 2: Apps and deployments for a selected customer
        ════════════════════════════════════════════════════════════════ *@
-    else if (selectedDeployment is null && selectedIdentityRealm is null && selectedSecrets is null && selectedRegistryProject is null && selectedGovernanceApp is null && selectedResourcesApp is null && selectedRoutesApp is null && selectedPortalEnvironment is null)
+    else if (selectedDeployment is null && selectedIdentityRealm is null && selectedSecrets is null && selectedRegistryProject is null && selectedGovernanceApp is null && selectedResourcesApp is null && selectedRoutesApp is null && selectedPortalEnvironment is null && !showNotifications)
     {
         <div class="d-flex align-items-center mb-3">
             <i class="bi bi-people fs-3 me-2 text-primary"></i>
@@ -110,6 +110,9 @@ else
                 <button class="btn btn-sm @(showMonitoringPanel ? "btn-primary" : "btn-outline-secondary")"
                         @onclick="() => showMonitoringPanel = !showMonitoringPanel">
                     <span class="bi bi-heart-pulse me-1"></span>Monitoring
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showNotifications = true">
+                    <span class="bi bi-bell me-1"></span>Notifications
                 </button>
                 <a class="btn btn-sm btn-outline-secondary" href="/portal/status">
                     <span class="bi bi-activity me-1"></span>Status Overview
@@ -454,6 +457,18 @@ else
     {
         <PortalAppRoutesPanel App="selectedRoutesApp" AccessRole="currentAccessRole" />
     }
+
+    @* ════════════════════════════════════════════════════════════════
+       Customer-wide: notifications (expiring secrets + channels)
+       ════════════════════════════════════════════════════════════════ *@
+    else if (showNotifications)
+    {
+        <PortalNotifications
+            TenantId="selectedCustomer!.TenantId"
+            CustomerId="selectedCustomer.Id"
+            CustomerName="selectedCustomer.Name"
+            AccessRole="currentAccessRole" />
+    }
 }
 
 <style>
@@ -471,7 +486,8 @@ else
         selectedDeployment is not null || selectedIdentityRealm is not null ||
         selectedSecrets is not null || selectedRegistryProject is not null ||
         selectedGovernanceApp is not null || selectedResourcesApp is not null ||
-        selectedRoutesApp is not null || selectedPortalEnvironment is not null;
+        selectedRoutesApp is not null || selectedPortalEnvironment is not null ||
+        showNotifications;
 
     private IReadOnlyList<Breadcrumb.BreadcrumbItem> PortalBreadcrumbs
     {
@@ -510,6 +526,8 @@ else
                 items.Add(new($"{selectedRoutesApp.Name} — URLs", "bi-globe", IsActive: true));
             else if (selectedPortalEnvironment is not null && selectedPortalApp is not null)
                 items.Add(new($"{selectedPortalApp.Name} › {selectedPortalEnvironment.Name}", "bi-app-indicator", IsActive: true));
+            else if (showNotifications)
+                items.Add(new("Notifications", "bi-bell", IsActive: true));
 
             return items;
         }
@@ -568,6 +586,7 @@ else
 
     // Monitoring panel toggle in Level 2
     private bool showMonitoringPanel;
+    private bool showNotifications;
 
     private List<AppDeployment> AllCustomerDeployments =>
         appDeployments.Values.SelectMany(d => d).ToList();
@@ -607,6 +626,7 @@ else
         selectedCustomer = customer;
         loadingCustomer = true;
         showMonitoringPanel = false;
+        showNotifications = false;
         StateHasChanged();
 
         // Look up the user's role for this customer.
@@ -696,8 +716,7 @@ else
         selectedIdentityRealm = null;
         selectedSecrets = null;
         selectedRegistryProject = null;
-
-
+        showNotifications = false;
     }
 
     private void OpenAppSecrets(Data.App app)       => selectedSecrets = new(app, "app");
@@ -800,7 +819,7 @@ else
         selectedRoutesApp = null;
         selectedPortalApp = null;
         selectedPortalEnvironment = null;
-
+        showNotifications = false;
     }
 
     private async Task OnDeploymentDeleted()

@@ -168,4 +168,72 @@ public class YamlFormMergerTests
         result.Should().Contain("rootUser: admin");
         result.Should().Contain("rootPassword: changeme");
     }
+
+    // ──────── EnsureWireGuardGatewayPort ────────
+
+    [Fact]
+    public void EnsureWireGuardGatewayPort_WithNoPorts_SeedsStandardPortsPlusWireguard()
+    {
+        // The Istio gateway's stored values typically only set service.type.
+        // Adding the UDP port must also re-list the standard ports, because
+        // specifying service.ports overrides the chart defaults.
+
+        string baseYaml = """
+            service:
+              type: LoadBalancer
+            resources:
+              requests:
+                cpu: 100m
+            """;
+
+        string result = YamlFormMerger.EnsureWireGuardGatewayPort(baseYaml);
+
+        // Ports come back as a proper YAML sequence with integer (unquoted) ports.
+        result.Should().Contain("name: status-port");
+        result.Should().Contain("name: http2");
+        result.Should().Contain("name: https");
+        result.Should().Contain("name: wireguard");
+        result.Should().Contain("port: 51820");
+        result.Should().Contain("protocol: UDP");
+        result.Should().NotContain("port: \"51820\"");
+
+        // It's a sequence (list item), not a map keyed "0".
+        result.Should().Contain("- name: status-port");
+        result.Should().NotContain("'0':");
+
+        // Existing keys are preserved.
+        result.Should().Contain("type: LoadBalancer");
+        result.Should().Contain("cpu: 100m");
+
+        // And the result round-trips as valid YAML.
+        string? extracted = YamlFormMerger.ExtractValue(result, "service.type");
+        extracted.Should().Be("LoadBalancer");
+    }
+
+    [Fact]
+    public void EnsureWireGuardGatewayPort_WhenWireguardAlreadyPresent_IsNoOp()
+    {
+        // Re-applying must be idempotent — no duplicate wireguard entries.
+
+        string baseYaml = """
+            service:
+              type: LoadBalancer
+              ports:
+                - name: http2
+                  port: 80
+                  protocol: TCP
+                  targetPort: 80
+                - name: wireguard
+                  port: 51820
+                  protocol: UDP
+                  targetPort: 51820
+            """;
+
+        string result = YamlFormMerger.EnsureWireGuardGatewayPort(baseYaml);
+
+        int wireguardCount = result.Split("name: wireguard").Length - 1;
+        wireguardCount.Should().Be(1);
+        // It should NOT inject the standard ports again on top of an existing list.
+        result.Should().NotContain("name: status-port");
+    }
 }

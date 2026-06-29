@@ -17,10 +17,18 @@
    ═══════════════════════════════════════════════════════════════════ *@
 
 <style>
+    .rg-wrap {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+    }
+
     .rg-outer {
         overflow-x: auto;
         overflow-y: auto;
-        max-height: 75vh;
+        flex: 1;
+        min-height: 0;
         background: #f6f8fa;
         border-radius: 8px;
         border: 1px solid #e9ecef;
@@ -51,9 +59,10 @@
     .rg-card {
         position: absolute;
         width: 204px;
-        background: white;
+        box-sizing: border-box;
+        background: var(--hc-bg, white);
         border: 1px solid #dee2e6;
-        border-left: 3px solid var(--hc, #adb5bd);
+        border-left: 7px solid var(--hc, #adb5bd);
         border-radius: 8px;
         box-shadow: 0 1px 4px rgba(0,0,0,.07);
         overflow: hidden;
@@ -84,11 +93,28 @@
         color: #495057;
         flex-shrink: 0;
     }
-    .rg-health-dot {
+    .rg-health-badge {
         margin-left: auto;
-        width: 8px;
-        height: 8px;
+        flex-shrink: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: .64rem;
+        font-weight: 700;
+        letter-spacing: .03em;
+        text-transform: uppercase;
+        color: #fff;
+        background: var(--hc, #adb5bd);
+        border-radius: 10px;
+        padding: 1px 7px 1px 6px;
+        line-height: 1.45;
+    }
+    .rg-health-badge::before {
+        content: "";
+        width: 6px;
+        height: 6px;
         border-radius: 50%;
+        background: rgba(255,255,255,.9);
         flex-shrink: 0;
     }
 
@@ -139,7 +165,7 @@
     .rg-panel {
         position: absolute;
         z-index: 200;
-        width: 360px;
+        width: 700px;
         background: #1e1e2e;
         border: 1px solid #3a3a4e;
         border-radius: 8px;
@@ -171,7 +197,7 @@
     }
 </style>
 
-<div class="@(_fullscreen ? "rg-fs" : "")">
+<div class="@(_fullscreen ? "rg-fs" : "rg-wrap")">
 <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
     @if (!string.IsNullOrEmpty(Namespace))
     {
@@ -244,15 +270,15 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                 var isActive = _activePanelNodeId == nd.Node.Id;
 
                 <div class="rg-card @(isActive ? "rg-active" : "")"
-                     style="left:@(cx)px;top:@(cy)px;--hc:@hc;">
+                     style="left:@(cx)px;top:@(cy)px;--hc:@hc;--hc-bg:@HealthTint(nd.Node.HealthStatus);">
 
                     <div class="rg-card-body">
                         <div class="rg-card-top">
                             <i class="bi @KindIcon(nd.Node.Kind) @KindColor(nd.Node.Kind)"
                                style="font-size:.95rem;flex-shrink:0;"></i>
                             <span class="rg-kind-badge">@nd.Node.Kind</span>
-                            <div class="rg-health-dot" style="background:@hc;"
-                                 title="@HealthLabel(nd.Node.HealthStatus)"></div>
+                            <span class="rg-health-badge" style="background:@hc;"
+                                  title="@HealthLabel(nd.Node.HealthStatus)">@HealthLabel(nd.Node.HealthStatus)</span>
                         </div>
 
                         <div class="rg-card-name" title="@nd.Node.Name">@nd.Node.Name</div>
@@ -260,10 +286,6 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                         @if (!string.IsNullOrEmpty(nd.Node.StatusMessage))
                         {
                             <div class="rg-card-status">@nd.Node.StatusMessage</div>
-                        }
-                        else
-                        {
-                            <div class="rg-card-status" style="color:@hc;">@HealthLabel(nd.Node.HealthStatus)</div>
                         }
                     </div>
 
@@ -601,8 +623,43 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
         StateHasChanged();
         var r = await K8sOps.GetResourceYamlAsync(DeploymentId, node.Kind, node.Name);
         _panelLoading = false;
-        if (r.IsSuccess) _panelText = r.Data ?? "(empty)"; else _panelError = r.Error;
+        if (r.IsSuccess)
+        {
+            _panelText = node.Kind == "Secret"
+                ? RedactSecretData(r.Data ?? "(empty)")
+                : r.Data ?? "(empty)";
+        }
+        else
+            _panelError = r.Error;
         StateHasChanged();
+    }
+
+    private static string RedactSecretData(string yaml)
+    {
+        bool inDataSection = false;
+        var sb = new System.Text.StringBuilder();
+        foreach (string raw in yaml.Split('\n'))
+        {
+            string line = raw.TrimEnd('\r');
+            string trimmed = line.TrimEnd();
+            if (trimmed is "data:" or "binaryData:" or "stringData:")
+            {
+                inDataSection = true;
+                sb.Append(line).Append('\n');
+            }
+            else if (inDataSection && line.Length > 0 && (line[0] == ' ' || line[0] == '\t'))
+            {
+                int colon = line.IndexOf(':');
+                sb.Append(colon >= 0 ? line[..(colon + 1)] + " [REDACTED]" : line).Append('\n');
+            }
+            else
+            {
+                if (line.Length > 0 && line[0] != ' ' && line[0] != '\t')
+                    inDataSection = false;
+                sb.Append(line).Append('\n');
+            }
+        }
+        return sb.ToString();
     }
 
     private async Task LoadEventsAsync(DeploymentResource node)
@@ -705,16 +762,16 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
 
     private double ClampPanelX(double cardX)
     {
-        const double PanelW = 360;
+        const double PanelW = 700;
         double canvasW = _graphW + 24;
         return Math.Max(0, Math.Min(cardX, canvasW - PanelW));
     }
 
     private static double EstimatedPanelHeight(string? mode) => mode switch
     {
-        "logs"    => 430,
-        "events"  => 310,
-        "yaml"    => 410,
+        "logs"    => 760,
+        "events"  => 580,
+        "yaml"    => 740,
         "scale"   => 120,
         "trigger" => 90,
         _         => 70      // restart / delete
@@ -813,7 +870,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                 }
                 else
                 {
-                    <pre @ref="_logPreRef" class="m-0 p-2 text-light" style="max-height:320px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-size:.7rem;background:transparent;">@_panelText</pre>
+                    <pre @ref="_logPreRef" class="m-0 p-2 text-light" style="max-height:620px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-size:.7rem;background:transparent;">@_panelText</pre>
                 }
             }
 
@@ -829,7 +886,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                 }
                 else
                 {
-                    <pre class="m-0 p-2 text-light" style="max-height:260px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-size:.7rem;background:transparent;">@_panelText</pre>
+                    <pre class="m-0 p-2 text-light" style="max-height:520px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-size:.7rem;background:transparent;">@_panelText</pre>
                 }
             }
 
@@ -845,7 +902,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                 }
                 else
                 {
-                    <pre class="m-0 p-2 text-light" style="max-height:360px;overflow-y:auto;overflow-x:auto;white-space:pre;font-size:.68rem;background:transparent;tab-size:2;">@_panelText</pre>
+                    <pre class="m-0 p-2 text-light" style="max-height:680px;overflow-y:auto;overflow-x:auto;white-space:pre;font-size:.68rem;background:transparent;tab-size:2;">@_panelText</pre>
                 }
             }
 
@@ -941,6 +998,18 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
         HealthStatus.Missing     => "#dc3545",
         HealthStatus.Suspended   => "#6c757d",
         _                        => "#adb5bd",
+    };
+
+    // Very light card-background tint per health status, so the whole card reads
+    // its status at a glance — healthy stays subtle, problems pop.
+    private static string HealthTint(HealthStatus h) => h switch
+    {
+        HealthStatus.Healthy     => "#f1faf5",
+        HealthStatus.Progressing => "#eef4ff",
+        HealthStatus.Degraded    => "#fff6ee",
+        HealthStatus.Missing     => "#fdeff1",
+        HealthStatus.Suspended   => "#f5f6f7",
+        _                        => "#ffffff",
     };
 
     private static string HealthLabel(HealthStatus h) => h switch

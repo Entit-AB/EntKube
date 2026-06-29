@@ -21,23 +21,16 @@ public class NotificationService(
         CancellationToken ct = default)
     {
         if (!channel.IsEnabled) return;
-        if (!MeetsSeverityFilter(incident.Severity, channel.SeverityFilter)) return;
-        if (!MeetsFiringFilter(isFiring, channel.FiringFilter)) return;
-        if (!MeetsAcknowledgeFilter(incident.Status, channel.AcknowledgeFilter)) return;
+        if (!MeetsFilters(channel, incident.Severity, isFiring, incident.Status)) return;
+
+        NotificationMessage message = FromIncident(incident, isFiring);
 
         bool success = false;
         string? error = null;
 
         try
         {
-            success = channel.Type switch
-            {
-                NotificationChannelType.Slack   => await SendSlackAsync(incident, channel, isFiring, ct),
-                NotificationChannelType.Teams   => await SendTeamsAsync(incident, channel, isFiring, ct),
-                NotificationChannelType.Email   => await SendEmailAsync(incident, channel, isFiring),
-                NotificationChannelType.Webhook => await SendWebhookAsync(incident, channel, isFiring, ct),
-                _ => false
-            };
+            success = await DispatchToChannelAsync(message, channel, isFiring, ct);
         }
         catch (Exception ex)
         {
@@ -52,10 +45,175 @@ public class NotificationService(
             ChannelId = channel.Id,
             IsFiring = isFiring,
             Success = success,
-            Error = error?.Length > 1000 ? error[..1000] : error
+            Error = Truncate(error)
         });
         await db.SaveChangesAsync(ct);
     }
+
+    /// <summary>
+    /// Sends an expiring-secret notification. For the tenant/ops scope
+    /// (<paramref name="customerId"/> null) it targets tenant-level channels and honors
+    /// alert routing rules (a rule matching by name/severity routes or suppresses the
+    /// notice; cluster/namespace/label-scoped rules never match a secret event). For a
+    /// customer scope it targets that customer's own channels and ignores tenant routing
+    /// rules (customers don't manage them). Returns the number of channels notified plus
+    /// an aggregate success/error for the caller to record. Writes no NotificationDelivery
+    /// — the SecretExpiryNotification row is the record of this send.
+    /// </summary>
+    public async Task<(int Notified, bool Success, string? Error)> DispatchSecretExpiryAsync(
+        Guid tenantId, ExpiringSecretInfo secret, int thresholdDays, Guid? customerId = null, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<NotificationChannel> channels = await db.NotificationChannels
+            .Where(c => c.TenantId == tenantId && c.CustomerId == customerId && c.IsEnabled)
+            .ToListAsync(ct);
+        if (channels.Count == 0)
+            return (0, false, customerId is null
+                ? "No enabled notification channels are configured for this tenant"
+                : "No enabled notification channels are configured");
+
+        NotificationMessage message = BuildSecretExpiryMessage(secret, thresholdDays);
+
+        List<NotificationChannel> targets;
+        if (customerId is null)
+        {
+            List<AlertRoutingRule> routingRules = await db.AlertRoutingRules
+                .Include(r => r.Channel)
+                .Where(r => r.TenantId == tenantId && r.IsEnabled)
+                .OrderBy(r => r.Priority)
+                .ToListAsync(ct);
+            targets = ResolveSecretExpiryTargets(channels, routingRules, message.Title, message.Severity);
+            if (targets.Count == 0)
+                return (0, false, "Suppressed by an alert routing rule");
+        }
+        else
+        {
+            // Customer-owned channels: no tenant routing rules apply.
+            targets = channels;
+        }
+
+        int notified = 0;
+        List<string> errors = [];
+
+        foreach (NotificationChannel channel in targets)
+        {
+            if (!MeetsFilters(channel, message.Severity, isFiring: true, IncidentStatus.Active))
+                continue;
+
+            try
+            {
+                if (await DispatchToChannelAsync(message, channel, isFiring: true, ct))
+                    notified++;
+                else
+                    errors.Add($"{channel.Name}: delivery rejected");
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Secret-expiry notification failed for channel {Channel} ({Type})", channel.Name, channel.Type);
+                errors.Add($"{channel.Name}: {ex.Message}");
+            }
+        }
+
+        bool success = notified > 0;
+        string? error = errors.Count == 0 ? null : string.Join("; ", errors);
+        return (notified, success, Truncate(error));
+    }
+
+    /// <summary>Dispatches a prepared message to a single channel's transport. May throw; returns transport success.</summary>
+    private async Task<bool> DispatchToChannelAsync(
+        NotificationMessage message, NotificationChannel channel, bool isFiring, CancellationToken ct)
+        => channel.Type switch
+        {
+            NotificationChannelType.Slack   => await SendSlackAsync(message, channel, isFiring, ct),
+            NotificationChannelType.Teams   => await SendTeamsAsync(message, channel, isFiring, ct),
+            NotificationChannelType.Email   => await SendEmailAsync(message, channel, isFiring),
+            NotificationChannelType.Webhook => await SendWebhookAsync(message, channel, isFiring, ct),
+            _ => false
+        };
+
+    private static NotificationMessage FromIncident(AlertIncident incident, bool isFiring) => new()
+    {
+        Title = incident.AlertName,
+        Severity = incident.Severity,
+        ScopeFieldName = "Cluster",
+        ScopeLabel = incident.Cluster?.Name ?? incident.ClusterId.ToString(),
+        Timestamp = incident.StartsAt,
+        EndsAt = incident.EndsAt,
+        Summary = incident.Summary,
+        Description = incident.Description,
+        StatusLabel = incident.Status.ToString(),
+        Status = incident.Status
+    };
+
+    private static NotificationMessage BuildSecretExpiryMessage(ExpiringSecretInfo secret, int thresholdDays)
+    {
+        int? days = secret.DaysUntilExpiry;
+        bool critical = secret.IsExpired || (days.HasValue && days.Value <= 7);
+        string when = secret.ExpiresAt.HasValue ? secret.ExpiresAt.Value.ToString("u") : "an unknown date";
+        string title = secret.IsExpired ? $"Secret expired: {secret.Name}" : $"Secret expiring: {secret.Name}";
+        string summary = secret.IsExpired
+            ? $"{secret.TypeLabel} \"{secret.Name}\" ({secret.ScopeLabel}) expired on {when}."
+            : $"{secret.TypeLabel} \"{secret.Name}\" ({secret.ScopeLabel}) expires on {when}"
+              + (days.HasValue ? $" — in {days.Value} day(s)." : ".");
+
+        return new NotificationMessage
+        {
+            Title = title,
+            Severity = critical ? "critical" : "warning",
+            ScopeFieldName = "Scope",
+            ScopeLabel = secret.ScopeLabel,
+            Timestamp = DateTime.UtcNow,
+            Summary = summary,
+            Description = secret.Detail ?? "",
+            StatusLabel = "Active",
+            Status = IncidentStatus.Active
+        };
+    }
+
+    /// <summary>
+    /// Resolves the channels a secret-expiry notice should reach, applying routing
+    /// rules with the same precedence as alert dispatch: the first matching rule wins
+    /// (suppress → none; channel → just that channel); no match → all enabled channels.
+    /// </summary>
+    private static List<NotificationChannel> ResolveSecretExpiryTargets(
+        List<NotificationChannel> channels, List<AlertRoutingRule> rules, string title, string severity)
+    {
+        Dictionary<Guid, NotificationChannel> byId = channels.ToDictionary(c => c.Id);
+
+        foreach (AlertRoutingRule rule in rules)
+        {
+            // Rules scoped to a cluster/namespace/label can never match a secret event.
+            if (rule.MatchClusterId.HasValue) continue;
+            if (!string.IsNullOrEmpty(rule.MatchNamespace)) continue;
+            if (!string.IsNullOrEmpty(rule.MatchLabelKey)) continue;
+            if (!string.IsNullOrEmpty(rule.MatchAlertName)
+                && !title.Contains(rule.MatchAlertName, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (!string.IsNullOrEmpty(rule.MatchSeverity)
+                && !string.Equals(severity, rule.MatchSeverity, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (rule.SuppressIncident) return [];
+
+            if (rule.ChannelId.HasValue)
+            {
+                NotificationChannel? ruleChannel = byId.GetValueOrDefault(rule.ChannelId.Value) ?? rule.Channel;
+                if (ruleChannel is not null) return [ruleChannel];
+            }
+            // Matched but has no channel and isn't a suppress rule — fall through.
+        }
+
+        return channels;
+    }
+
+    private static string? Truncate(string? value) => value is { Length: > 1000 } ? value[..1000] : value;
+
+    private static bool MeetsFilters(NotificationChannel channel, string severity, bool isFiring, IncidentStatus status)
+        => channel.IsEnabled
+           && MeetsSeverityFilter(severity, channel.SeverityFilter)
+           && MeetsFiringFilter(isFiring, channel.FiringFilter)
+           && MeetsAcknowledgeFilter(status, channel.AcknowledgeFilter);
 
     /// <summary>
     /// Re-dispatches an existing incident to channels, respecting routing rules.
@@ -71,7 +229,7 @@ public class NotificationService(
         if (incident is null) return 0;
 
         List<NotificationChannel> channels = await db.NotificationChannels
-            .Where(c => c.TenantId == tenantId && c.IsEnabled)
+            .Where(c => c.TenantId == tenantId && c.CustomerId == null && c.IsEnabled)
             .ToListAsync(ct);
         if (channels.Count == 0) return 0;
 
@@ -135,31 +293,23 @@ public class NotificationService(
 
     public async Task SendTestAsync(NotificationChannel channel, CancellationToken ct = default)
     {
-        AlertIncident fake = new()
+        NotificationMessage message = new()
         {
-            Id = Guid.Empty,
-            ClusterId = Guid.Empty,
-            Fingerprint = "test",
-            AlertName = "TestAlert",
+            Title = "TestAlert",
             Severity = "info",
+            ScopeFieldName = "Cluster",
+            ScopeLabel = "test-cluster",
+            Timestamp = DateTime.UtcNow,
             Summary = "This is a test notification from EntKube.",
-            StartsAt = DateTime.UtcNow,
-            Status = IncidentStatus.Active,
-            Cluster = new KubernetesCluster { Name = "test-cluster", ApiServerUrl = "" }
+            StatusLabel = "Active",
+            Status = IncidentStatus.Active
         };
 
         bool success = false;
         string? error = null;
         try
         {
-            success = channel.Type switch
-            {
-                NotificationChannelType.Slack   => await SendSlackAsync(fake, channel, true, ct),
-                NotificationChannelType.Teams   => await SendTeamsAsync(fake, channel, true, ct),
-                NotificationChannelType.Email   => await SendEmailAsync(fake, channel, true),
-                NotificationChannelType.Webhook => await SendWebhookAsync(fake, channel, true, ct),
-                _ => false
-            };
+            success = await DispatchToChannelAsync(message, channel, isFiring: true, ct);
         }
         catch (Exception ex)
         {
@@ -171,23 +321,23 @@ public class NotificationService(
     }
 
     private async Task<bool> SendSlackAsync(
-        AlertIncident incident, NotificationChannel channel, bool isFiring, CancellationToken ct)
+        NotificationMessage message, NotificationChannel channel, bool isFiring, CancellationToken ct)
     {
         using JsonDocument config = JsonDocument.Parse(channel.ConfigurationJson);
         string webhookUrl = config.RootElement.GetProperty("webhookUrl").GetString()
             ?? throw new InvalidOperationException("Slack webhookUrl missing");
 
-        string emoji = incident.Severity switch
+        string emoji = message.Severity switch
         {
             "critical" => ":red_circle:",
             "warning"  => ":warning:",
             _          => ":information_source:"
         };
         string state = isFiring ? "FIRING" : "RESOLVED";
-        string text = $"{emoji} *[{state}] {incident.AlertName}*\n" +
-                      $"Severity: {incident.Severity} | Cluster: {incident.Cluster?.Name ?? incident.ClusterId.ToString()}\n" +
-                      $"Started: {incident.StartsAt:u}\n" +
-                      $"{(string.IsNullOrEmpty(incident.Summary) ? "" : incident.Summary)}";
+        string text = $"{emoji} *[{state}] {message.Title}*\n" +
+                      $"Severity: {message.Severity} | {message.ScopeFieldName}: {message.ScopeLabel}\n" +
+                      $"Time: {message.Timestamp:u}\n" +
+                      $"{(string.IsNullOrEmpty(message.Summary) ? "" : message.Summary)}";
 
         string body = JsonSerializer.Serialize(new { text });
         using HttpClient http = httpClientFactory.CreateClient("Notifications");
@@ -197,7 +347,7 @@ public class NotificationService(
     }
 
     private async Task<bool> SendTeamsAsync(
-        AlertIncident incident, NotificationChannel channel, bool isFiring, CancellationToken ct)
+        NotificationMessage message, NotificationChannel channel, bool isFiring, CancellationToken ct)
     {
         using JsonDocument config = JsonDocument.Parse(channel.ConfigurationJson);
 
@@ -206,16 +356,16 @@ public class NotificationService(
         {
             string teamId = teamIdEl.GetString() ?? throw new InvalidOperationException("teamId is empty");
             string channelId = channelIdEl.GetString() ?? throw new InvalidOperationException("channelId is empty");
-            return await SendTeamsViaGraphAsync(incident, teamId, channelId, isFiring, ct);
+            return await SendTeamsViaGraphAsync(message, teamId, channelId, isFiring, ct);
         }
 
         string webhookUrl = config.RootElement.GetProperty("webhookUrl").GetString()
             ?? throw new InvalidOperationException("Teams webhookUrl missing");
-        return await SendTeamsViaWebhookAsync(incident, webhookUrl, isFiring, ct);
+        return await SendTeamsViaWebhookAsync(message, webhookUrl, isFiring, ct);
     }
 
     private async Task<bool> SendTeamsViaGraphAsync(
-        AlertIncident incident, string teamId, string channelId, bool isFiring, CancellationToken ct)
+        NotificationMessage message, string teamId, string channelId, bool isFiring, CancellationToken ct)
     {
         NotificationProviderConfig? providerConfig;
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
@@ -238,7 +388,7 @@ public class NotificationService(
         string token = await NotificationProviderConfigService.AcquireGraphTokenAsync(tenantId, clientId, clientSecret, ct);
 
         string state = isFiring ? "FIRING" : "RESOLVED";
-        string color = incident.Severity switch
+        string color = message.Severity switch
         {
             "critical" => "#FF0000",
             "warning"  => "#FFA500",
@@ -250,10 +400,10 @@ public class NotificationService(
             body = new
             {
                 contentType = "html",
-                content = $"<h3 style=\"color:{color}\">[{state}] {incident.AlertName}</h3>" +
-                          $"<p><b>Severity:</b> {incident.Severity} | <b>Cluster:</b> {incident.Cluster?.Name ?? incident.ClusterId.ToString()}</p>" +
-                          $"<p><b>Started:</b> {incident.StartsAt:u}</p>" +
-                          (string.IsNullOrEmpty(incident.Summary) ? "" : $"<p>{incident.Summary}</p>")
+                content = $"<h3 style=\"color:{color}\">[{state}] {message.Title}</h3>" +
+                          $"<p><b>Severity:</b> {message.Severity} | <b>{message.ScopeFieldName}:</b> {message.ScopeLabel}</p>" +
+                          $"<p><b>Time:</b> {message.Timestamp:u}</p>" +
+                          (string.IsNullOrEmpty(message.Summary) ? "" : $"<p>{message.Summary}</p>")
             }
         };
 
@@ -268,9 +418,9 @@ public class NotificationService(
     }
 
     private async Task<bool> SendTeamsViaWebhookAsync(
-        AlertIncident incident, string webhookUrl, bool isFiring, CancellationToken ct)
+        NotificationMessage message, string webhookUrl, bool isFiring, CancellationToken ct)
     {
-        string color = incident.Severity switch
+        string color = message.Severity switch
         {
             "critical" => "attention",
             "warning"  => "warning",
@@ -292,13 +442,13 @@ public class NotificationService(
                         version = "1.4",
                         body = new object[]
                         {
-                            new { type = "TextBlock", text = $"[{state}] {incident.AlertName}", weight = "Bolder", size = "Medium", color },
+                            new { type = "TextBlock", text = $"[{state}] {message.Title}", weight = "Bolder", size = "Medium", color },
                             new { type = "FactSet", facts = new[]
                             {
-                                new { title = "Severity", value = incident.Severity },
-                                new { title = "Cluster", value = incident.Cluster?.Name ?? incident.ClusterId.ToString() },
-                                new { title = "Started", value = incident.StartsAt.ToString("u") },
-                                new { title = "Summary", value = string.IsNullOrEmpty(incident.Summary) ? "-" : incident.Summary }
+                                new { title = "Severity", value = message.Severity },
+                                new { title = message.ScopeFieldName, value = message.ScopeLabel },
+                                new { title = "Time", value = message.Timestamp.ToString("u") },
+                                new { title = "Summary", value = string.IsNullOrEmpty(message.Summary) ? "-" : message.Summary }
                             }}
                         }
                     }
@@ -313,7 +463,7 @@ public class NotificationService(
         return response.IsSuccessStatusCode;
     }
 
-    private async Task<bool> SendEmailAsync(AlertIncident incident, NotificationChannel channel, bool isFiring)
+    private async Task<bool> SendEmailAsync(NotificationMessage message, NotificationChannel channel, bool isFiring)
     {
         using JsonDocument config = JsonDocument.Parse(channel.ConfigurationJson);
         string to = config.RootElement.GetProperty("to").GetString()
@@ -360,14 +510,14 @@ public class NotificationService(
         }
 
         string state = isFiring ? "FIRING" : "RESOLVED";
-        string subject = $"[EntKube] [{state}] {incident.AlertName} ({incident.Severity})";
-        string bodyText = $"Alert: {incident.AlertName}\n" +
+        string subject = $"[EntKube] [{state}] {message.Title} ({message.Severity})";
+        string bodyText = $"Alert: {message.Title}\n" +
                           $"Status: {state}\n" +
-                          $"Severity: {incident.Severity}\n" +
-                          $"Cluster: {incident.Cluster?.Name ?? incident.ClusterId.ToString()}\n" +
-                          $"Started: {incident.StartsAt:u}\n" +
-                          $"Summary: {incident.Summary}\n" +
-                          $"Description: {incident.Description}";
+                          $"Severity: {message.Severity}\n" +
+                          $"{message.ScopeFieldName}: {message.ScopeLabel}\n" +
+                          $"Time: {message.Timestamp:u}\n" +
+                          $"Summary: {message.Summary}\n" +
+                          $"Description: {message.Description}";
 
         MimeMessage mail = new();
         mail.From.Add(MailboxAddress.Parse(from));
@@ -386,7 +536,7 @@ public class NotificationService(
     }
 
     private async Task<bool> SendWebhookAsync(
-        AlertIncident incident, NotificationChannel channel, bool isFiring, CancellationToken ct)
+        NotificationMessage message, NotificationChannel channel, bool isFiring, CancellationToken ct)
     {
         using JsonDocument config = JsonDocument.Parse(channel.ConfigurationJson);
         string url = config.RootElement.GetProperty("url").GetString()
@@ -399,14 +549,14 @@ public class NotificationService(
         object payload = new
         {
             firing = isFiring,
-            alertName = incident.AlertName,
-            severity = incident.Severity,
-            summary = incident.Summary,
-            description = incident.Description,
-            clusterName = incident.Cluster?.Name ?? incident.ClusterId.ToString(),
-            startsAt = incident.StartsAt,
-            endsAt = incident.EndsAt,
-            status = incident.Status.ToString()
+            alertName = message.Title,
+            severity = message.Severity,
+            summary = message.Summary,
+            description = message.Description,
+            clusterName = message.ScopeLabel,
+            startsAt = message.Timestamp,
+            endsAt = message.EndsAt,
+            status = message.StatusLabel
         };
 
         using HttpClient http = httpClientFactory.CreateClient("Notifications");
@@ -439,4 +589,24 @@ public class NotificationService(
         AlertAcknowledgeFilter.AcknowledgedOnly   => status == IncidentStatus.Acknowledged,
         _ => true
     };
+}
+
+/// <summary>
+/// A transport-agnostic notification payload. Decouples the per-channel senders
+/// (Slack/Teams/Email/Webhook) from their source so the same transports serve both
+/// alert incidents and expiring-secret notices. <see cref="ScopeFieldName"/> labels
+/// the context field (e.g. "Cluster" for alerts, "Scope" for secrets).
+/// </summary>
+public sealed record NotificationMessage
+{
+    public required string Title { get; init; }
+    public required string Severity { get; init; }
+    public string ScopeFieldName { get; init; } = "Cluster";
+    public string ScopeLabel { get; init; } = "";
+    public DateTime Timestamp { get; init; }
+    public DateTime? EndsAt { get; init; }
+    public string Summary { get; init; } = "";
+    public string Description { get; init; } = "";
+    public string StatusLabel { get; init; } = "Active";
+    public IncidentStatus Status { get; init; } = IncidentStatus.Active;
 }

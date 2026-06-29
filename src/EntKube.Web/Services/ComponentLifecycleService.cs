@@ -46,6 +46,8 @@ public class HelmCommand
     public string? ManifestUrl { get; set; }
     /// <summary>When true, skips --wait so Helm returns immediately after applying values.</summary>
     public bool NoWait { get; set; }
+    /// <summary>Helm --wait timeout (Go duration, e.g. "10m0s"). Heavier components can extend it.</summary>
+    public string Timeout { get; set; } = "10m0s";
 }
 
 /// <summary>
@@ -590,10 +592,68 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
 
         string? valuesYaml = await InjectSecretsIntoValuesAsync(component, ct);
 
+        // Istio gateways: when a wg-easy component is present on the cluster, expose the
+        // WireGuard UDP port on the gateway's LoadBalancer so VPN traffic rides the
+        // gateway IP. Injected here (like secret injection) so both Apply and
+        // Save & Apply pick it up without re-editing the gateway's stored values.
+        //
+        // The external gateway ("istio") is wg-easy's default target, so it gets the
+        // port whenever any wg-easy exists — robust even if the WG_GATEWAY_NAME secret
+        // wasn't captured. The internal gateway only gets it when a wg-easy explicitly
+        // targets it (its WG_GATEWAY_NAME == this gateway's release name).
+        if (component.Name is "istio" or "istio-internal")
+        {
+            string gatewayRelease = (component.ReleaseName ?? component.Name).Trim();
+
+            // Only installed wg-easy components count — so re-applying the gateway after
+            // a wg-easy uninstall (status → NotInstalled) drops the port again.
+            List<ClusterComponent> wgComponents = await db.ClusterComponents
+                .Include(c => c.Cluster)
+                .Where(c => c.ClusterId == component.ClusterId
+                    && c.Name == "wg-easy"
+                    && c.Status == ComponentStatus.Installed)
+                .ToListAsync(ct);
+
+            bool inject = false;
+
+            if (wgComponents.Count > 0)
+            {
+                // External gateway is the default target → always expose the port.
+                if (component.Name == "istio")
+                {
+                    inject = true;
+                }
+                else
+                {
+                    // Internal gateway → only if a wg-easy explicitly targets it.
+                    foreach (ClusterComponent wg in wgComponents)
+                    {
+                        string? target = await vaultService.GetComponentSecretValueAsync(
+                            wg.Cluster.TenantId, wg.Id, "WG_GATEWAY_NAME", ct);
+
+                        if (string.Equals(target?.Trim(), gatewayRelease, StringComparison.OrdinalIgnoreCase))
+                        {
+                            inject = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (inject)
+            {
+                valuesYaml = YamlFormMerger.EnsureWireGuardGatewayPort(valuesYaml ?? "");
+            }
+        }
+
         string releaseName = component.ReleaseName ?? component.Name;
         string chartRef = !string.IsNullOrWhiteSpace(component.HelmRepoUrl)
             ? $"{component.HelmRepoUrl}/{component.HelmChartName}"
             : component.HelmChartName ?? component.Name;
+
+        // Catalog-registered components keep their key as the component Name, so we can
+        // look the entry back up for an extended install timeout (heavy/DaemonSet charts).
+        string installTimeout = ComponentCatalog.GetByKey(component.Name)?.InstallTimeout ?? "10m0s";
 
         return new HelmCommand
         {
@@ -604,7 +664,8 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
             RepoUrl = component.HelmRepoUrl,
             Version = component.HelmChartVersion,
             HasValues = !string.IsNullOrWhiteSpace(valuesYaml),
-            ValuesYaml = valuesYaml
+            ValuesYaml = valuesYaml,
+            Timeout = installTimeout
         };
     }
 
@@ -618,6 +679,7 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent component = await db.ClusterComponents
+            .Include(c => c.Cluster)
             .FirstOrDefaultAsync(c => c.Id == componentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
@@ -627,13 +689,19 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
 
         if (component.ComponentType == "Manifest")
         {
+            // Substitute %%PLACEHOLDER%% tokens before deleting — same as install.
+            // Without this, kubectl gets raw placeholders (e.g. %%WG_GATEWAY%%) which
+            // are invalid YAML and fail to parse, leaving resources orphaned.
+            string manifestYaml = await SubstituteManifestPlaceholdersAsync(
+                component.HelmValues ?? "", component, ct);
+
             // No Namespace — same reason as install: resources declare their own namespaces.
             return new HelmCommand
             {
                 Operation = "kubectl-delete",
                 ReleaseName = releaseName,
-                HasValues = !string.IsNullOrWhiteSpace(component.HelmValues),
-                ValuesYaml = component.HelmValues
+                HasValues = !string.IsNullOrWhiteSpace(manifestYaml),
+                ValuesYaml = manifestYaml
             };
         }
 
@@ -714,6 +782,67 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
     /// in an EnvoyFilter workloadSelector) rather than at a YAML dot-notation path.
     /// Only fields with both StoreAsSecret=true and ManifestPlaceholder set are processed.
     /// </summary>
+    /// <summary>
+    /// Resolves the Istio gateway a wg-easy component targets: the one named in its
+    /// WG_GATEWAY_NAME secret, falling back to the external "istio" gateway. Only
+    /// installed gateways are considered. Returns null if none match. Does not require
+    /// wg-easy itself to be installed, so it can be called before an uninstall to
+    /// capture the gateway that must later be re-applied to strip the UDP port.
+    /// </summary>
+    public async Task<Guid?> ResolveWireGuardGatewayIdAsync(
+        Guid wgComponentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ClusterComponent? wg = await db.ClusterComponents
+            .Include(c => c.Cluster)
+            .FirstOrDefaultAsync(c => c.Id == wgComponentId, ct);
+
+        if (wg is null || wg.Name != "wg-easy")
+            return null;
+
+        string? target = (await vaultService.GetComponentSecretValueAsync(
+            wg.Cluster.TenantId, wg.Id, "WG_GATEWAY_NAME", ct))?.Trim();
+
+        List<ClusterComponent> gateways = await db.ClusterComponents
+            .Where(c => c.ClusterId == wg.ClusterId
+                && (c.Name == "istio" || c.Name == "istio-internal")
+                && c.Status == ComponentStatus.Installed)
+            .ToListAsync(ct);
+
+        // Prefer the gateway wg-easy explicitly targets; otherwise the external one.
+        ClusterComponent? gateway = gateways.FirstOrDefault(g =>
+                string.Equals((g.ReleaseName ?? g.Name).Trim(), target, StringComparison.OrdinalIgnoreCase))
+            ?? gateways.FirstOrDefault(g => g.Name == "istio");
+
+        return gateway?.Id;
+    }
+
+    /// <summary>
+    /// Re-applies a gateway via helm upgrade. The WireGuard UDP port is added or dropped
+    /// automatically by GetInstallCommandAsync based on whether an installed wg-easy still
+    /// targets it — so this both adds the port (after wg-easy install) and removes it
+    /// (after wg-easy uninstall).
+    /// </summary>
+    public async Task<HelmExecutionResult?> ReapplyGatewayAsync(
+        Guid gatewayId, CancellationToken ct = default)
+    {
+        HelmCommand command = await GetInstallCommandAsync(gatewayId, ct);
+        return await ExecuteHelmAsync(gatewayId, command, ct);
+    }
+
+    /// <summary>
+    /// After a wg-easy install, re-applies the Istio gateway it targets so the gateway's
+    /// LoadBalancer picks up the WireGuard UDP port. Returns null if no matching installed
+    /// gateway exists.
+    /// </summary>
+    public async Task<HelmExecutionResult?> EnsureGatewayWireGuardPortAsync(
+        Guid wgComponentId, CancellationToken ct = default)
+    {
+        Guid? gatewayId = await ResolveWireGuardGatewayIdAsync(wgComponentId, ct);
+        return gatewayId is null ? null : await ReapplyGatewayAsync(gatewayId.Value, ct);
+    }
+
     private async Task<string> SubstituteManifestPlaceholdersAsync(
         string manifestYaml, ClusterComponent component, CancellationToken ct)
     {
@@ -731,6 +860,12 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
             string secretName = field.SecretName ?? field.Key;
             string? value = await vaultService.GetComponentSecretValueAsync(
                 tenantId, component.Id, secretName, ct);
+
+            // Fall back to the field's default when nothing was saved, so a placeholder
+            // (e.g. %%WG_ALLOWED_IPS%%) never leaks into the running config — important
+            // for fields that have sensible defaults like the cluster CIDRs / DNS.
+            if (string.IsNullOrEmpty(value))
+                value = field.DefaultValue;
 
             if (!string.IsNullOrEmpty(value))
                 manifestYaml = manifestYaml.Replace(field.ManifestPlaceholder!, value, StringComparison.Ordinal);
@@ -1175,9 +1310,11 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
         string gatewayYaml = ExternalRouteService.GenerateGatewayYaml(
             gatewayName, gatewayNamespace, allRoutes, appRoutes, gatewayClass: gatewayClass);
 
-        // One HTTPRoute per route — TLS is terminated at the Gateway, no per-route
-        // Certificate needed here.
-        IEnumerable<string> httpRoutes = allRoutes.Select(ExternalRouteService.GenerateHttpRouteYaml);
+        // One route resource per entry — HTTPRoute for terminated TLS, TLSRoute for passthrough.
+        IEnumerable<string> httpRoutes = allRoutes.Select(r =>
+            r.TlsMode == TlsMode.Passthrough
+                ? ExternalRouteService.GenerateTlsRouteYaml(r)
+                : ExternalRouteService.GenerateHttpRouteYaml(r));
 
         string combinedYaml = string.Join("\n---\n", new[] { gatewayYaml }.Concat(httpRoutes));
 
@@ -1286,7 +1423,7 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
             {
                 args.Add("--wait");
                 args.Add("--timeout");
-                args.Add("10m0s");
+                args.Add(command.Timeout);
             }
 
             // If there's a repo URL, add the repo first and resolve the chart reference.
@@ -1294,8 +1431,20 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
             if (!string.IsNullOrWhiteSpace(command.RepoUrl) && command.Operation != "uninstall")
             {
                 string repoName = $"entkube-{command.ReleaseName}";
-                await RunProcessAsync("helm", $"repo add {repoName} {command.RepoUrl} --force-update --kubeconfig {kubeconfigPath}", ct);
-                await RunProcessAsync("helm", $"repo update {repoName} --kubeconfig {kubeconfigPath}", ct);
+
+                // repo add/update are local operations — no kubeconfig needed or wanted.
+                HelmExecutionResult repoAddResult = await RunProcessAsync(
+                    "helm", $"repo add {repoName} {command.RepoUrl} --force-update", ct);
+                if (!repoAddResult.Success)
+                {
+                    return new HelmExecutionResult
+                    {
+                        Success = false,
+                        Output = $"Failed to add Helm repo '{repoName}' ({command.RepoUrl}):\n{repoAddResult.Output}"
+                    };
+                }
+
+                await RunProcessAsync("helm", $"repo update {repoName}", ct);
 
                 // Replace the chart reference with repo/chart format.
                 if (chartRefIndex >= 0)
@@ -1322,6 +1471,14 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
                 }
             }
 
+            // Ensure the namespace carries the default LimitRange before installing, so any
+            // pod the chart creates without its own resources (subchart pods, Helm hook Jobs,
+            // injected sidecars) is admitted with defaults on clusters that require limits.
+            if (command.Operation != "uninstall" && !string.IsNullOrWhiteSpace(command.Namespace))
+            {
+                await EnsureNamespaceDefaultsAsync(command.Namespace, kubeconfigPath, ct);
+            }
+
             string arguments = string.Join(" ", args);
             return await RunProcessAsync("helm", arguments, ct);
         }
@@ -1336,6 +1493,50 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
             {
                 Directory.Delete(tempChartDir, recursive: true);
             }
+        }
+    }
+
+    /// <summary>
+    /// Ensures the target namespace exists and carries the EntKube default LimitRange.
+    /// The LimitRange injects CPU/memory <c>defaultRequest</c> and <c>default</c> (limit)
+    /// values into every container that doesn't set its own, so pods are admitted on
+    /// clusters that enforce resource limits — including subchart pods, Helm hook Jobs and
+    /// injected sidecars that per-chart Helm values can't reach. Applied before the install
+    /// so pods created during --wait pass admission. Idempotent (kubectl apply).
+    /// </summary>
+    private static async Task EnsureNamespaceDefaultsAsync(string ns, string kubeconfigPath, CancellationToken ct)
+    {
+        // Create the namespace up front (helm --create-namespace would otherwise make it,
+        // but the LimitRange must exist before any pod is admitted). Ignore AlreadyExists.
+        await RunProcessAsync("kubectl", $"create namespace {ns} --kubeconfig {kubeconfigPath}", ct);
+
+        // Containers that set their own requests/limits keep them; this only fills the gaps.
+        string limitRange = $$"""
+            apiVersion: v1
+            kind: LimitRange
+            metadata:
+              name: entkube-defaults
+              namespace: {{ns}}
+            spec:
+              limits:
+                - type: Container
+                  defaultRequest:
+                    cpu: 50m
+                    memory: 128Mi
+                  default:
+                    cpu: "1"
+                    memory: 1Gi
+            """;
+
+        string tempFile = Path.Combine(Path.GetTempPath(), $"entkube-limitrange-{Guid.NewGuid()}.yaml");
+        try
+        {
+            await File.WriteAllTextAsync(tempFile, limitRange, ct);
+            await RunProcessAsync("kubectl", $"apply -f {tempFile} --kubeconfig {kubeconfigPath}", ct);
+        }
+        finally
+        {
+            if (File.Exists(tempFile)) File.Delete(tempFile);
         }
     }
 
@@ -1596,6 +1797,7 @@ public class ComponentLifecycleService(IDbContextFactory<ApplicationDbContext> d
             UseShellExecute = false,
             CreateNoWindow = true
         };
+        psi.EnvironmentVariables["HOME"] = "/tmp";
 
         using Process process = new() { StartInfo = psi };
 

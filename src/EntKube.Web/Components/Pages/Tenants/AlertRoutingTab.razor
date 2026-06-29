@@ -355,7 +355,7 @@ else
 
         using ApplicationDbContext db = DbFactory.CreateDbContext();
         channels = await db.NotificationChannels
-            .Where(c => c.TenantId == TenantId)
+            .Where(c => c.TenantId == TenantId && c.CustomerId == null)
             .OrderBy(c => c.Name)
             .ToListAsync();
 

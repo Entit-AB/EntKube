@@ -1,0 +1,1770 @@
+@implements IAsyncDisposable
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using System.Text.Json
+@inject KeycloakService KeycloakService
+@inject IJSRuntime JS
+
+@* ── Header row ─────────────────────────────────────────────────────────────── *@
+<div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+    <div class="btn-group btn-group-sm" role="group">
+        <button class="btn @(_mode == "visual" ? "btn-primary" : "btn-outline-secondary")"
+                @onclick='() => SetMode("visual")'>
+            <i class="bi bi-palette me-1"></i>Visual
+        </button>
+        <button class="btn @(_mode == "raw" ? "btn-primary" : "btn-outline-secondary")"
+                @onclick='() => SetMode("raw")'>
+            <i class="bi bi-code-slash me-1"></i>Raw CSS
+        </button>
+    </div>
+
+    @if (_mode == "visual")
+    {
+        <button class="btn btn-sm btn-primary" @onclick="SaveVisual" disabled="@_saving">
+            @if (_saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+            <i class="bi bi-floppy me-1"></i>Save &amp; Deploy
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="ToggleViewCss" title="View the generated login CSS">
+            <i class="bi bi-braces me-1"></i>@(_showGeneratedCss ? "Hide CSS" : "View CSS")
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="ExportThemeJson" title="Download theme settings as JSON">
+            <i class="bi bi-download me-1"></i>Export
+        </button>
+        <label class="btn btn-sm btn-outline-secondary mb-0" title="Import theme settings from JSON" style="cursor:pointer">
+            <i class="bi bi-upload me-1"></i>Import
+            <InputFile OnChange="ImportThemeJson" class="d-none" accept=".json" />
+        </label>
+        @if (_importError is not null)
+        {
+            <span class="text-danger small">@_importError</span>
+        }
+    }
+    else
+    {
+        <div class="d-flex gap-2 align-items-center">
+            @foreach (string t in new[] { "login", "account", "admin", "email" })
+            {
+                <button class="btn btn-sm @(_rawType == t ? "btn-primary" : "btn-outline-secondary")"
+                        @onclick="() => SwitchRawType(t)">
+                    @(char.ToUpper(t[0]) + t[1..])
+                </button>
+            }
+        </div>
+        <button class="btn btn-sm btn-primary" @onclick="SaveRawCss" disabled="@_saving">
+            @if (_saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+            <i class="bi bi-floppy me-1"></i>Save CSS
+        </button>
+    }
+
+    @if (_saveSuccess)
+    {
+        <span class="text-success small">
+            <i class="bi bi-check-circle me-1"></i>
+            @(_saveDeployed ? "Saved & deployed — Keycloak is restarting" : "Saved")
+        </span>
+    }
+    @if (_saveError is not null)
+    {
+        <span class="text-danger small">@_saveError</span>
+    }
+</div>
+
+@if (_loading)
+{
+    <div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Loading theme…</div>
+}
+else if (_mode == "raw")
+{
+    @* ── Raw CSS mode ─────────────────────────────────────────────────────────── *@
+    <textarea class="form-control font-monospace"
+              rows="20"
+              style="font-size:0.78rem; resize:vertical"
+              placeholder="/* Custom CSS */"
+              @bind="_rawCss"
+              @bind:event="oninput"></textarea>
+}
+else
+{
+    @* ── Visual editor ────────────────────────────────────────────────────────── *@
+
+    @* ── Base theme selector (must be first — affects all generated CSS) ── *@
+    <div class="te-base-theme-bar">
+        <i class="bi bi-layers me-1 text-muted"></i>
+        <span class="te-base-label">Base theme</span>
+        <button class="te-base-btn @(_vars.BaseTheme == "keycloak.v2" ? "te-base-active-v2" : "")"
+                @onclick='() => SetBaseThemeAsync("keycloak.v2")'>
+            <i class="bi bi-grid-1x2-fill me-1"></i>keycloak.v2
+            <span class="te-base-badge">PatternFly 5</span>
+        </button>
+        <button class="te-base-btn @(_vars.BaseTheme == "keycloak" ? "te-base-active-v1" : "")"
+                @onclick='() => SetBaseThemeAsync("keycloak")'>
+            <i class="bi bi-layout-text-sidebar me-1"></i>keycloak
+            <span class="te-base-badge">Classic · v1</span>
+        </button>
+        <span class="small text-muted ms-auto d-none d-md-inline">
+            @(_vars.BaseTheme == "keycloak.v2"
+                ? "Keycloak 20+ · PatternFly 5 · modern default"
+                : "Keycloak ≤19 · Bootstrap + PatternFly 4")
+        </span>
+    </div>
+
+    @if (_loginCssWasManual && !_manualWarningDismissed)
+    {
+        <div class="alert alert-warning alert-dismissible py-2 small mb-2" role="alert">
+            <i class="bi bi-exclamation-triangle me-1"></i>
+            The current <strong>login CSS</strong> was written manually. Saving here will replace it with auto-generated CSS — your manual edits will be lost.
+            <button type="button" class="btn-close btn-sm" @onclick='() => _manualWarningDismissed = true'></button>
+        </div>
+    }
+
+    @if (_showGeneratedCss)
+    {
+        <div class="mb-2">
+            <div class="d-flex align-items-center gap-2 mb-1">
+                <span class="small fw-semibold text-muted"><i class="bi bi-braces me-1"></i>Generated login.css (read-only)</span>
+                @if (!string.IsNullOrEmpty(_generatedCssPreview))
+                {
+                    <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                            @onclick="CopyGeneratedCss"
+                            title="Copy to clipboard">
+                        <i class="bi bi-clipboard me-1"></i>Copy
+                    </button>
+                    @if (_copiedCss) { <span class="text-success small">Copied!</span> }
+                }
+            </div>
+            @if (string.IsNullOrEmpty(_generatedCssPreview))
+            {
+                <p class="small text-muted">Save the theme first to generate CSS.</p>
+            }
+            else
+            {
+                <textarea class="form-control font-monospace"
+                          rows="12"
+                          style="font-size:0.72rem;resize:vertical"
+                          readonly
+                          value="@_generatedCssPreview"></textarea>
+            }
+        </div>
+    }
+
+    <div class="te-layout">
+
+        @* ── Property panel ── *@
+        <div class="te-props">
+
+            @* Colors *@
+            <div class="te-section">
+                <button class="te-section-head" @onclick='() => ToggleSection("colors")'>
+                    <i class="bi bi-palette2 me-1"></i>Colors
+                    <i class="bi @(_open.Contains("colors") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
+                </button>
+                @if (_open.Contains("colors"))
+                {
+                    <div class="te-section-body">
+                        @* Presets *@
+                        <div class="te-row">
+                            <label>Presets</label>
+                            <div class="d-flex flex-wrap gap-1">
+                                @foreach (var p in _presets)
+                                {
+                                    <button class="te-preset-btn" title="@p.Name" @onclick="() => ApplyPreset(p)">
+                                        <span style="background:@p.HeaderBg" class="te-preset-swatch"></span>
+                                        <span style="background:@p.Primary" class="te-preset-swatch"></span>
+                                        <span style="background:@p.PageBg;border:1px solid #ccc" class="te-preset-swatch"></span>
+                                        <span class="te-preset-label">@p.Name</span>
+                                    </button>
+                                }
+                                <button class="btn btn-sm btn-outline-secondary py-0 px-2 small" title="Reset all values to defaults"
+                                        @onclick="ResetDefaults">
+                                    <i class="bi bi-arrow-counterclockwise"></i> Reset
+                                </button>
+                            </div>
+                        </div>
+                        <hr class="my-1">
+                        @ColorRow("Primary", _vars.PrimaryColor, v => OnColorChanged("--ek-primary", v, x => _vars.PrimaryColor = x))
+                        <div class="te-color-row-wrap">
+                            @ColorRow("Primary (hover/dark)", _vars.PrimaryColorDark, v => OnColorChanged("--ek-primary-dark", v, x => _vars.PrimaryColorDark = x))
+                            <button class="btn btn-link btn-sm p-0 ms-1 text-muted te-auto-btn"
+                                    title="Auto-compute from primary colour (80% brightness)"
+                                    @onclick="AutoDarken">
+                                <i class="bi bi-arrow-repeat"></i>
+                            </button>
+                        </div>
+                        @ColorRow("Page background", _vars.PageBackground, v => OnColorChanged("--ek-bg", v, x => _vars.PageBackground = x))
+                        @ColorRow("Card / form background", _vars.CardBackground, v => OnColorChanged("--ek-card-bg", v, x => _vars.CardBackground = x))
+                        @ColorRow("Text", _vars.TextColor, v => OnColorChanged("--ek-text", v, x => _vars.TextColor = x))
+                        @ColorRow("Muted text", _vars.MutedTextColor, v => OnColorChanged("--ek-muted", v, x => _vars.MutedTextColor = x))
+                        @ColorRow("Link", _vars.LinkColor, v => OnColorChanged("--ek-link", v, x => _vars.LinkColor = x))
+                        @ColorRow("Input border", _vars.InputBorderColor, v => OnColorChanged("--ek-input-border", v, x => _vars.InputBorderColor = x))
+                        @ColorRow("Input background", _vars.InputBackground, v => OnColorChanged("--ek-input-bg", v, x => _vars.InputBackground = x))
+                        @ColorRow("Input text", _vars.InputTextColor, v => OnColorChanged("--ek-input-text", v, x => _vars.InputTextColor = x))
+                        @ColorRow("Button text", _vars.ButtonTextColor, v => OnColorChanged("--ek-btn-text", v, x => _vars.ButtonTextColor = x))
+                        @ColorRow("Error / danger", _vars.ErrorColor, v => OnColorChanged("--ek-error", v, x => _vars.ErrorColor = x))
+                        <div class="d-flex align-items-center justify-content-between mt-2 mb-1">
+                            <span class="small fw-semibold text-muted" style="font-size:.72rem;text-transform:uppercase;letter-spacing:.04em">Header</span>
+                            @if (_vars.BaseTheme == "keycloak.v2")
+                            {
+                                <span class="badge bg-warning-subtle text-warning border" style="font-size:.65rem"
+                                      title="In keycloak.v2 the logo floats above the card on the page background — there is no separate header bar. These colors are only applied when using the classic keycloak base theme.">v1 only</span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-success-subtle text-success border" style="font-size:.65rem">used in v1</span>
+                            }
+                        </div>
+                        @ColorRow("Header background", _vars.HeaderBackground, v => OnColorChanged("--ek-header-bg", v, x => _vars.HeaderBackground = x))
+                        @ColorRow("Header text", _vars.HeaderTextColor, v => OnColorChanged("--ek-header-text", v, x => _vars.HeaderTextColor = x))
+                    </div>
+                }
+            </div>
+
+            @* Typography *@
+            <div class="te-section">
+                <button class="te-section-head" @onclick='() => ToggleSection("typo")'>
+                    <i class="bi bi-type me-1"></i>Typography
+                    <i class="bi @(_open.Contains("typo") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
+                </button>
+                @if (_open.Contains("typo"))
+                {
+                    <div class="te-section-body">
+                        <div class="te-row">
+                            <label>Font family</label>
+                            <select class="form-select form-select-sm" @bind="_vars.FontFamily" @bind:after="OnFontChanged">
+                                @foreach ((string val, string label) in _fontOptions)
+                                {
+                                    <option value="@val">@label</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="te-row">
+                            <label>Font size — @(_vars.FontSizePx)px</label>
+                            <input type="range" class="form-range" min="11" max="18" step="1"
+                                   value="@_vars.FontSizePx"
+                                   @oninput="OnFontSizeInput" />
+                        </div>
+                    </div>
+                }
+            </div>
+
+            @* Shapes *@
+            <div class="te-section">
+                <button class="te-section-head" @onclick='() => ToggleSection("shapes")'>
+                    <i class="bi bi-border-outer me-1"></i>Shape &amp; Radius
+                    <i class="bi @(_open.Contains("shapes") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
+                </button>
+                @if (_open.Contains("shapes"))
+                {
+                    <div class="te-section-body">
+                        <div class="te-row">
+                            <label>Button radius — @(_vars.ButtonRadiusPx)px</label>
+                            <input type="range" class="form-range" min="0" max="24" step="1"
+                                   value="@_vars.ButtonRadiusPx"
+                                   @oninput="OnButtonRadiusInput" />
+                        </div>
+                        <div class="te-row">
+                            <label>Input radius — @(_vars.InputRadiusPx)px</label>
+                            <input type="range" class="form-range" min="0" max="16" step="1"
+                                   value="@_vars.InputRadiusPx"
+                                   @oninput="OnInputRadiusInput" />
+                        </div>
+                        <div class="te-row">
+                            <label>Card radius — @(_vars.CardRadiusPx)px</label>
+                            <input type="range" class="form-range" min="0" max="24" step="1"
+                                   value="@_vars.CardRadiusPx"
+                                   @oninput="OnCardRadiusInput" />
+                        </div>
+                        <div class="te-row">
+                            <label>Card width — @(_vars.CardMaxWidthPx)px</label>
+                            <input type="range" class="form-range" min="300" max="900" step="10"
+                                   value="@_vars.CardMaxWidthPx"
+                                   @oninput="OnCardMaxWidthInput" />
+                        </div>
+                        <div class="te-row">
+                            <label>Card shadow</label>
+                            <div class="btn-group btn-group-sm w-100" role="group">
+                                @foreach ((int lvl, string lbl) in new[] { (0,"None"), (1,"Subtle"), (2,"Medium"), (3,"Strong") })
+                                {
+                                    int captured = lvl;
+                                    <button type="button"
+                                            class="btn @(_vars.CardShadowLevel == captured ? "btn-secondary" : "btn-outline-secondary")"
+                                            @onclick="() => SetCardShadowLevel(captured)">
+                                        @lbl
+                                    </button>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                }
+            </div>
+
+            @* Logo *@
+            <div class="te-section">
+                <button class="te-section-head" @onclick='() => ToggleSection("logo")'>
+                    <i class="bi bi-image me-1"></i>Logo
+                    <i class="bi @(_open.Contains("logo") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
+                </button>
+                @if (_open.Contains("logo"))
+                {
+                    <div class="te-section-body">
+                        <div class="te-row d-flex align-items-center gap-2">
+                            <label class="mb-0">Show logo</label>
+                            <div class="form-check form-switch ms-auto mb-0">
+                                <input class="form-check-input" type="checkbox"
+                                       checked="@_vars.ShowLogo"
+                                       @onchange="e => { _vars.ShowLogo = (bool)(e.Value ?? false); _ = SetHeaderVisible(_vars.ShowLogo); }" />
+                            </div>
+                        </div>
+                        @if (_vars.ShowLogo)
+                        {
+                            <div class="te-row">
+                                <label>Logo image</label>
+                                @if (_resources.Count > 0)
+                                {
+                                    <select class="form-select form-select-sm mb-1"
+                                            @bind="_vars.LogoResourceName" @bind:after="OnLogoResourceChanged">
+                                        <option value="">— none / use external URL —</option>
+                                        @foreach (string r in _resources.Where(r => IsImage(r)))
+                                        {
+                                            <option value="@r">@r</option>
+                                        }
+                                    </select>
+                                }
+                                @if (string.IsNullOrEmpty(_vars.LogoResourceName))
+                                {
+                                    <input class="form-control form-control-sm" placeholder="https://… (external URL)"
+                                           @bind="_vars.LogoExternalUrl" @bind:event="oninput"
+                                           @bind:after="OnLogoResourceChanged" />
+                                }
+                            </div>
+                            <div class="te-row">
+                                <label>Logo height — @(_vars.LogoHeightPx)px</label>
+                                <input type="range" class="form-range" min="20" max="120" step="1"
+                                       value="@_vars.LogoHeightPx"
+                                       @oninput="OnLogoHeightInput" />
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+
+            @* Background *@
+            <div class="te-section">
+                <button class="te-section-head" @onclick='() => ToggleSection("bg")'>
+                    <i class="bi bi-card-image me-1"></i>Background
+                    <i class="bi @(_open.Contains("bg") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
+                </button>
+                @if (_open.Contains("bg"))
+                {
+                    <div class="te-section-body">
+                        <div class="te-row d-flex align-items-center gap-2">
+                            <label class="mb-0">Use image background</label>
+                            <div class="form-check form-switch ms-auto mb-0">
+                                <input class="form-check-input" type="checkbox"
+                                       checked="@_vars.UseBackgroundImage"
+                                       @onchange="e => { _vars.UseBackgroundImage = (bool)(e.Value ?? false); _ = OnBgTypeChanged(); }" />
+                            </div>
+                        </div>
+                        @if (_vars.UseBackgroundImage && _resources.Count > 0)
+                        {
+                            <div class="te-row">
+                                <label>Background image</label>
+                                <select class="form-select form-select-sm"
+                                        @bind="_vars.BackgroundImageResourceName" @bind:after="OnBgImageChanged">
+                                    <option value="">— none —</option>
+                                    @foreach (string r in _resources.Where(r => IsImage(r)))
+                                    {
+                                        <option value="@r">@r</option>
+                                    }
+                                </select>
+                            </div>
+                        }
+                        else if (_vars.UseBackgroundImage && _resources.Count == 0)
+                        {
+                            <p class="small text-muted mb-0 mt-1">Upload an image in the Resources section first.</p>
+                        }
+                    </div>
+                }
+            </div>
+
+            @* Footer *@
+            <div class="te-section">
+                <button class="te-section-head" @onclick='() => ToggleSection("footer")'>
+                    <i class="bi bi-layout-text-window-reverse me-1"></i>Footer
+                    <i class="bi @(_open.Contains("footer") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
+                </button>
+                @if (_open.Contains("footer"))
+                {
+                    <div class="te-section-body">
+                        <div class="te-row d-flex align-items-center gap-2">
+                            <label class="mb-0">Show footer</label>
+                            <div class="form-check form-switch ms-auto mb-0">
+                                <input class="form-check-input" type="checkbox"
+                                       checked="@_vars.ShowFooter"
+                                       @onchange="e => { _vars.ShowFooter = (bool)(e.Value ?? false); _ = SyncFooter(); }" />
+                            </div>
+                        </div>
+                        @if (_vars.ShowFooter)
+                        {
+                            <div class="te-row">
+                                <label>Footer text</label>
+                                <input class="form-control form-control-sm" placeholder="© 2025 Your Company"
+                                       @bind="_vars.FooterText" @bind:event="oninput"
+                                       @bind:after="SyncFooter" />
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+
+            @* Accessibility *@
+            @{
+                // Compute fail count for the header badge (cheap — all in-memory)
+                int _a11yFails = new[]
+                {
+                    ContrastRatio(_vars.TextColor,       _vars.CardBackground),
+                    ContrastRatio(_vars.TextColor,       _vars.PageBackground),
+                    ContrastRatio(_vars.ButtonTextColor, _vars.PrimaryColor),
+                    ContrastRatio(_vars.HeaderTextColor, _vars.HeaderBackground),
+                    ContrastRatio(_vars.LinkColor,       _vars.CardBackground),
+                    ContrastRatio(_vars.InputTextColor,  _vars.InputBackground),
+                    ContrastRatio(_vars.MutedTextColor,  _vars.CardBackground),
+                    ContrastRatio(_vars.ErrorColor,      _vars.CardBackground),
+                }.Count(r => r < 4.5);
+            }
+            <div class="te-section">
+                <button class="te-section-head" @onclick='() => ToggleSection("a11y")'>
+                    <i class="bi bi-universal-access me-1"></i>Accessibility
+                    @if (_a11yFails > 0)
+                    {
+                        <span class="badge bg-warning-subtle text-warning border ms-1" style="font-size:.65rem" title="@_a11yFails color pair(s) fail WCAG AA">
+                            <i class="bi bi-exclamation-triangle me-1"></i>@_a11yFails
+                        </span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-success-subtle text-success border ms-1" style="font-size:.65rem">
+                            <i class="bi bi-check-circle me-1"></i>All pass
+                        </span>
+                    }
+                    <i class="bi @(_open.Contains("a11y") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
+                </button>
+                @if (_open.Contains("a11y"))
+                {
+                    <div class="te-section-body">
+                        <p class="small text-muted mb-2">
+                            WCAG 2.1 contrast ratios for key color pairs.
+                            <strong>AA</strong> requires 4.5:1 (normal text) or 3:1 (large text / UI).
+                        </p>
+                        @A11yRow("Body text / card",         _vars.TextColor,       _vars.CardBackground)
+                        @A11yRow("Body text / page bg",      _vars.TextColor,       _vars.PageBackground)
+                        @A11yRow("Button text / primary",    _vars.ButtonTextColor, _vars.PrimaryColor)
+                        @A11yRow("Header text / header bg",  _vars.HeaderTextColor, _vars.HeaderBackground)
+                        @A11yRow("Link / card bg",           _vars.LinkColor,       _vars.CardBackground)
+                        @A11yRow("Input text / input bg",    _vars.InputTextColor,  _vars.InputBackground)
+                        @A11yRow("Muted text / card bg",     _vars.MutedTextColor,  _vars.CardBackground)
+                        @A11yRow("Error text / card bg",     _vars.ErrorColor,      _vars.CardBackground)
+                    </div>
+                }
+            </div>
+
+            @* Extra CSS *@
+            <div class="te-section">
+                <button class="te-section-head" @onclick='() => ToggleSection("extracss")'>
+                    <i class="bi bi-braces me-1"></i>Extra CSS
+                    <i class="bi @(_open.Contains("extracss") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
+                </button>
+                @if (_open.Contains("extracss"))
+                {
+                    <div class="te-section-body">
+                        <p class="small text-muted mb-1">
+                            Appended verbatim after the auto-generated CSS on every save. Use this for tweaks that the visual controls can't express.
+                        </p>
+                        <textarea class="form-control font-monospace"
+                                  rows="7"
+                                  style="font-size:0.72rem; resize:vertical"
+                                  placeholder=".kc-login-tooltip { display: none; }"
+                                  @bind="_vars.ExtraCss"
+                                  @bind:event="oninput"
+                                  @bind:after="SyncExtraCss"></textarea>
+                    </div>
+                }
+            </div>
+
+            @* Resources *@
+            <div class="te-section">
+                <button class="te-section-head" @onclick='() => ToggleSection("resources")'>
+                    <i class="bi bi-folder-symlink me-1"></i>Resources
+                    <span class="badge bg-secondary-subtle text-secondary border ms-1 small">@_resources.Count</span>
+                    <i class="bi @(_open.Contains("resources") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
+                </button>
+                @if (_open.Contains("resources"))
+                {
+                    <div class="te-section-body">
+                        @if (_uploadError is not null)
+                        {
+                            <div class="alert alert-danger py-1 small mb-2">@_uploadError</div>
+                        }
+                        <label class="btn btn-sm btn-outline-primary w-100 mb-2" style="cursor:pointer">
+                            @if (_uploading) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            <i class="bi bi-upload me-1"></i>Upload image
+                            <InputFile OnChange="HandleUpload" class="d-none" accept="image/*" />
+                        </label>
+                        @if (_resources.Count == 0)
+                        {
+                            <p class="small text-muted mb-0">No resources yet. Upload a logo or background image.</p>
+                        }
+                        else
+                        {
+                            <div class="d-flex flex-column gap-1">
+                                @foreach (string res in _resources)
+                                {
+                                    <div class="d-flex align-items-center gap-2 p-1 border rounded small">
+                                        @if (_resourcePreviews.TryGetValue(res, out string? thumb) && IsImage(res))
+                                        {
+                                            <img src="@thumb" style="height:28px;max-width:48px;object-fit:contain;border-radius:2px" alt="@res" />
+                                        }
+                                        else
+                                        {
+                                            <i class="bi bi-file-image text-muted" style="width:28px;text-align:center"></i>
+                                        }
+                                        <span class="text-truncate flex-grow-1" title="@res">@res</span>
+                                        <button class="btn btn-link btn-sm p-0 text-danger" title="Delete"
+                                                @onclick="() => DeleteResource(res)">
+                                            <i class="bi bi-trash3"></i>
+                                        </button>
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+
+            @* Version History *@
+            <div class="te-section">
+                <button class="te-section-head" @onclick='() => ToggleSectionAndLoad("history")'>
+                    <i class="bi bi-clock-history me-1"></i>Version history
+                    @if (_history is not null && _history.Count > 0)
+                    {
+                        <span class="badge bg-secondary-subtle text-secondary border ms-1 small">@_history.Count</span>
+                    }
+                    <i class="bi @(_open.Contains("history") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
+                </button>
+                @if (_open.Contains("history"))
+                {
+                    <div class="te-section-body">
+                        @if (_loadingHistory)
+                        {
+                            <div class="d-flex align-items-center gap-2 small text-muted">
+                                <span class="spinner-border spinner-border-sm"></span>Loading…
+                            </div>
+                        }
+                        else if (_history is null || _history.Count == 0)
+                        {
+                            <p class="small text-muted mb-0">
+                                No saved versions yet. The previous state is automatically snapshotted each time you save (last 5 kept).
+                            </p>
+                        }
+                        else
+                        {
+                            <div class="d-flex flex-column gap-1">
+                                @foreach (ThemeHistoryEntry entry in _history)
+                                {
+                                    <div class="te-history-row">
+                                        <span class="te-preset-swatch" title="Header"
+                                              style="background:@entry.Variables.HeaderBackground"></span>
+                                        <span class="te-preset-swatch" title="Primary"
+                                              style="background:@entry.Variables.PrimaryColor"></span>
+                                        <span class="te-preset-swatch" title="Page background"
+                                              style="background:@entry.Variables.PageBackground;outline:1px solid #ccc;outline-offset:-1px"></span>
+                                        <span class="small text-truncate flex-grow-1 text-muted">@RelativeTime(entry.SavedAt)</span>
+                                        <button class="btn btn-link btn-sm p-0 small"
+                                                title="Load this version into the editor (save to make permanent)"
+                                                @onclick="() => RestoreHistoryEntry(entry)">
+                                            Restore
+                                        </button>
+                                    </div>
+                                }
+                            </div>
+                            <p class="text-muted mt-2 mb-0" style="font-size:.7rem">
+                                Restoring loads the snapshot into the editor.
+                                Click <em>Save &amp; Deploy</em> to make it permanent.
+                            </p>
+                        }
+                    </div>
+                }
+            </div>
+
+        </div>
+
+        @* ── Preview panel ── *@
+        <div class="te-preview-wrap">
+            <div class="te-preview-bar small text-muted d-flex align-items-center gap-2">
+                <i class="bi bi-eye me-1"></i>Preview
+                <button class="btn btn-sm ms-1 @(_previewError ? "btn-danger" : "btn-outline-secondary")"
+                        style="font-size:0.72rem;padding:1px 7px"
+                        @onclick="TogglePreviewError"
+                        title="Show / hide an authentication error in the preview">
+                    <i class="bi bi-exclamation-triangle @(_previewError ? "" : "me-0")"></i>
+                    @if (_previewError) { <span class="ms-1">Error on</span> }
+                </button>
+                <div class="ms-auto d-flex align-items-center gap-2">
+                    <div class="btn-group btn-group-sm" role="group" aria-label="Preview size">
+                        <button class="btn @(_previewSize == "mobile" ? "btn-secondary" : "btn-outline-secondary")"
+                                @onclick='() => _previewSize = "mobile"' title="Mobile (375 px)">
+                            <i class="bi bi-phone"></i>
+                        </button>
+                        <button class="btn @(_previewSize == "tablet" ? "btn-secondary" : "btn-outline-secondary")"
+                                @onclick='() => _previewSize = "tablet"' title="Tablet (768 px)">
+                            <i class="bi bi-tablet"></i>
+                        </button>
+                        <button class="btn @(_previewSize == "desktop" ? "btn-secondary" : "btn-outline-secondary")"
+                                @onclick='() => _previewSize = "desktop"' title="Desktop (full width)">
+                            <i class="bi bi-display"></i>
+                        </button>
+                    </div>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="OpenPreviewTab"
+                            title="Open preview in a new browser tab">
+                        <i class="bi bi-box-arrow-up-right"></i>
+                    </button>
+                </div>
+            </div>
+            @* Page-type tab strip *@
+            <div class="te-page-tabs">
+                @foreach ((string key, string label, string icon) in new[] {
+                    ("login",    "Login",           "bi-door-open"),
+                    ("register", "Register",        "bi-person-plus"),
+                    ("forgot",   "Forgot password", "bi-key"),
+                    ("otp",      "2FA / OTP",       "bi-shield-lock"),
+                })
+                {
+                    <button class="te-page-tab @(_previewPage == key ? "active" : "")"
+                            @onclick="() => SetPreviewPage(key)">
+                        <i class="bi @icon me-1"></i>@label
+                    </button>
+                }
+                @if (_previewPage == "login")
+                {
+                    <button class="te-page-tab ms-auto @(_previewSocial ? "active" : "")"
+                            @onclick="TogglePreviewSocial"
+                            title="Show mock social login providers">
+                        <i class="bi bi-people me-1"></i>Social
+                    </button>
+                }
+            </div>
+            <div class="te-preview-viewport">
+                <iframe id="@_previewId"
+                        class="te-preview-frame"
+                        style="width:@(_previewSize switch { "mobile" => "375px", "tablet" => "768px", _ => "100%" })"
+                        sandbox="allow-same-origin allow-scripts"
+                        title="Theme preview"></iframe>
+            </div>
+        </div>
+
+    </div>
+
+    @* ── Realm assignment panel ───────────────────────────────────────────────── *@
+    <div class="te-realm-panel">
+        <div class="d-flex align-items-center gap-2">
+            <span class="small fw-semibold text-muted">
+                <i class="bi bi-diagram-3 me-1"></i>Applied to realms
+            </span>
+            @if (_realms is null)
+            {
+                <span class="spinner-border spinner-border-sm text-muted" style="width:0.75rem;height:0.75rem;border-width:2px"></span>
+            }
+            else
+            {
+                int assignedCount = _realms.Count(r => r.KeycloakThemeId == Theme.Id);
+                <span class="badge bg-@(assignedCount > 0 ? "success" : "secondary")-subtle text-@(assignedCount > 0 ? "success" : "secondary") border small">
+                    @assignedCount / @_realms.Count
+                </span>
+            }
+        </div>
+
+        @if (_realmError is not null)
+        {
+            <div class="alert alert-danger py-1 small mb-0 mt-1">
+                <i class="bi bi-exclamation-circle me-1"></i>@_realmError
+            </div>
+        }
+
+        @if (_realms is not null)
+        {
+            @if (_realms.Count == 0)
+            {
+                <p class="small text-muted mb-0 mt-1">No realms found for this Keycloak instance.</p>
+            }
+            else
+            {
+                <div class="d-flex flex-wrap gap-2 mt-2">
+                    @foreach (KeycloakRealm realm in _realms)
+                    {
+                        bool assigned = realm.KeycloakThemeId == Theme.Id;
+                        bool busy = _realmBusy.Contains(realm.Id);
+                        <button class="btn btn-sm @(assigned ? "btn-success" : "btn-outline-secondary")"
+                                @onclick="() => ToggleRealmAssignment(realm)"
+                                disabled="@busy"
+                                title="@(assigned ? "Click to detach this theme from the realm" : "Click to apply this theme to the realm")">
+                            @if (busy)
+                            {
+                                <span class="spinner-border spinner-border-sm me-1" style="width:.75rem;height:.75rem;border-width:2px"></span>
+                            }
+                            else
+                            {
+                                <i class="bi @(assigned ? "bi-check-circle-fill" : "bi-circle") me-1"></i>
+                            }
+                            @realm.DisplayName
+                        </button>
+                    }
+                </div>
+                <p class="small text-muted mb-0 mt-1">
+                    @if (_realms.Any(r => r.KeycloakThemeId == Theme.Id))
+                    {
+                        <text>Assignment updates Keycloak immediately. Changes to theme visuals still require <strong>Save &amp; Deploy</strong>.</text>
+                    }
+                    else
+                    {
+                        <text>Click a realm to apply this theme. The login theme slug is pushed to Keycloak immediately.</text>
+                    }
+                </p>
+            }
+        }
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter, EditorRequired] public Guid ComponentId { get; set; }
+    [Parameter, EditorRequired] public KeycloakTheme Theme { get; set; } = null!;
+    [Parameter] public bool IsManagedKeycloak { get; set; }
+
+    private string _previewId => $"kc-preview-{Theme.Id:N}";
+
+    private ThemeVariables _vars = new();
+    private string _mode = "visual";
+    private string _rawType = "login";
+    private string? _rawCss;
+    private bool _loading = true;
+    private bool _saving;
+    private bool _saveSuccess;
+    private bool _saveDeployed;
+    private string? _saveError;
+    private bool _previewReady;
+    private bool _previewNeedsInit;
+
+    private List<string> _resources = [];
+    private Dictionary<string, string> _resourcePreviews = new(StringComparer.Ordinal);
+    private bool _uploading;
+    private string? _uploadError;
+
+    private bool _loginCssWasManual;
+    private bool _manualWarningDismissed;
+    private bool _showGeneratedCss;
+    private string? _generatedCssPreview;
+    private bool _copiedCss;
+    private string _previewSize = "desktop";
+    private string _previewPage = "login";
+    private bool _previewError;
+    private bool _previewSocial;
+    private string? _importError;
+
+    private List<ThemeHistoryEntry>? _history;
+    private bool _loadingHistory;
+
+    private List<KeycloakRealm>? _realms;
+    private HashSet<Guid> _realmBusy = [];
+    private string? _realmError;
+
+    private HashSet<string> _open = ["colors", "logo"];
+
+    private IJSObjectReference? _jsModule;
+
+    private static readonly (string val, string label)[] _fontOptions =
+    [
+        ("system-ui, -apple-system, sans-serif", "System default"),
+        ("'Inter', system-ui, sans-serif", "Inter"),
+        ("'Roboto', sans-serif", "Roboto"),
+        ("'Open Sans', sans-serif", "Open Sans"),
+        ("'Lato', sans-serif", "Lato"),
+        ("'Source Sans 3', sans-serif", "Source Sans 3"),
+        ("Georgia, 'Times New Roman', serif", "Georgia (serif)"),
+        ("ui-monospace, monospace", "Monospace"),
+    ];
+
+    // Name, Primary, PrimaryDark, HeaderBg, PageBg, CardBg, TextColor, InputBorder
+    private static readonly (string Name, string Primary, string PrimaryDark, string HeaderBg, string PageBg, string CardBg, string Text, string InputBorder)[] _presets =
+    [
+        ("Keycloak (default)", "#0066CC", "#004E99", "#151515", "#f4f4f4", "#ffffff", "#151515", "#8a8d90"),
+        ("Dark",               "#3d8bcd", "#2d6fa3", "#212121", "#1a1a1a", "#2d2d2d", "#e0e0e0", "#555555"),
+        ("Forest green",       "#2d7a2d", "#1f5a1f", "#1a3a1a", "#f5f9f5", "#ffffff", "#1a1a1a", "#7aab7a"),
+        ("Royal purple",       "#6b3db3", "#4e2c8a", "#2a1a4a", "#f8f5ff", "#ffffff", "#1a1a1a", "#b39ddb"),
+        ("Warm orange",        "#d95b00", "#b34a00", "#2a1800", "#fff8f0", "#ffffff", "#1a1a1a", "#ffb87a"),
+        ("Minimal light",      "#0066CC", "#004E99", "#f0f0f0", "#ffffff", "#ffffff", "#1a1a1a", "#d0d0d0"),
+    ];
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAll();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _jsModule = await JS.InvokeAsync<IJSObjectReference>(
+                "import", "./Components/Pages/Tenants/KeycloakThemeEditor.razor.js");
+        }
+
+        if (!_loading && _mode == "visual" && _jsModule is not null)
+        {
+            if (!_previewReady || _previewNeedsInit)
+            {
+                await _jsModule.InvokeVoidAsync("initPreview", _previewId, _vars.BaseTheme);
+                _previewReady = true;
+                _previewNeedsInit = false;
+                await PushFullPreviewUpdate();
+                if (_previewPage != "login" || _previewSocial)
+                    await _jsModule.InvokeVoidAsync("setPreviewPage", _previewId, _previewPage, _previewError, _previewSocial);
+            }
+        }
+    }
+
+    private async Task LoadAll()
+    {
+        _loading = true;
+        _previewNeedsInit = true;
+        _realms = null;
+        _realmError = null;
+        _history = null;
+        _vars = await KeycloakService.GetThemeVariablesAsync(TenantId, ComponentId, Theme.Id);
+        _resources = await KeycloakService.ListThemeResourcesAsync(TenantId, ComponentId, Theme.Id);
+        await LoadResourcePreviews();
+
+        // Detect whether the login CSS was written manually (not generated by visual editor)
+        string? existingLoginCss = await KeycloakService.GetNamedThemeCssAsync(TenantId, ComponentId, Theme.Id, "login");
+        _loginCssWasManual = !string.IsNullOrEmpty(existingLoginCss)
+            && !existingLoginCss.StartsWith("/* Generated by EntKube Theme Editor", StringComparison.Ordinal);
+        _generatedCssPreview = existingLoginCss?.StartsWith("/* Generated by EntKube Theme Editor", StringComparison.Ordinal) == true
+            ? existingLoginCss : null;
+        _manualWarningDismissed = false;
+
+        _loading = false;
+
+        // Load realm list after setting _loading = false so the editor renders first,
+        // then realms populate asynchronously (they're not on the critical path).
+        _realms = await KeycloakService.GetRealmsForConfigAsync(TenantId, Theme.KeycloakComponentConfigId);
+    }
+
+    private async Task LoadResourcePreviews()
+    {
+        _resourcePreviews.Clear();
+        foreach (string r in _resources.Where(IsImage))
+        {
+            string? uri = await KeycloakService.GetThemeResourceDataUriAsync(TenantId, ComponentId, Theme.Id, r);
+            if (uri is not null)
+                _resourcePreviews[r] = uri;
+        }
+    }
+
+    // ── Export / Import ───────────────────────────────────────────────────────
+
+    private static readonly JsonSerializerOptions _jsonExportOptions = new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
+
+    private async Task ExportThemeJson()
+    {
+        if (_jsModule is null) return;
+        string json = JsonSerializer.Serialize(_vars, _jsonExportOptions);
+        string filename = $"theme-{SanitiseFilename(Theme.Name)}.json";
+        await _jsModule.InvokeVoidAsync("downloadJson", filename, json);
+    }
+
+    private async Task ImportThemeJson(InputFileChangeEventArgs e)
+    {
+        _importError = null;
+        try
+        {
+            using MemoryStream ms = new();
+            await using Stream stream = e.File.OpenReadStream(512 * 1024); // 512 KB max
+            await stream.CopyToAsync(ms);
+            string json = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+            ThemeVariables? imported = JsonSerializer.Deserialize<ThemeVariables>(json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (imported is null) throw new InvalidDataException("Could not parse JSON.");
+            _vars = imported;
+            await PushFullPreviewUpdate();
+        }
+        catch (Exception ex)
+        {
+            _importError = $"Import failed: {ex.Message}";
+        }
+    }
+
+    // ── View CSS toggle ───────────────────────────────────────────────────────
+
+    private async Task CopyGeneratedCss()
+    {
+        if (_jsModule is not null && _generatedCssPreview is not null)
+        {
+            await _jsModule.InvokeAsync<bool>("copyToClipboard", _generatedCssPreview);
+            _copiedCss = true;
+            StateHasChanged();
+            await Task.Delay(2000);
+            _copiedCss = false;
+        }
+    }
+
+    private async Task ToggleViewCss()
+    {
+        _showGeneratedCss = !_showGeneratedCss;
+        _copiedCss = false;
+        if (_showGeneratedCss && string.IsNullOrEmpty(_generatedCssPreview))
+        {
+            // Try to load from vault in case the user saved in a previous session
+            string? css = await KeycloakService.GetNamedThemeCssAsync(TenantId, ComponentId, Theme.Id, "login");
+            if (css?.StartsWith("/* Generated by EntKube Theme Editor", StringComparison.Ordinal) == true)
+                _generatedCssPreview = css;
+        }
+    }
+
+    // ── Base theme switching ──────────────────────────────────────────────────
+
+    private async Task SetBaseThemeAsync(string theme)
+    {
+        if (_vars.BaseTheme == theme) return;
+        _vars.BaseTheme = theme;
+        _previewNeedsInit = true; // forces initPreview re-call in OnAfterRenderAsync
+    }
+
+    // ── Mode switching ────────────────────────────────────────────────────────
+
+    private async Task SetMode(string mode)
+    {
+        _mode = mode;
+        _saveSuccess = false;
+        _saveError = null;
+        if (mode == "raw")
+        {
+            _rawCss = await KeycloakService.GetNamedThemeCssAsync(TenantId, ComponentId, Theme.Id, _rawType);
+        }
+        else
+        {
+            _previewNeedsInit = true;
+        }
+    }
+
+    private async Task SwitchRawType(string type)
+    {
+        _rawType = type;
+        _rawCss = await KeycloakService.GetNamedThemeCssAsync(TenantId, ComponentId, Theme.Id, _rawType);
+    }
+
+    // ── Saving ────────────────────────────────────────────────────────────────
+
+    private async Task SaveVisual()
+    {
+        _saving = true;
+        _saveSuccess = false;
+        _saveDeployed = false;
+        _saveError = null;
+        try
+        {
+            string? err = await KeycloakService.SaveThemeVariablesAsync(TenantId, ComponentId, Theme.Id, _vars);
+            _saveSuccess = true;
+            _saveDeployed = err is null && IsManagedKeycloak;
+            if (err is not null)
+                _saveError = $"Saved, but deploy failed: {err}";
+
+            // Refresh generated CSS preview and clear manual-CSS warning
+            _generatedCssPreview = await KeycloakService.GetNamedThemeCssAsync(TenantId, ComponentId, Theme.Id, "login");
+            _loginCssWasManual = false;
+            _copiedCss = false;
+            // Refresh history panel if it was already open
+            if (_open.Contains("history"))
+                _history = await KeycloakService.GetThemeHistoryAsync(TenantId, ComponentId, Theme.Id);
+        }
+        catch (Exception ex)
+        {
+            _saveError = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task SaveRawCss()
+    {
+        _saving = true;
+        _saveSuccess = false;
+        _saveDeployed = false;
+        _saveError = null;
+        try
+        {
+            string? err = await KeycloakService.SaveNamedThemeCssAsync(
+                TenantId, ComponentId, Theme.Id, _rawType, _rawCss ?? "");
+            _saveSuccess = true;
+            _saveDeployed = err is null && IsManagedKeycloak && _rawType == "login";
+            if (err is not null)
+                _saveError = $"Saved, but deploy failed: {err}";
+        }
+        catch (Exception ex)
+        {
+            _saveError = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    // ── Realm assignment ──────────────────────────────────────────────────────
+
+    private async Task ToggleRealmAssignment(KeycloakRealm realm)
+    {
+        if (_realmBusy.Contains(realm.Id)) return;
+        _realmBusy.Add(realm.Id);
+        _realmError = null;
+        try
+        {
+            bool currentlyAssigned = realm.KeycloakThemeId == Theme.Id;
+            Guid? newThemeId = currentlyAssigned ? null : Theme.Id;
+            await KeycloakService.AssignNamedThemeToRealmAsync(TenantId, realm.Id, newThemeId);
+            realm.KeycloakThemeId = newThemeId;
+        }
+        catch (Exception ex)
+        {
+            _realmError = ex.Message;
+        }
+        finally
+        {
+            _realmBusy.Remove(realm.Id);
+        }
+    }
+
+    // ── Resource upload / delete ──────────────────────────────────────────────
+
+    private async Task HandleUpload(InputFileChangeEventArgs e)
+    {
+        _uploadError = null;
+        _uploading = true;
+        try
+        {
+            IBrowserFile file = e.File;
+            if (file.Size > 2 * 1024 * 1024)
+            {
+                _uploadError = "File too large (max 2 MB).";
+                return;
+            }
+            // Sanitise filename: keep only safe chars
+            string safe = SanitiseFilename(file.Name);
+            using MemoryStream ms = new();
+            await using Stream stream = file.OpenReadStream(2 * 1024 * 1024);
+            await stream.CopyToAsync(ms);
+            string b64 = Convert.ToBase64String(ms.ToArray());
+            await KeycloakService.UploadThemeResourceAsync(TenantId, ComponentId, Theme.Id, safe, b64);
+            _resources = await KeycloakService.ListThemeResourcesAsync(TenantId, ComponentId, Theme.Id);
+            await LoadResourcePreviews();
+        }
+        catch (Exception ex)
+        {
+            _uploadError = ex.Message;
+        }
+        finally
+        {
+            _uploading = false;
+        }
+    }
+
+    private async Task DeleteResource(string filename)
+    {
+        await KeycloakService.DeleteThemeResourceAsync(TenantId, ComponentId, Theme.Id, filename);
+        _resources = await KeycloakService.ListThemeResourcesAsync(TenantId, ComponentId, Theme.Id);
+        _resourcePreviews.Remove(filename);
+        if (_vars.LogoResourceName == filename) _vars.LogoResourceName = null;
+        if (_vars.BackgroundImageResourceName == filename) _vars.BackgroundImageResourceName = null;
+    }
+
+    // ── Property change helpers → direct preview JS calls ────────────────────
+
+    private void OnColorChanged(string cssVar, string value, Action<string> setter)
+    {
+        setter(value);
+        _ = SetVar(cssVar, value);
+    }
+
+    private void OnIntPropChanged(ChangeEventArgs e, Action<int> handler)
+    {
+        if (int.TryParse(e.Value?.ToString(), out int v))
+            handler(v);
+    }
+
+    private void OnFontSizeInput(ChangeEventArgs e)
+        => OnIntPropChanged(e, v => { _vars.FontSizePx = v; _ = SetVar("--ek-font-size", $"{v}px"); });
+
+    private void OnButtonRadiusInput(ChangeEventArgs e)
+        => OnIntPropChanged(e, v => { _vars.ButtonRadiusPx = v; _ = SetVar("--ek-btn-radius", $"{v}px"); });
+
+    private void OnInputRadiusInput(ChangeEventArgs e)
+        => OnIntPropChanged(e, v => { _vars.InputRadiusPx = v; _ = SetVar("--ek-input-radius", $"{v}px"); });
+
+    private void OnCardRadiusInput(ChangeEventArgs e)
+        => OnIntPropChanged(e, v => { _vars.CardRadiusPx = v; _ = SetVar("--ek-card-radius", $"{v}px"); });
+
+    private void OnCardMaxWidthInput(ChangeEventArgs e)
+        => OnIntPropChanged(e, v => { _vars.CardMaxWidthPx = v; _ = SetVar("--ek-card-max-width", $"{v}px"); });
+
+    private async Task SetCardShadowLevel(int level)
+    {
+        _vars.CardShadowLevel = level;
+        // The shadow CSS value is computed in JS via _cardShadowCss; pass the level directly
+        // through a full update so the JS helper converts it correctly.
+        await PushFullPreviewUpdate();
+    }
+
+    private void OnLogoHeightInput(ChangeEventArgs e)
+        => OnIntPropChanged(e, v => { _vars.LogoHeightPx = v; _ = SetLogoHeight(v); });
+
+    private async Task OnFontChanged()
+    {
+        await SetVar("--ek-font", _vars.FontFamily);
+    }
+
+    private async Task OnLogoResourceChanged()
+    {
+        string? dataUri = null;
+        if (!string.IsNullOrEmpty(_vars.LogoResourceName))
+            dataUri = _resourcePreviews.GetValueOrDefault(_vars.LogoResourceName);
+        if (_jsModule is not null && _previewReady)
+            await _jsModule.InvokeVoidAsync("setPreviewLogo", _previewId,
+                dataUri, _vars.LogoExternalUrl, _vars.LogoHeightPx);
+    }
+
+    private async Task OnBgTypeChanged()
+    {
+        if (!_vars.UseBackgroundImage)
+        {
+            if (_jsModule is not null && _previewReady)
+                await _jsModule.InvokeVoidAsync("setPreviewBodyBg", _previewId, null);
+        }
+    }
+
+    private async Task OnBgImageChanged()
+    {
+        string? dataUri = null;
+        if (!string.IsNullOrEmpty(_vars.BackgroundImageResourceName))
+            dataUri = _resourcePreviews.GetValueOrDefault(_vars.BackgroundImageResourceName);
+        if (_jsModule is not null && _previewReady)
+            await _jsModule.InvokeVoidAsync("setPreviewBodyBg", _previewId, dataUri);
+    }
+
+    private async Task SetHeaderVisible(bool visible)
+    {
+        if (_jsModule is not null && _previewReady)
+            await _jsModule.InvokeVoidAsync("setPreviewHeaderVisible", _previewId, visible);
+    }
+
+    private async Task SyncFooter()
+    {
+        if (_jsModule is not null && _previewReady)
+            await _jsModule.InvokeVoidAsync("setPreviewFooter", _previewId, _vars.ShowFooter, _vars.FooterText);
+    }
+
+    private async Task SyncExtraCss()
+    {
+        if (_jsModule is not null && _previewReady)
+            await _jsModule.InvokeVoidAsync("setPreviewExtraCss", _previewId, _vars.ExtraCss);
+    }
+
+    private async Task TogglePreviewError()
+    {
+        _previewError = !_previewError;
+        if (_jsModule is not null && _previewReady)
+            await _jsModule.InvokeVoidAsync("setPreviewErrorState", _previewId, _previewError);
+    }
+
+    private async Task SetPreviewPage(string page)
+    {
+        _previewPage = page;
+        if (_jsModule is not null && _previewReady)
+            await _jsModule.InvokeVoidAsync("setPreviewPage", _previewId, page, _previewError, _previewSocial);
+    }
+
+    private async Task TogglePreviewSocial()
+    {
+        _previewSocial = !_previewSocial;
+        if (_jsModule is not null && _previewReady)
+            await _jsModule.InvokeVoidAsync("setPreviewSocial", _previewId, _previewSocial);
+    }
+
+    private async Task OpenPreviewTab()
+    {
+        if (_jsModule is not null && _previewReady)
+            await _jsModule.InvokeVoidAsync("openPreviewTab", _previewId);
+    }
+
+    private async Task SetLogoHeight(int px)
+    {
+        await SetVar("--ek-logo-height", $"{px}px");
+    }
+
+    private async Task SetVar(string prop, string value)
+    {
+        if (_jsModule is not null && _previewReady)
+            await _jsModule.InvokeVoidAsync("setPreviewVar", _previewId, prop, value);
+    }
+
+    private async Task PushFullPreviewUpdate()
+    {
+        if (_jsModule is null) return;
+        string? logoDataUri = null;
+        if (_vars.ShowLogo && !string.IsNullOrEmpty(_vars.LogoResourceName))
+            logoDataUri = _resourcePreviews.GetValueOrDefault(_vars.LogoResourceName);
+        string? bgDataUri = null;
+        if (_vars.UseBackgroundImage && !string.IsNullOrEmpty(_vars.BackgroundImageResourceName))
+            bgDataUri = _resourcePreviews.GetValueOrDefault(_vars.BackgroundImageResourceName);
+
+        // Object with camelCase property names to match the JS interface
+        await _jsModule.InvokeVoidAsync("updatePreview", _previewId, new
+        {
+            primaryColor = _vars.PrimaryColor,
+            primaryColorDark = _vars.PrimaryColorDark,
+            pageBackground = _vars.PageBackground,
+            cardBackground = _vars.CardBackground,
+            textColor = _vars.TextColor,
+            mutedTextColor = _vars.MutedTextColor,
+            linkColor = _vars.LinkColor,
+            inputBorderColor = _vars.InputBorderColor,
+            inputBackground = _vars.InputBackground,
+            inputTextColor = _vars.InputTextColor,
+            buttonTextColor = _vars.ButtonTextColor,
+            errorColor = _vars.ErrorColor,
+            headerBackground = _vars.HeaderBackground,
+            headerTextColor = _vars.HeaderTextColor,
+            fontFamily = _vars.FontFamily,
+            fontSizePx = _vars.FontSizePx,
+            buttonRadiusPx = _vars.ButtonRadiusPx,
+            inputRadiusPx = _vars.InputRadiusPx,
+            cardRadiusPx = _vars.CardRadiusPx,
+            logoHeightPx = _vars.LogoHeightPx,
+            showLogo = _vars.ShowLogo,
+            logoExternalUrl = _vars.LogoExternalUrl ?? "",
+            useBackgroundImage = _vars.UseBackgroundImage,
+            showFooter = _vars.ShowFooter,
+            footerText = _vars.FooterText,
+            extraCss = _vars.ExtraCss,
+        }, logoDataUri, bgDataUri);
+    }
+
+    // ── Presets ───────────────────────────────────────────────────────────────
+
+    private async Task ApplyPreset((string Name, string Primary, string PrimaryDark, string HeaderBg, string PageBg, string CardBg, string Text, string InputBorder) p)
+    {
+        _vars.PrimaryColor    = p.Primary;
+        _vars.PrimaryColorDark = p.PrimaryDark;
+        _vars.HeaderBackground = p.HeaderBg;
+        _vars.PageBackground  = p.PageBg;
+        _vars.CardBackground  = p.CardBg;
+        _vars.TextColor       = p.Text;
+        _vars.InputTextColor  = p.Text;
+        _vars.MutedTextColor  = AdjustAlpha(p.Text, 0.55);
+        _vars.InputBorderColor = p.InputBorder;
+        _vars.LinkColor       = p.Primary;
+        _vars.ButtonTextColor = IsLight(p.Primary) ? "#000000" : "#ffffff";
+        _vars.HeaderTextColor = IsLight(p.HeaderBg) ? "#151515" : "#ffffff";
+        await PushFullPreviewUpdate();
+    }
+
+    private async Task ResetDefaults()
+    {
+        _vars = new ThemeVariables();
+        _previewNeedsInit = false;
+        await PushFullPreviewUpdate();
+    }
+
+    private async Task AutoDarken()
+    {
+        string darkened = DarkenHex(_vars.PrimaryColor, 0.80);
+        _vars.PrimaryColorDark = darkened;
+        await SetVar("--ek-primary-dark", darkened);
+    }
+
+    private static string DarkenHex(string hex, double factor)
+    {
+        try
+        {
+            string h = hex.TrimStart('#');
+            if (h.Length < 6) return hex;
+            int r = (int)(Convert.ToInt32(h[0..2], 16) * factor);
+            int g = (int)(Convert.ToInt32(h[2..4], 16) * factor);
+            int b = (int)(Convert.ToInt32(h[4..6], 16) * factor);
+            return $"#{Math.Clamp(r, 0, 255):X2}{Math.Clamp(g, 0, 255):X2}{Math.Clamp(b, 0, 255):X2}";
+        }
+        catch { return hex; }
+    }
+
+    // ── WCAG contrast helpers ─────────────────────────────────────────────────
+
+    private static double SrgbLinearize(double c)
+        => c <= 0.04045 ? c / 12.92 : Math.Pow((c + 0.055) / 1.055, 2.4);
+
+    private static double RelativeLuminance(string hex)
+    {
+        try
+        {
+            string h = hex.TrimStart('#');
+            if (h.Length < 6) return 0;
+            return 0.2126 * SrgbLinearize(Convert.ToInt32(h[0..2], 16) / 255.0)
+                 + 0.7152 * SrgbLinearize(Convert.ToInt32(h[2..4], 16) / 255.0)
+                 + 0.0722 * SrgbLinearize(Convert.ToInt32(h[4..6], 16) / 255.0);
+        }
+        catch { return 0; }
+    }
+
+    private static double ContrastRatio(string fg, string bg)
+    {
+        double l1 = RelativeLuminance(fg);
+        double l2 = RelativeLuminance(bg);
+        double lighter = Math.Max(l1, l2);
+        double darker  = Math.Min(l1, l2);
+        return (lighter + 0.05) / (darker + 0.05);
+    }
+
+    // ── WCAG render helper ────────────────────────────────────────────────────
+
+    private RenderFragment A11yRow(string label, string fg, string bg) =>
+        __builder =>
+        {
+            double ratio = ContrastRatio(fg, bg);
+            bool passAAA  = ratio >= 7.0;
+            bool passAA   = ratio >= 4.5;
+            bool passLarge = ratio >= 3.0;
+            string level  = passAAA ? "AAA" : (passAA ? "AA" : (passLarge ? "AA Large" : "Fail"));
+            string color  = passAA  ? "success" : (passLarge ? "warning" : "danger");
+            string icon   = passAA  ? "bi-check-circle-fill" : "bi-x-circle-fill";
+            <div class="te-a11y-row">
+                <span class="te-a11y-label">@label</span>
+                <span class="te-a11y-swatch" aria-hidden="true">
+                    <span style="background:@bg;color:@fg;padding:1px 7px;border-radius:3px;font-size:.68rem;font-weight:700;border:1px solid rgba(0,0,0,.08)">Aa</span>
+                </span>
+                <span class="te-a11y-ratio">@ratio.ToString("F1"):1</span>
+                <span class="badge bg-@(color)-subtle text-@color border" style="font-size:.65rem;white-space:nowrap">
+                    <i class="bi @icon me-1"></i>@level
+                </span>
+            </div>
+        };
+
+    // rough luminance check — "is this hex colour light?"
+    private static bool IsLight(string hex)
+    {
+        try
+        {
+            string h = hex.TrimStart('#');
+            if (h.Length < 6) return true;
+            int r = Convert.ToInt32(h[0..2], 16);
+            int g = Convert.ToInt32(h[2..4], 16);
+            int b = Convert.ToInt32(h[4..6], 16);
+            return (r * 299 + g * 587 + b * 114) / 1000 > 128;
+        }
+        catch { return true; }
+    }
+
+    private static string AdjustAlpha(string hex, double opacity)
+    {
+        try
+        {
+            string h = hex.TrimStart('#');
+            if (h.Length < 6) return hex;
+            int r = (int)(Convert.ToInt32(h[0..2], 16) * opacity + 255 * (1 - opacity));
+            int g = (int)(Convert.ToInt32(h[2..4], 16) * opacity + 255 * (1 - opacity));
+            int b = (int)(Convert.ToInt32(h[4..6], 16) * opacity + 255 * (1 - opacity));
+            return $"#{r:X2}{g:X2}{b:X2}";
+        }
+        catch { return hex; }
+    }
+
+    // ── Section accordion ─────────────────────────────────────────────────────
+
+    private void ToggleSection(string key)
+    {
+        if (!_open.Add(key)) _open.Remove(key);
+    }
+
+    private async Task ToggleSectionAndLoad(string key)
+    {
+        bool wasOpen = _open.Contains(key);
+        ToggleSection(key);
+        if (!wasOpen && key == "history" && _history is null)
+            await LoadHistoryAsync();
+    }
+
+    // ── Version history ───────────────────────────────────────────────────────
+
+    private async Task LoadHistoryAsync()
+    {
+        _loadingHistory = true;
+        StateHasChanged();
+        _history = await KeycloakService.GetThemeHistoryAsync(TenantId, ComponentId, Theme.Id);
+        _loadingHistory = false;
+    }
+
+    private async Task RestoreHistoryEntry(ThemeHistoryEntry entry)
+    {
+        _vars = entry.Variables;
+        await PushFullPreviewUpdate();
+        // Scroll to top of props panel so the user sees the changes
+        if (_jsModule is not null)
+            try { await _jsModule.InvokeVoidAsync("scrollPropsToTop"); } catch { }
+    }
+
+    private static string RelativeTime(DateTimeOffset dt)
+    {
+        TimeSpan elapsed = DateTimeOffset.UtcNow - dt;
+        if (elapsed.TotalSeconds < 90)  return "just now";
+        if (elapsed.TotalMinutes < 60)  return $"{(int)elapsed.TotalMinutes} min ago";
+        if (elapsed.TotalHours < 24)    return $"{(int)elapsed.TotalHours} hr ago";
+        if (elapsed.TotalDays < 7)
+        {
+            int d = (int)elapsed.TotalDays;
+            return $"{d} day{(d > 1 ? "s" : "")} ago";
+        }
+        return dt.ToLocalTime().ToString("MMM d");
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static bool IsImage(string filename) =>
+        new[] { ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico" }
+            .Contains(Path.GetExtension(filename).ToLowerInvariant());
+
+    private static string SanitiseFilename(string name)
+    {
+        string clean = System.Text.RegularExpressions.Regex.Replace(
+            Path.GetFileNameWithoutExtension(name), @"[^a-zA-Z0-9_\-]", "_");
+        string ext = Path.GetExtension(name).ToLowerInvariant();
+        return $"{clean}{ext}";
+    }
+
+    // ── Render helper for colour rows ─────────────────────────────────────────
+
+    private RenderFragment ColorRow(string label, string currentValue, Action<string> onChange) =>
+        __builder =>
+        {
+            <div class="te-row te-color-row">
+                <label>@label</label>
+                <div class="d-flex align-items-center gap-2">
+                    <input type="color" class="form-control form-control-color te-color-input"
+                           value="@currentValue"
+                           @oninput="e => onChange(e.Value?.ToString() ?? currentValue)" />
+                    <input type="text" class="form-control form-control-sm te-color-hex"
+                           value="@currentValue"
+                           @oninput="e => onChange(e.Value?.ToString() ?? currentValue)"
+                           maxlength="9" spellcheck="false" />
+                </div>
+            </div>
+        };
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_jsModule is not null)
+        {
+            try { await _jsModule.InvokeVoidAsync("destroyPreview", _previewId); } catch { }
+            await _jsModule.DisposeAsync();
+        }
+    }
+}
+
+<style>
+    .te-layout {
+        display: grid;
+        grid-template-columns: 300px 1fr;
+        gap: 16px;
+        min-height: 600px;
+    }
+
+    @@media (max-width: 900px) {
+        .te-layout { grid-template-columns: 1fr; }
+    }
+
+    .te-props {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        overflow-y: auto;
+        max-height: 680px;
+        padding-right: 4px;
+    }
+
+    .te-section {
+        border: 1px solid var(--bs-border-color);
+        border-radius: 6px;
+        overflow: hidden;
+    }
+
+    .te-section-head {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 8px 12px;
+        background: var(--bs-tertiary-bg);
+        border: none;
+        font-size: 0.82rem;
+        font-weight: 600;
+        cursor: pointer;
+        text-align: left;
+        color: var(--bs-body-color);
+    }
+
+    .te-section-head:hover { background: var(--bs-secondary-bg); }
+
+    .te-section-body {
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        background: var(--bs-body-bg);
+    }
+
+    .te-row { display: flex; flex-direction: column; gap: 3px; }
+    .te-row label { font-size: 0.78rem; color: var(--bs-secondary-color); margin: 0; }
+
+    .te-color-input {
+        width: 32px !important;
+        height: 28px !important;
+        padding: 2px !important;
+        flex-shrink: 0;
+        cursor: pointer;
+    }
+
+    .te-color-hex {
+        font-size: 0.78rem !important;
+        font-family: ui-monospace, monospace;
+        width: 90px !important;
+    }
+
+    .te-preview-wrap {
+        display: flex;
+        flex-direction: column;
+        border: 1px solid var(--bs-border-color);
+        border-radius: 6px;
+        overflow: hidden;
+    }
+
+    .te-preview-bar {
+        background: var(--bs-tertiary-bg);
+        padding: 6px 12px;
+        border-bottom: 1px solid var(--bs-border-color);
+        flex-shrink: 0;
+    }
+
+    .te-page-tabs {
+        display: flex;
+        border-bottom: 1px solid var(--bs-border-color);
+        background: var(--bs-body-bg);
+        flex-shrink: 0;
+    }
+
+    .te-page-tab {
+        padding: 5px 14px;
+        font-size: 0.78rem;
+        border: none;
+        background: transparent;
+        color: var(--bs-secondary-color);
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        margin-bottom: -1px;
+        white-space: nowrap;
+        transition: color .1s, border-color .1s;
+    }
+
+    .te-page-tab:hover { color: var(--bs-body-color); }
+    .te-page-tab.active { color: var(--bs-primary); border-bottom-color: var(--bs-primary); font-weight: 500; }
+
+    .te-preview-viewport {
+        flex: 1;
+        overflow-x: auto;
+        background: var(--bs-tertiary-bg);
+        display: flex;
+        justify-content: center;
+        min-height: 540px;
+    }
+
+    .te-preview-frame {
+        border: none;
+        min-height: 520px;
+        flex-shrink: 0;
+    }
+
+    .te-preset-btn {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding: 2px 6px 2px 4px;
+        background: var(--bs-body-bg);
+        border: 1px solid var(--bs-border-color);
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.72rem;
+        color: var(--bs-body-color);
+        white-space: nowrap;
+        transition: border-color .1s, box-shadow .1s;
+    }
+
+    .te-preset-btn:hover {
+        border-color: var(--bs-primary);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--bs-primary) 20%, transparent);
+    }
+
+    .te-preset-swatch {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+        flex-shrink: 0;
+    }
+
+    .te-preset-label {
+        margin-left: 2px;
+    }
+
+    .te-color-row-wrap {
+        display: flex;
+        align-items: flex-end;
+        gap: 2px;
+    }
+
+    .te-color-row-wrap > :first-child { flex: 1; }
+
+    .te-auto-btn {
+        font-size: 0.78rem;
+        opacity: 0.6;
+        flex-shrink: 0;
+        padding-bottom: 3px !important;
+    }
+
+    .te-auto-btn:hover { opacity: 1; }
+
+    .te-realm-panel {
+        margin-top: 14px;
+        padding: 10px 14px;
+        border: 1px solid var(--bs-border-color);
+        border-radius: 6px;
+        background: var(--bs-tertiary-bg);
+    }
+
+    .te-a11y-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 0;
+        border-bottom: 1px solid var(--bs-border-color-translucent);
+    }
+
+    .te-a11y-row:last-child { border-bottom: none; }
+
+    .te-a11y-label {
+        flex: 1;
+        font-size: .77rem;
+        color: var(--bs-secondary-color);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .te-a11y-swatch { flex-shrink: 0; line-height: 1; }
+
+    .te-a11y-ratio {
+        font-size: .72rem;
+        font-family: ui-monospace, monospace;
+        color: var(--bs-secondary-color);
+        min-width: 44px;
+        text-align: right;
+        flex-shrink: 0;
+    }
+
+    .te-history-row {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 4px;
+        border-radius: 4px;
+        transition: background .1s;
+    }
+
+    .te-history-row:hover { background: var(--bs-tertiary-bg); }
+
+    /* ── Base theme selector ─────────────────────────────────────────────── */
+
+    .te-base-theme-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 9px 12px;
+        border: 2px solid var(--bs-border-color);
+        border-radius: 8px;
+        background: var(--bs-tertiary-bg);
+        margin-bottom: 12px;
+        flex-wrap: wrap;
+    }
+
+    .te-base-label {
+        font-size: .82rem;
+        font-weight: 700;
+        white-space: nowrap;
+        color: var(--bs-body-color);
+    }
+
+    .te-base-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 4px 12px;
+        border: 1.5px solid var(--bs-border-color);
+        border-radius: 6px;
+        background: var(--bs-body-bg);
+        cursor: pointer;
+        font-size: .82rem;
+        color: var(--bs-secondary-color);
+        transition: border-color .12s, background .12s, color .12s;
+        white-space: nowrap;
+    }
+
+    .te-base-btn:hover:not(.te-base-active-v1):not(.te-base-active-v2) {
+        border-color: var(--bs-primary);
+        color: var(--bs-body-color);
+    }
+
+    .te-base-active-v2 {
+        background: var(--bs-primary);
+        border-color: var(--bs-primary);
+        color: #fff;
+        font-weight: 600;
+    }
+
+    .te-base-active-v1 {
+        background: #d08000;
+        border-color: #b86e00;
+        color: #fff;
+        font-weight: 600;
+    }
+
+    .te-base-badge {
+        font-size: .65rem;
+        padding: 1px 5px;
+        border-radius: 3px;
+        background: rgba(255,255,255,.22);
+        font-weight: 500;
+    }
+
+    .te-base-btn:not(.te-base-active-v1):not(.te-base-active-v2) .te-base-badge {
+        background: var(--bs-secondary-subtle);
+        color: var(--bs-secondary);
+    }
+</style>

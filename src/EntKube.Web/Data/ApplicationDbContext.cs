@@ -81,10 +81,14 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<AppAllowedDatabase> AppAllowedDatabases => Set<AppAllowedDatabase>();
     public DbSet<AppAllowedCache> AppAllowedCaches => Set<AppAllowedCache>();
     public DbSet<AppAllowedStorage> AppAllowedStorages => Set<AppAllowedStorage>();
+    public DbSet<KyvernoPolicy> KyvernoPolicies => Set<KyvernoPolicy>();
+    public DbSet<KedaScaler> KedaScalers => Set<KedaScaler>();
     public DbSet<OnCallSchedule> OnCallSchedules => Set<OnCallSchedule>();
     public DbSet<OnCallShift> OnCallShifts => Set<OnCallShift>();
     public DbSet<AlertRoutingRule> AlertRoutingRules => Set<AlertRoutingRule>();
     public DbSet<NotificationProviderConfig> NotificationProviderConfigs => Set<NotificationProviderConfig>();
+    public DbSet<SecretExpiryNotificationConfig> SecretExpiryNotificationConfigs => Set<SecretExpiryNotificationConfig>();
+    public DbSet<SecretExpiryNotification> SecretExpiryNotifications => Set<SecretExpiryNotification>();
     public DbSet<ClusterServer> ClusterServers => Set<ClusterServer>();
     public DbSet<IdentityBinding> IdentityBindings => Set<IdentityBinding>();
 
@@ -286,10 +290,15 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
         {
             entity.HasKey(s => s.Id);
             entity.Property(s => s.Name).HasMaxLength(200).IsRequired();
+            // Stored as an int; existing rows default to Opaque (0).
+            entity.Property(s => s.SecretType).HasDefaultValue(VaultSecretType.Opaque);
             entity.Property(s => s.KubernetesSecretName).HasMaxLength(253);
             entity.Property(s => s.KubernetesNamespace).HasMaxLength(63);
 
-            entity.HasIndex(s => new { s.VaultId, s.AppId, s.Name })
+            // App secrets are unique per (app, environment, name): a "shared"
+            // secret (null EnvironmentId) and an environment-bound secret can
+            // reuse the same name, and each environment has its own namespace.
+            entity.HasIndex(s => new { s.VaultId, s.AppId, s.EnvironmentId, s.Name })
                 .IsUnique()
                 .HasFilter(null);
 
@@ -306,6 +315,14 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithMany(a => a.Secrets)
                 .HasForeignKey(s => s.AppId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            // Environment binding for app-scoped secrets. When the environment is
+            // deleted the FK is set to null (the secret falls back to "shared")
+            // rather than cascading the secret away.
+            entity.HasOne(s => s.Environment)
+                .WithMany()
+                .HasForeignKey(s => s.EnvironmentId)
+                .OnDelete(DeleteBehavior.SetNull);
 
             entity.HasOne(s => s.Component)
                 .WithMany(c => c.Secrets)
@@ -1069,7 +1086,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
         builder.Entity<NotificationChannel>(entity =>
         {
             entity.HasKey(c => c.Id);
-            entity.HasIndex(c => new { c.TenantId, c.Name }).IsUnique();
+            entity.HasIndex(c => new { c.TenantId, c.CustomerId, c.Name }).IsUnique();
+            entity.HasIndex(c => new { c.TenantId, c.CustomerId });
             entity.Property(c => c.Name).HasMaxLength(200).IsRequired();
             entity.Property(c => c.Type).HasConversion<string>().HasMaxLength(20);
             entity.Property(c => c.SeverityFilter).HasConversion<string>().HasMaxLength(30);
@@ -1561,6 +1579,88 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(a => a.StorageLink)
                 .WithMany()
                 .HasForeignKey(a => a.StorageLinkId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // KyvernoPolicy — Kyverno admission policy at tenant+environment scope.
+        // Built-in types are singleton per (tenant, environment, type); Custom type allows multiples.
+
+        builder.Entity<KyvernoPolicy>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => new { p.TenantId, p.EnvironmentId, p.PolicyType });
+            entity.Property(p => p.PolicyType).HasConversion<string>().HasMaxLength(50).IsRequired();
+            entity.Property(p => p.ValidationFailureAction).HasConversion<string>().HasMaxLength(10).IsRequired();
+            entity.Property(p => p.Name).HasMaxLength(63);
+
+            entity.HasOne(p => p.Tenant)
+                .WithMany()
+                .HasForeignKey(p => p.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(p => p.Environment)
+                .WithMany()
+                .HasForeignKey(p => p.EnvironmentId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // KedaScaler — KEDA autoscaler (ScaledObject / Custom) scoped per (App, Environment).
+        // Name is unique within that scope and used as the Kubernetes resource name.
+
+        builder.Entity<KedaScaler>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => new { s.AppId, s.EnvironmentId, s.Name }).IsUnique();
+            entity.HasIndex(s => new { s.TenantId, s.EnvironmentId });
+            entity.Property(s => s.Kind).HasConversion<string>().HasMaxLength(20).IsRequired();
+            entity.Property(s => s.Name).HasMaxLength(63).IsRequired();
+            entity.Property(s => s.ScaleTargetKind).HasMaxLength(63);
+
+            entity.HasOne(s => s.Tenant)
+                .WithMany()
+                .HasForeignKey(s => s.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(s => s.App)
+                .WithMany()
+                .HasForeignKey(s => s.AppId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(s => s.Environment)
+                .WithMany()
+                .HasForeignKey(s => s.EnvironmentId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // SecretExpiryNotificationConfig — per-tenant settings for expiring-secret
+        // notifications (one row per tenant).
+
+        builder.Entity<SecretExpiryNotificationConfig>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.HasIndex(c => new { c.TenantId, c.CustomerId }).IsUnique();
+            entity.Property(c => c.ThresholdDaysCsv).HasMaxLength(200).IsRequired();
+
+            entity.HasOne(c => c.Tenant)
+                .WithMany()
+                .HasForeignKey(c => c.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // SecretExpiryNotification — sent-record / dedupe / history for expiring-secret
+        // notices. SecretId is not an FK so history survives secret deletion.
+
+        builder.Entity<SecretExpiryNotification>(entity =>
+        {
+            entity.HasKey(n => n.Id);
+            entity.HasIndex(n => new { n.SecretId, n.ThresholdDays, n.ExpiresAt });
+            entity.HasIndex(n => new { n.TenantId, n.CustomerId, n.SentAt });
+            entity.Property(n => n.SecretName).HasMaxLength(256).IsRequired();
+            entity.Property(n => n.Error).HasMaxLength(1000);
+
+            entity.HasOne(n => n.Tenant)
+                .WithMany()
+                .HasForeignKey(n => n.TenantId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

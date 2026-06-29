@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
@@ -32,6 +33,19 @@ public class Program
                 options.DefaultSignInScheme = IdentityConstants.ExternalScheme;
             })
             .AddIdentityCookies();
+
+        // Persist DataProtection keys to a stable location so antiforgery/auth cookies
+        // survive container restarts. Without this the keys live in the container's
+        // ephemeral filesystem (/app/.aspnet/DataProtection-Keys) and are regenerated on
+        // every restart, invalidating all existing cookies and forcing every user to
+        // re-authenticate after each deploy. The path should be a mounted volume in
+        // containerized deployments (e.g. mount a volume at /app/keys).
+        string keyRingPath = builder.Configuration.GetValue<string>("DataProtection:KeyPath")
+            ?? Path.Combine(builder.Environment.ContentRootPath, "keys");
+        Directory.CreateDirectory(keyRingPath);
+        builder.Services.AddDataProtection()
+            .PersistKeysToFileSystem(new DirectoryInfo(keyRingPath))
+            .SetApplicationName("EntKube");
 
         // The database provider is selected based on the "DatabaseProvider" config value.
         // Supported values: "Sqlite" (default for local dev), "Postgres", "SqlServer".
@@ -135,6 +149,8 @@ public class Program
         builder.Services.AddScoped<RabbitMQService>();
         builder.Services.AddScoped<RedisService>();
         builder.Services.AddScoped<HarborService>();
+        builder.Services.AddScoped<TailscaleService>();
+        builder.Services.AddScoped<HeadscaleService>();
         builder.Services.AddScoped<AuditService>();
         builder.Services.AddScoped<IncidentService>();
         builder.Services.AddScoped<NotificationService>();
@@ -145,6 +161,11 @@ public class Program
         builder.Services.AddScoped<LokiService>();
         builder.Services.AddScoped<BackupService>();
         builder.Services.AddScoped<VpnService>();
+        builder.Services.AddScoped<KyvernoPolicyService>();
+        builder.Services.AddScoped<KedaScalerService>();
+        builder.Services.AddScoped<SecretExpiryService>();
+        builder.Services.AddScoped<CustomerNotificationService>();
+
         builder.Services.AddScoped<AppGovernanceService>();
         builder.Services.AddScoped<GitOperationsService>();
         builder.Services.AddScoped<GitRepositoryService>();
@@ -157,6 +178,8 @@ public class Program
         builder.Services.AddHostedService<AlertSyncService>();
         builder.Services.AddHostedService<AlertEscalationService>();
         builder.Services.AddHostedService<UptimeTrackingService>();
+        builder.Services.AddHostedService<HeadscaleCertSyncService>();
+        builder.Services.AddHostedService<SecretExpiryNotificationService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<GitSyncService>());
 
         builder.Services.AddHttpClient("Notifications", client =>
@@ -175,6 +198,15 @@ public class Program
             MaxAutomaticRedirections = 3,
             ServerCertificateCustomValidationCallback =
                 HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+        });
+
+        // Headscale REST API client — each call sets a per-request BaseAddress and Bearer token.
+        builder.Services.AddHttpClient("HeadscaleApi", client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(15);
+        }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+        {
+            ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
         });
 
         // Harbor API client: cookies must be disabled so Harbor's gorilla/csrf middleware

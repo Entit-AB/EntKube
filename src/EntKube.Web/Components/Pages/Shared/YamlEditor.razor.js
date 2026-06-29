@@ -71,6 +71,17 @@ export async function createEditor(container, value, language, readOnly, dotNetR
         updateAutoHeight();
     }
 
+    // When Monaco is already cached, loadMonaco() resolves synchronously and
+    // editor.create() runs before the browser has painted the container at its
+    // final dimensions. Two rAFs ensure we re-measure after the first real paint.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (editor._updateAutoHeight) {
+            editor._updateAutoHeight();
+        } else {
+            editor.layout();
+        }
+    }));
+
     return editor;
 }
 

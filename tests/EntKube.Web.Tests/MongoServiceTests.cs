@@ -315,15 +315,12 @@ public class MongoServiceTests : IDisposable
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
 
-        k8sFactory.Setup(f => f.ExecuteMongoAsync(
+        // CreateDatabaseAsync runs a mongosh script and checks stdout for the
+        // ENTK_SUCCESS sentinel before marking the database Ready.
+        k8sFactory.Setup(f => f.ExecuteMongoWithOutputAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
-
-        k8sFactory.Setup(f => f.GetSecretValueAsync(
-                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync("test-admin-password");
+            .ReturnsAsync("ENTK_SUCCESS");
 
         MongoCluster mongoCluster = await sut.CreateClusterAsync(
             tenant.Id, cluster.Id, "db-test", "databases", 3, "10Gi", null, null);
@@ -338,7 +335,7 @@ public class MongoServiceTests : IDisposable
         result.Name.Should().Be("myapp");
         result.Status.Should().Be(MongoDatabaseStatus.Ready);
 
-        k8sFactory.Verify(f => f.ExecuteMongoAsync(
+        k8sFactory.Verify(f => f.ExecuteMongoWithOutputAsync(
             "db-test", "databases", It.Is<string>(s => s.Contains("myapp")),
             It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()), Times.Once);
     }

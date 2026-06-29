@@ -12,20 +12,60 @@
 @inject AuthenticationStateProvider AuthStateProvider
 @inject NavigationManager Navigation
 
-<PageTitle>Status Overview</PageTitle>
+<PageTitle>Operations</PageTitle>
 
 <div class="d-flex justify-content-between align-items-center mb-3">
     <div>
-        <h4 class="mb-0"><i class="bi bi-activity me-2"></i>Status Overview</h4>
-        <div class="text-muted small">Health and uptime across all your applications</div>
+        <h4 class="mb-0"><i class="bi bi-activity me-2"></i>Operations</h4>
+        <div class="text-muted small">Health, uptime and logs across your applications</div>
     </div>
-    <button class="btn btn-sm btn-outline-secondary" @onclick="LoadData" disabled="@isLoading">
-        <span class="bi bi-arrow-clockwise @(isLoading ? "spin" : "")"></span> Refresh
-    </button>
+    <div class="d-flex gap-2 align-items-center">
+        @if (customers.Count > 1)
+        {
+            <select class="form-select form-select-sm" style="width:auto" @bind="selectedCustomerId" @bind:after="OnCustomerChanged">
+                <option value="">All customers</option>
+                @foreach (Customer c in customers)
+                {
+                    <option value="@c.Id">@c.Name</option>
+                }
+            </select>
+        }
+        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadData" disabled="@isLoading">
+            <span class="bi bi-arrow-clockwise @(isLoading ? "spin" : "")"></span> Refresh
+        </button>
+    </div>
 </div>
 
+<ul class="nav nav-tabs mb-3">
+    <li class="nav-item">
+        <button class="nav-link @(activeTab == "overview" ? "active" : "")" @onclick="@(() => activeTab = "overview")">
+            <i class="bi bi-grid-1x2 me-1"></i>Dashboard
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(activeTab == "logs" ? "active" : "")" @onclick="@(() => activeTab = "logs")">
+            <i class="bi bi-journal-text me-1"></i>Logs
+        </button>
+    </li>
+</ul>
+
+@if (activeTab == "logs")
+{
+    @if (SelectedCustomer is null)
+    {
+        <EmptyState Icon="bi-people"
+                    Title="Select a customer"
+                    Message="Pick a customer from the selector above to browse their logs." />
+    }
+    else
+    {
+        <CustomerLogBrowser Customer="@SelectedCustomer" />
+    }
+}
+else
+{
 <LoadingPanel Loading="@isLoading" LoadingText="Loading status…">
-@if (!isLoading && rows.Count == 0)
+@if (!isLoading && VisibleRows.Count == 0)
 {
     <EmptyState Icon="bi-shield-lock"
                 Title="No applications to show"
@@ -33,6 +73,41 @@
 }
 else
 {
+    <div class="row g-3 mb-3">
+        <div class="col-6 col-md-3">
+            <div class="card shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Applications</div>
+                    <div class="display-6 fw-semibold">@VisibleRows.Count</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="card shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Healthy</div>
+                    <div class="display-6 fw-semibold text-success">@HealthyCount</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="card shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Needs attention</div>
+                    <div class="display-6 fw-semibold @(AttentionCount > 0 ? "text-danger" : "text-muted")">@AttentionCount</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="card shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Active alerts</div>
+                    <div class="display-6 fw-semibold @(TotalAlerts > 0 ? "text-danger" : "text-muted")">@TotalAlerts</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="card shadow-sm">
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0">
@@ -49,7 +124,7 @@ else
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach (StatusRow row in rows)
+                    @foreach (StatusRow row in VisibleRows)
                     {
                         <tr style="cursor:pointer" @onclick="() => GoToPortal(row)">
                             <td class="fw-semibold">@row.AppName</td>
@@ -113,12 +188,29 @@ else
     </div>
 }
 </LoadingPanel>
+}
 
 @code {
     private List<StatusRow> rows = [];
+    private List<Customer> customers = [];
+    private Guid? selectedCustomerId;
+    private string activeTab = "overview";
     private bool isLoading = true;
     private DateTime lastRefreshed;
     private string? currentUserId;
+
+    private Customer? SelectedCustomer =>
+        selectedCustomerId is Guid id ? customers.FirstOrDefault(c => c.Id == id) : null;
+
+    private List<StatusRow> VisibleRows =>
+        selectedCustomerId is Guid id ? rows.Where(r => r.CustomerId == id).ToList() : rows;
+
+    private int HealthyCount => VisibleRows.Count(r => r.WorstHealth == HealthStatus.Healthy);
+    private int AttentionCount => VisibleRows.Count(r =>
+        r.WorstHealth is HealthStatus.Degraded or HealthStatus.Missing or HealthStatus.Unknown);
+    private int TotalAlerts => VisibleRows.Sum(r => r.ActiveAlerts);
+
+    private void OnCustomerChanged() => StateHasChanged();
 
     protected override async Task OnInitializedAsync()
     {
@@ -134,7 +226,14 @@ else
         isLoading = true;
         StateHasChanged();
 
-        List<Customer> customers = await CustomerAccessService.GetAccessibleCustomersAsync(currentUserId);
+        customers = await CustomerAccessService.GetAccessibleCustomersAsync(currentUserId);
+
+        // Default to a single customer (one-at-a-time scope); only the "All
+        // customers" option spans everything, and it's offered when there's > 1.
+        if (selectedCustomerId is null && customers.Count == 1)
+            selectedCustomerId = customers[0].Id;
+        else if (selectedCustomerId is Guid sel && customers.All(c => c.Id != sel))
+            selectedCustomerId = null;
 
         using ApplicationDbContext db = DbFactory.CreateDbContext();
 

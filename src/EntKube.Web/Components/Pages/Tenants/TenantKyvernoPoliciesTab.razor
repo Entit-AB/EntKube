@@ -1,0 +1,572 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject KyvernoPolicyService KyvernoService
+
+@* ═══════════════════════════════════════════════════════════════════
+   TenantKyvernoPoliciesTab — Kyverno admission policy management
+   at tenant+environment scope. Policies are applied to every app
+   namespace the tenant owns in this environment.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3 mt-4">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <div>
+            <i class="bi bi-shield-lock me-2 text-danger"></i>
+            <strong>Policy Enforcement</strong>
+            <span class="text-muted small ms-2">Kyverno admission policies applied to all app namespaces in this environment.</span>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+            @{
+                int builtInCount = kyvernoPolicies.Count(p => p.PolicyType != KyvernoPolicyType.Custom);
+                int customCount  = kyvernoPolicies.Count(p => p.PolicyType == KyvernoPolicyType.Custom);
+            }
+            @if (builtInCount + customCount > 0)
+            {
+                <span class="badge bg-danger-subtle text-danger border border-danger-subtle">
+                    @builtInCount built-in &amp; @customCount custom active
+                </span>
+            }
+            else
+            {
+                <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">no policies</span>
+            }
+            <button class="btn btn-sm btn-success" @onclick="ApplyToAllNamespaces" disabled="@applying">
+                @if (applying) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                else { <i class="bi bi-cloud-upload me-1"></i> }
+                Apply to all namespaces
+            </button>
+        </div>
+    </div>
+    <div class="card-body pt-2">
+
+        @if (loading)
+        {
+            <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+        }
+        else if (loadError is not null)
+        {
+            <div class="alert alert-danger py-2 small">
+                <i class="bi bi-exclamation-triangle me-1"></i>
+                <strong>Failed to load policies:</strong> @loadError
+                <button class="btn btn-sm btn-outline-danger ms-2" @onclick="LoadAsync">Retry</button>
+            </div>
+        }
+        else
+        {
+            @if (applyResults is not null)
+            {
+                <div class="alert @(applyAllOk ? "alert-success" : "alert-danger") py-2 small mb-3">
+                    <div class="d-flex align-items-start justify-content-between">
+                        <div>
+                            <i class="bi @(applyAllOk ? "bi-check-circle" : "bi-exclamation-triangle") me-1"></i>
+                            <strong>@(applyAllOk ? "Applied to all namespaces" : "Some targets had errors")</strong>
+                        </div>
+                        <button class="btn-close btn-close-sm" @onclick="() => applyResults = null"></button>
+                    </div>
+                    <ul class="mb-0 mt-1 ps-3">
+                        @foreach ((string target, bool ok, string output) in applyResults)
+                        {
+                            <li class="@(ok ? "text-success" : "text-danger")">
+                                <code>@target</code>: @(ok ? "✓ applied" : output)
+                            </li>
+                        }
+                    </ul>
+                </div>
+            }
+
+            @if (!kyvernoAvailable)
+            {
+                <div class="alert alert-warning py-2 small mb-3 d-flex align-items-center gap-2">
+                    <i class="bi bi-exclamation-triangle-fill text-warning flex-shrink-0"></i>
+                    <div>
+                        <strong>Kyverno is not installed</strong> on any cluster in this environment.
+                        Install it from the <strong>Cluster → Components</strong> page (Security category).
+                        Saved policies will be applied once Kyverno is running.
+                    </div>
+                </div>
+            }
+            else
+            {
+                <p class="text-muted small mb-3">
+                    <i class="bi bi-check-circle-fill text-success me-1"></i>
+                    Kyverno is installed. <strong>Audit</strong> logs violations; <strong>Enforce</strong> blocks them at admission.
+                </p>
+            }
+
+            @* ── Container Security ── *@
+            <h6 class="text-muted fw-semibold mb-2 d-flex align-items-center gap-1">
+                <i class="bi bi-cpu text-primary"></i> Container Security
+            </h6>
+            <div class="list-group list-group-flush mb-3">
+                @RenderPolicyRow(KyvernoPolicyType.DisallowPrivilegedContainers,
+                    "Block privileged containers",
+                    "Prevents containers from using elevated host privileges (privileged: true).")
+                @RenderPolicyRow(KyvernoPolicyType.DisallowRootUser,
+                    "Block running as root",
+                    "Requires all containers to run as a non-root user (runAsNonRoot or runAsUser > 0).")
+                @RenderPolicyRow(KyvernoPolicyType.RequireReadOnlyRootFilesystem,
+                    "Require read-only root filesystem",
+                    "Forces containers to declare readOnlyRootFilesystem: true in their security context.")
+                @RenderPolicyRow(KyvernoPolicyType.DisallowPrivilegeEscalation,
+                    "Block privilege escalation",
+                    "Sets allowPrivilegeEscalation: false on all containers.")
+                @RenderPolicyRow(KyvernoPolicyType.RequireSeccompProfile,
+                    "Require seccomp profile",
+                    "Pods must set seccompProfile to RuntimeDefault or Localhost at the pod or container level.")
+            </div>
+
+            @* ── Workload Isolation ── *@
+            <h6 class="text-muted fw-semibold mb-2 d-flex align-items-center gap-1">
+                <i class="bi bi-server text-info"></i> Workload Isolation
+            </h6>
+            <div class="list-group list-group-flush mb-3">
+                @RenderPolicyRow(KyvernoPolicyType.DisallowHostNetwork,
+                    "Block host networking",
+                    "Prevents pods from sharing the host's network namespace (hostNetwork: true).")
+                @RenderPolicyRow(KyvernoPolicyType.DisallowHostPID,
+                    "Block host process namespace",
+                    "Prevents pods from sharing the host's PID namespace (hostPID: true).")
+                @RenderPolicyRow(KyvernoPolicyType.DisallowHostPath,
+                    "Block host path volumes",
+                    "Prevents mounting host filesystem paths via hostPath volumes.")
+            </div>
+
+            @* ── Image Registry ── *@
+            <h6 class="text-muted fw-semibold mb-2 d-flex align-items-center gap-1">
+                <i class="bi bi-box-seam text-warning"></i> Image Registry
+            </h6>
+            <div class="list-group list-group-flush mb-3">
+                @{
+                    KyvernoPolicy? regPolicy = GetPolicy(KyvernoPolicyType.RestrictImageRegistries);
+                    bool regEnabled = regPolicy is not null;
+                    List<string> registries = KyvernoPolicyService.GetConfigList(regPolicy);
+                }
+                <div class="list-group-item px-0 py-2">
+                    <div class="d-flex align-items-center">
+                        <div class="flex-grow-1">
+                            <div class="fw-medium small">Restrict to allowed registries</div>
+                            <div class="text-muted" style="font-size:0.78rem">Only permit pulling images from the registries you specify.</div>
+                        </div>
+                        <div class="d-flex align-items-center gap-2 ms-3">
+                            @if (regEnabled)
+                            {
+                                <select class="form-select form-select-sm" style="width:145px"
+                                        value="@regPolicy!.ValidationFailureAction.ToString()"
+                                        @onchange="@(e => SetMode(KyvernoPolicyType.RestrictImageRegistries, ParseMode(e.Value?.ToString())))">
+                                    <option value="Audit">Audit (log only)</option>
+                                    <option value="Enforce">Enforce (block)</option>
+                                </select>
+                            }
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" checked="@regEnabled"
+                                       @onchange="@(e => TogglePolicy(KyvernoPolicyType.RestrictImageRegistries, (bool)e.Value!))" />
+                            </div>
+                        </div>
+                    </div>
+                    @if (regEnabled)
+                    {
+                        <div class="mt-2 ps-1">
+                            <div class="d-flex flex-wrap gap-1 mb-1">
+                                @foreach (string reg in registries)
+                                {
+                                    <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle d-inline-flex align-items-center gap-1">
+                                        <code class="fw-normal" style="font-size:0.75rem">@reg</code>
+                                        <button type="button" class="btn-close" style="font-size:0.5rem"
+                                                @onclick="() => RemoveRegistry(reg)"></button>
+                                    </span>
+                                }
+                                @if (registries.Count == 0)
+                                {
+                                    <span class="text-muted small fst-italic">No registries added — policy will block all images.</span>
+                                }
+                            </div>
+                            <div class="d-flex gap-1">
+                                <input class="form-control form-control-sm font-monospace" style="max-width:260px"
+                                       @bind="registryInput" placeholder="e.g. ghcr.io/myorg" />
+                                <button class="btn btn-sm btn-outline-secondary"
+                                        disabled="@string.IsNullOrWhiteSpace(registryInput)"
+                                        @onclick="AddRegistry">
+                                    <i class="bi bi-plus me-1"></i>Add
+                                </button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+
+            @* ── Resource Governance ── *@
+            <h6 class="text-muted fw-semibold mb-2 d-flex align-items-center gap-1">
+                <i class="bi bi-speedometer text-success"></i> Resource Governance
+            </h6>
+            <div class="list-group list-group-flush mb-3">
+                @RenderPolicyRow(KyvernoPolicyType.RequireResourceLimits,
+                    "Require resource limits",
+                    "All containers must declare CPU and memory limits.")
+                @RenderPolicyRow(KyvernoPolicyType.RequireResourceRequests,
+                    "Require resource requests",
+                    "All containers must declare CPU and memory requests.")
+            </div>
+
+            @* ── Pod Labels ── *@
+            <h6 class="text-muted fw-semibold mb-2 d-flex align-items-center gap-1">
+                <i class="bi bi-tag text-secondary"></i> Pod Labels
+            </h6>
+            <div class="list-group list-group-flush mb-3">
+                @{
+                    KyvernoPolicy? labelPolicy = GetPolicy(KyvernoPolicyType.RequirePodLabels);
+                    bool labelEnabled = labelPolicy is not null;
+                    List<string> requiredLabels = KyvernoPolicyService.GetConfigList(labelPolicy);
+                }
+                <div class="list-group-item px-0 py-2">
+                    <div class="d-flex align-items-center">
+                        <div class="flex-grow-1">
+                            <div class="fw-medium small">Require pod labels</div>
+                            <div class="text-muted" style="font-size:0.78rem">Enforce that all pods carry the label keys you specify.</div>
+                        </div>
+                        <div class="d-flex align-items-center gap-2 ms-3">
+                            @if (labelEnabled)
+                            {
+                                <select class="form-select form-select-sm" style="width:145px"
+                                        value="@labelPolicy!.ValidationFailureAction.ToString()"
+                                        @onchange="@(e => SetMode(KyvernoPolicyType.RequirePodLabels, ParseMode(e.Value?.ToString())))">
+                                    <option value="Audit">Audit (log only)</option>
+                                    <option value="Enforce">Enforce (block)</option>
+                                </select>
+                            }
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" checked="@labelEnabled"
+                                       @onchange="@(e => TogglePolicy(KyvernoPolicyType.RequirePodLabels, (bool)e.Value!))" />
+                            </div>
+                        </div>
+                    </div>
+                    @if (labelEnabled)
+                    {
+                        <div class="mt-2 ps-1">
+                            <div class="d-flex flex-wrap gap-1 mb-1">
+                                @foreach (string lbl in requiredLabels)
+                                {
+                                    <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle d-inline-flex align-items-center gap-1">
+                                        <code class="fw-normal" style="font-size:0.75rem">@lbl</code>
+                                        <button type="button" class="btn-close" style="font-size:0.5rem"
+                                                @onclick="() => RemoveLabel(lbl)"></button>
+                                    </span>
+                                }
+                                @if (requiredLabels.Count == 0)
+                                {
+                                    <span class="text-muted small fst-italic">No labels added — policy will pass all pods.</span>
+                                }
+                            </div>
+                            <div class="d-flex gap-1">
+                                <input class="form-control form-control-sm font-monospace" style="max-width:200px"
+                                       @bind="labelInput" placeholder="e.g. app" />
+                                <button class="btn btn-sm btn-outline-secondary"
+                                        disabled="@string.IsNullOrWhiteSpace(labelInput)"
+                                        @onclick="AddLabel">
+                                    <i class="bi bi-plus me-1"></i>Add
+                                </button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+
+            @* ── Custom Policies ── *@
+            <h6 class="text-muted fw-semibold mb-2 d-flex align-items-center gap-1">
+                <i class="bi bi-code-square text-dark"></i> Custom Policies
+            </h6>
+            @if (kyvernoPolicies.Any(p => p.PolicyType == KyvernoPolicyType.Custom))
+            {
+                <div class="list-group list-group-flush mb-2">
+                    @foreach (KyvernoPolicy cp in kyvernoPolicies.Where(p => p.PolicyType == KyvernoPolicyType.Custom))
+                    {
+                        <div class="list-group-item d-flex align-items-center justify-content-between px-0 py-1">
+                            <div class="small d-flex align-items-center gap-2">
+                                <code>@cp.Name</code>
+                                <span class="badge @(cp.ValidationFailureAction == KyvernoValidationFailureAction.Enforce ? "bg-danger-subtle text-danger border border-danger-subtle" : "bg-warning-subtle text-warning border border-warning-subtle")">
+                                    @(cp.ValidationFailureAction == KyvernoValidationFailureAction.Enforce ? "Enforce" : "Audit")
+                                </span>
+                            </div>
+                            @if (confirmDeleteId != cp.Id)
+                            {
+                                <button class="btn btn-sm btn-outline-danger p-0 px-1"
+                                        @onclick="() => confirmDeleteId = cp.Id">
+                                    <i class="bi bi-trash" style="font-size:.8rem;"></i>
+                                </button>
+                            }
+                            else
+                            {
+                                <div class="d-flex gap-1">
+                                    <button class="btn btn-sm btn-danger" @onclick="() => DeleteCustom(cp.Id)">Yes</button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDeleteId = null">No</button>
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+
+            @if (showAddCustom)
+            {
+                <div class="card border-secondary mb-2">
+                    <div class="card-body">
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-5">
+                                <label class="form-label small">Policy name <span class="text-muted">(K8s resource name)</span></label>
+                                <input class="form-control form-control-sm font-monospace" @bind="newKpName"
+                                       placeholder="e.g. require-security-context" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Failure action</label>
+                                <select class="form-select form-select-sm" @bind="newKpMode">
+                                    <option value="@KyvernoValidationFailureAction.Audit">Audit (log only)</option>
+                                    <option value="@KyvernoValidationFailureAction.Enforce">Enforce (block)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <label class="form-label small">Kyverno Policy YAML</label>
+                        <YamlEditor @bind-Value="newKpYaml" />
+                        <div class="d-flex gap-1 mt-2">
+                            <button class="btn btn-sm btn-secondary"
+                                    disabled="@(string.IsNullOrWhiteSpace(newKpName) || string.IsNullOrWhiteSpace(newKpYaml) || addingCustom)"
+                                    @onclick="AddCustom">
+                                @if (addingCustom) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Add policy
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddCustom = false">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            }
+            else
+            {
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddCustom = true">
+                    <i class="bi bi-plus me-1"></i>Add custom policy
+                </button>
+            }
+        }
+
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter, EditorRequired] public Guid EnvironmentId { get; set; }
+
+    private bool loading = true;
+    private string? loadError;
+
+    private List<KyvernoPolicy> kyvernoPolicies = [];
+    private bool kyvernoAvailable = true;
+
+    private bool applying;
+    private List<(string Target, bool Success, string Output)>? applyResults;
+    private bool applyAllOk;
+
+    private string registryInput = "";
+    private string labelInput = "";
+    private bool showAddCustom;
+    private string newKpName = "";
+    private string? newKpYaml;
+    private KyvernoValidationFailureAction newKpMode = KyvernoValidationFailureAction.Audit;
+    private bool addingCustom;
+    private Guid? confirmDeleteId;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!loading)
+            await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        loadError = null;
+        try
+        {
+            kyvernoPolicies  = await KyvernoService.GetPoliciesAsync(TenantId, EnvironmentId);
+            kyvernoAvailable = await KyvernoService.IsKyvernoAvailableAsync(TenantId, EnvironmentId);
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task ApplyToAllNamespaces()
+    {
+        applying = true;
+        applyResults = null;
+        try
+        {
+            applyResults = await KyvernoService.ApplyToEnvironmentAsync(TenantId, EnvironmentId);
+            applyAllOk = applyResults.All(r => r.Success);
+        }
+        catch (Exception ex)
+        {
+            applyResults = [("error", false, ex.Message)];
+            applyAllOk = false;
+        }
+        finally
+        {
+            applying = false;
+        }
+    }
+
+    private KyvernoPolicy? GetPolicy(KyvernoPolicyType type) =>
+        kyvernoPolicies.FirstOrDefault(p => p.PolicyType == type);
+
+    private static KyvernoValidationFailureAction ParseMode(string? value) =>
+        value == "Enforce" ? KyvernoValidationFailureAction.Enforce : KyvernoValidationFailureAction.Audit;
+
+    private RenderFragment RenderPolicyRow(KyvernoPolicyType type, string label, string description) =>
+        @<div class="list-group-item px-0 py-2">
+            <div class="d-flex align-items-center">
+                <div class="flex-grow-1">
+                    <div class="fw-medium small">@label</div>
+                    <div class="text-muted" style="font-size:0.78rem">@description</div>
+                </div>
+                <div class="d-flex align-items-center gap-2 ms-3">
+                    @{
+                        KyvernoPolicy? rowPolicy = GetPolicy(type);
+                    }
+                    @if (rowPolicy is not null)
+                    {
+                        <select class="form-select form-select-sm" style="width:145px"
+                                value="@rowPolicy.ValidationFailureAction.ToString()"
+                                @onchange="@(e => SetMode(type, ParseMode(e.Value?.ToString())))">
+                            <option value="Audit">Audit (log only)</option>
+                            <option value="Enforce">Enforce (block)</option>
+                        </select>
+                    }
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" checked="@(rowPolicy is not null)"
+                               @onchange="@(e => TogglePolicy(type, (bool)e.Value!))" />
+                    </div>
+                </div>
+            </div>
+        </div>;
+
+    private async Task TogglePolicy(KyvernoPolicyType type, bool enable)
+    {
+        if (enable)
+        {
+            KyvernoPolicy p = await KyvernoService.EnablePolicyAsync(TenantId, EnvironmentId, type,
+                KyvernoValidationFailureAction.Audit);
+            kyvernoPolicies.Add(p);
+        }
+        else
+        {
+            KyvernoPolicy? existing = GetPolicy(type);
+            if (existing is not null)
+            {
+                await KyvernoService.DeletePolicyAsync(existing.Id);
+                kyvernoPolicies.Remove(existing);
+            }
+        }
+    }
+
+    private async Task SetMode(KyvernoPolicyType type, KyvernoValidationFailureAction mode)
+    {
+        KyvernoPolicy? existing = GetPolicy(type);
+        if (existing is null) return;
+        KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(existing.Id, mode, existing.Configuration);
+        int idx = kyvernoPolicies.IndexOf(existing);
+        if (idx >= 0) kyvernoPolicies[idx] = updated;
+    }
+
+    private async Task AddRegistry()
+    {
+        if (string.IsNullOrWhiteSpace(registryInput)) return;
+        KyvernoPolicy? p = GetPolicy(KyvernoPolicyType.RestrictImageRegistries);
+        List<string> list = KyvernoPolicyService.GetConfigList(p);
+        string reg = registryInput.Trim();
+        if (!list.Contains(reg)) list.Add(reg);
+        string config = KyvernoPolicyService.SerializeConfigList(list);
+        if (p is null)
+        {
+            KyvernoPolicy created = await KyvernoService.EnablePolicyAsync(TenantId, EnvironmentId,
+                KyvernoPolicyType.RestrictImageRegistries, KyvernoValidationFailureAction.Audit, config);
+            kyvernoPolicies.Add(created);
+        }
+        else
+        {
+            KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(p.Id, p.ValidationFailureAction, config);
+            kyvernoPolicies[kyvernoPolicies.IndexOf(p)] = updated;
+        }
+        registryInput = "";
+    }
+
+    private async Task RemoveRegistry(string registry)
+    {
+        KyvernoPolicy? p = GetPolicy(KyvernoPolicyType.RestrictImageRegistries);
+        if (p is null) return;
+        List<string> list = KyvernoPolicyService.GetConfigList(p);
+        list.Remove(registry);
+        KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(p.Id, p.ValidationFailureAction,
+            KyvernoPolicyService.SerializeConfigList(list));
+        kyvernoPolicies[kyvernoPolicies.IndexOf(p)] = updated;
+    }
+
+    private async Task AddLabel()
+    {
+        if (string.IsNullOrWhiteSpace(labelInput)) return;
+        KyvernoPolicy? p = GetPolicy(KyvernoPolicyType.RequirePodLabels);
+        List<string> list = KyvernoPolicyService.GetConfigList(p);
+        string lbl = labelInput.Trim();
+        if (!list.Contains(lbl)) list.Add(lbl);
+        string config = KyvernoPolicyService.SerializeConfigList(list);
+        if (p is null)
+        {
+            KyvernoPolicy created = await KyvernoService.EnablePolicyAsync(TenantId, EnvironmentId,
+                KyvernoPolicyType.RequirePodLabels, KyvernoValidationFailureAction.Audit, config);
+            kyvernoPolicies.Add(created);
+        }
+        else
+        {
+            KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(p.Id, p.ValidationFailureAction, config);
+            kyvernoPolicies[kyvernoPolicies.IndexOf(p)] = updated;
+        }
+        labelInput = "";
+    }
+
+    private async Task RemoveLabel(string labelKey)
+    {
+        KyvernoPolicy? p = GetPolicy(KyvernoPolicyType.RequirePodLabels);
+        if (p is null) return;
+        List<string> list = KyvernoPolicyService.GetConfigList(p);
+        list.Remove(labelKey);
+        KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(p.Id, p.ValidationFailureAction,
+            KyvernoPolicyService.SerializeConfigList(list));
+        kyvernoPolicies[kyvernoPolicies.IndexOf(p)] = updated;
+    }
+
+    private async Task AddCustom()
+    {
+        if (string.IsNullOrWhiteSpace(newKpName) || string.IsNullOrWhiteSpace(newKpYaml)) return;
+        addingCustom = true;
+        try
+        {
+            KyvernoPolicy p = await KyvernoService.AddCustomPolicyAsync(
+                TenantId, EnvironmentId, newKpName, newKpMode, newKpYaml!);
+            kyvernoPolicies.Add(p);
+            showAddCustom = false;
+            newKpName = ""; newKpYaml = null;
+            newKpMode = KyvernoValidationFailureAction.Audit;
+        }
+        catch { }
+        finally { addingCustom = false; }
+    }
+
+    private async Task DeleteCustom(Guid id)
+    {
+        await KyvernoService.DeletePolicyAsync(id);
+        kyvernoPolicies.RemoveAll(p => p.Id == id);
+        confirmDeleteId = null;
+    }
+}

@@ -5,6 +5,7 @@
 @inject MongoService MongoService
 @inject StorageService StorageService
 @inject RegisteredPostgresService RegisteredPostgresService
+@inject ILogger<DatabaseTab> Logger
 
 @* ===========================================================================
    Databases Tab — shows CNPG PostgreSQL clusters and MongoDB clusters
@@ -3634,9 +3635,11 @@
 
         var regPgTask = RegisteredPostgresService.GetInstancesAsync(TenantId);
         var allClustersTask = DatabaseService.GetAllClustersAsync(TenantId);
-        await Task.WhenAll(regPgTask, allClustersTask);
+        var storageLinksTask = StorageService.GetStorageLinksAsync(TenantId);
+        await Task.WhenAll(regPgTask, allClustersTask, storageLinksTask);
         registeredPgInstances = regPgTask.Result;
         allClusters = allClustersTask.Result;
+        storageLinks = storageLinksTask.Result;
 
         loading = false;
     }
@@ -5770,6 +5773,9 @@
         migrateSuccess = null;
         migrateErrorDbId = db.Id;
 
+        Logger.LogInformation("MigrateRegPgToCnpg: button clicked instance={InstanceId} db={DatabaseId} target={TargetCluster}",
+            rpi.Id, db.Id, migrateFormCnpgClusterId);
+
         try
         {
             await RegisteredPostgresService.MigrateDirectlyToCnpgAsync(
@@ -5781,6 +5787,7 @@
         catch (Exception ex)
         {
             migrateError = ex.Message;
+            Logger.LogError(ex, "MigrateRegPgToCnpg: migration failed for db={DatabaseId}", db.Id);
         }
         finally
         {

@@ -1,0 +1,1343 @@
+@using EntKube.Web.Services
+@using EntKube.Web.Data
+@inject HeadscaleService HeadscaleService
+@inject ComponentLifecycleService LifecycleService
+@inject ExternalRouteService RouteService
+
+@* ══════════════════════════════════════════════════════
+   Headscale VPN — cluster-level management
+   Sections: Setup · Users · Pre-auth Keys · Nodes · Routes · ACL
+   ══════════════════════════════════════════════════════ *@
+
+@if (loading)
+{
+    <div class="text-center py-5">
+        <div class="spinner-border text-primary" role="status"></div>
+        <div class="mt-2 text-muted small">Loading VPN status…</div>
+    </div>
+}
+else if (component is null)
+{
+    <div class="alert alert-info d-flex align-items-start gap-2 mt-3">
+        <i class="bi bi-info-circle-fill fs-5 mt-1"></i>
+        <div>
+            <strong>Headscale is not installed on this cluster.</strong>
+            <div class="mt-1 small">
+                Go to the <strong>Components</strong> tab and install <strong>Headscale (VPN coordinator)</strong>
+                from the catalog. Set the public server URL and click Install — the external route will be
+                created automatically.
+            </div>
+        </div>
+    </div>
+}
+else
+{
+    @* ── Tab navigation ── *@
+    <ul class="nav nav-pills nav-sm mb-3 gap-1">
+        <li class="nav-item">
+            <button class="nav-link py-1 px-3 @(vpnTab == "setup" ? "active" : "")"
+                    @onclick='() => SwitchTab("setup")'>
+                <i class="bi bi-gear me-1"></i>Setup
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link py-1 px-3 @(vpnTab == "users" ? "active" : "")"
+                    @onclick='() => SwitchTab("users")'>
+                <i class="bi bi-people me-1"></i>Users
+                @if (users is not null)
+                {
+                    <span class="badge bg-secondary ms-1">@users.Count</span>
+                }
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link py-1 px-3 @(vpnTab == "keys" ? "active" : "")"
+                    @onclick='() => SwitchTab("keys")'>
+                <i class="bi bi-key me-1"></i>Auth Keys
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link py-1 px-3 @(vpnTab == "nodes" ? "active" : "")"
+                    @onclick='() => SwitchTab("nodes")'>
+                <i class="bi bi-hdd-network me-1"></i>Nodes
+                @if (nodes is not null)
+                {
+                    <span class="badge bg-secondary ms-1">@nodes.Count</span>
+                }
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link py-1 px-3 @(vpnTab == "routes" ? "active" : "")"
+                    @onclick='() => SwitchTab("routes")'>
+                <i class="bi bi-diagram-3 me-1"></i>Routes
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link py-1 px-3 @(vpnTab == "acl" ? "active" : "")"
+                    @onclick='() => SwitchTab("acl")'>
+                <i class="bi bi-shield-check me-1"></i>ACL Policy
+            </button>
+        </li>
+    </ul>
+
+    @if (tabError is not null)
+    {
+        <div class="alert alert-danger alert-dismissible small py-2 px-3 mb-3">
+            <i class="bi bi-exclamation-triangle me-1"></i>@tabError
+            <button type="button" class="btn-close btn-close-sm" @onclick="() => tabError = null"></button>
+        </div>
+    }
+
+    @* ══════════════════════════════════════════════════════
+       Setup tab
+       ══════════════════════════════════════════════════════ *@
+    @if (vpnTab == "setup")
+    {
+        <div class="row g-3">
+            @* Status card *@
+            <div class="col-12">
+                <div class="card shadow-sm">
+                    <div class="card-header bg-white py-2 d-flex align-items-center gap-2">
+                        <i class="bi bi-activity text-primary"></i>
+                        <strong>Status</strong>
+                    </div>
+                    <div class="card-body py-2">
+                        <div class="d-flex flex-wrap gap-3">
+                            <div class="d-flex align-items-center gap-2">
+                                <i class="bi bi-check-circle-fill text-success"></i>
+                                <span class="small">Component installed</span>
+                            </div>
+                            <div class="d-flex align-items-center gap-2">
+                                @if (!string.IsNullOrEmpty(serverUrl))
+                                {
+                                    <i class="bi bi-check-circle-fill text-success"></i>
+                                    <span class="small"><a href="@serverUrl" target="_blank" rel="noopener">@serverUrl</a></span>
+                                }
+                                else
+                                {
+                                    <i class="bi bi-exclamation-circle-fill text-warning"></i>
+                                    <span class="small text-muted">Server URL not configured</span>
+                                }
+                            </div>
+                            <div class="d-flex align-items-center gap-2">
+                                @if (reachable == true)
+                                {
+                                    <i class="bi bi-wifi text-success"></i>
+                                    <span class="small text-success">Reachable</span>
+                                }
+                                else if (reachable == false)
+                                {
+                                    <i class="bi bi-wifi-off text-danger"></i>
+                                    <span class="small text-danger">Not reachable</span>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                                            @onclick="CheckReachabilityAsync" disabled="@checkingReachability">
+                                        @if (checkingReachability)
+                                        {
+                                            <span class="spinner-border spinner-border-sm me-1"></span>
+                                        }
+                                        Check reachability
+                                    </button>
+                                }
+                            </div>
+                            <div class="d-flex align-items-center gap-2">
+                                @if (!string.IsNullOrEmpty(apiKey))
+                                {
+                                    <i class="bi bi-key-fill text-success"></i>
+                                    <span class="small">API key configured</span>
+                                }
+                                else
+                                {
+                                    <i class="bi bi-key text-warning"></i>
+                                    <span class="small text-muted">No API key</span>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            @* External route *@
+            <div class="col-12">
+                <div class="card shadow-sm">
+                    <div class="card-header bg-white py-2 d-flex align-items-center gap-2">
+                        <i class="bi bi-link-45deg text-primary"></i>
+                        <strong>External Route</strong>
+                    </div>
+                    <div class="card-body py-2">
+                        @if (hasExternalRoute)
+                        {
+                            <div class="d-flex align-items-center gap-2 text-success small">
+                                <i class="bi bi-check-circle-fill"></i>
+                                External route exists — headscale is exposed at <strong class="ms-1">@serverUrl</strong>
+                            </div>
+                        }
+                        else if (!string.IsNullOrEmpty(serverUrl))
+                        {
+                            <div class="d-flex flex-wrap align-items-center gap-2">
+                                <span class="small text-muted">No external route yet. Choose a TLS issuer and create it:</span>
+                                <select class="form-select form-select-sm" style="width:220px"
+                                        @bind="routeClusterIssuer">
+                                    @foreach (string issuer in clusterIssuers)
+                                    {
+                                        <option value="@issuer">@issuer</option>
+                                    }
+                                </select>
+                                <button class="btn btn-sm btn-primary"
+                                        @onclick="CreateExternalRouteAsync" disabled="@creatingRoute">
+                                    @if (creatingRoute)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                    }
+                                    <i class="bi bi-plus me-1"></i>Create Route
+                                </button>
+                            </div>
+                        }
+                        else
+                        {
+                            <span class="small text-muted">Configure the server URL in the component settings first.</span>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            @* Node registration fix *@
+            @if (hasExternalRoute)
+            {
+                <div class="col-12">
+                    <div class="card shadow-sm">
+                        <div class="card-header bg-white py-2 d-flex align-items-center gap-2">
+                            <i class="bi bi-shield-lock text-primary"></i>
+                            <strong>Node Registration</strong>
+                            @if (routeTlsMode == TlsMode.Passthrough)
+                            {
+                                <span class="badge bg-success ms-1 small">TLS Passthrough Active</span>
+                            }
+                        </div>
+                        <div class="card-body py-2">
+                            @if (routeTlsMode == TlsMode.Passthrough)
+                            {
+                                <div class="d-flex flex-column gap-2">
+                                    <div class="small text-success d-flex align-items-center gap-2">
+                                        <i class="bi bi-check-circle-fill"></i>
+                                        TLS passthrough is active. The gateway routes raw TCP by SNI; headscale
+                                        terminates TLS directly so the ts2021 noise upgrade is preserved end-to-end.
+                                    </div>
+                                    <div class="d-flex flex-wrap align-items-center gap-2">
+                                        <button class="btn btn-sm btn-outline-secondary"
+                                                @onclick="SwitchToPassthroughAsync" disabled="@switchingPassthrough">
+                                            @if (switchingPassthrough) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            <i class="bi bi-arrow-repeat me-1"></i>Reapply manifests
+                                        </button>
+                                        @if (!string.IsNullOrEmpty(passthroughMsg))
+                                        {
+                                            <span class="small @(passthroughMsg.StartsWith("Error") ? "text-danger" : "text-success")">@passthroughMsg</span>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="d-flex flex-column gap-2">
+                                    <p class="small text-muted mb-0">
+                                        Tailscale nodes register via the ts2021 noise protocol, which requires an
+                                        HTTP Upgrade (HTTP/1.1). Many gateways negotiate HTTP/2, which strips the
+                                        Upgrade header and returns 403 before headscale sees the request. The fix
+                                        is TLS passthrough: the gateway routes raw TCP by SNI, nginx inside the pod
+                                        terminates TLS over HTTP/1.1, and the upgrade is preserved end-to-end.
+                                        Requires cert-manager — the certificate is provisioned automatically.
+                                    </p>
+                                    <div class="d-flex flex-wrap align-items-center gap-2">
+                                        <button class="btn btn-sm btn-primary"
+                                                @onclick="SwitchToPassthroughAsync" disabled="@switchingPassthrough">
+                                            @if (switchingPassthrough) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            <i class="bi bi-shield-lock me-1"></i>Switch to TLS Passthrough
+                                        </button>
+                                        @if (!string.IsNullOrEmpty(passthroughMsg))
+                                        {
+                                            <span class="small @(passthroughMsg.StartsWith("Error") ? "text-danger" : "text-success")">@passthroughMsg</span>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @* API key *@
+            <div class="col-12">
+                <div class="card shadow-sm">
+                    <div class="card-header bg-white py-2 d-flex align-items-center gap-2">
+                        <i class="bi bi-key text-primary"></i>
+                        <strong>API Key</strong>
+                    </div>
+                    <div class="card-body py-2">
+                        @if (!string.IsNullOrEmpty(apiKey))
+                        {
+                            <div class="d-flex flex-wrap align-items-center gap-2">
+                                <code class="small user-select-all">@(revealedKeys.Contains("__apikey__") ? apiKey : MaskKey(apiKey))</code>
+                                <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                                        @onclick='() => ToggleReveal("__apikey__")'
+                                        title="@(revealedKeys.Contains("__apikey__") ? "Hide" : "Reveal value")">
+                                    <i class="bi @(revealedKeys.Contains("__apikey__") ? "bi-eye-slash" : "bi-eye")"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger py-0 px-2"
+                                        @onclick="RegenerateApiKeyAsync" disabled="@generatingKey">
+                                    @if (generatingKey)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                    }
+                                    Regenerate
+                                </button>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="d-flex flex-wrap align-items-center gap-2">
+                                <span class="small text-muted">
+                                    Generate an API key by running
+                                    <code>headscale apikeys create</code> in the headscale pod,
+                                    or click below to do it automatically.
+                                </span>
+                                <button class="btn btn-sm btn-primary"
+                                        @onclick="GenerateApiKeyAsync" disabled="@generatingKey">
+                                    @if (generatingKey)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                    }
+                                    <i class="bi bi-key me-1"></i>Generate API Key
+                                </button>
+                                <div class="w-100 mt-1">
+                                    <span class="small text-muted me-1">Or paste an existing key:</span>
+                                    <div class="input-group" style="max-width:420px">
+                                        <input type="password" class="form-control form-control-sm"
+                                               placeholder="Paste API key…"
+                                               @bind="manualApiKey" />
+                                        <button class="btn btn-sm btn-outline-secondary"
+                                                @onclick="SaveManualApiKeyAsync"
+                                                disabled="@string.IsNullOrWhiteSpace(manualApiKey)">
+                                            Save
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            @* Subnet router *@
+            <div class="col-12">
+                <div class="card shadow-sm">
+                    <div class="card-header bg-white py-2 d-flex align-items-center gap-2">
+                        <i class="bi bi-router text-primary"></i>
+                        <strong>Subnet Router</strong>
+                    </div>
+                    <div class="card-body py-2">
+                        <p class="small text-muted mb-2">
+                            Deploys a DaemonSet that connects to headscale as the "infra" user
+                            and advertises the cluster service CIDR, making all in-cluster services
+                            reachable from Tailscale clients without per-service tunnels.
+                        </p>
+                        @if (routerRunning)
+                        {
+                            <div class="d-flex align-items-center gap-2 mb-2 text-success small">
+                                <i class="bi bi-check-circle-fill"></i> Subnet router is running
+                            </div>
+                            <button class="btn btn-sm btn-outline-danger"
+                                    @onclick="RemoveRouterAsync" disabled="@routerWorking">
+                                @if (routerWorking) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Remove subnet router
+                            </button>
+                        }
+                        else
+                        {
+                            <div class="d-flex flex-wrap align-items-center gap-2">
+                                <div class="input-group" style="max-width:260px">
+                                    <span class="input-group-text small">Service CIDR</span>
+                                    <input type="text" class="form-control form-control-sm"
+                                           placeholder="10.96.0.0/12"
+                                           @bind="serviceCidr" />
+                                </div>
+                                <button class="btn btn-sm btn-primary"
+                                        @onclick="DeployRouterAsync"
+                                        disabled="@(routerWorking || string.IsNullOrWhiteSpace(serviceCidr) || string.IsNullOrEmpty(apiKey))">
+                                    @if (routerWorking) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    <i class="bi bi-plus me-1"></i>Deploy subnet router
+                                </button>
+                            </div>
+                            @if (string.IsNullOrEmpty(apiKey))
+                            {
+                                <div class="small text-warning mt-1">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>Configure the API key first.
+                                </div>
+                            }
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* ══════════════════════════════════════════════════════
+       Users tab
+       ══════════════════════════════════════════════════════ *@
+    @if (vpnTab == "users")
+    {
+        @if (!IsApiReady)
+        {
+            @ApiNotReady
+        }
+        else
+        {
+            <div class="d-flex align-items-center justify-content-between mb-2">
+                <span class="text-muted small">@(users?.Count ?? 0) users</span>
+                <button class="btn btn-sm btn-primary" @onclick="() => showCreateUser = !showCreateUser">
+                    <i class="bi bi-plus me-1"></i>New user
+                </button>
+            </div>
+            @if (showCreateUser)
+            {
+                <div class="card shadow-sm mb-3">
+                    <div class="card-body py-2">
+                        <div class="input-group" style="max-width:360px">
+                            <input type="text" class="form-control form-control-sm"
+                                   placeholder="Username (e.g. alice)"
+                                   @bind="newUserName" />
+                            <button class="btn btn-sm btn-success"
+                                    @onclick="CreateUserAsync"
+                                    disabled="@(string.IsNullOrWhiteSpace(newUserName) || userWorking)">
+                                @if (userWorking) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => { showCreateUser = false; newUserName = null; }">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            }
+            @if (users is null)
+            {
+                <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+            }
+            else if (users.Count == 0)
+            {
+                <div class="text-muted small py-3">No users yet.</div>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Name</th>
+                                <th>Created</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (HeadscaleUser u in users)
+                            {
+                                <tr>
+                                    <td><code>@u.Name</code></td>
+                                    <td class="text-muted small">@u.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
+                                    <td class="text-end">
+                                        @if (confirmDeleteUser == u.Id)
+                                        {
+                                            <span class="me-1 small">Delete <strong>@u.Name</strong>?</span>
+                                            <button class="btn btn-sm btn-danger py-0 px-2 me-1"
+                                                    @onclick="ConfirmDeleteUserAsync">Yes, delete</button>
+                                            <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                                                    @onclick="() => confirmDeleteUser = null">No</button>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-link text-danger p-0"
+                                                    @onclick="() => StartDeleteUser(u)"
+                                                    title="Delete user">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        }
+    }
+
+    @* ══════════════════════════════════════════════════════
+       Pre-auth keys tab
+       ══════════════════════════════════════════════════════ *@
+    @if (vpnTab == "keys")
+    {
+        @if (!IsApiReady)
+        {
+            @ApiNotReady
+        }
+        else
+        {
+            <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+                <div class="input-group" style="max-width:220px">
+                    <span class="input-group-text small">User</span>
+                    <select class="form-select form-select-sm" @bind="keyUser" @bind:after="LoadPreAuthKeysAsync">
+                        @foreach (HeadscaleUser u in users ?? [])
+                        {
+                            <option value="@u.Name">@u.Name</option>
+                        }
+                    </select>
+                </div>
+                <button class="btn btn-sm btn-primary"
+                        @onclick="() => showCreateKey = !showCreateKey"
+                        disabled="@string.IsNullOrEmpty(keyUser)">
+                    <i class="bi bi-plus me-1"></i>New key
+                </button>
+            </div>
+            @if (showCreateKey)
+            {
+                <div class="card shadow-sm mb-3">
+                    <div class="card-body py-2">
+                        <div class="d-flex flex-wrap gap-3 align-items-end">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="keyReusable" @bind="newKeyReusable" />
+                                <label class="form-check-label small" for="keyReusable">Reusable</label>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="keyEphemeral" @bind="newKeyEphemeral" />
+                                <label class="form-check-label small" for="keyEphemeral">Ephemeral</label>
+                            </div>
+                            <button class="btn btn-sm btn-success"
+                                    @onclick="CreatePreAuthKeyAsync"
+                                    disabled="@keyWorking">
+                                @if (keyWorking) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Generate
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => showCreateKey = false">Cancel</button>
+                        </div>
+                        @if (!string.IsNullOrEmpty(newKeyResult))
+                        {
+                            <div class="mt-2 p-2 bg-light border rounded">
+                                <div class="small text-muted mb-1">Key generated — copy it now, it will not be shown again.</div>
+                                <code class="text-break">@newKeyResult</code>
+                                <button class="btn btn-sm btn-outline-secondary ms-2 py-0"
+                                        @onclick="() => newKeyResult = null">Dismiss</button>
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+            @if (preAuthKeys is null)
+            {
+                <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+            }
+            else if (preAuthKeys.Count == 0)
+            {
+                <div class="text-muted small py-2">No pre-auth keys for this user.</div>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Key</th>
+                                <th>Reusable</th>
+                                <th>Ephemeral</th>
+                                <th>Expires</th>
+                                <th>Used</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (HeadscalePreAuthKey k in preAuthKeys)
+                            {
+                                <tr class="@(k.Expiration < DateTime.UtcNow ? "text-muted" : "")">
+                                    <td>
+                                        <code class="small user-select-all">@(revealedKeys.Contains(k.Id) ? k.Key : MaskKey(k.Key))</code>
+                                        <button class="btn btn-link btn-sm p-0 ms-1 align-baseline"
+                                                @onclick="() => ToggleReveal(k.Id)"
+                                                title="@(revealedKeys.Contains(k.Id) ? "Hide" : "Reveal value")">
+                                            <i class="bi @(revealedKeys.Contains(k.Id) ? "bi-eye-slash" : "bi-eye") small"></i>
+                                        </button>
+                                    </td>
+                                    <td class="small">@(k.Reusable ? "Yes" : "—")</td>
+                                    <td class="small">@(k.Ephemeral ? "Yes" : "—")</td>
+                                    <td class="small">@(k.Expiration.Year >= 9000 ? "Never" : k.Expiration.ToLocalTime().ToString("yyyy-MM-dd"))</td>
+                                    <td class="small">@(k.Used ? "Yes" : "—")</td>
+                                    <td class="text-end">
+                                        @if (confirmExpireKey == k.Id)
+                                        {
+                                            <button class="btn btn-sm btn-danger py-0 px-2 me-1"
+                                                    @onclick="ConfirmExpireKeyAsync">Expire</button>
+                                            <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                                                    @onclick="() => confirmExpireKey = null">No</button>
+                                        }
+                                        else if (k.Expiration > DateTime.UtcNow)
+                                        {
+                                            <button class="btn btn-sm btn-link text-warning p-0"
+                                                    @onclick="() => StartExpireKey(k)"
+                                                    title="Expire key">
+                                                <i class="bi bi-x-circle"></i>
+                                            </button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        }
+    }
+
+    @* ══════════════════════════════════════════════════════
+       Nodes tab
+       ══════════════════════════════════════════════════════ *@
+    @if (vpnTab == "nodes")
+    {
+        @if (!IsApiReady)
+        {
+            @ApiNotReady
+        }
+        else
+        {
+            <div class="d-flex align-items-center justify-content-between mb-2">
+                <span class="text-muted small">@(nodes?.Count ?? 0) registered nodes</span>
+                <button class="btn btn-sm btn-outline-secondary py-0"
+                        @onclick="LoadNodesAsync">
+                    <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                </button>
+            </div>
+            @if (nodes is null)
+            {
+                <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+            }
+            else if (nodes.Count == 0)
+            {
+                <div class="text-muted small py-3">
+                    No nodes registered. Deploy a subnet router or install the Tailscale client
+                    on a machine with <code>--login-server @serverUrl</code>.
+                </div>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Name</th>
+                                <th>User</th>
+                                <th>IP</th>
+                                <th>Status</th>
+                                <th>Advertised routes</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (HeadscaleNode n in nodes)
+                            {
+                                <tr>
+                                    <td><code class="small">@n.Name</code></td>
+                                    <td class="small">@n.User</td>
+                                    <td class="small">@string.Join(", ", n.IpAddresses)</td>
+                                    <td>
+                                        @if (n.Online)
+                                        {
+                                            <span class="badge bg-success-subtle text-success">Online</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="badge bg-secondary-subtle text-muted">Offline</span>
+                                        }
+                                    </td>
+                                    <td class="small">
+                                        @if (n.AdvertisedRoutes.Length > 0)
+                                        {
+                                            @foreach (string r in n.AdvertisedRoutes)
+                                            {
+                                                bool enabled = n.EnabledRoutes.Contains(r);
+                                                <span class="badge @(enabled ? "bg-success-subtle text-success" : "bg-warning-subtle text-warning") me-1">
+                                                    @r
+                                                </span>
+                                            }
+                                        }
+                                        else
+                                        {
+                                            <span class="text-muted">—</span>
+                                        }
+                                    </td>
+                                    <td class="text-end">
+                                        @if (confirmDeleteNode == n.Id)
+                                        {
+                                            <button class="btn btn-sm btn-danger py-0 px-2 me-1"
+                                                    @onclick="ConfirmDeleteNodeAsync">Yes</button>
+                                            <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                                                    @onclick="() => confirmDeleteNode = null">No</button>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-link text-danger p-0"
+                                                    @onclick="() => StartDeleteNode(n)"
+                                                    title="Remove node">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        }
+    }
+
+    @* ══════════════════════════════════════════════════════
+       Routes tab
+       ══════════════════════════════════════════════════════ *@
+    @if (vpnTab == "routes")
+    {
+        @if (!IsApiReady)
+        {
+            @ApiNotReady
+        }
+        else
+        {
+            <div class="d-flex align-items-center justify-content-between mb-2">
+                <span class="text-muted small">Advertised subnet routes</span>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-sm btn-outline-success py-0"
+                            @onclick="ApproveAllRoutesAsync" disabled="@routeWorking">
+                        @if (routeWorking) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        <i class="bi bi-check-all me-1"></i>Approve all
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary py-0"
+                            @onclick="LoadRoutesAsync">
+                        <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                    </button>
+                </div>
+            </div>
+            @if (routes is null)
+            {
+                <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+            }
+            else if (routes.Count == 0)
+            {
+                <div class="text-muted small py-3">No routes advertised yet.</div>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Prefix</th>
+                                <th>Node</th>
+                                <th>Advertised</th>
+                                <th>Enabled</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (HeadscaleRoute r in routes)
+                            {
+                                <tr>
+                                    <td><code>@r.Prefix</code></td>
+                                    <td class="small">@r.NodeName</td>
+                                    <td class="small">@(r.Advertised ? "Yes" : "—")</td>
+                                    <td>
+                                        @if (r.Enabled)
+                                        {
+                                            <span class="badge bg-success-subtle text-success">Enabled</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="badge bg-secondary-subtle text-muted">Disabled</span>
+                                        }
+                                    </td>
+                                    <td class="text-end">
+                                        @if (r.Enabled)
+                                        {
+                                            <button class="btn btn-sm btn-link text-muted p-0"
+                                                    @onclick="() => ToggleRouteAsync(r, false)"
+                                                    title="Disable route">
+                                                <i class="bi bi-toggle-on"></i>
+                                            </button>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-link text-success p-0"
+                                                    @onclick="() => ToggleRouteAsync(r, true)"
+                                                    title="Enable route">
+                                                <i class="bi bi-toggle-off"></i>
+                                            </button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        }
+    }
+
+    @* ══════════════════════════════════════════════════════
+       ACL Policy tab
+       ══════════════════════════════════════════════════════ *@
+    @if (vpnTab == "acl")
+    {
+        @if (!IsApiReady)
+        {
+            @ApiNotReady
+        }
+        else
+        {
+            <div class="d-flex align-items-center justify-content-between mb-2">
+                <span class="text-muted small">HuJSON access control policy</span>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-sm btn-outline-secondary py-0"
+                            @onclick="LoadPolicyAsync">
+                        <i class="bi bi-arrow-clockwise me-1"></i>Reload
+                    </button>
+                    <button class="btn btn-sm btn-primary py-0"
+                            @onclick="SavePolicyAsync" disabled="@(policyWorking || string.IsNullOrEmpty(policyText))">
+                        @if (policyWorking) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        <i class="bi bi-floppy me-1"></i>Save
+                    </button>
+                </div>
+            </div>
+            <textarea class="form-control font-monospace small"
+                      style="min-height:400px; resize:vertical;"
+                      @bind="policyText"
+                      spellcheck="false"
+                      placeholder="Loading policy…"></textarea>
+            <div class="text-muted small mt-1">
+                Edit the HuJSON ACL policy. Changes take effect immediately after saving.
+                <a href="https://tailscale.com/kb/1018/acls/" target="_blank" rel="noopener">ACL syntax reference</a>
+            </div>
+        }
+    }
+}
+
+@code {
+    [Parameter] public Guid ClusterId { get; set; }
+    [Parameter] public Guid TenantId { get; set; }
+
+    private RenderFragment ApiNotReady =>
+        @<div class="alert alert-warning d-flex align-items-start gap-2 mt-2">
+            <i class="bi bi-key-fill fs-5 mt-1"></i>
+            <div>
+                <strong>API key required.</strong>
+                <div class="small mt-1">
+                    Go to the <button class="btn btn-link p-0 small"
+                        @onclick='() => SwitchTab("setup")'>Setup tab</button>
+                    and generate or paste an API key to manage headscale.
+                </div>
+            </div>
+        </div>;
+
+    // ── State ──────────────────────────────────────────────────────────────────
+
+    private bool loading = true;
+    private string vpnTab = "setup";
+    private string? tabError;
+
+    private EntKube.Web.Data.ClusterComponent? component;
+    private string? serverUrl;
+    private string? apiKey;
+    private bool? reachable;
+    private bool checkingReachability;
+    private bool hasExternalRoute;
+    private TlsMode? routeTlsMode;
+    private List<string> clusterIssuers = [];
+    private string routeClusterIssuer = "";
+    private bool creatingRoute;
+
+    private bool generatingKey;
+    private string? manualApiKey;
+
+    private bool switchingPassthrough;
+    private string? passthroughMsg;
+
+    private string serviceCidr = "10.96.0.0/12";
+    private bool routerRunning;
+    private bool routerWorking;
+
+    // Users
+    private List<HeadscaleUser>? users;
+    private bool showCreateUser;
+    private string? newUserName;
+    private bool userWorking;
+    private string? confirmDeleteUser;
+    private HeadscaleUser? pendingDeleteUser;
+
+    // Pre-auth keys
+    private List<HeadscalePreAuthKey>? preAuthKeys;
+    private readonly HashSet<string> revealedKeys = [];
+    private void ToggleReveal(string id) { if (!revealedKeys.Remove(id)) revealedKeys.Add(id); }
+
+    private string? keyUser;
+    private bool showCreateKey;
+    private bool newKeyReusable = true;
+    private bool newKeyEphemeral;
+    private bool keyWorking;
+    private string? confirmExpireKey;
+    private HeadscalePreAuthKey? pendingExpireKey;
+    private string? newKeyResult;
+
+    // Nodes
+    private List<HeadscaleNode>? nodes;
+    private string? confirmDeleteNode;
+    private HeadscaleNode? pendingDeleteNode;
+
+    // Routes
+    private List<HeadscaleRoute>? routes;
+    private bool routeWorking;
+
+    // ACL
+    private string? policyText;
+    private bool policyWorking;
+
+    private bool IsApiReady => !string.IsNullOrEmpty(serverUrl) && !string.IsNullOrEmpty(apiKey);
+
+    // ── Lifecycle ──────────────────────────────────────────────────────────────
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadSetupAsync();
+    }
+
+    private async Task LoadSetupAsync()
+    {
+        loading = true;
+        tabError = null;
+        try
+        {
+            component = await HeadscaleService.GetComponentAsync(ClusterId);
+            if (component is null) return;
+
+            serverUrl = await HeadscaleService.GetServerUrlAsync(ClusterId);
+            apiKey = await HeadscaleService.GetApiKeyAsync(ClusterId);
+            hasExternalRoute = await ExternalRouteExistsAsync();
+            if (hasExternalRoute && component is not null)
+            {
+                List<EntKube.Web.Data.ExternalRoute> exRoutes =
+                    await RouteService.GetRoutesAsync(component.Id);
+                routeTlsMode = exRoutes.FirstOrDefault()?.TlsMode;
+            }
+            routerRunning = await HeadscaleService.IsSubnetRouterRunningAsync(ClusterId);
+            clusterIssuers = await LifecycleService.ListClusterIssuersAsync(ClusterId);
+            string? storedIssuer = await HeadscaleService.GetClusterIssuerAsync(ClusterId);
+            routeClusterIssuer = storedIssuer
+                ?? (clusterIssuers.Count > 0 ? clusterIssuers[0] : "");
+
+            // Auto-create the external route on first load if all config is present.
+            if (!hasExternalRoute
+                && !string.IsNullOrEmpty(serverUrl)
+                && !string.IsNullOrEmpty(routeClusterIssuer)
+                && component is not null)
+            {
+                await HeadscaleService.EnsureExternalRouteAsync(
+                    component.Id, serverUrl, routeClusterIssuer);
+                hasExternalRoute = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            tabError = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task<bool> ExternalRouteExistsAsync()
+    {
+        if (component is null) return false;
+        List<EntKube.Web.Data.ExternalRoute> routes =
+            await RouteService.GetRoutesAsync(component.Id);
+        return routes.Count > 0;
+    }
+
+    private void SwitchTab(string tab)
+    {
+        vpnTab = tab;
+        tabError = null;
+
+        if (tab == "users" && users is null && IsApiReady)
+            _ = LoadUsersAsync();
+        else if (tab == "keys" && users is null && IsApiReady)
+            _ = LoadUsersAndKeysAsync();
+        else if (tab == "nodes" && nodes is null && IsApiReady)
+            _ = LoadNodesAsync();
+        else if (tab == "routes" && routes is null && IsApiReady)
+            _ = LoadRoutesAsync();
+        else if (tab == "acl" && policyText is null && IsApiReady)
+            _ = LoadPolicyAsync();
+    }
+
+    // ── Setup actions ─────────────────────────────────────────────────────────
+
+    private async Task CheckReachabilityAsync()
+    {
+        if (string.IsNullOrEmpty(serverUrl) || string.IsNullOrEmpty(apiKey)) return;
+        checkingReachability = true;
+        StateHasChanged();
+        try
+        {
+            reachable = await HeadscaleService.IsReachableAsync(serverUrl, apiKey);
+        }
+        finally
+        {
+            checkingReachability = false;
+        }
+    }
+
+    private async Task CreateExternalRouteAsync()
+    {
+        if (component is null || string.IsNullOrEmpty(serverUrl)) return;
+        creatingRoute = true;
+        tabError = null;
+        try
+        {
+            await HeadscaleService.EnsureExternalRouteAsync(
+                component.Id, serverUrl, routeClusterIssuer);
+            hasExternalRoute = true;
+        }
+        catch (Exception ex)
+        {
+            tabError = ex.Message;
+        }
+        finally
+        {
+            creatingRoute = false;
+        }
+    }
+
+    private async Task GenerateApiKeyAsync()
+    {
+        generatingKey = true;
+        tabError = null;
+        try
+        {
+            string key = await HeadscaleService.GenerateApiKeyAsync(ClusterId);
+            await HeadscaleService.SaveApiKeyAsync(ClusterId, key);
+            apiKey = key;
+        }
+        catch (Exception ex)
+        {
+            tabError = ex.Message;
+        }
+        finally
+        {
+            generatingKey = false;
+        }
+    }
+
+    private async Task RegenerateApiKeyAsync()
+    {
+        generatingKey = true;
+        tabError = null;
+        try
+        {
+            string key = await HeadscaleService.GenerateApiKeyAsync(ClusterId);
+            await HeadscaleService.SaveApiKeyAsync(ClusterId, key);
+            apiKey = key;
+        }
+        catch (Exception ex)
+        {
+            tabError = ex.Message;
+        }
+        finally
+        {
+            generatingKey = false;
+        }
+    }
+
+    private async Task SaveManualApiKeyAsync()
+    {
+        if (string.IsNullOrWhiteSpace(manualApiKey)) return;
+        try
+        {
+            await HeadscaleService.SaveApiKeyAsync(ClusterId, manualApiKey.Trim());
+            apiKey = manualApiKey.Trim();
+            manualApiKey = null;
+        }
+        catch (Exception ex)
+        {
+            tabError = ex.Message;
+        }
+    }
+
+    private async Task SwitchToPassthroughAsync()
+    {
+        switchingPassthrough = true;
+        passthroughMsg = null;
+        try
+        {
+            await HeadscaleService.SwitchToTlsPassthroughAsync(ClusterId);
+            routeTlsMode = TlsMode.Passthrough;
+            passthroughMsg = "Done. cert-manager is provisioning the certificate (~1–2 min for Let's Encrypt); the pod will restart automatically once the secret is ready.";
+        }
+        catch (Exception ex)
+        {
+            passthroughMsg = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            switchingPassthrough = false;
+        }
+    }
+
+    private async Task DeployRouterAsync()
+    {
+        if (string.IsNullOrEmpty(serverUrl) || string.IsNullOrEmpty(serviceCidr)) return;
+        routerWorking = true;
+        tabError = null;
+        try
+        {
+            await HeadscaleService.SetupInfraAuthKeyAsync(ClusterId, serverUrl, apiKey!);
+            await HeadscaleService.DeploySubnetRouterAsync(ClusterId, serverUrl, serviceCidr);
+            routerRunning = true;
+        }
+        catch (Exception ex)
+        {
+            tabError = ex.Message;
+        }
+        finally
+        {
+            routerWorking = false;
+        }
+    }
+
+    private async Task RemoveRouterAsync()
+    {
+        routerWorking = true;
+        tabError = null;
+        try
+        {
+            await HeadscaleService.RemoveSubnetRouterAsync(ClusterId);
+            routerRunning = false;
+        }
+        catch (Exception ex)
+        {
+            tabError = ex.Message;
+        }
+        finally
+        {
+            routerWorking = false;
+        }
+    }
+
+    // ── Users ─────────────────────────────────────────────────────────────────
+
+    private async Task LoadUsersAsync()
+    {
+        if (!IsApiReady) return;
+        try { users = await HeadscaleService.ListUsersAsync(serverUrl!, apiKey!); }
+        catch (Exception ex) { tabError = ex.Message; }
+        StateHasChanged();
+    }
+
+    private async Task LoadUsersAndKeysAsync()
+    {
+        await LoadUsersAsync();
+        if (users?.Count > 0) keyUser = users[0].Name;
+        await LoadPreAuthKeysAsync();
+    }
+
+    private async Task CreateUserAsync()
+    {
+        if (string.IsNullOrWhiteSpace(newUserName)) return;
+        userWorking = true;
+        tabError = null;
+        try
+        {
+            await HeadscaleService.CreateUserAsync(serverUrl!, apiKey!, newUserName.Trim());
+            newUserName = null;
+            showCreateUser = false;
+            await LoadUsersAsync();
+        }
+        catch (Exception ex) { tabError = ex.Message; }
+        finally { userWorking = false; }
+    }
+
+    private void StartDeleteUser(HeadscaleUser u)
+    {
+        confirmDeleteUser = u.Id;
+        pendingDeleteUser = u;
+    }
+
+    private async Task ConfirmDeleteUserAsync()
+    {
+        if (pendingDeleteUser is null) return;
+        userWorking = true;
+        tabError = null;
+        try
+        {
+            await HeadscaleService.DeleteUserAsync(serverUrl!, apiKey!, pendingDeleteUser.Name);
+            confirmDeleteUser = null;
+            pendingDeleteUser = null;
+            await LoadUsersAsync();
+        }
+        catch (Exception ex) { tabError = ex.Message; }
+        finally { userWorking = false; }
+    }
+
+    // ── Pre-auth keys ─────────────────────────────────────────────────────────
+
+    private async Task LoadPreAuthKeysAsync()
+    {
+        if (!IsApiReady || string.IsNullOrEmpty(keyUser)) return;
+        try
+        {
+            preAuthKeys = await HeadscaleService.ListPreAuthKeysAsync(serverUrl!, apiKey!, keyUser!);
+        }
+        catch (Exception ex) { tabError = ex.Message; }
+        StateHasChanged();
+    }
+
+    private async Task CreatePreAuthKeyAsync()
+    {
+        if (string.IsNullOrEmpty(keyUser)) return;
+        keyWorking = true;
+        tabError = null;
+        newKeyResult = null;
+        try
+        {
+            HeadscalePreAuthKey key = await HeadscaleService.CreatePreAuthKeyAsync(
+                serverUrl!, apiKey!, keyUser!, newKeyReusable, newKeyEphemeral);
+            newKeyResult = key.Key;
+            showCreateKey = false;
+            await LoadPreAuthKeysAsync();
+        }
+        catch (Exception ex) { tabError = ex.Message; }
+        finally { keyWorking = false; }
+    }
+
+    private void StartExpireKey(HeadscalePreAuthKey k)
+    {
+        confirmExpireKey = k.Id;
+        pendingExpireKey = k;
+    }
+
+    private async Task ConfirmExpireKeyAsync()
+    {
+        if (pendingExpireKey is null || string.IsNullOrEmpty(keyUser)) return;
+        keyWorking = true;
+        tabError = null;
+        try
+        {
+            await HeadscaleService.ExpirePreAuthKeyAsync(serverUrl!, apiKey!, keyUser!, pendingExpireKey.Key);
+            confirmExpireKey = null;
+            pendingExpireKey = null;
+            await LoadPreAuthKeysAsync();
+        }
+        catch (Exception ex) { tabError = ex.Message; }
+        finally { keyWorking = false; }
+    }
+
+    // ── Nodes ─────────────────────────────────────────────────────────────────
+
+    private async Task LoadNodesAsync()
+    {
+        if (!IsApiReady) return;
+        try { nodes = await HeadscaleService.ListNodesAsync(serverUrl!, apiKey!); }
+        catch (Exception ex) { tabError = ex.Message; }
+        StateHasChanged();
+    }
+
+    private void StartDeleteNode(HeadscaleNode n)
+    {
+        confirmDeleteNode = n.Id;
+        pendingDeleteNode = n;
+    }
+
+    private async Task ConfirmDeleteNodeAsync()
+    {
+        if (pendingDeleteNode is null) return;
+        try
+        {
+            await HeadscaleService.DeleteNodeAsync(serverUrl!, apiKey!, pendingDeleteNode.Id);
+            confirmDeleteNode = null;
+            pendingDeleteNode = null;
+            await LoadNodesAsync();
+        }
+        catch (Exception ex) { tabError = ex.Message; }
+    }
+
+    // ── Routes ────────────────────────────────────────────────────────────────
+
+    private async Task LoadRoutesAsync()
+    {
+        if (!IsApiReady) return;
+        try { routes = await HeadscaleService.ListRoutesAsync(serverUrl!, apiKey!); }
+        catch (Exception ex) { tabError = ex.Message; }
+        StateHasChanged();
+    }
+
+    private async Task ToggleRouteAsync(HeadscaleRoute r, bool enable)
+    {
+        routeWorking = true;
+        tabError = null;
+        try
+        {
+            if (enable)
+                await HeadscaleService.EnableRouteAsync(serverUrl!, apiKey!, r.Id);
+            else
+                await HeadscaleService.DisableRouteAsync(serverUrl!, apiKey!, r.Id);
+            await LoadRoutesAsync();
+        }
+        catch (Exception ex) { tabError = ex.Message; }
+        finally { routeWorking = false; }
+    }
+
+    private async Task ApproveAllRoutesAsync()
+    {
+        routeWorking = true;
+        tabError = null;
+        try
+        {
+            await HeadscaleService.EnableAllRoutesAsync(serverUrl!, apiKey!);
+            await LoadRoutesAsync();
+        }
+        catch (Exception ex) { tabError = ex.Message; }
+        finally { routeWorking = false; }
+    }
+
+    // ── ACL Policy ────────────────────────────────────────────────────────────
+
+    private async Task LoadPolicyAsync()
+    {
+        if (!IsApiReady) return;
+        try { policyText = await HeadscaleService.GetPolicyAsync(serverUrl!, apiKey!); }
+        catch (Exception ex) { tabError = ex.Message; }
+        StateHasChanged();
+    }
+
+    private async Task SavePolicyAsync()
+    {
+        if (string.IsNullOrEmpty(policyText)) return;
+        policyWorking = true;
+        tabError = null;
+        try { await HeadscaleService.SetPolicyAsync(serverUrl!, apiKey!, policyText); }
+        catch (Exception ex) { tabError = ex.Message; }
+        finally { policyWorking = false; }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static string MaskKey(string key)
+    {
+        if (key.Length <= 8) return new string('*', key.Length);
+        return key[..4] + new string('*', key.Length - 8) + key[^4..];
+    }
+}

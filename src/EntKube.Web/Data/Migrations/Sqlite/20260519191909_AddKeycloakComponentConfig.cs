@@ -11,6 +11,35 @@ namespace EntKube.Web.Data.Migrations.Sqlite
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            // Ensure pre-migration tables exist so this migration is safe to apply
+            // on a fresh database (they were originally created before migrations existed).
+            migrationBuilder.Sql("""
+                CREATE TABLE IF NOT EXISTS "KeycloakConnections" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_KeycloakConnections" PRIMARY KEY,
+                    "AdminPasswordSecretId" TEXT,
+                    "KubernetesClusterId" TEXT NOT NULL DEFAULT '',
+                    "TenantId" TEXT NOT NULL DEFAULT '',
+                    "AdminUrl" TEXT NOT NULL DEFAULT '',
+                    "AdminUsername" TEXT NOT NULL DEFAULT '',
+                    "CreatedAt" TEXT NOT NULL DEFAULT ''
+                );
+                """);
+
+            migrationBuilder.Sql("""
+                CREATE TABLE IF NOT EXISTS "KeycloakRealms" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_KeycloakRealms" PRIMARY KEY,
+                    "AccountTheme" TEXT,
+                    "CreatedAt" TEXT NOT NULL DEFAULT '',
+                    "DisplayName" TEXT NOT NULL DEFAULT '',
+                    "Enabled" INTEGER NOT NULL DEFAULT 0,
+                    "KeycloakConnectionId" TEXT NOT NULL DEFAULT '',
+                    "LinkedAppId" TEXT,
+                    "LoginTheme" TEXT,
+                    "RealmName" TEXT NOT NULL DEFAULT '',
+                    "TenantId" TEXT NOT NULL DEFAULT ''
+                );
+                """);
+
             migrationBuilder.DropForeignKey(
                 name: "FK_KeycloakRealms_KeycloakConnections_KeycloakConnectionId",
                 table: "KeycloakRealms");
@@ -19,12 +48,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                 name: "FK_VaultSecrets_KeycloakConnections_KeycloakConnectionId",
                 table: "VaultSecrets");
 
-            migrationBuilder.DropTable(
-                name: "KeycloakConnections");
+            migrationBuilder.Sql("""DROP TABLE IF EXISTS "KeycloakConnections";""");
 
-            migrationBuilder.DropIndex(
-                name: "IX_VaultSecrets_KeycloakConnectionId",
-                table: "VaultSecrets");
+            migrationBuilder.Sql("""DROP INDEX IF EXISTS "IX_VaultSecrets_KeycloakConnectionId";""");
 
             migrationBuilder.DropColumn(
                 name: "KeycloakConnectionId",
@@ -35,10 +61,11 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                 table: "KeycloakRealms",
                 newName: "KeycloakComponentConfigId");
 
-            migrationBuilder.RenameIndex(
-                name: "IX_KeycloakRealms_KeycloakConnectionId_RealmName",
-                table: "KeycloakRealms",
-                newName: "IX_KeycloakRealms_KeycloakComponentConfigId_RealmName");
+            migrationBuilder.Sql("""DROP INDEX IF EXISTS "IX_KeycloakRealms_KeycloakConnectionId_RealmName";""");
+            migrationBuilder.Sql("""
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_KeycloakRealms_KeycloakComponentConfigId_RealmName"
+                ON "KeycloakRealms" ("KeycloakComponentConfigId", "RealmName");
+                """);
 
             migrationBuilder.CreateTable(
                 name: "KeycloakComponentConfigs",

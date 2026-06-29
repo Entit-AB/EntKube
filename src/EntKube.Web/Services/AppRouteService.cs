@@ -153,10 +153,16 @@ public class AppRouteService(
             .FirstOrDefaultAsync(d => d.Id == deploymentId, ct)
             ?? throw new InvalidOperationException("Deployment not found.");
 
-        bool duplicate = await db.AppDeploymentRoutes
-            .AnyAsync(r => r.AppRouteId == appRouteId && r.AppDeploymentId == deploymentId, ct);
-        if (duplicate)
-            throw new InvalidOperationException("This deployment is already linked to this route.");
+        // A deployment may be linked to the same hostname multiple times — one Helm release can
+        // expose several services that each need their own path. What can't collide is the path
+        // prefix: two rules sharing a hostname + path prefix would produce an ambiguous HTTPRoute.
+        string pathPrefix = string.IsNullOrWhiteSpace(request.PathPrefix) ? "/" : request.PathPrefix.Trim();
+
+        bool pathTaken = await db.AppDeploymentRoutes
+            .AnyAsync(r => r.AppRouteId == appRouteId && r.PathPrefix == pathPrefix, ct);
+        if (pathTaken)
+            throw new InvalidOperationException(
+                $"Path prefix '{pathPrefix}' is already in use on this hostname. Choose a different path.");
 
         (string gatewayName, string gatewayNamespace) =
             ExternalRouteService.ResolveGateway(deployment.Cluster.Components);
@@ -166,7 +172,7 @@ public class AppRouteService(
             Id = Guid.NewGuid(),
             AppRouteId = appRouteId,
             AppDeploymentId = deploymentId,
-            PathPrefix = string.IsNullOrWhiteSpace(request.PathPrefix) ? "/" : request.PathPrefix.Trim(),
+            PathPrefix = pathPrefix,
             RewritePath = string.IsNullOrWhiteSpace(request.RewritePath) ? null : request.RewritePath.Trim(),
             ServiceName = request.ServiceName.Trim(),
             ServicePort = request.ServicePort,
@@ -192,7 +198,15 @@ public class AppRouteService(
             .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct)
             ?? throw new InvalidOperationException("Deployment route not found.");
 
-        dr.PathPrefix = string.IsNullOrWhiteSpace(request.PathPrefix) ? "/" : request.PathPrefix.Trim();
+        string pathPrefix = string.IsNullOrWhiteSpace(request.PathPrefix) ? "/" : request.PathPrefix.Trim();
+
+        bool pathTaken = await db.AppDeploymentRoutes
+            .AnyAsync(r => r.AppRouteId == dr.AppRouteId && r.PathPrefix == pathPrefix && r.Id != deploymentRouteId, ct);
+        if (pathTaken)
+            throw new InvalidOperationException(
+                $"Path prefix '{pathPrefix}' is already in use on this hostname. Choose a different path.");
+
+        dr.PathPrefix = pathPrefix;
         dr.RewritePath = string.IsNullOrWhiteSpace(request.RewritePath) ? null : request.RewritePath.Trim();
         dr.ServiceName = request.ServiceName.Trim();
         dr.ServicePort = request.ServicePort;

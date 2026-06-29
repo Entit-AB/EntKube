@@ -91,10 +91,34 @@ public class LokiService(
         int limit = 200,
         CancellationToken ct = default)
     {
+        return await QueryRangeMultiAsync(
+            clusterId, [namespaceName], podName, containerName, textFilter, from, to, limit, ct);
+    }
+
+    /// <summary>
+    /// Queries logs across multiple namespaces on a single cluster in one request,
+    /// using a <c>namespace=~"a|b|c"</c> LogQL matcher. Used by the customer
+    /// operations view to aggregate logs across all of an app's deployments
+    /// (which may live in different namespaces on the same cluster).
+    /// </summary>
+    public async Task<KubernetesOperationResult<List<LokiLogStream>>> QueryRangeMultiAsync(
+        Guid clusterId,
+        IReadOnlyCollection<string> namespaces,
+        string? podName,
+        string? containerName,
+        string? textFilter,
+        DateTime from,
+        DateTime to,
+        int limit = 200,
+        CancellationToken ct = default)
+    {
+        if (namespaces.Count == 0)
+            return KubernetesOperationResult<List<LokiLogStream>>.Success([]);
+
         var (info, error) = await ResolveLokiInfoAsync(clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<LokiLogStream>>.Failure(error!);
 
-        string logQuery = BuildLogQL(namespaceName, podName, containerName, textFilter);
+        string logQuery = BuildLogQL(namespaces, podName, containerName, textFilter);
         long fromNs = new DateTimeOffset(from.ToUniversalTime()).ToUnixTimeMilliseconds() * 1_000_000;
         long toNs   = new DateTimeOffset(to.ToUniversalTime()).ToUnixTimeMilliseconds() * 1_000_000;
 
@@ -208,10 +232,14 @@ public class LokiService(
 
     // ──────── Internal ────────
 
-    private static string BuildLogQL(string ns, string? pod, string? container, string? text)
+    private static string BuildLogQL(
+        IReadOnlyCollection<string> namespaces, string? pod, string? container, string? text)
     {
         StringBuilder sb = new("{");
-        sb.Append($"namespace=\"{ns}\"");
+        if (namespaces.Count == 1)
+            sb.Append($"namespace=\"{namespaces.First()}\"");
+        else
+            sb.Append($"namespace=~\"{string.Join("|", namespaces.Select(System.Text.RegularExpressions.Regex.Escape))}\"");
         if (!string.IsNullOrEmpty(pod))       sb.Append($", pod=~\"{pod}.*\"");
         if (!string.IsNullOrEmpty(container)) sb.Append($", container=\"{container}\"");
         sb.Append('}');

@@ -54,7 +54,10 @@ public class KeycloakRealmDetails
     public bool Enabled { get; set; }
     public string? LoginTheme { get; set; }
     public string? AccountTheme { get; set; }
+    /// <summary>Available login theme provider names from Keycloak server info.</summary>
     public List<string> Themes { get; set; } = [];
+    /// <summary>Available account theme provider names from Keycloak server info.</summary>
+    public List<string> AccountThemes { get; set; } = [];
 }
 
 public class CopyResult
@@ -849,6 +852,7 @@ public class KeycloakService(
         JsonElement root = doc.RootElement;
 
         List<string> themes = [];
+        List<string> accountThemes = [];
 
         try
         {
@@ -862,13 +866,23 @@ public class KeycloakService(
             {
                 using JsonDocument tDoc = JsonDocument.Parse(await themeResp.Content.ReadAsStringAsync(ct));
 
-                if (tDoc.RootElement.TryGetProperty("themes", out JsonElement themesEl)
-                    && themesEl.TryGetProperty("login", out JsonElement loginThemes))
+                if (tDoc.RootElement.TryGetProperty("themes", out JsonElement themesEl))
                 {
-                    themes = loginThemes.EnumerateArray()
-                        .Select(t => t.GetStringOrDefault("name") ?? "")
-                        .Where(t => t.Length > 0)
-                        .ToList();
+                    if (themesEl.TryGetProperty("login", out JsonElement loginThemes))
+                    {
+                        themes = loginThemes.EnumerateArray()
+                            .Select(t => t.GetStringOrDefault("name") ?? "")
+                            .Where(t => t.Length > 0)
+                            .ToList();
+                    }
+
+                    if (themesEl.TryGetProperty("account", out JsonElement acctThemes))
+                    {
+                        accountThemes = acctThemes.EnumerateArray()
+                            .Select(t => t.GetStringOrDefault("name") ?? "")
+                            .Where(t => t.Length > 0)
+                            .ToList();
+                    }
                 }
             }
         }
@@ -881,7 +895,8 @@ public class KeycloakService(
             Enabled = root.TryGetProperty("enabled", out JsonElement en) && en.GetBoolean(),
             LoginTheme = root.GetStringOrDefault("loginTheme"),
             AccountTheme = root.GetStringOrDefault("accountTheme"),
-            Themes = themes
+            Themes = themes,
+            AccountThemes = accountThemes
         };
     }
 
@@ -899,13 +914,19 @@ public class KeycloakService(
         string token = await GetAdminTokenAsync(tenantId, realm.ComponentConfig, ct);
         HttpClient http = CreateHttpClient();
 
-        var patch = new { loginTheme, accountTheme };
+        // Serialize only non-null fields. Keycloak treats "" as "use default theme", so
+        // we send null (which Keycloak ignores/preserves) when the user wants default.
+        string patchJson = JsonSerializer.Serialize(new
+        {
+            loginTheme = string.IsNullOrEmpty(loginTheme) ? null : loginTheme,
+            accountTheme = string.IsNullOrEmpty(accountTheme) ? null : accountTheme
+        });
 
         HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Put,
             $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}")
         {
             Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
-            Content = new StringContent(JsonSerializer.Serialize(patch), Encoding.UTF8, "application/json")
+            Content = new StringContent(patchJson, Encoding.UTF8, "application/json")
         }, ct);
 
         resp.EnsureSuccessStatusCode();
@@ -1694,6 +1715,18 @@ public class KeycloakService(
 
     // ── Named themes ─────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Derives a valid Keycloak theme provider name (slug) from a human-readable theme name.
+    /// Example: "Capio Blue" → "capio-blue".
+    /// </summary>
+    private static string ToThemeSlug(string name)
+    {
+        string s = name.Trim().ToLowerInvariant();
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"[^a-z0-9]+", "-");
+        s = s.Trim('-');
+        return string.IsNullOrEmpty(s) ? "entkube-theme" : s;
+    }
+
     /// <summary>Returns all named themes saved for a Keycloak instance.</summary>
     public async Task<List<KeycloakTheme>> GetNamedThemesAsync(
         Guid tenantId, Guid configId, CancellationToken ct = default)
@@ -1713,13 +1746,26 @@ public class KeycloakService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // For managed Keycloak instances (ClusterComponentId set), auto-derive the login theme
+        // slug from the theme name so the slug-named theme directory (deployed as a ConfigMap)
+        // is what Keycloak picks up. The user can override this with an explicit loginTheme.
+        string trimmedName = name.Trim();
+        string? resolvedLoginTheme = string.IsNullOrWhiteSpace(loginTheme) ? null : loginTheme;
+        if (resolvedLoginTheme is null)
+        {
+            KeycloakComponentConfig? config = await db.KeycloakComponentConfigs
+                .FirstOrDefaultAsync(c => c.Id == configId && c.TenantId == tenantId, ct);
+            if (config?.ClusterComponentId is not null)
+                resolvedLoginTheme = ToThemeSlug(trimmedName);
+        }
+
         KeycloakTheme theme = new()
         {
             Id = Guid.NewGuid(),
             TenantId = tenantId,
             KeycloakComponentConfigId = configId,
-            Name = name.Trim(),
-            LoginTheme = string.IsNullOrWhiteSpace(loginTheme) ? null : loginTheme,
+            Name = trimmedName,
+            LoginTheme = resolvedLoginTheme,
             AccountTheme = string.IsNullOrWhiteSpace(accountTheme) ? null : accountTheme,
         };
 
@@ -1771,20 +1817,937 @@ public class KeycloakService(
         }
     }
 
+    /// <summary>
+    /// Creates a duplicate of a named theme (new DB record + copy of all vault secrets)
+    /// within the same Keycloak component. The duplicate is named "{original} (copy)".
+    /// K8s deployment is not triggered for the copy.
+    /// </summary>
+    public async Task<KeycloakTheme> DuplicateNamedThemeAsync(
+        Guid tenantId, Guid sourceThemeId, Guid componentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        KeycloakTheme src = await db.KeycloakThemes
+            .FirstOrDefaultAsync(t => t.Id == sourceThemeId && t.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Theme not found.");
+
+        KeycloakTheme dup = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            KeycloakComponentConfigId = src.KeycloakComponentConfigId,
+            Name = src.Name + " (copy)",
+            LoginTheme = src.LoginTheme,
+            AccountTheme = src.AccountTheme,
+        };
+        db.KeycloakThemes.Add(dup);
+        await db.SaveChangesAsync(ct);
+
+        await vaultService.InitializeVaultAsync(tenantId, ct);
+
+        // Copy variables
+        string? vars = await vaultService.GetComponentSecretValueAsync(
+            tenantId, componentId, $"named-theme-{src.Id}-variables", ct);
+        if (!string.IsNullOrEmpty(vars))
+            await vaultService.SetComponentSecretAsync(
+                tenantId, componentId, $"named-theme-{dup.Id}-variables", vars, ct);
+
+        // Copy CSS for all types
+        foreach (string themeType in new[] { "login", "account", "admin", "email" })
+        {
+            string? css = await vaultService.GetComponentSecretValueAsync(
+                tenantId, componentId, $"named-theme-{src.Id}-{themeType}-css", ct);
+            if (!string.IsNullOrEmpty(css))
+                await vaultService.SetComponentSecretAsync(
+                    tenantId, componentId, $"named-theme-{dup.Id}-{themeType}-css", css, ct);
+        }
+
+        // Copy resources
+        List<string> resources = await ListThemeResourcesAsync(tenantId, componentId, src.Id, ct);
+        foreach (string filename in resources)
+        {
+            string? b64 = await vaultService.GetComponentSecretValueAsync(
+                tenantId, componentId, $"named-theme-{src.Id}-resource-{filename}", ct);
+            if (!string.IsNullOrEmpty(b64))
+                await vaultService.SetComponentSecretAsync(
+                    tenantId, componentId, $"named-theme-{dup.Id}-resource-{filename}", b64, ct);
+        }
+
+        return dup;
+    }
+
+    // ── Theme Variables (structured visual editor) ────────────────────────────
+
+    private static readonly JsonSerializerOptions ThemeVarsJsonOptions = new() { WriteIndented = false };
+
+    /// <summary>
+    /// Loads the structured <see cref="ThemeVariables"/> for a named theme from the vault.
+    /// Returns defaults if none have been saved yet.
+    /// </summary>
+    public async Task<ThemeVariables> GetThemeVariablesAsync(
+        Guid tenantId, Guid componentId, Guid themeId, CancellationToken ct = default)
+    {
+        string? json = await vaultService.GetComponentSecretValueAsync(
+            tenantId, componentId, $"named-theme-{themeId}-variables", ct);
+        if (string.IsNullOrEmpty(json))
+            return new ThemeVariables();
+        return JsonSerializer.Deserialize<ThemeVariables>(json, ThemeVarsJsonOptions) ?? new ThemeVariables();
+    }
+
+    /// <summary>Returns up to 5 snapshots of the theme variables saved before previous saves.</summary>
+    public async Task<List<ThemeHistoryEntry>> GetThemeHistoryAsync(
+        Guid tenantId, Guid componentId, Guid themeId, CancellationToken ct = default)
+    {
+        string? json = await vaultService.GetComponentSecretValueAsync(
+            tenantId, componentId, $"named-theme-{themeId}-history", ct);
+        if (string.IsNullOrEmpty(json))
+            return [];
+        return JsonSerializer.Deserialize<List<ThemeHistoryEntry>>(json, ThemeVarsJsonOptions) ?? [];
+    }
+
+    private async Task AppendThemeHistoryAsync(
+        Guid tenantId, Guid componentId, Guid themeId, string currentVarsJson,
+        CancellationToken ct)
+    {
+        ThemeVariables? current = JsonSerializer.Deserialize<ThemeVariables>(currentVarsJson, ThemeVarsJsonOptions);
+        if (current is null)
+            return;
+
+        string? historyJson = await vaultService.GetComponentSecretValueAsync(
+            tenantId, componentId, $"named-theme-{themeId}-history", ct);
+        List<ThemeHistoryEntry> entries = string.IsNullOrEmpty(historyJson)
+            ? []
+            : JsonSerializer.Deserialize<List<ThemeHistoryEntry>>(historyJson, ThemeVarsJsonOptions) ?? [];
+
+        entries.Insert(0, new ThemeHistoryEntry { SavedAt = DateTimeOffset.UtcNow, Variables = current });
+        if (entries.Count > 5)
+            entries = entries[..5];
+
+        await vaultService.SetComponentSecretAsync(
+            tenantId, componentId, $"named-theme-{themeId}-history",
+            JsonSerializer.Serialize(entries, ThemeVarsJsonOptions), ct);
+    }
+
+    /// <summary>
+    /// Persists <see cref="ThemeVariables"/>, auto-generates the login CSS from them
+    /// (embedding any logo / background-image data URIs), and saves + deploys the CSS.
+    /// Returns a non-null deploy error message if vault save succeeded but K8s deploy failed.
+    /// </summary>
+    public async Task<string?> SaveThemeVariablesAsync(
+        Guid tenantId, Guid componentId, Guid themeId, ThemeVariables vars,
+        CancellationToken ct = default)
+    {
+        await vaultService.InitializeVaultAsync(tenantId, ct);
+
+        // Snapshot the current (pre-save) state into version history.
+        string? existingJson = await vaultService.GetComponentSecretValueAsync(
+            tenantId, componentId, $"named-theme-{themeId}-variables", ct);
+        if (!string.IsNullOrEmpty(existingJson))
+            await AppendThemeHistoryAsync(tenantId, componentId, themeId, existingJson, ct);
+
+        string json = JsonSerializer.Serialize(vars, ThemeVarsJsonOptions);
+        await vaultService.SetComponentSecretAsync(
+            tenantId, componentId, $"named-theme-{themeId}-variables", json, ct);
+
+        string? logoDataUri = null;
+        if (vars.ShowLogo && !string.IsNullOrEmpty(vars.LogoResourceName))
+            logoDataUri = await GetThemeResourceDataUriAsync(tenantId, componentId, themeId, vars.LogoResourceName, ct);
+
+        string? bgDataUri = null;
+        if (vars.UseBackgroundImage && !string.IsNullOrEmpty(vars.BackgroundImageResourceName))
+            bgDataUri = await GetThemeResourceDataUriAsync(tenantId, componentId, themeId, vars.BackgroundImageResourceName, ct);
+
+        string css = GenerateThemeCss(vars, logoDataUri, bgDataUri);
+        return await SaveNamedThemeCssAsync(tenantId, componentId, themeId, "login", css, ct);
+    }
+
+    // ── Theme Resources (uploaded images) ────────────────────────────────────
+
+    /// <summary>Returns the filenames of all uploaded resources for a named theme.</summary>
+    public async Task<List<string>> ListThemeResourcesAsync(
+        Guid tenantId, Guid componentId, Guid themeId, CancellationToken ct = default)
+    {
+        List<VaultSecret> secrets = await vaultService.GetComponentSecretsAsync(tenantId, componentId, ct);
+        string prefix = $"named-theme-{themeId}-resource-";
+        return secrets
+            .Where(s => s.Name.StartsWith(prefix, StringComparison.Ordinal))
+            .Select(s => s.Name[prefix.Length..])
+            .OrderBy(n => n)
+            .ToList();
+    }
+
+    /// <summary>Stores an uploaded resource (base64-encoded) in the vault.</summary>
+    public async Task UploadThemeResourceAsync(
+        Guid tenantId, Guid componentId, Guid themeId, string filename, string base64Content,
+        CancellationToken ct = default)
+    {
+        await vaultService.InitializeVaultAsync(tenantId, ct);
+        await vaultService.SetComponentSecretAsync(
+            tenantId, componentId, $"named-theme-{themeId}-resource-{filename}", base64Content, ct);
+    }
+
+    /// <summary>Removes an uploaded resource from the vault.</summary>
+    public async Task DeleteThemeResourceAsync(
+        Guid tenantId, Guid componentId, Guid themeId, string filename,
+        CancellationToken ct = default)
+    {
+        List<VaultSecret> secrets = await vaultService.GetComponentSecretsAsync(tenantId, componentId, ct);
+        string key = $"named-theme-{themeId}-resource-{filename}";
+        VaultSecret? secret = secrets.FirstOrDefault(s => s.Name == key);
+        if (secret is not null)
+            await vaultService.DeleteSecretAsync(secret.Id, ct);
+    }
+
+    /// <summary>Returns a CSS data URI (<c>data:image/png;base64,…</c>) for a stored resource, or null.</summary>
+    public async Task<string?> GetThemeResourceDataUriAsync(
+        Guid tenantId, Guid componentId, Guid themeId, string filename,
+        CancellationToken ct = default)
+    {
+        string? base64 = await vaultService.GetComponentSecretValueAsync(
+            tenantId, componentId, $"named-theme-{themeId}-resource-{filename}", ct);
+        if (string.IsNullOrEmpty(base64))
+            return null;
+        string mime = GetResourceMimeType(filename);
+        return $"data:{mime};base64,{base64}";
+    }
+
+    private static string GetResourceMimeType(string filename) =>
+        Path.GetExtension(filename).ToLowerInvariant() switch
+        {
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".svg" => "image/svg+xml",
+            ".ico" => "image/x-icon",
+            ".webp" => "image/webp",
+            _ => "application/octet-stream"
+        };
+
+    private static bool IsImageResource(string filename) =>
+        new[] { ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp" }
+            .Contains(Path.GetExtension(filename).ToLowerInvariant());
+
+    // ── CSS generation from ThemeVariables ───────────────────────────────────
+
+    private static string GenerateThemeCss(ThemeVariables v, string? logoDataUri, string? bgDataUri)
+        => v.BaseTheme == "keycloak"
+            ? GenerateV1ThemeCss(v, logoDataUri, bgDataUri)
+            : GenerateV2ThemeCss(v, logoDataUri, bgDataUri);
+
+    private static string CardShadowValue(int level) => level switch
+    {
+        0 => "none",
+        1 => "0 1px 3px rgba(0,0,0,.12), 0 1px 2px rgba(0,0,0,.08)",
+        2 => "0 4px 12px rgba(0,0,0,.16), 0 2px 4px rgba(0,0,0,.12)",
+        3 => "0 12px 28px rgba(0,0,0,.22), 0 4px 8px rgba(0,0,0,.14)",
+        _ => "none"
+    };
+
+    private static void AppendLogoAndFooter(StringBuilder sb, ThemeVariables v,
+        string? logoDataUri, string logoImgSelector, string logoHideSelector, string footerSelector)
+    {
+        if (!v.ShowLogo)
+        {
+            sb.AppendLine($"\n{logoHideSelector} {{ display: none !important; }}");
+        }
+        else
+        {
+            string? logoSrc = logoDataUri ?? (string.IsNullOrEmpty(v.LogoExternalUrl) ? null : v.LogoExternalUrl);
+            sb.AppendLine($"\n{logoImgSelector} {{");
+            if (!string.IsNullOrEmpty(logoSrc))
+                sb.AppendLine($"  content: url('{logoSrc}');");
+            sb.AppendLine($"  height: {v.LogoHeightPx}px;");
+            sb.AppendLine("  width: auto;");
+            sb.AppendLine("}");
+        }
+
+        if (!v.ShowFooter)
+        {
+            sb.AppendLine($"\n{footerSelector} {{ display: none !important; }}");
+        }
+        else if (!string.IsNullOrEmpty(v.FooterText))
+        {
+            sb.AppendLine($"\n{footerSelector}::before {{");
+            sb.AppendLine($"  content: '{v.FooterText.Replace("'", "\\'")}';");
+            sb.AppendLine("  display: block;");
+            sb.AppendLine($"  color: {v.MutedTextColor};");
+            sb.AppendLine("  font-size: 0.8em;");
+            sb.AppendLine("  margin-bottom: 0.5em;");
+            sb.AppendLine("}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(v.ExtraCss))
+        {
+            sb.AppendLine("\n/* ── Extra CSS ──────────────────────────────────────────────────── */");
+            sb.AppendLine(v.ExtraCss.Trim());
+        }
+    }
+
+    // ── keycloak.v2 — PatternFly 5 (Keycloak 20+) ────────────────────────────
+
+    private static string GenerateV2ThemeCss(ThemeVariables v, string? logoDataUri, string? bgDataUri)
+    {
+        var sb = new StringBuilder("/* Generated by EntKube Theme Editor — do not edit manually */\n");
+        sb.AppendLine("/* Base: keycloak.v2 (PatternFly 5 · Keycloak 20+) */\n");
+
+        string? logoSrcV2 = logoDataUri ?? (string.IsNullOrEmpty(v.LogoExternalUrl) ? null : v.LogoExternalUrl);
+
+        sb.AppendLine(":root {");
+        sb.AppendLine($"  --pf-v5-global--primary-color--100: {v.PrimaryColor};");
+        sb.AppendLine($"  --pf-v5-global--primary-color--200: {v.PrimaryColorDark};");
+        sb.AppendLine($"  --pf-v5-global--primary-color--300: {v.PrimaryColorDark};");
+        sb.AppendLine($"  --pf-v5-global--link--Color: {v.LinkColor};");
+        sb.AppendLine($"  --pf-v5-global--link--Color--hover: {v.PrimaryColorDark};");
+        sb.AppendLine($"  --pf-v5-global--Color--100: {v.TextColor};");
+        sb.AppendLine($"  --pf-v5-global--Color--200: {v.MutedTextColor};");
+        sb.AppendLine($"  --pf-v5-global--Color--400: {v.MutedTextColor};");
+        sb.AppendLine($"  --pf-v5-global--BackgroundColor--100: {v.PageBackground};");
+        sb.AppendLine($"  --pf-v5-global--BackgroundColor--200: {v.CardBackground};");
+        sb.AppendLine($"  --pf-v5-global--BorderColor--100: {v.InputBorderColor};");
+        sb.AppendLine($"  --pf-v5-global--BorderRadius--sm: {v.ButtonRadiusPx}px;");
+        sb.AppendLine($"  --pf-v5-global--BorderRadius--md: {v.InputRadiusPx}px;");
+        sb.AppendLine($"  --pf-v5-global--BorderRadius--lg: {v.CardRadiusPx}px;");
+        sb.AppendLine($"  --pf-v5-global--FontSize--md: {v.FontSizePx}px;");
+        sb.AppendLine($"  --pf-v5-global--FontFamily--sans-serif: {v.FontFamily};");
+        sb.AppendLine($"  --pf-v5-global--danger-color--100: {v.ErrorColor};");
+        // keycloak.v2 uses --keycloak-logo-url (and dark variant) to render the brand logo.
+        // Setting these vars is the primary override mechanism for this theme version.
+        if (!v.ShowLogo)
+        {
+            sb.AppendLine("  --keycloak-logo-url: none;");
+            sb.AppendLine("  --keycloak-logo-url-dark: none;");
+        }
+        else if (!string.IsNullOrEmpty(logoSrcV2))
+        {
+            sb.AppendLine($"  --keycloak-logo-url: url('{logoSrcV2}');");
+            sb.AppendLine($"  --keycloak-logo-url-dark: url('{logoSrcV2}');");
+        }
+        sb.AppendLine("}");
+
+        // Page / body — keycloak.v2 hosts its default wavy SVG background on
+        // .pf-v5-c-login, so we must target it explicitly and clear background-image.
+        string bgImg = v.UseBackgroundImage && !string.IsNullOrEmpty(bgDataUri)
+            ? $"url('{bgDataUri}')" : "none";
+        sb.AppendLine($"\nbody, .login-pf-page, .pf-v5-c-login {{");
+        sb.AppendLine($"  background-color: {v.PageBackground};");
+        sb.AppendLine($"  background-image: {bgImg} !important;");
+        if (v.UseBackgroundImage && !string.IsNullOrEmpty(bgDataUri))
+        {
+            sb.AppendLine("  background-size: cover;");
+            sb.AppendLine("  background-position: center;");
+        }
+        sb.AppendLine($"  --pf-v5-c-login--BackgroundColor: {v.PageBackground};");
+        sb.AppendLine($"  --pf-v5-c-login--BackgroundImage: {bgImg};");
+        sb.AppendLine($"  font-family: {v.FontFamily};");
+        sb.AppendLine($"  font-size: {v.FontSizePx}px;");
+        sb.AppendLine($"  color: {v.TextColor};");
+        sb.AppendLine("}");
+
+        // Card — the white login box is <main class="pf-v5-c-login__main">, NOT __main-body
+        sb.AppendLine($"\n.pf-v5-c-login__main {{");
+        sb.AppendLine($"  background-color: {v.CardBackground};");
+        sb.AppendLine($"  border-radius: {v.CardRadiusPx}px;");
+        sb.AppendLine($"  box-shadow: {CardShadowValue(v.CardShadowLevel)};");
+        sb.AppendLine($"  --pf-v5-c-login__main--BackgroundColor: {v.CardBackground};");
+        sb.AppendLine("}");
+        sb.AppendLine($"\n.pf-v5-c-card, .card-pf {{");
+        sb.AppendLine($"  background-color: {v.CardBackground};");
+        sb.AppendLine($"  border-radius: {v.CardRadiusPx}px;");
+        sb.AppendLine("}");
+        sb.AppendLine($"\n.pf-v5-c-login__container {{");
+        sb.AppendLine($"  max-width: {v.CardMaxWidthPx}px;");
+        sb.AppendLine("}");
+
+        // Header region (floats above the card on the page background)
+        sb.AppendLine($"\n.pf-v5-c-login__header {{");
+        sb.AppendLine($"  color: {v.HeaderTextColor};");
+        sb.AppendLine("}");
+
+        // Primary button
+        sb.AppendLine($"\n.pf-v5-c-button.pf-m-primary {{");
+        sb.AppendLine($"  --pf-v5-c-button--m-primary--BackgroundColor: {v.PrimaryColor};");
+        sb.AppendLine($"  --pf-v5-c-button--m-primary--hover--BackgroundColor: {v.PrimaryColorDark};");
+        sb.AppendLine($"  --pf-v5-c-button--m-primary--Color: {v.ButtonTextColor};");
+        sb.AppendLine($"  border-radius: {v.ButtonRadiusPx}px;");
+        sb.AppendLine("}");
+
+        // Form inputs — .pf-v5-c-form-control is the <span> wrapper; inner <input> inherits Color var
+        sb.AppendLine($"\n.pf-v5-c-form-control {{");
+        sb.AppendLine($"  --pf-v5-c-form-control--BorderColor: {v.InputBorderColor};");
+        sb.AppendLine($"  --pf-v5-c-form-control--BackgroundColor: {v.InputBackground};");
+        sb.AppendLine($"  --pf-v5-c-form-control--Color: {v.InputTextColor};");
+        sb.AppendLine($"  border-radius: {v.InputRadiusPx}px;");
+        sb.AppendLine("}");
+        // Password field uses pf-v5-c-input-group which wraps the form-control + toggle button
+        sb.AppendLine($"\n.pf-v5-c-input-group {{");
+        sb.AppendLine($"  --pf-v5-c-input-group--BackgroundColor: {v.InputBackground};");
+        sb.AppendLine($"  background-color: {v.InputBackground};");
+        sb.AppendLine($"  border-radius: {v.InputRadiusPx}px;");
+        sb.AppendLine("}");
+        // Password show/hide toggle — keep neutral, do not inherit primary button styles
+        sb.AppendLine($"\n.pf-v5-c-button.pf-m-control {{");
+        sb.AppendLine($"  --pf-v5-c-button--m-control--BackgroundColor: {v.InputBackground};");
+        sb.AppendLine($"  --pf-v5-c-button--m-control--Color: {v.TextColor};");
+        sb.AppendLine($"  --pf-v5-c-button--m-control--BorderColor: {v.InputBorderColor};");
+        sb.AppendLine("}");
+
+        // Links
+        sb.AppendLine($"\na, a:visited, .pf-v5-c-button.pf-m-link {{ color: {v.LinkColor}; }}");
+        sb.AppendLine($"\na:hover {{ color: {v.PrimaryColorDark}; }}");
+
+        // Logo / header brand
+        // keycloak.v2 renders the logo as background-image on #kc-header-wrapper via
+        // --keycloak-logo-url (set in :root above). The .kc-logo-text div shows the
+        // realm name as text fallback; Keycloak's own CSS hides it via color:transparent
+        // when a logo URL is active, so we don't need to hide it ourselves.
+        if (!v.ShowLogo)
+        {
+            sb.AppendLine("\n#kc-header, #kc-header-wrapper { display: none !important; }");
+        }
+        else
+        {
+            // Realm name text color (visible when no logo image is set)
+            sb.AppendLine($"\n.kc-logo-text span {{ color: {v.HeaderTextColor}; }}");
+            if (!string.IsNullOrEmpty(logoSrcV2))
+            {
+                // Control the height of the background-image logo container
+                sb.AppendLine($"\n#kc-header-wrapper {{");
+                sb.AppendLine($"  height: {v.LogoHeightPx}px;");
+                sb.AppendLine($"  min-height: {v.LogoHeightPx}px;");
+                sb.AppendLine("  min-width: 120px;");
+                sb.AppendLine("}");
+            }
+        }
+
+        // Footer
+        const string footerSelV2 = ".pf-v5-c-login__main-footer, #kc-info";
+        if (!v.ShowFooter)
+        {
+            sb.AppendLine($"\n{footerSelV2} {{ display: none !important; }}");
+        }
+        else if (!string.IsNullOrEmpty(v.FooterText))
+        {
+            sb.AppendLine($"\n{footerSelV2}::before {{");
+            sb.AppendLine($"  content: '{v.FooterText.Replace("'", "\\'")}';");
+            sb.AppendLine("  display: block;");
+            sb.AppendLine($"  color: {v.MutedTextColor};");
+            sb.AppendLine("  font-size: 0.8em;");
+            sb.AppendLine("  margin-bottom: 0.5em;");
+            sb.AppendLine("}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(v.ExtraCss))
+        {
+            sb.AppendLine("\n/* ── Extra CSS ──────────────────────────────────────────────────── */");
+            sb.AppendLine(v.ExtraCss.Trim());
+        }
+
+        return sb.ToString();
+    }
+
+    // ── keycloak (Classic — Bootstrap + PatternFly 4, Keycloak 19 and earlier) ─
+
+    private static string GenerateV1ThemeCss(ThemeVariables v, string? logoDataUri, string? bgDataUri)
+    {
+        var sb = new StringBuilder("/* Generated by EntKube Theme Editor — do not edit manually */\n");
+        sb.AppendLine("/* Base: keycloak (Classic/Bootstrap + PatternFly 4 · Keycloak ≤19) */\n");
+
+        // PF4 global custom properties (no "v5" infix)
+        sb.AppendLine(":root {");
+        sb.AppendLine($"  --pf-global--primary-color--100: {v.PrimaryColor};");
+        sb.AppendLine($"  --pf-global--primary-color--200: {v.PrimaryColorDark};");
+        sb.AppendLine($"  --pf-global--link--Color: {v.LinkColor};");
+        sb.AppendLine($"  --pf-global--link--Color--hover: {v.PrimaryColorDark};");
+        sb.AppendLine($"  --pf-global--Color--100: {v.TextColor};");
+        sb.AppendLine($"  --pf-global--Color--200: {v.MutedTextColor};");
+        sb.AppendLine($"  --pf-global--BackgroundColor--100: {v.PageBackground};");
+        sb.AppendLine($"  --pf-global--BackgroundColor--200: {v.CardBackground};");
+        sb.AppendLine($"  --pf-global--BorderColor--100: {v.InputBorderColor};");
+        sb.AppendLine($"  --pf-global--BorderRadius--sm: {v.ButtonRadiusPx}px;");
+        sb.AppendLine($"  --pf-global--FontSize--md: {v.FontSizePx}px;");
+        sb.AppendLine($"  --pf-global--FontFamily--sans-serif: {v.FontFamily};");
+        sb.AppendLine($"  --pf-global--danger-color--100: {v.ErrorColor};");
+        sb.AppendLine("}");
+
+        // Page background
+        sb.AppendLine($"\nbody, .login-pf-page {{");
+        sb.AppendLine($"  background-color: {v.PageBackground};");
+        if (v.UseBackgroundImage && !string.IsNullOrEmpty(bgDataUri))
+        {
+            sb.AppendLine($"  background-image: url('{bgDataUri}');");
+            sb.AppendLine("  background-size: cover;");
+            sb.AppendLine("  background-position: center;");
+        }
+        sb.AppendLine($"  font-family: {v.FontFamily};");
+        sb.AppendLine($"  font-size: {v.FontSizePx}px;");
+        sb.AppendLine($"  color: {v.TextColor};");
+        sb.AppendLine("}");
+
+        // Header bar (full-width strip at the top of the page in v1)
+        sb.AppendLine($"\n#kc-header, #kc-header-wrapper {{");
+        sb.AppendLine($"  background-color: {v.HeaderBackground};");
+        sb.AppendLine($"  color: {v.HeaderTextColor};");
+        sb.AppendLine("}");
+
+        // Card / form
+        sb.AppendLine($"\n#kc-login, .card-pf, .login-pf-card, .pf-c-card {{");
+        sb.AppendLine($"  background-color: {v.CardBackground};");
+        sb.AppendLine($"  border-radius: {v.CardRadiusPx}px;");
+        sb.AppendLine($"  box-shadow: {CardShadowValue(v.CardShadowLevel)};");
+        sb.AppendLine("}");
+        sb.AppendLine($"\n#kc-content, #kc-content-wrapper, #kc-login {{");
+        sb.AppendLine($"  max-width: {v.CardMaxWidthPx}px;");
+        sb.AppendLine("  margin-left: auto; margin-right: auto;");
+        sb.AppendLine("}");
+
+        // Primary button — Bootstrap .btn-primary AND PF4 .pf-c-button
+        sb.AppendLine($"\n.btn-primary {{");
+        sb.AppendLine($"  background-color: {v.PrimaryColor} !important;");
+        sb.AppendLine($"  border-color: {v.PrimaryColor} !important;");
+        sb.AppendLine($"  color: {v.ButtonTextColor} !important;");
+        sb.AppendLine($"  border-radius: {v.ButtonRadiusPx}px !important;");
+        sb.AppendLine("}");
+        sb.AppendLine($"\n.btn-primary:hover, .btn-primary:focus {{");
+        sb.AppendLine($"  background-color: {v.PrimaryColorDark} !important;");
+        sb.AppendLine($"  border-color: {v.PrimaryColorDark} !important;");
+        sb.AppendLine("}");
+        sb.AppendLine($"\n.pf-c-button.pf-m-primary {{");
+        sb.AppendLine($"  --pf-c-button--m-primary--BackgroundColor: {v.PrimaryColor};");
+        sb.AppendLine($"  --pf-c-button--m-primary--hover--BackgroundColor: {v.PrimaryColorDark};");
+        sb.AppendLine($"  --pf-c-button--m-primary--Color: {v.ButtonTextColor};");
+        sb.AppendLine($"  border-radius: {v.ButtonRadiusPx}px;");
+        sb.AppendLine("}");
+
+        // Form inputs — Bootstrap .form-control AND PF4 .pf-c-form-control
+        sb.AppendLine($"\n.form-control {{");
+        sb.AppendLine($"  border-color: {v.InputBorderColor};");
+        sb.AppendLine($"  background-color: {v.InputBackground};");
+        sb.AppendLine($"  color: {v.InputTextColor};");
+        sb.AppendLine($"  border-radius: {v.InputRadiusPx}px;");
+        sb.AppendLine("}");
+        sb.AppendLine($"\n.form-control:focus {{");
+        sb.AppendLine($"  border-color: {v.PrimaryColor};");
+        sb.AppendLine($"  box-shadow: 0 0 0 3px color-mix(in srgb, {v.PrimaryColor} 20%, transparent);");
+        sb.AppendLine("}");
+        sb.AppendLine($"\n.pf-c-form-control {{");
+        sb.AppendLine($"  --pf-c-form-control--BorderColor: {v.InputBorderColor};");
+        sb.AppendLine($"  background-color: {v.InputBackground};");
+        sb.AppendLine($"  color: {v.InputTextColor};");
+        sb.AppendLine($"  border-radius: {v.InputRadiusPx}px;");
+        sb.AppendLine("}");
+
+        // Links
+        sb.AppendLine($"\na, a:visited {{ color: {v.LinkColor}; }}");
+        sb.AppendLine($"\na:hover {{ color: {v.PrimaryColorDark}; }}");
+
+        AppendLogoAndFooter(sb, v, logoDataUri,
+            logoImgSelector:  ".login-pf-brand img, #kc-logo-link",
+            logoHideSelector: ".login-pf-brand, #kc-logo-link, #kc-logo",
+            footerSelector:   "#kc-info");
+
+        return sb.ToString();
+    }
+
     /// <summary>Returns CSS for the given type from a named theme's vault slot, or null if none saved.</summary>
     public async Task<string?> GetNamedThemeCssAsync(
         Guid tenantId, Guid componentId, Guid themeId, string themeType, CancellationToken ct = default)
         => await vaultService.GetComponentSecretValueAsync(
             tenantId, componentId, $"named-theme-{themeId}-{themeType}-css", ct);
 
-    /// <summary>Persists CSS for the given type in a named theme's vault slot (not synced to K8s).</summary>
-    public async Task SaveNamedThemeCssAsync(
+    /// <summary>
+    /// Persists CSS for the given type in a named theme's vault slot and, for managed
+    /// Keycloak instances, deploys it to the Keycloak pod via a Kubernetes ConfigMap +
+    /// strategic-merge-patch Deployment update.
+    /// Returns a non-null deploy error message if the vault save succeeded but K8s
+    /// deployment failed — the caller can surface this without blocking the save.
+    /// </summary>
+    public async Task<string?> SaveNamedThemeCssAsync(
         Guid tenantId, Guid componentId, Guid themeId, string themeType, string css,
         CancellationToken ct = default)
     {
         await vaultService.InitializeVaultAsync(tenantId, ct);
         await vaultService.SetComponentSecretAsync(
             tenantId, componentId, $"named-theme-{themeId}-{themeType}-css", css, ct);
+
+        // Deploy to Kubernetes for managed Keycloak instances.
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        KeycloakTheme? theme = await db.KeycloakThemes
+            .Include(t => t.ComponentConfig)
+                .ThenInclude(c => c.ClusterComponent!)
+                .ThenInclude(cc => cc.Cluster)
+            .FirstOrDefaultAsync(t => t.Id == themeId && t.TenantId == tenantId, ct);
+
+        if (theme?.ComponentConfig.ClusterComponentId is null
+            || theme.ComponentConfig.ClusterComponent is null)
+            return null; // external Keycloak — vault only
+
+        try
+        {
+            // Sync realm loginTheme BEFORE deploying (while Keycloak is still up).
+            // If done after, the rolling restart makes Keycloak unavailable and the API
+            // call fails silently — leaving the realm pointing at the wrong theme slug.
+            // Also include realms whose stored loginTheme matches old slug variants (e.g.
+            // "theme-{slug}" written by earlier code) so they get corrected on the next save.
+            string deployedSlug = ToThemeSlug(theme.Name);
+            List<Guid> realmIds = await db.KeycloakRealms
+                .Where(r => r.TenantId == tenantId && (
+                    r.KeycloakThemeId == theme.Id ||
+                    r.LoginTheme == deployedSlug ||
+                    r.LoginTheme == "theme-" + deployedSlug))
+                .Select(r => r.Id)
+                .ToListAsync(ct);
+            List<string> syncErrors = [];
+            foreach (Guid rid in realmIds)
+            {
+                try { await AssignNamedThemeToRealmAsync(tenantId, rid, theme.Id, ct); }
+                catch (Exception ex) { syncErrors.Add(ex.Message); }
+            }
+
+            await DeployNamedThemeToClusterAsync(tenantId, theme, ct);
+
+            if (syncErrors.Count > 0)
+                return $"Theme deployed but realm sync failed: {string.Join("; ", syncErrors)}";
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// Deploys a named theme to the Keycloak pod as a ConfigMap-backed theme directory.
+    /// Creates or updates the ConfigMap with all saved CSS types, patches the Keycloak
+    /// Deployment to mount it at the right theme path, and triggers a rolling restart
+    /// so Keycloak picks up the new theme files (subPath mounts require a restart).
+    /// No-op for external Keycloak instances (ClusterComponentId not set).
+    /// </summary>
+    public async Task DeployNamedThemeToClusterAsync(
+        Guid tenantId, KeycloakTheme theme, CancellationToken ct = default)
+    {
+        if (theme.ComponentConfig is null)
+        {
+            // Reload with navigation properties.
+            using ApplicationDbContext db2 = dbFactory.CreateDbContext();
+            theme = await db2.KeycloakThemes
+                .Include(t => t.ComponentConfig)
+                    .ThenInclude(c => c.ClusterComponent!)
+                    .ThenInclude(cc => cc.Cluster)
+                .FirstOrDefaultAsync(t => t.Id == theme.Id && t.TenantId == tenantId, ct)
+                ?? throw new InvalidOperationException("Theme not found.");
+        }
+
+        if (theme.ComponentConfig.ClusterComponentId is null
+            || theme.ComponentConfig.ClusterComponent is null)
+            return;
+
+        ClusterComponent comp = theme.ComponentConfig.ClusterComponent;
+        string? kubeconfig = comp.Cluster.Kubeconfig;
+        if (string.IsNullOrEmpty(kubeconfig) || string.IsNullOrEmpty(comp.Namespace))
+            return;
+
+        Guid componentVaultId = comp.Id;
+        string cmName = $"entkube-theme-{theme.Id:N}";
+        string ns = comp.Namespace;
+        string releaseName = comp.ReleaseName ?? comp.Name;
+
+        // Find the Keycloak Deployment by the standard Helm instance label.
+        // The keycloakx chart names the Deployment "{release}-keycloakx" (not just "{release}"),
+        // so we resolve dynamically rather than hard-coding the naming convention.
+        string deployName = await ResolveKeycloakDeploymentNameAsync(releaseName, ns, kubeconfig, ct);
+
+        // Load login CSS from vault.
+        string loginCss = await vaultService.GetComponentSecretValueAsync(
+            tenantId, componentVaultId, $"named-theme-{theme.Id}-login-css", ct) ?? "";
+
+        // Derive the slug and the deployed directory name.
+        // The "theme-" prefix distinguishes our themes from Keycloak built-ins and matches
+        // the loginTheme value already stored in Keycloak's realm database from prior deploys.
+        string baseSlug   = ToThemeSlug(theme.Name);   // e.g. "salesdata"
+        string deploySlug = "theme-" + baseSlug;        // e.g. "theme-salesdata"
+
+        // Load uploaded resource images (logo, backgrounds, etc.) for deployment.
+        // Images are stored as raw base64 in the vault. We include them in ConfigMap
+        // binaryData so Keycloak can serve them from resources/img/ in the theme directory.
+        // Each key uses the "img-" prefix to distinguish from CSS/properties entries.
+        List<string> resourceNames = await ListThemeResourcesAsync(tenantId, componentVaultId, theme.Id, ct);
+        var resources = new Dictionary<string, string>(StringComparer.Ordinal); // filename → base64
+        foreach (string name in resourceNames.Where(n => IsImageResource(n)))
+        {
+            string? b64 = await vaultService.GetComponentSecretValueAsync(
+                tenantId, componentVaultId, $"named-theme-{theme.Id}-resource-{name}", ct);
+            if (!string.IsNullOrEmpty(b64))
+                resources[name] = b64;
+        }
+
+        // Build ConfigMap with theme.properties, the custom CSS, and any uploaded images.
+        // ConfigMap mounts (directory or subPath) both ultimately place symlinks in the
+        // container filesystem. Keycloak's FlatFileThemeProvider uses NOFOLLOW_LINKS, so
+        // it cannot read through those symlinks and silently falls back to keycloak.v2.
+        // The only reliable approach: an init container copies the ConfigMap files into an
+        // emptyDir volume as real files before the Keycloak process starts.
+        string loginCssYaml = IndentForYaml(loginCss, 4);
+
+        // binaryData section for image resources (Kubernetes decodes base64 → raw bytes).
+        string binaryDataSection = resources.Count > 0
+            ? "\nbinaryData:\n" + string.Join("\n", resources.Select(kvp => $"  img-{kvp.Key}: {kvp.Value}"))
+            : "";
+
+        string configMap = $"""
+            apiVersion: v1
+            kind: ConfigMap
+            metadata:
+              name: {cmName}
+              namespace: {ns}
+              labels:
+                app.kubernetes.io/managed-by: entkube
+                entkube.io/theme-id: "{theme.Id:N}"
+            data:
+              login-theme.properties: |
+                parent=keycloak.v2
+                styles=css/styles.css css/login.css
+              login.css: |
+            {loginCssYaml}{binaryDataSection}
+            """;
+
+        await k8sFactory.ApplyManifestAsync(configMap, kubeconfig, ct);
+
+        // Read the StatefulSet to discover the actual container name — keycloakx chart uses
+        // ".Chart.Name" as the container name, which may be "keycloakx" not "keycloak".
+        string containerName = await GetFirstContainerNameAsync(
+            "statefulset", deployName, ns, kubeconfig, ct)
+            ?? throw new InvalidOperationException(
+                $"StatefulSet '{deployName}' has no containers in spec.template.spec.containers.");
+
+        // Volume/container names for this theme.
+        // srcVolName:     ConfigMap-backed source volume, read by the init container.
+        // loginVolName:   emptyDir populated by the init container; Keycloak mounts this.
+        // accountVolName: legacy name kept only for $patch:delete cleanup.
+        // copierName:     init container that copies ConfigMap symlinks → real files in emptyDir.
+        string srcVolName     = $"entkube-theme-{theme.Id:N}-src";
+        string loginVolName   = $"entkube-theme-{theme.Id:N}-login";
+        string accountVolName = $"entkube-theme-{theme.Id:N}-account";
+        string copierName     = $"entkube-theme-{theme.Id:N}-copier";
+
+        // Build the configMap.items array: fixed theme files + one entry per image resource.
+        // Images are mounted into /src/imgs/{filename} inside the init container.
+        string imageItems = resources.Count > 0
+            ? ",\n" + string.Join(",\n", resources.Keys.Select(n =>
+                $"            {{ \"key\": \"img-{n}\", \"path\": \"imgs/{n}\" }}"))
+            : "";
+
+        // Init-container shell command: copy theme files and any uploaded images.
+        // copierCmdJson is the value already JSON-string-escaped (without surrounding quotes)
+        // so it can be safely spliced into the JSON patch literal.
+        string copierCmdRaw =
+            "mkdir -p /dest/resources/css /dest/resources/img; " +
+            "cp /src/theme.properties /dest/theme.properties; " +
+            "cp /src/login.css /dest/resources/css/login.css; " +
+            "find /src/imgs -maxdepth 1 -type f -exec cp {} /dest/resources/img/ \\; 2>/dev/null; true";
+        string copierCmd = JsonSerializer.Serialize(copierCmdRaw)[1..^1]; // strip surrounding quotes
+
+        // Strategic merge patch:
+        //  • Delete all previous volume/mount variants (subPath, directory, and legacy names).
+        //  • Add ConfigMap source volume + emptyDir target volume.
+        //  • Add/update the init container that copies files to the emptyDir as real files.
+        //  • Mount the emptyDir at the theme login directory in the Keycloak container.
+        // Only spec.template.* is touched — StatefulSet immutable fields are not in the patch.
+        string patchJson = $$"""
+            {
+              "spec": {
+                "template": {
+                  "spec": {
+                    "volumes": [
+                      { "name": "{{cmName}}",         "$patch": "delete" },
+                      { "name": "{{accountVolName}}", "$patch": "delete" },
+                      { "name": "{{loginVolName}}",   "$patch": "delete" },
+                      { "name": "{{srcVolName}}",     "$patch": "delete" },
+                      {
+                        "name": "{{srcVolName}}",
+                        "configMap": {
+                          "name": "{{cmName}}",
+                          "items": [
+                            { "key": "login-theme.properties", "path": "theme.properties" },
+                            { "key": "login.css",              "path": "login.css" }{{imageItems}}
+                          ]
+                        }
+                      },
+                      {
+                        "name": "{{loginVolName}}",
+                        "emptyDir": {}
+                      }
+                    ],
+                    "initContainers": [
+                      {
+                        "name": "{{copierName}}",
+                        "image": "busybox:1.36",
+                        "command": ["sh", "-c", "{{copierCmd}}"],
+                        "volumeMounts": [
+                          { "name": "{{srcVolName}}",   "mountPath": "/src" },
+                          { "name": "{{loginVolName}}", "mountPath": "/dest" }
+                        ]
+                      }
+                    ],
+                    "containers": [
+                      {
+                        "name": "{{containerName}}",
+                        "volumeMounts": [
+                          { "mountPath": "/opt/keycloak/themes/{{deploySlug}}/login/theme.properties",             "$patch": "delete" },
+                          { "mountPath": "/opt/keycloak/themes/{{deploySlug}}/login/resources/css/login.css",      "$patch": "delete" },
+                          { "mountPath": "/opt/keycloak/themes/{{deploySlug}}/login/resources/css/custom.css",     "$patch": "delete" },
+                          { "mountPath": "/opt/keycloak/themes/{{deploySlug}}/account/theme.properties",           "$patch": "delete" },
+                          { "mountPath": "/opt/keycloak/themes/{{deploySlug}}/account/resources/css/account.css",  "$patch": "delete" },
+                          { "mountPath": "/opt/keycloak/themes/{{deploySlug}}/account",                            "$patch": "delete" },
+                          { "mountPath": "/opt/keycloak/themes/{{deploySlug}}",                                    "$patch": "delete" },
+                          { "mountPath": "/opt/keycloak/themes/{{deploySlug}}/login",                              "$patch": "delete" },
+                          { "mountPath": "/opt/keycloak/themes/{{baseSlug}}/login/theme.properties",               "$patch": "delete" },
+                          { "mountPath": "/opt/keycloak/themes/{{baseSlug}}/login/resources/css/login.css",        "$patch": "delete" },
+                          { "mountPath": "/opt/keycloak/themes/{{baseSlug}}/login/resources/css/custom.css",       "$patch": "delete" },
+                          { "mountPath": "/opt/keycloak/themes/{{baseSlug}}/login",                                "$patch": "delete" },
+                          {
+                            "name": "{{loginVolName}}",
+                            "mountPath": "/opt/keycloak/themes/{{deploySlug}}/login"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        await k8sFactory.PatchStrategicAsync("statefulset", deployName, ns, patchJson, kubeconfig, ct);
+
+        // Rolling restart so Keycloak reloads theme files from the new subPath mounts.
+        string restartPatch =
+            $"{{\"spec\":{{\"template\":{{\"metadata\":{{\"annotations\":{{\"kubectl.kubernetes.io/restartedAt\":\"{DateTime.UtcNow:O}\"}}}}}}}}}}";
+        await k8sFactory.PatchJsonAsync("statefulset", deployName, ns, restartPatch, kubeconfig, ct);
+    }
+
+    private static string IndentForYaml(string content, int spaces)
+    {
+        string indent = new(' ', spaces);
+        if (string.IsNullOrWhiteSpace(content))
+            return indent + "/* no css */";
+        // Normalize to LF only — YAML block scalars are sensitive to CR characters.
+        string normalized = content.Replace("\r\n", "\n").Replace("\r", "\n");
+        return string.Join("\n", normalized.Split('\n').Select(l => indent + l));
+    }
+
+    /// <summary>
+    /// Finds the name of the Keycloak StatefulSet in a namespace (keycloakx uses StatefulSets).
+    /// Tries label-based lookup first, then falls back to listing all StatefulSets in
+    /// the namespace and matching by name.  Throws InvalidOperationException with a
+    /// diagnostic message (including all names found) when nothing matches.
+    /// </summary>
+    private async Task<string> ResolveKeycloakDeploymentNameAsync(
+        string releaseName, string ns, string kubeconfig, CancellationToken ct)
+    {
+        // Strategy 1: Helm instance label.
+        try
+        {
+            string json = await k8sFactory.GetJsonAsync(
+                "statefulset", ns, kubeconfig,
+                $"app.kubernetes.io/instance={releaseName}", ct);
+            string? name = FirstDeploymentName(json);
+            if (!string.IsNullOrEmpty(name))
+                return name;
+        }
+        catch { /* label query failed — fall through */ }
+
+        // Strategy 2 & 3: list ALL deployments in the namespace.
+        List<string> allNames = [];
+        string? listError = null;
+        try
+        {
+            string json = await k8sFactory.GetJsonAsync("statefulset", ns, kubeconfig, "", ct);
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("items", out JsonElement items))
+            {
+                foreach (JsonElement item in items.EnumerateArray())
+                {
+                    if (item.TryGetProperty("metadata", out JsonElement meta))
+                    {
+                        string? n = meta.GetStringOrDefault("name");
+                        if (!string.IsNullOrEmpty(n)) allNames.Add(n);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            listError = ex.Message;
+        }
+
+        // Exact name candidates in preference order.
+        foreach (string candidate in new[]
+        {
+            releaseName,
+            $"{releaseName}-keycloakx",
+            $"{releaseName}-keycloak"
+        })
+        {
+            if (allNames.Contains(candidate, StringComparer.OrdinalIgnoreCase))
+                return candidate;
+        }
+
+        // Prefix match as last resort.
+        string? prefixed = allNames.FirstOrDefault(
+            n => n.StartsWith(releaseName, StringComparison.OrdinalIgnoreCase));
+        if (!string.IsNullOrEmpty(prefixed))
+            return prefixed;
+
+        // Nothing found — produce a diagnostic message.
+        string found = allNames.Count > 0
+            ? $"Deployments in namespace: {string.Join(", ", allNames)}"
+            : listError is not null
+                ? $"Could not list deployments: {listError}"
+                : "No deployments found in namespace.";
+
+        throw new InvalidOperationException(
+            $"Could not find Keycloak Deployment in namespace '{ns}' for release '{releaseName}'. {found}");
+    }
+
+    private async Task<string?> GetFirstContainerNameAsync(
+        string resource, string name, string ns, string kubeconfig, CancellationToken ct)
+    {
+        string json = await k8sFactory.GetJsonAsync($"{resource}/{name}", ns, kubeconfig, ct: ct);
+        using JsonDocument doc = JsonDocument.Parse(json);
+        JsonElement root = doc.RootElement;
+        if (root.TryGetProperty("spec", out JsonElement spec)
+            && spec.TryGetProperty("template", out JsonElement tmpl)
+            && tmpl.TryGetProperty("spec", out JsonElement podSpec)
+            && podSpec.TryGetProperty("containers", out JsonElement containers))
+        {
+            foreach (JsonElement c in containers.EnumerateArray())
+            {
+                if (c.TryGetProperty("name", out JsonElement n))
+                    return n.GetString();
+            }
+        }
+        return null;
+    }
+
+    private static string? FirstDeploymentName(string json)
+    {
+        using JsonDocument doc = JsonDocument.Parse(json);
+        JsonElement root = doc.RootElement;
+        if (root.TryGetProperty("items", out JsonElement items))
+        {
+            foreach (JsonElement item in items.EnumerateArray())
+            {
+                string? name = item.TryGetProperty("metadata", out JsonElement meta)
+                    ? meta.GetStringOrDefault("name") : null;
+                if (!string.IsNullOrEmpty(name)) return name;
+            }
+        }
+        else if (root.TryGetProperty("metadata", out JsonElement singleMeta))
+        {
+            return singleMeta.GetStringOrDefault("name");
+        }
+        return null;
     }
 
     /// <summary>
@@ -1809,27 +2772,54 @@ public class KeycloakService(
         }
 
         KeycloakTheme theme = await db.KeycloakThemes
+            .Include(t => t.ComponentConfig)
             .FirstOrDefaultAsync(t => t.Id == themeId && t.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Theme not found.");
+
+        // For managed Keycloak (ClusterComponentId set), the login theme slug is always
+        // "theme-{name-slug}" — that is exactly what DeployNamedThemeToClusterAsync
+        // mounts as the theme directory name. The "theme-" prefix avoids collisions with
+        // Keycloak built-ins and matches the value stored in Keycloak's realm database.
+        // For external Keycloak, use the explicit LoginTheme/AccountTheme fields as before.
+        string deployedSlug = "theme-" + ToThemeSlug(theme.Name);
+        bool isManaged = theme.ComponentConfig?.ClusterComponentId is not null;
+        string? effectiveLogin = (isManaged || string.IsNullOrWhiteSpace(theme.LoginTheme))
+            ? deployedSlug
+            : theme.LoginTheme;
+        string? effectiveAccount = string.IsNullOrWhiteSpace(theme.AccountTheme)
+            ? null
+            : theme.AccountTheme;
+
+        // Repair stale LoginTheme on the theme entity itself (e.g. old code wrote "theme-salesdata"
+        // when the deployed directory is always the name-derived slug).  Writing it back here
+        // means the next call is correct even if isManaged somehow evaluates false.
+        if (isManaged && theme.LoginTheme != effectiveLogin)
+            theme.LoginTheme = effectiveLogin;
 
         // Apply the theme's native login/account theme to Keycloak.
         string token = await GetAdminTokenAsync(tenantId, realm.ComponentConfig, ct);
         HttpClient http = CreateHttpClient();
 
-        var patch = new { loginTheme = theme.LoginTheme ?? "", accountTheme = theme.AccountTheme ?? "" };
+        // Null values are serialized as JSON null, which Keycloak ignores (keeps existing value).
+        // We never send "" — Keycloak stores it and shows the default theme, which is confusing.
+        string patchJson = JsonSerializer.Serialize(new
+        {
+            loginTheme = effectiveLogin,
+            accountTheme = effectiveAccount
+        });
 
         HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Put,
             $"{realm.ComponentConfig.AdminUrl}/admin/realms/{realm.RealmName}")
         {
             Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
-            Content = new StringContent(JsonSerializer.Serialize(patch), Encoding.UTF8, "application/json")
+            Content = new StringContent(patchJson, Encoding.UTF8, "application/json")
         }, ct);
 
         resp.EnsureSuccessStatusCode();
 
         realm.KeycloakThemeId = themeId;
-        realm.LoginTheme = theme.LoginTheme;
-        realm.AccountTheme = theme.AccountTheme;
+        realm.LoginTheme = effectiveLogin;
+        realm.AccountTheme = effectiveAccount;
         await db.SaveChangesAsync(ct);
     }
 
@@ -2011,6 +3001,98 @@ public class KeycloakService(
                 copied++;
             }
         }
+        return copied;
+    }
+
+    /// <summary>
+    /// Copies all named themes (visual editor variables, CSS overrides, and uploaded resources)
+    /// from one Keycloak component to another within the same tenant.
+    /// Themes are matched by name; new themes are created on the target if needed.
+    /// K8s deployment is NOT triggered — the user must open the visual editor and
+    /// click "Save &amp; Deploy" to push to the cluster.
+    /// Returns the number of named themes copied.
+    /// </summary>
+    public async Task<int> CopyNamedThemesAsync(
+        Guid tenantId, Guid sourceComponentId, Guid targetComponentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        // Resolve DB config IDs from vault component IDs
+        KeycloakComponentConfig? srcConfig = await db.KeycloakComponentConfigs
+            .FirstOrDefaultAsync(c => c.TenantId == tenantId && (
+                c.ClusterComponentId == sourceComponentId ||
+                (c.ClusterComponentId == null && c.Id == sourceComponentId)), ct);
+        KeycloakComponentConfig? tgtConfig = await db.KeycloakComponentConfigs
+            .FirstOrDefaultAsync(c => c.TenantId == tenantId && (
+                c.ClusterComponentId == targetComponentId ||
+                (c.ClusterComponentId == null && c.Id == targetComponentId)), ct);
+
+        if (srcConfig is null || tgtConfig is null) return 0;
+
+        List<KeycloakTheme> srcThemes = await db.KeycloakThemes
+            .Where(t => t.TenantId == tenantId && t.KeycloakComponentConfigId == srcConfig.Id)
+            .ToListAsync(ct);
+        if (srcThemes.Count == 0) return 0;
+
+        List<KeycloakTheme> tgtThemes = await db.KeycloakThemes
+            .Where(t => t.TenantId == tenantId && t.KeycloakComponentConfigId == tgtConfig.Id)
+            .ToListAsync(ct);
+
+        await vaultService.InitializeVaultAsync(tenantId, ct);
+
+        int copied = 0;
+        foreach (KeycloakTheme src in srcThemes)
+        {
+            // Find or create a matching theme on the target (matched by name)
+            KeycloakTheme? tgt = tgtThemes.FirstOrDefault(
+                t => string.Equals(t.Name, src.Name, StringComparison.OrdinalIgnoreCase));
+            if (tgt is null)
+            {
+                tgt = new KeycloakTheme
+                {
+                    Id = Guid.NewGuid(),
+                    TenantId = tenantId,
+                    KeycloakComponentConfigId = tgtConfig.Id,
+                    Name = src.Name,
+                    LoginTheme = src.LoginTheme,
+                    AccountTheme = src.AccountTheme,
+                };
+                db.KeycloakThemes.Add(tgt);
+                await db.SaveChangesAsync(ct);
+                tgtThemes.Add(tgt);
+            }
+
+            // Copy visual-editor variables JSON
+            string? varsJson = await vaultService.GetComponentSecretValueAsync(
+                tenantId, sourceComponentId, $"named-theme-{src.Id}-variables", ct);
+            if (!string.IsNullOrEmpty(varsJson))
+                await vaultService.SetComponentSecretAsync(
+                    tenantId, targetComponentId, $"named-theme-{tgt.Id}-variables", varsJson, ct);
+
+            // Copy CSS for all theme types (written directly to vault — no K8s deploy)
+            foreach (string themeType in new[] { "login", "account", "admin", "email" })
+            {
+                string? css = await vaultService.GetComponentSecretValueAsync(
+                    tenantId, sourceComponentId, $"named-theme-{src.Id}-{themeType}-css", ct);
+                if (!string.IsNullOrEmpty(css))
+                    await vaultService.SetComponentSecretAsync(
+                        tenantId, targetComponentId, $"named-theme-{tgt.Id}-{themeType}-css", css, ct);
+            }
+
+            // Copy uploaded resources
+            List<string> resources = await ListThemeResourcesAsync(tenantId, sourceComponentId, src.Id, ct);
+            foreach (string filename in resources)
+            {
+                string? b64 = await vaultService.GetComponentSecretValueAsync(
+                    tenantId, sourceComponentId, $"named-theme-{src.Id}-resource-{filename}", ct);
+                if (!string.IsNullOrEmpty(b64))
+                    await vaultService.SetComponentSecretAsync(
+                        tenantId, targetComponentId, $"named-theme-{tgt.Id}-resource-{filename}", b64, ct);
+            }
+
+            copied++;
+        }
+
         return copied;
     }
 

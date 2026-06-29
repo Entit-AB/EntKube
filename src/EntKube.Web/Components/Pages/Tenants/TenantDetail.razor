@@ -157,6 +157,11 @@ else
                 </button>
             </li>
             <li class="nav-item">
+                <button class="nav-link @(activeTab == "secret-expiry" ? "active" : "")" @onclick='() => SetTab("secret-expiry")'>
+                    <i class="bi bi-shield-exclamation me-1"></i>Secret Expiry
+                </button>
+            </li>
+            <li class="nav-item">
                 <button class="nav-link @(activeTab == "maintenance" ? "active" : "")" @onclick='() => SetTab("maintenance")'>
                     <i class="bi bi-tools me-1"></i>Maintenance
                 </button>
@@ -240,6 +245,9 @@ else
                 break;
             case "notifications":
                 <NotificationChannels TenantId="tenant.Id" />
+                break;
+            case "secret-expiry":
+                <SecretExpiryTab TenantId="tenant.Id" OnNavigateTab="SetTab" />
                 break;
             case "maintenance":
                 <MaintenanceWindows TenantId="tenant.Id" />

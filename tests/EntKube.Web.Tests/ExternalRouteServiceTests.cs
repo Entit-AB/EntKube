@@ -3,6 +3,7 @@ using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace EntKube.Web.Tests;
 
@@ -76,7 +77,7 @@ public class ExternalRouteServiceTests : IDisposable
         db.ClusterComponents.AddRange(traefik, monitoring);
         db.SaveChanges();
 
-        sut = new ExternalRouteService(dbFactory);
+        sut = new ExternalRouteService(dbFactory, NullLogger<ExternalRouteService>.Instance);
     }
 
     public void Dispose()
@@ -269,7 +270,7 @@ public class ExternalRouteServiceTests : IDisposable
     // ──────── YAML generation ────────
 
     [Fact]
-    public async Task GenerateHttpRouteYaml_ClusterIssuer_IncludesAnnotation()
+    public async Task GenerateHttpRouteYaml_ClusterIssuer_IncludesCertificate()
     {
         ExternalRouteRequest request = new()
         {
@@ -281,17 +282,21 @@ public class ExternalRouteServiceTests : IDisposable
         };
 
         ExternalRoute route = await sut.AddRouteAsync(componentId, request);
-        string yaml = await sut.GenerateHttpRouteYamlAsync(route.Id);
+        string yaml = await sut.GenerateFullManifestYamlAsync(route.Id);
 
+        // ClusterIssuer mode appends a cert-manager Certificate (issuerRef → ClusterIssuer),
+        // not an ingress-shim annotation — TLS terminates at the Gateway listener.
         yaml.Should().Contain("kind: HTTPRoute");
         yaml.Should().Contain("grafana.example.com");
-        yaml.Should().Contain("cert-manager.io/cluster-issuer: \"letsencrypt-prod\"");
+        yaml.Should().Contain("kind: Certificate");
+        yaml.Should().Contain("kind: ClusterIssuer");
+        yaml.Should().Contain("name: letsencrypt-prod");
         yaml.Should().Contain("name: traefik-gateway");
         yaml.Should().Contain("kube-prometheus-stack-grafana");
     }
 
     [Fact]
-    public async Task GenerateHttpRouteYaml_ManualTls_ReferencesSecret()
+    public async Task GenerateTlsSecret_ManualTls_ReferencesSecret()
     {
         ExternalRouteRequest request = new()
         {
@@ -303,12 +308,16 @@ public class ExternalRouteServiceTests : IDisposable
         };
 
         ExternalRoute route = await sut.AddRouteAsync(componentId, request);
-        string yaml = await sut.GenerateHttpRouteYamlAsync(route.Id);
 
+        // The applied route manifest is just the HTTPRoute (TLS terminates at the gateway)…
+        string yaml = await sut.GenerateHttpRouteYamlAsync(route.Id);
         yaml.Should().Contain("kind: HTTPRoute");
         yaml.Should().Contain("manual.example.com");
-        yaml.Should().Contain("my-service-tls");
-        yaml.Should().Contain("kind: Secret");
+
+        // …the manually-supplied certificate is applied as a separate TLS Secret.
+        string secret = ExternalRouteService.GenerateTlsSecretYaml(route);
+        secret.Should().Contain("kind: Secret");
+        secret.Should().Contain("my-service-tls");
     }
 
     [Fact]

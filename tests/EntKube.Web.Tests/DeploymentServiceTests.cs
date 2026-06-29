@@ -3,6 +3,7 @@ using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace EntKube.Web.Tests;
 
@@ -34,7 +35,8 @@ public class DeploymentServiceTests : IDisposable
         dbFactory = new TestDbContextFactory(connection);
         db.Database.EnsureCreated();
 
-        sut = new DeploymentService(dbFactory);
+        sut = new DeploymentService(dbFactory, new AuditService(dbFactory),
+            new DeploymentStatusNotifier(), NullLogger<DeploymentService>.Instance);
     }
 
     public void Dispose()

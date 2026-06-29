@@ -29,6 +29,13 @@ public interface IKubernetesClientFactory
     Task PatchJsonAsync(string resource, string name, string ns, string jsonPatch, string kubeconfig, CancellationToken ct = default);
 
     /// <summary>
+    /// Applies a strategic merge patch to an existing resource.
+    /// Unlike PatchJsonAsync (which replaces arrays), strategic merge uses per-type merge keys
+    /// so array items (volumes, containers, volumeMounts) are added rather than replaced.
+    /// </summary>
+    Task PatchStrategicAsync(string resource, string name, string ns, string jsonPatch, string kubeconfig, CancellationToken ct = default);
+
+    /// <summary>
     /// Ensures a namespace exists, creating it if it doesn't.
     /// Equivalent to "kubectl create namespace {ns} --dry-run=client -o yaml | kubectl apply -f -".
     /// </summary>
@@ -38,6 +45,11 @@ public interface IKubernetesClientFactory
     /// Gets the JSON output of a kubectl command. Used for querying cluster/pod status.
     /// </summary>
     Task<string> GetJsonAsync(string resource, string ns, string kubeconfig, string labelSelector = "", CancellationToken ct = default);
+
+    /// <summary>
+    /// Lists a resource type across all namespaces (kubectl get {resource} -A -o json).
+    /// </summary>
+    Task<string> GetJsonAllNamespacesAsync(string resource, string kubeconfig, string labelSelector = "", CancellationToken ct = default);
 
     /// <summary>
     /// Executes a SQL statement against the CNPG primary pod.
@@ -87,7 +99,7 @@ public interface IKubernetesClientFactory
     /// </summary>
     Task<string> RunCommandOnPodAsync(string podName, string ns, IReadOnlyList<string> command,
         string kubeconfig, IReadOnlyDictionary<string, string>? envVars = null,
-        CancellationToken ct = default);
+        CancellationToken ct = default, int timeoutSeconds = 0, bool verbose = false);
 
     /// <summary>
     /// Executes SQL directly connected to a specific database on a CNPG primary pod.

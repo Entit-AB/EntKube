@@ -287,7 +287,7 @@ public class AlertSyncService(
 
         // Dispatch notifications (need the saved incidents to have IDs)
         List<NotificationChannel> channels = await db.NotificationChannels
-            .Where(c => c.TenantId == cluster.TenantId && c.IsEnabled)
+            .Where(c => c.TenantId == cluster.TenantId && c.CustomerId == null && c.IsEnabled)
             .ToListAsync(ct);
 
         if (channels.Count == 0) return;

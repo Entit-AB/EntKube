@@ -11,9 +11,7 @@ namespace EntKube.Web.Data.Migrations.Sqlite
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropIndex(
-                name: "IX_OnCallSchedules_TenantId",
-                table: "OnCallSchedules");
+            migrationBuilder.Sql("""DROP INDEX IF EXISTS "IX_OnCallSchedules_TenantId";""");
 
             migrationBuilder.AddColumn<string>(
                 name: "UpdatedBy",

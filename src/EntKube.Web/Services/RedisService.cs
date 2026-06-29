@@ -527,6 +527,30 @@ public class RedisService(
         sb.AppendLine("        cpu: '1'");
         sb.AppendLine("        memory: 1Gi");
 
+        // Spread leader and follower pods across nodes (the operator sets no
+        // anti-affinity by default). Preferred, so it won't block scheduling when
+        // nodes < pods. The OT operator labels pods app=<name>-leader / -follower.
+        sb.AppendLine("  redisLeader:");
+        sb.AppendLine("    affinity:");
+        sb.AppendLine("      podAntiAffinity:");
+        sb.AppendLine("        preferredDuringSchedulingIgnoredDuringExecution:");
+        sb.AppendLine("          - weight: 100");
+        sb.AppendLine("            podAffinityTerm:");
+        sb.AppendLine("              topologyKey: kubernetes.io/hostname");
+        sb.AppendLine("              labelSelector:");
+        sb.AppendLine("                matchLabels:");
+        sb.AppendLine($"                  app: {cluster.Name}-leader");
+        sb.AppendLine("  redisFollower:");
+        sb.AppendLine("    affinity:");
+        sb.AppendLine("      podAntiAffinity:");
+        sb.AppendLine("        preferredDuringSchedulingIgnoredDuringExecution:");
+        sb.AppendLine("          - weight: 100");
+        sb.AppendLine("            podAffinityTerm:");
+        sb.AppendLine("              topologyKey: kubernetes.io/hostname");
+        sb.AppendLine("              labelSelector:");
+        sb.AppendLine("                matchLabels:");
+        sb.AppendLine($"                  app: {cluster.Name}-follower");
+
         if (cluster.PersistenceEnabled)
         {
             sb.AppendLine("  storage:");

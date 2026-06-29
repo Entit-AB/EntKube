@@ -696,14 +696,16 @@
    ══════════════════════════════════════════════════════════════ *@
 @if (activeTab == "resources")
 {
-    <ResourceTreePanel Loading="@(resourceTree is null)"
-                       Error="@resourcesError"
-                       Resources="@resourceTree"
-                       Namespace="@Deployment.Namespace"
-                       DeploymentId="@Deployment.Id"
-                       AccessRole="@AccessRole"
-                       OnRefresh="LoadResources"
-                       LastRefreshed="@_resourcesRefreshedAt" />
+    <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
+        <ResourceTreePanel Loading="@(resourceTree is null)"
+                           Error="@resourcesError"
+                           Resources="@resourceTree"
+                           Namespace="@Deployment.Namespace"
+                           DeploymentId="@Deployment.Id"
+                           AccessRole="@AccessRole"
+                           OnRefresh="LoadResources"
+                           LastRefreshed="@_resourcesRefreshedAt" />
+    </div>
 }
 
 @* ══════════════════════════════════════════════════════════════
