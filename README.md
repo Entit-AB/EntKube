@@ -28,18 +28,23 @@ EntKube provides a unified developer portal for provisioning, configuring, and m
 ## Getting Started
 
 ```bash
-cd EntKube/EntKube
-dotnet run
+git clone https://github.com/Entit-AB/EntKube.git
+cd EntKube
+dotnet run --project src/EntKube.Web
 ```
 
-The app launches at `https://localhost:7001` (see `Properties/launchSettings.json`).
+The app launches at `https://localhost:7136` (see `src/EntKube.Web/Properties/launchSettings.json`).
 
 ## Project Structure
 
 ```
 EntKube/
-├── EntKube/          # Server-side Blazor host, Identity, data layer
-└── EntKube.Client/   # WebAssembly client project
+├── EntKube.slnx              # Solution file
+├── src/
+│   ├── EntKube.Web/          # Server-side Blazor host, Identity, data layer
+│   └── EntKube.Web.Client/   # WebAssembly client project
+└── tests/
+    └── EntKube.Web.Tests/    # Test project
 ```
 
 ## Docker
