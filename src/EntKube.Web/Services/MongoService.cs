@@ -374,6 +374,37 @@ public class MongoService(
     }
 
     /// <summary>
+    /// Triggers a rolling restart of a MongoDB cluster by bumping a pod-template annotation on
+    /// the MongoDBCommunity CR. The Community Operator merges spec.statefulSet into the
+    /// generated StatefulSet, so the changed template drives a StatefulSet rolling update —
+    /// letting the scheduler re-place members according to the cluster's anti-affinity.
+    /// </summary>
+    public async Task RestartClusterAsync(
+        Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        MongoCluster mongo = await db.MongoClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == mongoClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("MongoDB cluster not found.");
+
+        // Bump a pod-template annotation on the MongoDBCommunity CR. The Community Operator
+        // merges spec.statefulSet into the generated StatefulSet, so changing the pod template
+        // triggers a StatefulSet rolling update — recreating members one at a time and letting
+        // the scheduler re-place them according to the cluster's anti-affinity.
+        // Non-interpolated raw string (the trailing brace run is too long for $-interpolation),
+        // with the timestamp substituted in afterwards.
+        string patch = """
+            {"spec":{"statefulSet":{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"__TS__"}}}}}}}
+            """.Replace("__TS__", DateTime.UtcNow.ToString("O"));
+
+        await k8sFactory.PatchJsonAsync(
+            "mongodbcommunity.mongodbcommunity.mongodb.com", mongo.Name, mongo.Namespace, patch,
+            mongo.KubernetesCluster.Kubeconfig!, ct);
+    }
+
+    /// <summary>
     /// Resizes a running MongoDB cluster. Two independent operations can be triggered:
     ///
     /// CPU/Memory — updates the DB record and re-applies the MongoDBCommunity manifest.

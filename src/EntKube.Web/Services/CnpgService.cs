@@ -463,6 +463,31 @@ public class CnpgService(
     }
 
     /// <summary>
+    /// Triggers a rolling restart of a CNPG cluster. Sets the
+    /// <c>kubectl.kubernetes.io/restartedAt</c> annotation on the Cluster resource — the same
+    /// mechanism as <c>kubectl cnpg restart</c>. CloudNativePG orchestrates the rollout
+    /// (replicas first, then a switchover before recreating the old primary), which also lets
+    /// the scheduler re-place pods according to the cluster's anti-affinity.
+    /// </summary>
+    public async Task RestartClusterAsync(
+        Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        CnpgCluster cnpg = await db.CnpgClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == cnpgClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("CNPG cluster not found.");
+
+        string patch =
+            $"{{\"metadata\":{{\"annotations\":{{\"kubectl.kubernetes.io/restartedAt\":\"{DateTime.UtcNow:O}\"}}}}}}";
+
+        await k8sFactory.PatchJsonAsync(
+            "cluster.postgresql.cnpg.io", cnpg.Name, cnpg.Namespace, patch,
+            cnpg.KubernetesCluster.Kubeconfig!, ct);
+    }
+
+    /// <summary>
     /// Performs a major version upgrade by restoring to a new cluster with the target
     /// PostgreSQL version, then swapping the service name so existing clients reconnect
     /// automatically, and finally removing the old cluster.
@@ -1991,6 +2016,15 @@ public class CnpgService(
         sb.AppendLine($"  instances: {cnpg.Instances}");
         sb.AppendLine($"  imageName: ghcr.io/cloudnative-pg/postgresql:{cnpg.PostgresVersion}");
         sb.AppendLine("  enableSuperuserAccess: true");
+
+        // Spread instances across nodes so a single node loss can't take down the whole
+        // cluster. Preferred (soft) so it degrades to co-location when there are fewer
+        // nodes than instances, rather than leaving pods Pending. CNPG generates the
+        // pod anti-affinity from this native block (keyed on the cnpg.io/cluster label).
+        sb.AppendLine("  affinity:");
+        sb.AppendLine("    enablePodAntiAffinity: true");
+        sb.AppendLine("    topologyKey: kubernetes.io/hostname");
+        sb.AppendLine("    podAntiAffinityType: preferred");
 
         // Rolling update strategy: replicas are updated first, then a switchover
         // promotes a replica to primary before updating the old primary. This gives

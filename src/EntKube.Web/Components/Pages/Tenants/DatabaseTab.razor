@@ -1025,6 +1025,19 @@
                                     <i class="bi bi-arrow-up-circle"></i>
                                 </button>
                                 <button class="btn btn-sm btn-outline-secondary border-0"
+                                        title="Rolling restart — re-rolls the instances (replicas first, then switchover) so pods are re-placed according to anti-affinity"
+                                        disabled="@(cnpgRestartingId == mc.Id)"
+                                        @onclick="() => RestartCnpgCluster(mc.Id)">
+                                    @if (cnpgRestartingId == mc.Id)
+                                    {
+                                        <span class="spinner-border spinner-border-sm"></span>
+                                    }
+                                    else
+                                    {
+                                        <i class="bi bi-arrow-repeat"></i>
+                                    }
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary border-0"
                                         title="Fetch the PostgreSQL superuser credentials from the CNPG Kubernetes secret and store them in vault"
                                         disabled="@(clusterSuperuserFetchingId == mc.Id)"
                                         @onclick="() => FetchClusterSuperuserPassword(mc)">
@@ -2142,6 +2155,19 @@
                                     <button class="btn btn-sm btn-outline-secondary border-0" title="Resize (storage, CPU, memory)"
                                             @onclick="() => ShowMongoResize(mc)">
                                         <i class="bi bi-sliders"></i>
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary border-0"
+                                            title="Rolling restart — re-rolls the StatefulSet members so pods are re-placed according to anti-affinity"
+                                            disabled="@(mongoRestartingId == mc.Id)"
+                                            @onclick="() => RestartMongoCluster(mc.Id)">
+                                        @if (mongoRestartingId == mc.Id)
+                                        {
+                                            <span class="spinner-border spinner-border-sm"></span>
+                                        }
+                                        else
+                                        {
+                                            <i class="bi bi-arrow-repeat"></i>
+                                        }
                                     </button>
                                 }
                                 else
@@ -3348,6 +3374,7 @@
 
     // Delete cluster
     private Guid? deletingId;
+    private Guid? cnpgRestartingId;
     private Guid? cnpgDeleteConfirmId;
     private Guid? cnpgDbDeleteConfirmId;
 
@@ -3508,6 +3535,7 @@
 
     // Mongo backup
     private Guid? mongoBackingUpId;
+    private Guid? mongoRestartingId;
 
     // Mongo restore form
     private MongoCluster? mongoRestoreSource;
@@ -3932,6 +3960,27 @@
         finally
         {
             deletingId = null;
+        }
+    }
+
+    private async Task RestartCnpgCluster(Guid cnpgClusterId)
+    {
+        cnpgRestartingId = cnpgClusterId;
+        StateHasChanged();
+
+        try
+        {
+            await CnpgService.RestartClusterAsync(TenantId, cnpgClusterId);
+            managedClusters = await CnpgService.GetClustersAsync(TenantId);
+            await RefreshOpenDetailPanels();
+        }
+        catch (Exception ex)
+        {
+            createError = $"Restart failed: {ex.Message}";
+        }
+        finally
+        {
+            cnpgRestartingId = null;
         }
     }
 
@@ -4689,6 +4738,27 @@
         finally
         {
             mongoBackingUpId = null;
+        }
+    }
+
+    private async Task RestartMongoCluster(Guid mongoClusterId)
+    {
+        mongoRestartingId = mongoClusterId;
+        StateHasChanged();
+
+        try
+        {
+            await MongoService.RestartClusterAsync(TenantId, mongoClusterId);
+            managedMongoClusters = await MongoService.GetClustersAsync(TenantId);
+            await RefreshOpenDetailPanels();
+        }
+        catch (Exception ex)
+        {
+            mongoCreateError = $"Restart failed: {ex.Message}";
+        }
+        finally
+        {
+            mongoRestartingId = null;
         }
     }
 
