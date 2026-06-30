@@ -2146,6 +2146,7 @@ public class KeycloakService(
             sb.AppendLine($"\n{footerSelector}::before {{");
             sb.AppendLine($"  content: '{v.FooterText.Replace("'", "\\'")}';");
             sb.AppendLine("  display: block;");
+            sb.AppendLine("  text-align: center;");
             sb.AppendLine($"  color: {v.MutedTextColor};");
             sb.AppendLine("  font-size: 0.8em;");
             sb.AppendLine("  margin-bottom: 0.5em;");
@@ -2296,22 +2297,25 @@ public class KeycloakService(
             }
         }
 
-        // Footer — Keycloak renders an empty <div class="pf-v5-c-login__main-footer">
-        // that we fill via a ::before pseudo-element. (#kc-info is the registration/info
-        // area, not the footer, so we don't touch it here.) The pseudo-element must be
-        // appended to the footer selector itself — "a, b::before" would bind ::before to
-        // b only, leaving the footer empty.
-        const string footerSelV2 = ".pf-v5-c-login__main-footer";
+        // Footer — keycloak.v2 renders TWO empty <div class="pf-v5-c-login__main-footer">
+        // elements: one nested inside .pf-v5-c-login__main-body (directly under the form's
+        // Sign In button) and one as a direct child of <main class="pf-v5-c-login__main">
+        // at the very bottom. We only want the bottom one, so scope to the direct child —
+        // otherwise the ::before content renders in both and the footer text appears twice.
+        // The pseudo-element must be appended to the footer selector itself ("a, b::before"
+        // would bind ::before to b only, leaving the footer empty).
+        const string footerSelV2 = ".pf-v5-c-login__main > .pf-v5-c-login__main-footer";
         if (!v.ShowFooter)
         {
             sb.AppendLine($"\n{footerSelV2} {{ display: none !important; }}");
         }
         else if (!string.IsNullOrEmpty(v.FooterText))
         {
-            sb.AppendLine($"\n{footerSelV2} {{ display: block !important; }}");
+            sb.AppendLine($"\n{footerSelV2} {{ display: block !important; text-align: center !important; }}");
             sb.AppendLine($"\n{footerSelV2}::before {{");
             sb.AppendLine($"  content: '{v.FooterText.Replace("'", "\\'")}';");
             sb.AppendLine("  display: block;");
+            sb.AppendLine("  text-align: center;");
             sb.AppendLine($"  color: {v.MutedTextColor};");
             sb.AppendLine("  font-size: 0.8em;");
             sb.AppendLine("  margin-bottom: 0.5em;");
