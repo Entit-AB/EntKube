@@ -736,9 +736,31 @@ public static class ComponentCatalog
                   auth_enabled: false
                   commonConfig:
                     replication_factor: 1
+                    # Working dir / data root — the singleBinary PVC is mounted here, so all
+                    # write paths below must live under it (the rootfs is read-only).
+                    path_prefix: /var/loki
                   storage:
                     type: filesystem
-                  useTestSchema: true
+                    # Pin the filesystem object store to the mounted volume. Without explicit
+                    # directories the store path resolves to an empty/relative path, so chunk
+                    # writes and loki_cluster_seed.json land on the read-only root FS and the
+                    # ingester fails every flush ("store put chunk: mkdir fake: read-only
+                    # file system"), which stalls the rollout until the helm --wait deadline.
+                    filesystem:
+                      chunks_directory: /var/loki/chunks
+                      rules_directory: /var/loki/rules
+                  # Explicit schema instead of useTestSchema (which is documented for quick
+                  # testing only and does not wire up persistent filesystem paths). Mirrors the
+                  # chart's test schema exactly so any already-written chunks stay queryable.
+                  schemaConfig:
+                    configs:
+                      - from: "2024-04-01"
+                        store: tsdb
+                        object_store: filesystem
+                        schema: v13
+                        index:
+                          prefix: index_
+                          period: 24h
                   # The chart already hardens Loki (non-root 10001, drop ALL, read-only
                   # rootfs); only seccompProfile is missing — add it without disturbing
                   # the chart's fsGroup/uid defaults (deep-merged).
