@@ -1,0 +1,280 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IncidentService IncidentService
+
+@* Health / uptime / SLA dashboard for a single customer. Self-loading so it can be
+   dropped into the customer portal's Monitoring panel without the host wiring data. *@
+
+@if (isLoading)
+{
+    <div class="text-center py-4">
+        <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+        <div class="text-muted small mt-2">Loading status…</div>
+    </div>
+}
+else if (rows.Count == 0)
+{
+    <div class="text-muted small">No deployments to report on yet.</div>
+}
+else
+{
+    <div class="row g-3 mb-3">
+        <div class="col-6 col-md-3">
+            <div class="card shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Applications</div>
+                    <div class="display-6 fw-semibold">@rows.Count</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="card shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Healthy</div>
+                    <div class="display-6 fw-semibold text-success">@HealthyCount</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="card shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Needs attention</div>
+                    <div class="display-6 fw-semibold @(AttentionCount > 0 ? "text-danger" : "text-muted")">@AttentionCount</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="card shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Active alerts</div>
+                    <div class="display-6 fw-semibold @(TotalAlerts > 0 ? "text-danger" : "text-muted")">@TotalAlerts</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card shadow-sm">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Application</th>
+                        <th>Health</th>
+                        <th>Uptime (7d)</th>
+                        <th>Uptime (30d)</th>
+                        <th>SLA Target</th>
+                        <th>Active Alerts</th>
+                        <th>Last Sync</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (StatusRow row in rows)
+                    {
+                        <tr>
+                            <td class="fw-semibold">@row.AppName</td>
+                            <td>@HealthBadge(row.WorstHealth)</td>
+                            <td>
+                                @if (row.Uptime7d.HasValue)
+                                {
+                                    <span class="fw-semibold @UptimeColor(row.Uptime7d.Value, row.SlaTarget)">@row.Uptime7d.Value.ToString("F2")%</span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">—</span>
+                                }
+                            </td>
+                            <td>
+                                @if (row.Uptime30d.HasValue)
+                                {
+                                    <span class="fw-semibold @UptimeColor(row.Uptime30d.Value, row.SlaTarget)">@row.Uptime30d.Value.ToString("F2")%</span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">—</span>
+                                }
+                            </td>
+                            <td class="text-muted small">
+                                @if (row.SlaTarget.HasValue)
+                                {
+                                    bool met30 = !row.Uptime30d.HasValue || row.Uptime30d.Value >= row.SlaTarget.Value;
+                                    <span class="@(met30 ? "text-success" : "text-danger")">
+                                        <i class="bi bi-@(met30 ? "check" : "exclamation-triangle") me-1"></i>@row.SlaTarget.Value.ToString("F1")%
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">—</span>
+                                }
+                            </td>
+                            <td>
+                                @if (row.ActiveAlerts > 0)
+                                {
+                                    <span class="badge bg-danger">@row.ActiveAlerts</span>
+                                }
+                                else
+                                {
+                                    <span class="text-success small"><i class="bi bi-check-circle me-1"></i>None</span>
+                                }
+                            </td>
+                            <td class="text-muted small">
+                                @(row.LastSync.HasValue ? row.LastSync.Value.ToLocalTime().ToString("MMM d HH:mm") : "—")
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="text-muted small mt-2 text-end">
+        Refreshed @lastRefreshed.ToLocalTime().ToString("HH:mm:ss") · Health snapshots every 5 minutes
+    </div>
+}
+
+@code {
+    [Parameter] public Customer Customer { get; set; } = null!;
+
+    private List<StatusRow> rows = [];
+    private bool isLoading = true;
+    private DateTime lastRefreshed;
+    private Guid loadedCustomerId;
+
+    private int HealthyCount => rows.Count(r => r.WorstHealth == HealthStatus.Healthy);
+    private int AttentionCount => rows.Count(r =>
+        r.WorstHealth is HealthStatus.Degraded or HealthStatus.Missing or HealthStatus.Unknown);
+    private int TotalAlerts => rows.Sum(r => r.ActiveAlerts);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Customer is null || Customer.Id == loadedCustomerId) return;
+        loadedCustomerId = Customer.Id;
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        isLoading = true;
+        StateHasChanged();
+
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+
+        List<Guid> appIds = Customer.Apps.Select(a => a.Id).ToList();
+
+        List<AppDeployment> deployments = await db.AppDeployments
+            .Where(d => appIds.Contains(d.AppId))
+            .ToListAsync();
+
+        List<Guid> deploymentIds = deployments.Select(d => d.Id).ToList();
+
+        DateTime from30 = DateTime.UtcNow.AddDays(-30);
+        DateTime from7 = DateTime.UtcNow.AddDays(-7);
+
+        var snapshots = await db.DeploymentHealthSnapshots
+            .Where(s => deploymentIds.Contains(s.DeploymentId) && s.SnapshotAt >= from30)
+            .Select(s => new { s.DeploymentId, s.HealthStatus, s.SnapshotAt })
+            .ToListAsync();
+
+        List<Guid> clusterIds = deployments.Select(d => d.ClusterId).Distinct().ToList();
+        List<(Guid ClusterId, string LabelsJson)> activeIncidentLabels = await db.AlertIncidents
+            .Where(i => clusterIds.Contains(i.ClusterId)
+                     && (i.Status == IncidentStatus.Active || i.Status == IncidentStatus.Acknowledged))
+            .Select(i => new ValueTuple<Guid, string>(i.ClusterId, i.LabelsJson))
+            .ToListAsync();
+
+        rows = [];
+        foreach (EntKube.Web.Data.App app in Customer.Apps.OrderBy(a => a.Name))
+        {
+            List<AppDeployment> appDeployments = deployments.Where(d => d.AppId == app.Id).ToList();
+            if (appDeployments.Count == 0) continue;
+
+            HealthStatus worstHealth = appDeployments
+                .Select(d => d.HealthStatus)
+                .OrderByDescending(h => (int)h)
+                .FirstOrDefault();
+
+            DateTime? lastSync = appDeployments
+                .Where(d => d.LastSyncedAt.HasValue)
+                .Max(d => d.LastSyncedAt);
+
+            double? uptime7d = null, uptime30d = null;
+            foreach (AppDeployment dep in appDeployments)
+            {
+                var depSnaps = snapshots.Where(s => s.DeploymentId == dep.Id).ToList();
+                if (depSnaps.Count == 0) continue;
+
+                var snaps7 = depSnaps.Where(s => s.SnapshotAt >= from7).ToList();
+                var snaps30 = depSnaps;
+
+                if (snaps7.Count > 0)
+                {
+                    double pct = (double)snaps7.Count(s => s.HealthStatus == HealthStatus.Healthy) / snaps7.Count * 100;
+                    uptime7d = uptime7d.HasValue ? (uptime7d + pct) / 2 : pct;
+                }
+                if (snaps30.Count > 0)
+                {
+                    double pct = (double)snaps30.Count(s => s.HealthStatus == HealthStatus.Healthy) / snaps30.Count * 100;
+                    uptime30d = uptime30d.HasValue ? (uptime30d + pct) / 2 : pct;
+                }
+            }
+
+            HashSet<Guid> appClusterIds = appDeployments.Select(d => d.ClusterId).ToHashSet();
+            HashSet<string> appNamespaces = appDeployments.Select(d => d.Namespace).ToHashSet();
+            int activeAlerts = activeIncidentLabels
+                .Where(x => appClusterIds.Contains(x.ClusterId))
+                .Count(x =>
+                {
+                    try
+                    {
+                        using var doc = System.Text.Json.JsonDocument.Parse(x.LabelsJson);
+                        return doc.RootElement.TryGetProperty("namespace", out var ns)
+                               && appNamespaces.Contains(ns.GetString() ?? "");
+                    }
+                    catch { return false; }
+                });
+
+            SlaTarget? sla = await IncidentService.GetSlaTargetAsync(
+                Customer.TenantId, Customer.Id, app.Id);
+
+            rows.Add(new StatusRow(
+                app.Name,
+                worstHealth,
+                uptime7d.HasValue ? Math.Round(uptime7d.Value, 2) : null,
+                uptime30d.HasValue ? Math.Round(uptime30d.Value, 2) : null,
+                sla?.TargetPercent,
+                activeAlerts,
+                lastSync));
+        }
+
+        lastRefreshed = DateTime.UtcNow;
+        isLoading = false;
+    }
+
+    private static string UptimeColor(double pct, double? slaTarget)
+    {
+        double threshold = slaTarget ?? 99.0;
+        if (pct >= threshold) return "text-success";
+        if (pct >= threshold - 2) return "text-warning";
+        return "text-danger";
+    }
+
+    private static RenderFragment HealthBadge(HealthStatus health) => health switch
+    {
+        HealthStatus.Healthy    => @<span class="badge bg-success">Healthy</span>,
+        HealthStatus.Progressing => @<span class="badge bg-primary">Progressing</span>,
+        HealthStatus.Degraded   => @<span class="badge bg-warning text-dark">Degraded</span>,
+        HealthStatus.Suspended  => @<span class="badge bg-secondary">Suspended</span>,
+        HealthStatus.Missing    => @<span class="badge bg-danger">Missing</span>,
+        _ => @<span class="badge bg-secondary">Unknown</span>
+    };
+
+    private record StatusRow(
+        string AppName,
+        HealthStatus WorstHealth,
+        double? Uptime7d,
+        double? Uptime30d,
+        double? SlaTarget,
+        int ActiveAlerts,
+        DateTime? LastSync);
+}

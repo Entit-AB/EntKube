@@ -108,15 +108,16 @@ else
             </div>
             <div class="ms-auto d-flex gap-2">
                 <button class="btn btn-sm @(showMonitoringPanel ? "btn-primary" : "btn-outline-secondary")"
-                        @onclick="() => showMonitoringPanel = !showMonitoringPanel">
+                        @onclick="ToggleMonitoringPanel">
                     <span class="bi bi-heart-pulse me-1"></span>Monitoring
+                </button>
+                <button class="btn btn-sm @(showLogsPanel ? "btn-primary" : "btn-outline-secondary")"
+                        @onclick="ToggleLogsPanel">
+                    <span class="bi bi-journal-text me-1"></span>Logs
                 </button>
                 <button class="btn btn-sm btn-outline-secondary" @onclick="() => showNotifications = true">
                     <span class="bi bi-bell me-1"></span>Notifications
                 </button>
-                <a class="btn btn-sm btn-outline-secondary" href="/portal/status">
-                    <span class="bi bi-activity me-1"></span>Status Overview
-                </a>
             </div>
         </div>
 
@@ -133,6 +134,10 @@ else
                     <button class="btn-close btn-sm ms-auto" @onclick="() => showMonitoringPanel = false"></button>
                 </div>
                 <div class="card-body p-0">
+                    <div class="p-3 border-bottom">
+                        <h6 class="text-muted small mb-2"><span class="bi bi-grid-1x2 me-1"></span>Health & Uptime Dashboard</h6>
+                        <CustomerStatusDashboard Customer="selectedCustomer" />
+                    </div>
                     <div class="p-3 border-bottom">
                         <h6 class="text-muted small mb-2"><span class="bi bi-shield-check me-1"></span>SLA & Uptime</h6>
                         @if (AllCustomerDeployments.Count > 0)
@@ -152,6 +157,21 @@ else
                         }
                         else { <div class="text-muted small">No deployments yet.</div> }
                     </div>
+                </div>
+            </div>
+        }
+
+        @* ── Logs panel (toggled) ── *@
+        @if (showLogsPanel)
+        {
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-white d-flex align-items-center gap-2 py-2">
+                    <span class="bi bi-journal-text text-primary"></span>
+                    <strong>Logs — @selectedCustomer.Name</strong>
+                    <button class="btn-close btn-sm ms-auto" @onclick="() => showLogsPanel = false"></button>
+                </div>
+                <div class="card-body p-3">
+                    <CustomerLogBrowser Customer="selectedCustomer" />
                 </div>
             </div>
         }
@@ -584,9 +604,22 @@ else
     private List<Data.Environment> tenantEnvironments = [];
     private List<KubernetesCluster> tenantClusters = [];
 
-    // Monitoring panel toggle in Level 2
+    // Monitoring / Logs panel toggles in Level 2 (mutually exclusive)
     private bool showMonitoringPanel;
+    private bool showLogsPanel;
     private bool showNotifications;
+
+    private void ToggleMonitoringPanel()
+    {
+        showMonitoringPanel = !showMonitoringPanel;
+        if (showMonitoringPanel) showLogsPanel = false;
+    }
+
+    private void ToggleLogsPanel()
+    {
+        showLogsPanel = !showLogsPanel;
+        if (showLogsPanel) showMonitoringPanel = false;
+    }
 
     private List<AppDeployment> AllCustomerDeployments =>
         appDeployments.Values.SelectMany(d => d).ToList();
@@ -626,6 +659,7 @@ else
         selectedCustomer = customer;
         loadingCustomer = true;
         showMonitoringPanel = false;
+        showLogsPanel = false;
         showNotifications = false;
         StateHasChanged();
 
