@@ -447,8 +447,3 @@ export function downloadJson(filename, content) {
     document.body.removeChild(a);
     URL.revokeObjectURL(a.href);
 }
-
-export function scrollPropsToTop() {
-    const el = document.querySelector('.te-props');
-    if (el) el.scrollTop = 0;
-}

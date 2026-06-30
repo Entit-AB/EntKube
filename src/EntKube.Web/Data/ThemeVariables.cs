@@ -51,6 +51,15 @@ public class ThemeVariables
     public int LogoHeightPx { get; set; } = 48;
     public bool ShowLogo { get; set; } = true;
 
+    // ── Favicon ───────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Name of an uploaded resource to publish as the realm's favicon. It is deployed
+    /// to <c>resources/img/favicon.ico</c> — the fixed path the Keycloak login template
+    /// references — so it shows in the browser tab for this realm's login pages.
+    /// Managed Keycloak only (requires deploying theme files).
+    /// </summary>
+    public string? FaviconResourceName { get; set; }
+
     // ── Background ────────────────────────────────────────────────────────────
     public bool UseBackgroundImage { get; set; } = false;
     public string? BackgroundImageResourceName { get; set; }

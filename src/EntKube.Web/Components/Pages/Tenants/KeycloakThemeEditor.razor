@@ -149,17 +149,23 @@ else
 
     <div class="te-layout">
 
-        @* ── Property panel ── *@
-        <div class="te-props">
+        @* ── Tool palette — each button opens its section in a dialog ── *@
+        <div class="te-toolbar">
 
             @* Colors *@
-            <div class="te-section">
-                <button class="te-section-head" @onclick='() => ToggleSection("colors")'>
-                    <i class="bi bi-palette2 me-1"></i>Colors
-                    <i class="bi @(_open.Contains("colors") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
-                </button>
-                @if (_open.Contains("colors"))
-                {
+            <button class="te-tool-btn" @onclick='() => OpenDialog("colors")'>
+                <i class="bi bi-palette2 te-tool-ico"></i><span class="te-tool-label">Colors</span>
+                <i class="bi bi-chevron-right te-tool-chev"></i>
+            </button>
+            @if (_activeDialog == "colors")
+            {
+                <div class="te-modal-backdrop" @onclick="CloseDialog">
+                    <div class="te-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true">
+                        <div class="te-modal-head">
+                            <i class="bi bi-palette2 me-2"></i><span>Colors</span>
+                            <button type="button" class="btn-close ms-auto" aria-label="Close" @onclick="CloseDialog"></button>
+                        </div>
+                        <div class="te-modal-body">
                     <div class="te-section-body">
                         @* Presets *@
                         <div class="te-row">
@@ -215,17 +221,25 @@ else
                         @ColorRow("Header background", _vars.HeaderBackground, v => OnColorChanged("--ek-header-bg", v, x => _vars.HeaderBackground = x))
                         @ColorRow("Header text", _vars.HeaderTextColor, v => OnColorChanged("--ek-header-text", v, x => _vars.HeaderTextColor = x))
                     </div>
-                }
-            </div>
+                        </div>
+                    </div>
+                </div>
+            }
 
             @* Typography *@
-            <div class="te-section">
-                <button class="te-section-head" @onclick='() => ToggleSection("typo")'>
-                    <i class="bi bi-type me-1"></i>Typography
-                    <i class="bi @(_open.Contains("typo") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
-                </button>
-                @if (_open.Contains("typo"))
-                {
+            <button class="te-tool-btn" @onclick='() => OpenDialog("typo")'>
+                <i class="bi bi-type te-tool-ico"></i><span class="te-tool-label">Typography</span>
+                <i class="bi bi-chevron-right te-tool-chev"></i>
+            </button>
+            @if (_activeDialog == "typo")
+            {
+                <div class="te-modal-backdrop" @onclick="CloseDialog">
+                    <div class="te-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true">
+                        <div class="te-modal-head">
+                            <i class="bi bi-type me-2"></i><span>Typography</span>
+                            <button type="button" class="btn-close ms-auto" aria-label="Close" @onclick="CloseDialog"></button>
+                        </div>
+                        <div class="te-modal-body">
                     <div class="te-section-body">
                         <div class="te-row">
                             <label>Font family</label>
@@ -243,17 +257,25 @@ else
                                    @oninput="OnFontSizeInput" />
                         </div>
                     </div>
-                }
-            </div>
+                        </div>
+                    </div>
+                </div>
+            }
 
             @* Shapes *@
-            <div class="te-section">
-                <button class="te-section-head" @onclick='() => ToggleSection("shapes")'>
-                    <i class="bi bi-border-outer me-1"></i>Shape &amp; Radius
-                    <i class="bi @(_open.Contains("shapes") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
-                </button>
-                @if (_open.Contains("shapes"))
-                {
+            <button class="te-tool-btn" @onclick='() => OpenDialog("shapes")'>
+                <i class="bi bi-border-outer te-tool-ico"></i><span class="te-tool-label">Shape &amp; Radius</span>
+                <i class="bi bi-chevron-right te-tool-chev"></i>
+            </button>
+            @if (_activeDialog == "shapes")
+            {
+                <div class="te-modal-backdrop" @onclick="CloseDialog">
+                    <div class="te-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true">
+                        <div class="te-modal-head">
+                            <i class="bi bi-border-outer me-2"></i><span>Shape &amp; Radius</span>
+                            <button type="button" class="btn-close ms-auto" aria-label="Close" @onclick="CloseDialog"></button>
+                        </div>
+                        <div class="te-modal-body">
                     <div class="te-section-body">
                         <div class="te-row">
                             <label>Button radius — @(_vars.ButtonRadiusPx)px</label>
@@ -294,17 +316,25 @@ else
                             </div>
                         </div>
                     </div>
-                }
-            </div>
+                        </div>
+                    </div>
+                </div>
+            }
 
             @* Logo *@
-            <div class="te-section">
-                <button class="te-section-head" @onclick='() => ToggleSection("logo")'>
-                    <i class="bi bi-image me-1"></i>Logo
-                    <i class="bi @(_open.Contains("logo") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
-                </button>
-                @if (_open.Contains("logo"))
-                {
+            <button class="te-tool-btn" @onclick='() => OpenDialog("logo")'>
+                <i class="bi bi-image te-tool-ico"></i><span class="te-tool-label">Logo</span>
+                <i class="bi bi-chevron-right te-tool-chev"></i>
+            </button>
+            @if (_activeDialog == "logo")
+            {
+                <div class="te-modal-backdrop" @onclick="CloseDialog">
+                    <div class="te-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true">
+                        <div class="te-modal-head">
+                            <i class="bi bi-image me-2"></i><span>Logo</span>
+                            <button type="button" class="btn-close ms-auto" aria-label="Close" @onclick="CloseDialog"></button>
+                        </div>
+                        <div class="te-modal-body">
                     <div class="te-section-body">
                         <div class="te-row d-flex align-items-center gap-2">
                             <label class="mb-0">Show logo</label>
@@ -344,17 +374,72 @@ else
                             </div>
                         }
                     </div>
-                }
-            </div>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @* Favicon *@
+            <button class="te-tool-btn" @onclick='() => OpenDialog("favicon")'>
+                <i class="bi bi-bookmark-star te-tool-ico"></i><span class="te-tool-label">Favicon</span>
+                <i class="bi bi-chevron-right te-tool-chev"></i>
+            </button>
+            @if (_activeDialog == "favicon")
+            {
+                <div class="te-modal-backdrop" @onclick="CloseDialog">
+                    <div class="te-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true">
+                        <div class="te-modal-head">
+                            <i class="bi bi-bookmark-star me-2"></i><span>Favicon</span>
+                            <button type="button" class="btn-close ms-auto" aria-label="Close" @onclick="CloseDialog"></button>
+                        </div>
+                        <div class="te-modal-body">
+                    <div class="te-section-body">
+                        <p class="small text-muted mb-1">
+                            Icon shown in the browser tab for this realm's login pages. Upload an
+                            image in the <strong>Resources</strong> section below (a square
+                            <code>.ico</code> or <code>.png</code> works best), then select it here.
+                            @if (!IsManagedKeycloak)
+                            {
+                                <span class="text-warning">Applied to managed Keycloak only.</span>
+                            }
+                        </p>
+                        @if (_resources.Any(IsImage))
+                        {
+                            <div class="te-row">
+                                <label>Favicon image</label>
+                                <select class="form-select form-select-sm" @bind="_vars.FaviconResourceName">
+                                    <option value="">— Keycloak default —</option>
+                                    @foreach (string r in _resources.Where(IsImage))
+                                    {
+                                        <option value="@r">@r</option>
+                                    }
+                                </select>
+                            </div>
+                        }
+                        else
+                        {
+                            <p class="small text-muted mb-0 mt-1">Upload an image in the Resources section first.</p>
+                        }
+                    </div>
+                        </div>
+                    </div>
+                </div>
+            }
 
             @* Background *@
-            <div class="te-section">
-                <button class="te-section-head" @onclick='() => ToggleSection("bg")'>
-                    <i class="bi bi-card-image me-1"></i>Background
-                    <i class="bi @(_open.Contains("bg") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
-                </button>
-                @if (_open.Contains("bg"))
-                {
+            <button class="te-tool-btn" @onclick='() => OpenDialog("bg")'>
+                <i class="bi bi-card-image te-tool-ico"></i><span class="te-tool-label">Background</span>
+                <i class="bi bi-chevron-right te-tool-chev"></i>
+            </button>
+            @if (_activeDialog == "bg")
+            {
+                <div class="te-modal-backdrop" @onclick="CloseDialog">
+                    <div class="te-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true">
+                        <div class="te-modal-head">
+                            <i class="bi bi-card-image me-2"></i><span>Background</span>
+                            <button type="button" class="btn-close ms-auto" aria-label="Close" @onclick="CloseDialog"></button>
+                        </div>
+                        <div class="te-modal-body">
                     <div class="te-section-body">
                         <div class="te-row d-flex align-items-center gap-2">
                             <label class="mb-0">Use image background</label>
@@ -383,17 +468,25 @@ else
                             <p class="small text-muted mb-0 mt-1">Upload an image in the Resources section first.</p>
                         }
                     </div>
-                }
-            </div>
+                        </div>
+                    </div>
+                </div>
+            }
 
             @* Footer *@
-            <div class="te-section">
-                <button class="te-section-head" @onclick='() => ToggleSection("footer")'>
-                    <i class="bi bi-layout-text-window-reverse me-1"></i>Footer
-                    <i class="bi @(_open.Contains("footer") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
-                </button>
-                @if (_open.Contains("footer"))
-                {
+            <button class="te-tool-btn" @onclick='() => OpenDialog("footer")'>
+                <i class="bi bi-layout-text-window-reverse te-tool-ico"></i><span class="te-tool-label">Footer</span>
+                <i class="bi bi-chevron-right te-tool-chev"></i>
+            </button>
+            @if (_activeDialog == "footer")
+            {
+                <div class="te-modal-backdrop" @onclick="CloseDialog">
+                    <div class="te-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true">
+                        <div class="te-modal-head">
+                            <i class="bi bi-layout-text-window-reverse me-2"></i><span>Footer</span>
+                            <button type="button" class="btn-close ms-auto" aria-label="Close" @onclick="CloseDialog"></button>
+                        </div>
+                        <div class="te-modal-body">
                     <div class="te-section-body">
                         <div class="te-row d-flex align-items-center gap-2">
                             <label class="mb-0">Show footer</label>
@@ -413,8 +506,10 @@ else
                             </div>
                         }
                     </div>
-                }
-            </div>
+                        </div>
+                    </div>
+                </div>
+            }
 
             @* Accessibility *@
             @{
@@ -431,25 +526,31 @@ else
                     ContrastRatio(_vars.ErrorColor,      _vars.CardBackground),
                 }.Count(r => r < 4.5);
             }
-            <div class="te-section">
-                <button class="te-section-head" @onclick='() => ToggleSection("a11y")'>
-                    <i class="bi bi-universal-access me-1"></i>Accessibility
-                    @if (_a11yFails > 0)
-                    {
-                        <span class="badge bg-warning-subtle text-warning border ms-1" style="font-size:.65rem" title="@_a11yFails color pair(s) fail WCAG AA">
-                            <i class="bi bi-exclamation-triangle me-1"></i>@_a11yFails
-                        </span>
-                    }
-                    else
-                    {
-                        <span class="badge bg-success-subtle text-success border ms-1" style="font-size:.65rem">
-                            <i class="bi bi-check-circle me-1"></i>All pass
-                        </span>
-                    }
-                    <i class="bi @(_open.Contains("a11y") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
-                </button>
-                @if (_open.Contains("a11y"))
+            <button class="te-tool-btn" @onclick='() => OpenDialog("a11y")'>
+                <i class="bi bi-universal-access te-tool-ico"></i><span class="te-tool-label">Accessibility</span>
+                @if (_a11yFails > 0)
                 {
+                    <span class="badge bg-warning-subtle text-warning border" style="font-size:.65rem" title="@_a11yFails color pair(s) fail WCAG AA">
+                        <i class="bi bi-exclamation-triangle me-1"></i>@_a11yFails
+                    </span>
+                }
+                else
+                {
+                    <span class="badge bg-success-subtle text-success border" style="font-size:.65rem">
+                        <i class="bi bi-check-circle"></i>
+                    </span>
+                }
+                <i class="bi bi-chevron-right te-tool-chev ms-1"></i>
+            </button>
+            @if (_activeDialog == "a11y")
+            {
+                <div class="te-modal-backdrop" @onclick="CloseDialog">
+                    <div class="te-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true">
+                        <div class="te-modal-head">
+                            <i class="bi bi-universal-access me-2"></i><span>Accessibility</span>
+                            <button type="button" class="btn-close ms-auto" aria-label="Close" @onclick="CloseDialog"></button>
+                        </div>
+                        <div class="te-modal-body">
                     <div class="te-section-body">
                         <p class="small text-muted mb-2">
                             WCAG 2.1 contrast ratios for key color pairs.
@@ -464,17 +565,25 @@ else
                         @A11yRow("Muted text / card bg",     _vars.MutedTextColor,  _vars.CardBackground)
                         @A11yRow("Error text / card bg",     _vars.ErrorColor,      _vars.CardBackground)
                     </div>
-                }
-            </div>
+                        </div>
+                    </div>
+                </div>
+            }
 
             @* Extra CSS *@
-            <div class="te-section">
-                <button class="te-section-head" @onclick='() => ToggleSection("extracss")'>
-                    <i class="bi bi-braces me-1"></i>Extra CSS
-                    <i class="bi @(_open.Contains("extracss") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
-                </button>
-                @if (_open.Contains("extracss"))
-                {
+            <button class="te-tool-btn" @onclick='() => OpenDialog("extracss")'>
+                <i class="bi bi-braces te-tool-ico"></i><span class="te-tool-label">Extra CSS</span>
+                <i class="bi bi-chevron-right te-tool-chev"></i>
+            </button>
+            @if (_activeDialog == "extracss")
+            {
+                <div class="te-modal-backdrop" @onclick="CloseDialog">
+                    <div class="te-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true">
+                        <div class="te-modal-head">
+                            <i class="bi bi-braces me-2"></i><span>Extra CSS</span>
+                            <button type="button" class="btn-close ms-auto" aria-label="Close" @onclick="CloseDialog"></button>
+                        </div>
+                        <div class="te-modal-body">
                     <div class="te-section-body">
                         <p class="small text-muted mb-1">
                             Appended verbatim after the auto-generated CSS on every save. Use this for tweaks that the visual controls can't express.
@@ -487,18 +596,29 @@ else
                                   @bind:event="oninput"
                                   @bind:after="SyncExtraCss"></textarea>
                     </div>
-                }
-            </div>
+                        </div>
+                    </div>
+                </div>
+            }
 
             @* Resources *@
-            <div class="te-section">
-                <button class="te-section-head" @onclick='() => ToggleSection("resources")'>
-                    <i class="bi bi-folder-symlink me-1"></i>Resources
-                    <span class="badge bg-secondary-subtle text-secondary border ms-1 small">@_resources.Count</span>
-                    <i class="bi @(_open.Contains("resources") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
-                </button>
-                @if (_open.Contains("resources"))
+            <button class="te-tool-btn" @onclick='() => OpenDialog("resources")'>
+                <i class="bi bi-folder-symlink te-tool-ico"></i><span class="te-tool-label">Resources</span>
+                @if (_resources.Count > 0)
                 {
+                    <span class="badge bg-secondary-subtle text-secondary border small">@_resources.Count</span>
+                }
+                <i class="bi bi-chevron-right te-tool-chev ms-1"></i>
+            </button>
+            @if (_activeDialog == "resources")
+            {
+                <div class="te-modal-backdrop" @onclick="CloseDialog">
+                    <div class="te-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true">
+                        <div class="te-modal-head">
+                            <i class="bi bi-folder-symlink me-2"></i><span>Resources</span>
+                            <button type="button" class="btn-close ms-auto" aria-label="Close" @onclick="CloseDialog"></button>
+                        </div>
+                        <div class="te-modal-body">
                     <div class="te-section-body">
                         @if (_uploadError is not null)
                         {
@@ -537,21 +657,29 @@ else
                             </div>
                         }
                     </div>
-                }
-            </div>
+                        </div>
+                    </div>
+                </div>
+            }
 
             @* Version History *@
-            <div class="te-section">
-                <button class="te-section-head" @onclick='() => ToggleSectionAndLoad("history")'>
-                    <i class="bi bi-clock-history me-1"></i>Version history
-                    @if (_history is not null && _history.Count > 0)
-                    {
-                        <span class="badge bg-secondary-subtle text-secondary border ms-1 small">@_history.Count</span>
-                    }
-                    <i class="bi @(_open.Contains("history") ? "bi-chevron-up" : "bi-chevron-down") ms-auto"></i>
-                </button>
-                @if (_open.Contains("history"))
+            <button class="te-tool-btn" @onclick='() => OpenDialog("history")'>
+                <i class="bi bi-clock-history te-tool-ico"></i><span class="te-tool-label">Version history</span>
+                @if (_history is not null && _history.Count > 0)
                 {
+                    <span class="badge bg-secondary-subtle text-secondary border small">@_history.Count</span>
+                }
+                <i class="bi bi-chevron-right te-tool-chev ms-1"></i>
+            </button>
+            @if (_activeDialog == "history")
+            {
+                <div class="te-modal-backdrop" @onclick="CloseDialog">
+                    <div class="te-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true">
+                        <div class="te-modal-head">
+                            <i class="bi bi-clock-history me-2"></i><span>Version history</span>
+                            <button type="button" class="btn-close ms-auto" aria-label="Close" @onclick="CloseDialog"></button>
+                        </div>
+                        <div class="te-modal-body">
                     <div class="te-section-body">
                         @if (_loadingHistory)
                         {
@@ -592,8 +720,10 @@ else
                             </p>
                         }
                     </div>
-                }
-            </div>
+                        </div>
+                    </div>
+                </div>
+            }
 
         </div>
 
@@ -776,7 +906,9 @@ else
     private HashSet<Guid> _realmBusy = [];
     private string? _realmError;
 
-    private HashSet<string> _open = ["colors", "logo"];
+    // Key of the section dialog currently open (null = none). Replaces the old
+    // inline accordion, which clipped tall sections inside the fixed-height sidebar.
+    private string? _activeDialog;
 
     private IJSObjectReference? _jsModule;
 
@@ -985,8 +1117,8 @@ else
             _generatedCssPreview = await KeycloakService.GetNamedThemeCssAsync(TenantId, ComponentId, Theme.Id, "login");
             _loginCssWasManual = false;
             _copiedCss = false;
-            // Refresh history panel if it was already open
-            if (_open.Contains("history"))
+            // Refresh history panel if its dialog is open
+            if (_activeDialog == "history")
                 _history = await KeycloakService.GetThemeHistoryAsync(TenantId, ComponentId, Theme.Id);
         }
         catch (Exception ex)
@@ -1389,20 +1521,17 @@ else
         catch { return hex; }
     }
 
-    // ── Section accordion ─────────────────────────────────────────────────────
+    // ── Section dialogs ───────────────────────────────────────────────────────
 
-    private void ToggleSection(string key)
+    private async Task OpenDialog(string key)
     {
-        if (!_open.Add(key)) _open.Remove(key);
-    }
-
-    private async Task ToggleSectionAndLoad(string key)
-    {
-        bool wasOpen = _open.Contains(key);
-        ToggleSection(key);
-        if (!wasOpen && key == "history" && _history is null)
+        _activeDialog = key;
+        // Version history is loaded lazily the first time its dialog is opened.
+        if (key == "history" && _history is null)
             await LoadHistoryAsync();
     }
+
+    private void CloseDialog() => _activeDialog = null;
 
     // ── Version history ───────────────────────────────────────────────────────
 
@@ -1417,10 +1546,9 @@ else
     private async Task RestoreHistoryEntry(ThemeHistoryEntry entry)
     {
         _vars = entry.Variables;
+        // Close the history dialog so the restored values are visible in the live preview.
+        _activeDialog = null;
         await PushFullPreviewUpdate();
-        // Scroll to top of props panel so the user sees the changes
-        if (_jsModule is not null)
-            try { await _jsModule.InvokeVoidAsync("scrollPropsToTop"); } catch { }
     }
 
     private static string RelativeTime(DateTimeOffset dt)
@@ -1483,7 +1611,7 @@ else
 <style>
     .te-layout {
         display: grid;
-        grid-template-columns: 300px 1fr;
+        grid-template-columns: 232px 1fr;
         gap: 16px;
         min-height: 600px;
     }
@@ -1492,37 +1620,88 @@ else
         .te-layout { grid-template-columns: 1fr; }
     }
 
-    .te-props {
+    /* Left-hand tool palette: each button opens its section in a modal dialog. */
+    .te-toolbar {
         display: flex;
         flex-direction: column;
-        gap: 2px;
-        overflow-y: auto;
-        max-height: 680px;
-        padding-right: 4px;
+        gap: 4px;
+        align-content: start;
     }
 
-    .te-section {
-        border: 1px solid var(--bs-border-color);
-        border-radius: 6px;
-        overflow: hidden;
+    @@media (max-width: 900px) {
+        .te-toolbar { flex-direction: row; flex-wrap: wrap; }
+        .te-tool-btn { flex: 1 1 140px; }
     }
 
-    .te-section-head {
-        width: 100%;
+    .te-tool-btn {
         display: flex;
         align-items: center;
-        gap: 4px;
-        padding: 8px 12px;
-        background: var(--bs-tertiary-bg);
-        border: none;
+        gap: 8px;
+        width: 100%;
+        padding: 9px 12px;
+        background: var(--bs-body-bg);
+        border: 1px solid var(--bs-border-color);
+        border-radius: 6px;
         font-size: 0.82rem;
-        font-weight: 600;
+        font-weight: 500;
         cursor: pointer;
         text-align: left;
         color: var(--bs-body-color);
+        transition: border-color .1s, background .1s, box-shadow .1s;
     }
 
-    .te-section-head:hover { background: var(--bs-secondary-bg); }
+    .te-tool-btn:hover {
+        background: var(--bs-tertiary-bg);
+        border-color: var(--bs-primary);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--bs-primary) 18%, transparent);
+    }
+
+    .te-tool-ico { font-size: 1rem; color: var(--bs-primary); width: 1.1rem; text-align: center; flex-shrink: 0; }
+    .te-tool-label { flex: 1; }
+    .te-tool-chev { font-size: 0.72rem; opacity: 0.45; }
+
+    /* Section dialog (modal) */
+    .te-modal-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 1080;
+        background: rgba(0, 0, 0, .45);
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        padding: 5vh 16px;
+        overflow-y: auto;
+    }
+
+    .te-modal {
+        width: 100%;
+        max-width: 460px;
+        background: var(--bs-body-bg);
+        border: 1px solid var(--bs-border-color);
+        border-radius: 8px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, .3);
+        display: flex;
+        flex-direction: column;
+        max-height: 90vh;
+    }
+
+    .te-modal-head {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--bs-border-color);
+        font-size: 0.92rem;
+        font-weight: 600;
+        background: var(--bs-tertiary-bg);
+        border-radius: 8px 8px 0 0;
+        flex-shrink: 0;
+    }
+
+    .te-modal-body {
+        padding: 4px 4px;
+        overflow-y: auto;
+    }
 
     .te-section-body {
         padding: 10px 12px;

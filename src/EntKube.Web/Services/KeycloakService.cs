@@ -2027,6 +2027,30 @@ public class KeycloakService(
         new[] { ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp" }
             .Contains(Path.GetExtension(filename).ToLowerInvariant());
 
+    /// <summary>
+    /// Resolves the ordered set of images to publish under a theme's
+    /// <c>resources/img/</c> directory: every uploaded image under its own name, plus the
+    /// selected favicon resource republished as <c>favicon.ico</c> (the fixed path the
+    /// Keycloak login template references). Returned as (deployName → sourceName) pairs in a
+    /// stable ordinal order so the live StatefulSet patch and the Helm-values builder emit an
+    /// identical ConfigMap item list (otherwise a later <c>helm upgrade</c> would churn).
+    /// </summary>
+    private async Task<List<(string DeployName, string SourceName)>> ResolveDeployImagesAsync(
+        Guid tenantId, Guid componentId, Guid themeId, CancellationToken ct)
+    {
+        List<string> resourceNames = await ListThemeResourcesAsync(tenantId, componentId, themeId, ct);
+        var map = new SortedDictionary<string, string>(StringComparer.Ordinal); // deployName → sourceName
+        foreach (string n in resourceNames.Where(IsImageResource))
+            map[n] = n;
+
+        ThemeVariables vars = await GetThemeVariablesAsync(tenantId, componentId, themeId, ct);
+        if (!string.IsNullOrEmpty(vars.FaviconResourceName)
+            && resourceNames.Contains(vars.FaviconResourceName))
+            map["favicon.ico"] = vars.FaviconResourceName!; // republish under the favicon path
+
+        return map.Select(kvp => (kvp.Key, kvp.Value)).ToList();
+    }
+
     // ── CSS generation from ThemeVariables ───────────────────────────────────
 
     private static string GenerateThemeCss(ThemeVariables v, string? logoDataUri, string? bgDataUri)
@@ -2042,6 +2066,58 @@ public class KeycloakService(
         3 => "0 12px 28px rgba(0,0,0,.22), 0 4px 8px rgba(0,0,0,.14)",
         _ => "none"
     };
+
+    /// <summary>True when a <c>#rgb</c>/<c>#rrggbb</c> colour is dark (perceived luma &lt; 50%).</summary>
+    private static bool IsColorDark(string hex)
+    {
+        try
+        {
+            string h = hex.TrimStart('#');
+            if (h.Length == 3)
+                h = string.Concat(h[0], h[0], h[1], h[1], h[2], h[2]);
+            if (h.Length < 6) return false;
+            int r = Convert.ToInt32(h[0..2], 16);
+            int g = Convert.ToInt32(h[2..4], 16);
+            int b = Convert.ToInt32(h[4..6], 16);
+            return (r * 299 + g * 587 + b * 114) / 1000 < 128;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// CSS <c>color-scheme</c> value matching a background colour. Native form controls
+    /// follow the OS theme unless this is pinned, which is why Safari (and others) paint
+    /// light-grey text on a themed input under OS dark mode. Pinning it to the input's
+    /// own background keeps the browser's default text/caret colours legible.
+    /// </summary>
+    private static string ColorScheme(string backgroundHex) => IsColorDark(backgroundHex) ? "dark" : "light";
+
+    /// <summary>
+    /// Emits rules that force the configured input text/background colour onto the real
+    /// <c>&lt;input&gt;/&lt;select&gt;/&lt;textarea&gt;</c> element (PatternFly only sets a CSS
+    /// var on a wrapper), plus a pinned <c>color-scheme</c>, so typed text stays readable
+    /// regardless of the visitor's browser dark-mode setting.
+    /// </summary>
+    private static void AppendInputColorScheme(StringBuilder sb, ThemeVariables v, string extraSelectors)
+    {
+        string scheme = ColorScheme(v.InputBackground);
+        sb.AppendLine("\n/* Pin input colours so browser dark-mode doesn't override typed text */");
+        sb.AppendLine(
+            "input[type=\"text\"], input[type=\"email\"], input[type=\"password\"],\n" +
+            "input[type=\"number\"], input[type=\"tel\"], input[type=\"url\"], input[type=\"search\"],\n" +
+            $"select, textarea{extraSelectors} {{");
+        sb.AppendLine($"  color: {v.InputTextColor} !important;");
+        sb.AppendLine($"  -webkit-text-fill-color: {v.InputTextColor} !important;");
+        sb.AppendLine($"  background-color: {v.InputBackground} !important;");
+        sb.AppendLine($"  color-scheme: {scheme};");
+        sb.AppendLine("}");
+        sb.AppendLine($"input::placeholder, textarea::placeholder {{ color: {v.MutedTextColor} !important; opacity: 1; }}");
+        // Browser autofill paints its own background/text — override both to keep contrast.
+        sb.AppendLine("input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus {");
+        sb.AppendLine($"  -webkit-text-fill-color: {v.InputTextColor} !important;");
+        sb.AppendLine($"  -webkit-box-shadow: 0 0 0 1000px {v.InputBackground} inset !important;");
+        sb.AppendLine("}");
+    }
 
     private static void AppendLogoAndFooter(StringBuilder sb, ThemeVariables v,
         string? logoDataUri, string logoImgSelector, string logoHideSelector, string footerSelector)
@@ -2190,6 +2266,7 @@ public class KeycloakService(
         sb.AppendLine($"  --pf-v5-c-button--m-control--Color: {v.TextColor};");
         sb.AppendLine($"  --pf-v5-c-button--m-control--BorderColor: {v.InputBorderColor};");
         sb.AppendLine("}");
+        AppendInputColorScheme(sb, v, ", .pf-v5-c-form-control, .pf-v5-c-form-control > input");
 
         // Links
         sb.AppendLine($"\na, a:visited, .pf-v5-c-button.pf-m-link {{ color: {v.LinkColor}; }}");
@@ -2335,6 +2412,7 @@ public class KeycloakService(
         sb.AppendLine($"  color: {v.InputTextColor};");
         sb.AppendLine($"  border-radius: {v.InputRadiusPx}px;");
         sb.AppendLine("}");
+        AppendInputColorScheme(sb, v, ", .form-control, .pf-c-form-control");
 
         // Links
         sb.AppendLine($"\na, a:visited {{ color: {v.LinkColor}; }}");
@@ -2479,10 +2557,11 @@ public class KeycloakService(
             string copierName   = $"{cmName}-copier";
             string deploySlug   = "theme-" + ToThemeSlug(theme.Name);
 
-            // Same source (vault) and ordering (alphabetical) as the live patch, so the
-            // ConfigMap items list matches byte-for-byte.
-            List<string> resourceNames = await ListThemeResourcesAsync(theme.TenantId, componentId, theme.Id, ct);
-            List<string> imageNames = resourceNames.Where(IsImageResource).ToList();
+            // Same source (vault) and ordering as the live patch, so the ConfigMap items
+            // list matches byte-for-byte (includes the synthesized favicon.ico, if any).
+            List<(string DeployName, string SourceName)> deployImages =
+                await ResolveDeployImagesAsync(theme.TenantId, componentId, theme.Id, ct);
+            List<string> imageNames = deployImages.Select(d => d.DeployName).ToList();
 
             // extraVolumes: optional ConfigMap source (never blocks startup if the theme hasn't
             // been deployed yet) + emptyDir target the init container populates.
@@ -2564,14 +2643,15 @@ public class KeycloakService(
         // Images are stored as raw base64 in the vault. We include them in ConfigMap
         // binaryData so Keycloak can serve them from resources/img/ in the theme directory.
         // Each key uses the "img-" prefix to distinguish from CSS/properties entries.
-        List<string> resourceNames = await ListThemeResourcesAsync(tenantId, componentVaultId, theme.Id, ct);
-        var resources = new Dictionary<string, string>(StringComparer.Ordinal); // filename → base64
-        foreach (string name in resourceNames.Where(n => IsImageResource(n)))
+        List<(string DeployName, string SourceName)> deployImages =
+            await ResolveDeployImagesAsync(tenantId, componentVaultId, theme.Id, ct);
+        var resources = new Dictionary<string, string>(StringComparer.Ordinal); // imgName → base64
+        foreach ((string imgName, string sourceName) in deployImages)
         {
             string? b64 = await vaultService.GetComponentSecretValueAsync(
-                tenantId, componentVaultId, $"named-theme-{theme.Id}-resource-{name}", ct);
+                tenantId, componentVaultId, $"named-theme-{theme.Id}-resource-{sourceName}", ct);
             if (!string.IsNullOrEmpty(b64))
-                resources[name] = b64;
+                resources[imgName] = b64;
         }
 
         // Build ConfigMap with theme.properties, the custom CSS, and any uploaded images.
