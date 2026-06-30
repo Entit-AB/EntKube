@@ -236,6 +236,25 @@ public class DeploymentImportService(
             }
         });
 
+        // Pull image-pull secrets out first — they become registry credentials, never
+        // vault secrets — regardless of how they reach us (plain Secret, ExternalSecret
+        // target, or an Opaque secret that just carries a .dockerconfigjson payload).
+        // Removing them here keeps the ExternalSecret/plain passes below from re-importing
+        // them as opaque secrets.
+        HashSet<string> registrySecretNames = new(StringComparer.Ordinal);
+        foreach ((string name, V1Secret s) in secretsByName)
+        {
+            if (IsDockerConfigSecret(s))
+            {
+                AddRegistryCredentials(s, name, ns, preview);
+                registrySecretNames.Add(name);
+            }
+        }
+        foreach (string handled in registrySecretNames)
+        {
+            secretsByName.Remove(handled);
+        }
+
         HashSet<string> esoTargets = new(StringComparer.Ordinal);
 
         foreach (JsonNode es in await ListCrAsync(client, "external-secrets.io", ["v1", "v1beta1"], ns, "externalsecrets", ct))
@@ -243,6 +262,12 @@ public class DeploymentImportService(
             string esName = es["metadata"]?["name"]?.GetValue<string>() ?? "unknown";
             string targetName = es["spec"]?["target"]?["name"]?.GetValue<string>() ?? esName;
             esoTargets.Add(targetName);
+
+            // The ExternalSecret's target is an image-pull secret already handled above.
+            if (registrySecretNames.Contains(targetName))
+            {
+                continue;
+            }
 
             DetectedSecret detected = new() { SecretName = targetName, Namespace = ns, Source = "ExternalSecret" };
 
@@ -308,21 +333,7 @@ public class DeploymentImportService(
                 continue;
             }
 
-            // Image-pull secrets become registry credentials, not opaque vault secrets.
-            // Detect by type OR by the presence of the dockerconfig data key — some charts
-            // create the secret as Opaque (or untyped) with a .dockerconfigjson payload.
-            // Checked before the controller-managed guard so a pull secret that carries an
-            // ownerReference still becomes a registry credential (these never auto-push).
-            bool isDockerConfig =
-                secret.Type is "kubernetes.io/dockerconfigjson" or "kubernetes.io/dockercfg"
-                || (secret.Data?.ContainsKey(".dockerconfigjson") ?? false)
-                || (secret.Data?.ContainsKey(".dockercfg") ?? false);
-
-            if (isDockerConfig)
-            {
-                AddRegistryCredentials(secret, name, ns, preview);
-                continue;
-            }
+            // (Image-pull secrets were already pulled out into registry credentials above.)
 
             // Skip secrets that another controller owns/derives (ExternalSecret target,
             // cert-manager Certificate, any ownerReference). These are recreated by their
@@ -428,6 +439,16 @@ public class DeploymentImportService(
 
         return false;
     }
+
+    /// <summary>
+    /// True when a Secret is an image-pull secret: typed dockerconfigjson/dockercfg, or
+    /// an Opaque/untyped secret that carries a <c>.dockerconfigjson</c>/<c>.dockercfg</c>
+    /// payload (some charts create them that way).
+    /// </summary>
+    private static bool IsDockerConfigSecret(V1Secret s) =>
+        s.Type is "kubernetes.io/dockerconfigjson" or "kubernetes.io/dockercfg"
+        || (s.Data?.ContainsKey(".dockerconfigjson") ?? false)
+        || (s.Data?.ContainsKey(".dockercfg") ?? false);
 
     /// <summary>
     /// Parses an image-pull Secret (<c>kubernetes.io/dockerconfigjson</c> or legacy
