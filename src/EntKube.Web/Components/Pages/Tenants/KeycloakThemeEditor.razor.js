@@ -100,7 +100,7 @@ function _buildPreviewHtml(isV1) {
         ? `.lp-header{background:var(--ek-header-bg);padding:0 24px;display:flex;align-items:center;min-height:60px;}
 .lp-logo-text{color:var(--ek-header-text);font-size:1.1rem;font-weight:600;letter-spacing:.02em}
 .lp-main{flex:1;display:flex;align-items:center;justify-content:center;padding:40px 16px;}`
-        : `.lp-header{display:flex;align-items:center;padding:0 2px 20px;min-height:56px;}
+        : `.lp-header{display:flex;align-items:center;justify-content:center;padding:0 2px 20px;min-height:56px;}
 .lp-logo-text{color:var(--ek-text);font-size:1.1rem;font-weight:600;letter-spacing:.02em}
 .lp-main{flex:1;display:flex;align-items:center;justify-content:center;padding:48px 16px 40px;}`;
 

@@ -2296,14 +2296,19 @@ public class KeycloakService(
             }
         }
 
-        // Footer
-        const string footerSelV2 = ".pf-v5-c-login__main-footer, #kc-info";
+        // Footer — Keycloak renders an empty <div class="pf-v5-c-login__main-footer">
+        // that we fill via a ::before pseudo-element. (#kc-info is the registration/info
+        // area, not the footer, so we don't touch it here.) The pseudo-element must be
+        // appended to the footer selector itself — "a, b::before" would bind ::before to
+        // b only, leaving the footer empty.
+        const string footerSelV2 = ".pf-v5-c-login__main-footer";
         if (!v.ShowFooter)
         {
             sb.AppendLine($"\n{footerSelV2} {{ display: none !important; }}");
         }
         else if (!string.IsNullOrEmpty(v.FooterText))
         {
+            sb.AppendLine($"\n{footerSelV2} {{ display: block !important; }}");
             sb.AppendLine($"\n{footerSelV2}::before {{");
             sb.AppendLine($"  content: '{v.FooterText.Replace("'", "\\'")}';");
             sb.AppendLine("  display: block;");
@@ -2505,11 +2510,16 @@ public class KeycloakService(
     // (DeployNamedThemeToClusterAsync) and the Helm-values builder
     // (BuildKeycloakThemeHelmExtrasAsync) so both emit an identical container.
     private const string ThemeCopierImage = "busybox:1.36";
+    // NOTE: ConfigMap volume entries are symlinks (key → ..data/key). `cp` dereferences
+    // symlinks by default (so theme.properties/login.css copy fine), but `find -type f`
+    // evaluates the symlink itself (type l) and matches nothing — which silently dropped
+    // every image, including favicon.ico. `find -L` makes the type test follow the symlink
+    // to its real (regular-file) target; `cp -L` copies contents rather than a dangling link.
     private const string ThemeCopierCommandRaw =
         "mkdir -p /dest/resources/css /dest/resources/img; " +
         "cp /src/theme.properties /dest/theme.properties; " +
         "cp /src/login.css /dest/resources/css/login.css; " +
-        "find /src/imgs -maxdepth 1 -type f -exec cp {} /dest/resources/img/ \\; 2>/dev/null; true";
+        "find -L /src/imgs -maxdepth 1 -type f -exec cp -L {} /dest/resources/img/ \\; 2>/dev/null; true";
 
     /// <summary>
     /// Builds the keycloakx Helm values fragment (<c>extraVolumes</c> /
