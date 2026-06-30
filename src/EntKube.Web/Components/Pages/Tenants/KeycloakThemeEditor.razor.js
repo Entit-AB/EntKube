@@ -447,3 +447,21 @@ export function downloadJson(filename, content) {
     document.body.removeChild(a);
     URL.revokeObjectURL(a.href);
 }
+
+// ── Section-dialog Escape-to-close ──────────────────────────────────────────
+let _escHandler = null;
+
+export function registerKeyClose(dotNetRef) {
+    unregisterKeyClose();
+    _escHandler = (e) => {
+        if (e.key === 'Escape') dotNetRef.invokeMethodAsync('OnDialogEscape');
+    };
+    document.addEventListener('keydown', _escHandler);
+}
+
+export function unregisterKeyClose() {
+    if (_escHandler) {
+        document.removeEventListener('keydown', _escHandler);
+        _escHandler = null;
+    }
+}

@@ -911,6 +911,7 @@ else
     private string? _activeDialog;
 
     private IJSObjectReference? _jsModule;
+    private DotNetObjectReference<KeycloakThemeEditor>? _selfRef;
 
     private static readonly (string val, string label)[] _fontOptions =
     [
@@ -948,6 +949,8 @@ else
         {
             _jsModule = await JS.InvokeAsync<IJSObjectReference>(
                 "import", "./Components/Pages/Tenants/KeycloakThemeEditor.razor.js");
+            _selfRef = DotNetObjectReference.Create(this);
+            await _jsModule.InvokeVoidAsync("registerKeyClose", _selfRef);
         }
 
         if (!_loading && _mode == "visual" && _jsModule is not null)
@@ -1533,6 +1536,15 @@ else
 
     private void CloseDialog() => _activeDialog = null;
 
+    /// <summary>Invoked from JS when Escape is pressed — closes any open section dialog.</summary>
+    [JSInvokable]
+    public Task OnDialogEscape()
+    {
+        if (_activeDialog is null)
+            return Task.CompletedTask;
+        return InvokeAsync(() => { _activeDialog = null; StateHasChanged(); });
+    }
+
     // ── Version history ───────────────────────────────────────────────────────
 
     private async Task LoadHistoryAsync()
@@ -1602,9 +1614,11 @@ else
     {
         if (_jsModule is not null)
         {
+            try { await _jsModule.InvokeVoidAsync("unregisterKeyClose"); } catch { }
             try { await _jsModule.InvokeVoidAsync("destroyPreview", _previewId); } catch { }
             await _jsModule.DisposeAsync();
         }
+        _selfRef?.Dispose();
     }
 }
 
