@@ -4,8 +4,8 @@ namespace EntKube.Web.Services;
 
 /// <summary>
 /// Singleton push bus for deployment status changes. Background services
-/// (DeploymentSyncService, PortalDeploymentDetail) call Notify() after writing
-/// a new SyncStatus/HealthStatus to the database. Blazor Server components
+/// (e.g. DeploymentSyncService) call Notify() after writing a new
+/// SyncStatus/HealthStatus to the database. Blazor Server components
 /// subscribe on mount so their status badges update immediately — no polling.
 /// </summary>
 public sealed class DeploymentStatusNotifier

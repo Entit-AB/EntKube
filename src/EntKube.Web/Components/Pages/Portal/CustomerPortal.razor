@@ -12,8 +12,6 @@
 @inject KeycloakService KeycloakService
 @inject HarborService HarborService
 @inject VaultService VaultService
-@inject PrometheusService PrometheusService
-@inject AuditService AuditService
 @inject IncidentService IncidentService
 @inject CustomerGitService CustomerGitService
 @inject AppRouteService AppRouteService
@@ -98,7 +96,7 @@ else
     @* ════════════════════════════════════════════════════════════════
        Level 2: Apps and deployments for a selected customer
        ════════════════════════════════════════════════════════════════ *@
-    else if (selectedDeployment is null && selectedIdentityRealm is null && selectedSecrets is null && selectedRegistryProject is null && selectedGovernanceApp is null && selectedResourcesApp is null && selectedRoutesApp is null && selectedPortalEnvironment is null && !showNotifications)
+    else if (selectedIdentityRealm is null && selectedSecrets is null && selectedRegistryProject is null && selectedGovernanceApp is null && selectedResourcesApp is null && selectedRoutesApp is null && selectedPortalEnvironment is null && !showNotifications)
     {
         <div class="d-flex align-items-center mb-3">
             <i class="bi bi-people fs-3 me-2 text-primary"></i>
@@ -171,7 +169,8 @@ else
                     <button class="btn-close btn-sm ms-auto" @onclick="() => showLogsPanel = false"></button>
                 </div>
                 <div class="card-body p-3">
-                    <CustomerLogBrowser Customer="selectedCustomer" />
+                    <CustomerLogBrowser Customer="selectedCustomer"
+                                        OnNavigateToDeployment="NavigateToDeploymentFromLogs" />
                 </div>
             </div>
         }
@@ -412,27 +411,8 @@ else
                               TenantId="selectedCustomer!.TenantId"
                               IsPortalView="true"
                               AccessRole="currentAccessRole"
-                              OnBack="() => { selectedPortalApp = null; selectedPortalEnvironment = null; }" />
-    }
-
-    @* ════════════════════════════════════════════════════════════════
-       Level 3: Deployment detail with operations
-       ════════════════════════════════════════════════════════════════ *@
-    else if (selectedDeployment is not null)
-    {
-        <PortalDeploymentDetail
-            Deployment="selectedDeployment"
-            AccessRole="currentAccessRole"
-            K8sOps="K8sOps"
-            DeploymentService="DeploymentService"
-            PrometheusService="PrometheusService"
-            AuditService="AuditService"
-            CustomerId="selectedCustomer!.Id"
-            TenantId="selectedCustomer!.TenantId"
-            EnvironmentId="selectedDeployment.EnvironmentId"
-            GovernanceNamespace="@(selectedCustomer?.Apps.FirstOrDefault(a => a.Id == selectedDeployment.AppId)?.Namespace)"
-            OnBack="BackToApps"
-            OnDeleted="OnDeploymentDeleted" />
+                              InitialDeploymentId="pendingPortalDeploymentId"
+                              OnBack="() => { selectedPortalApp = null; selectedPortalEnvironment = null; pendingPortalDeploymentId = null; }" />
     }
 
     @* ════════════════════════════════════════════════════════════════
@@ -503,7 +483,7 @@ else
     private CustomerAccessRole currentAccessRole;
 
     private bool InDetailView =>
-        selectedDeployment is not null || selectedIdentityRealm is not null ||
+        selectedIdentityRealm is not null ||
         selectedSecrets is not null || selectedRegistryProject is not null ||
         selectedGovernanceApp is not null || selectedResourcesApp is not null ||
         selectedRoutesApp is not null || selectedPortalEnvironment is not null ||
@@ -530,9 +510,7 @@ else
                     items.Add(new(selectedCustomer.Name, IsActive: true));
             }
 
-            if (selectedDeployment is not null)
-                items.Add(new(selectedDeployment.Name, IsActive: true));
-            else if (selectedIdentityRealm is not null)
+            if (selectedIdentityRealm is not null)
                 items.Add(new(selectedIdentityRealm.DisplayName, "bi-shield-lock", IsActive: true));
             else if (selectedSecrets is not null)
                 items.Add(new($"{selectedSecrets.App.Name} — {SecretsScopeLabel}", SecretsScopeIcon, IsActive: true));
@@ -555,7 +533,6 @@ else
 
     private List<Customer>? customers;
     private Customer? selectedCustomer;
-    private AppDeployment? selectedDeployment;
     private KeycloakRealm? selectedIdentityRealm;
 
     private sealed record SecretsNav(Data.App App, string Scope);
@@ -586,6 +563,8 @@ else
     // Per-environment navigation in portal (environment-first view)
     private Data.App? selectedPortalApp;
     private Data.Environment? selectedPortalEnvironment;
+    // Deployment to auto-open when entering AppEnvironmentDetail from the log "Go to deployment" jump.
+    private Guid? pendingPortalDeploymentId;
     private Dictionary<Guid, List<Data.Environment>> appLinkedEnvironments = new();
 
     // Deployments indexed by app ID for the selected customer.
@@ -724,11 +703,27 @@ else
     {
         selectedPortalApp = app;
         selectedPortalEnvironment = env;
+        pendingPortalDeploymentId = null;
     }
 
-    private void SelectDeployment(AppDeployment deploy)
+    // Jump from a clicked log row to its deployment, landing on the SAME per-deployment
+    // view as the normal App → Environment → Deployment navigation (AppEnvironmentDetail
+    // with the deployment pre-selected), so pods/resources are correctly deployment-scoped.
+    private void NavigateToDeploymentFromLogs(Guid deploymentId)
     {
-        selectedDeployment = deploy;
+        AppDeployment? deploy = appDeployments.Values
+            .SelectMany(d => d)
+            .FirstOrDefault(d => d.Id == deploymentId);
+        if (deploy is null) return;
+
+        Data.App? app = selectedCustomer?.Apps.FirstOrDefault(a => a.Id == deploy.AppId);
+        Data.Environment? env = tenantEnvironments.FirstOrDefault(e => e.Id == deploy.EnvironmentId);
+        if (app is null || env is null) return;
+
+        showLogsPanel = false;
+        selectedPortalApp = app;
+        selectedPortalEnvironment = env;
+        pendingPortalDeploymentId = deploymentId;
     }
 
     private void SelectIdentityRealm(Guid appId)
@@ -746,7 +741,6 @@ else
     private void BackToCustomers()
     {
         selectedCustomer = null;
-        selectedDeployment = null;
         selectedIdentityRealm = null;
         selectedSecrets = null;
         selectedRegistryProject = null;
@@ -844,7 +838,6 @@ else
 
     private void BackToApps()
     {
-        selectedDeployment = null;
         selectedIdentityRealm = null;
         selectedSecrets = null;
         selectedRegistryProject = null;
@@ -853,18 +846,8 @@ else
         selectedRoutesApp = null;
         selectedPortalApp = null;
         selectedPortalEnvironment = null;
+        pendingPortalDeploymentId = null;
         showNotifications = false;
-    }
-
-    private async Task OnDeploymentDeleted()
-    {
-        if (selectedDeployment is not null)
-        {
-            Guid appId = selectedDeployment.AppId;
-            selectedDeployment = null;
-            // Reload the affected app's deployments.
-            appDeployments[appId] = await DeploymentService.GetDeploymentsAsync(appId);
-        }
     }
 
     private static bool IsGitType(DeploymentType type)

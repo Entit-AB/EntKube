@@ -712,6 +712,20 @@ public static class ComponentCatalog
                     YamlPath = "singleBinary.resources.requests.memory", Type = FormFieldType.Text,
                     DefaultValue = "256Mi", Placeholder = "e.g. 256Mi, 512Mi"
                 },
+                new ComponentFormField
+                {
+                    Key = "cpu-limit", Label = "CPU Limit",
+                    YamlPath = "singleBinary.resources.limits.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "1000m", Placeholder = "e.g. 500m, 1000m",
+                    HelpText = "Required on clusters that enforce a LimitRange — pods without limits are rejected."
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-limit", Label = "Memory Limit",
+                    YamlPath = "singleBinary.resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "1Gi", Placeholder = "e.g. 1Gi, 2Gi",
+                    HelpText = "Hard memory cap. Loki's startup (TSDB index + WAL replay) is the memory peak — set this well above the request, or the pod gets OOMKilled mid-replay and crashloops."
+                },
                 // Hidden secret fields — written by LokiService.WriteStorageHelmValuesAsync,
                 // injected at install time via InjectSecretsIntoValuesAsync.
                 new ComponentFormField
@@ -761,12 +775,20 @@ public static class ComponentCatalog
                         index:
                           prefix: index_
                           period: 24h
-                  # The chart already hardens Loki (non-root 10001, drop ALL, read-only
-                  # rootfs); only seccompProfile is missing — add it without disturbing
-                  # the chart's fsGroup/uid defaults (deep-merged).
+                  # The chart hardens Loki (non-root 10001, drop ALL); only seccompProfile
+                  # is missing — add it without disturbing the chart's fsGroup/uid defaults
+                  # (deep-merged).
                   podSecurityContext:
                     seccompProfile:
                       type: RuntimeDefault
+                  # Loki's filesystem object store and assorted /tmp scratch writes need a
+                  # writable rootfs, so the chart's default readOnlyRootFilesystem: true breaks
+                  # startup ("read-only file system" on chunk flush / temp writes). Disable it
+                  # for the Loki container only; the rest of the chart's hardening (drop ALL,
+                  # no-privesc, non-root) is left intact. Mirrors the MinIO entry, which also
+                  # writes to local paths.
+                  containerSecurityContext:
+                    readOnlyRootFilesystem: false
 
                 # Same seccomp gap on the gateway (nginx) pod.
                 gateway:
@@ -783,6 +805,12 @@ public static class ComponentCatalog
                     requests:
                       cpu: 100m
                       memory: 256Mi
+                    # Startup (TSDB index + WAL replay) is the memory peak, not steady state.
+                    # Keep the limit well above the request, or the pod is OOMKilled mid-replay
+                    # and crashloops (the loki-canary then replays its spot-checks each restart).
+                    limits:
+                      cpu: 1000m
+                      memory: 1Gi
 
                 # Disable distributed components for SingleBinary mode
                 read:

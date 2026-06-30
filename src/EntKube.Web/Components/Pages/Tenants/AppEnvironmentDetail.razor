@@ -2191,6 +2191,10 @@
     [Parameter] public CustomerAccessRole AccessRole { get; set; } = CustomerAccessRole.Admin;
     [Parameter] public EventCallback OnBack { get; set; }
 
+    /// When set, the view opens straight into this deployment's detail (used by the
+    /// portal log viewer's "Go to deployment" action) instead of the deployment list.
+    [Parameter] public Guid? InitialDeploymentId { get; set; }
+
     private string section = "deployments";
 
     // Governance
@@ -2406,6 +2410,14 @@
     {
         StatusNotifier.OnStatusChanged += HandleDeploymentStatusChanged;
         await LoadDeployments();
+
+        // Deep-link: open directly on a specific deployment when requested (log "Go to deployment").
+        if (InitialDeploymentId is Guid depId && deployments is not null)
+        {
+            AppDeployment? preselect = deployments.FirstOrDefault(d => d.Id == depId);
+            if (preselect is not null) await SelectDeployment(preselect);
+        }
+
         envClusters = (await TenantService.GetClustersAsync(TenantId))
             .Where(c => c.EnvironmentId == Environment.Id)
             .ToList();

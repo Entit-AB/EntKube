@@ -452,10 +452,29 @@ public class LokiService(
             .Where(s => !string.Equals(s.Spec?.ClusterIP, "None", StringComparison.OrdinalIgnoreCase))
             // Match the query port (3100) — naturally excludes gateway (80), canary (3500), memberlist (7946).
             .Where(s => s.Spec?.Ports?.Any(p => p.Port == config.ServicePort) ?? false)
-            .OrderBy(s => s.Metadata.Name)
+            // Prefer query-serving components. In simple-scalable mode the namespace holds
+            // loki-read/-write/-backend all on 3100; plain alphabetical order would pick
+            // loki-backend first, which doesn't serve /query_range and answers 503. Rank the
+            // read path ahead of write/backend, then fall back to name for stable ordering.
+            .OrderBy(s => QueryServiceRank(s.Metadata.Name))
+            .ThenBy(s => s.Metadata.Name)
             .FirstOrDefault();
 
         return match?.Metadata.Name;
+    }
+
+    /// <summary>Lower rank = more likely to serve read queries. Used to break ties when
+    /// multiple Loki services share the query port (simple-scalable deployments).</summary>
+    private static int QueryServiceRank(string name)
+    {
+        string n = name.ToLowerInvariant();
+        // Write-path / storage components don't serve query_range → would 503. Pick last.
+        if (n.Contains("write") || n.Contains("backend") || n.Contains("ingester") ||
+            n.Contains("distributor") || n.Contains("compactor")) return 2;
+        // Read path / queriers explicitly serve queries.
+        if (n.Contains("read") || n.Contains("querier") || n.Contains("query-frontend")) return 0;
+        // Single-binary / all-in-one service (serves everything).
+        return 1;
     }
 
     private async Task<V1EndpointAddress?> FindLokiEndpointAsync(

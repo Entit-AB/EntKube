@@ -8,6 +8,12 @@
    single namespace), this queries logs across every deployment of a chosen app
    — which may span multiple namespaces and clusters — and merges them by time. *@
 
+@* Hover affordance to jump from a log line to its owning deployment. *@
+<style>
+    .logrow-nav { visibility: hidden; }
+    .logrow:hover .logrow-nav { visibility: visible; }
+</style>
+
 @if (Customer is null)
 {
     <EmptyState Icon="bi-people"
@@ -113,12 +119,21 @@ else
         <div class="border rounded font-monospace" style="background:#1e1e1e;max-height:560px;overflow-y:auto">
             @foreach (LogRow entry in FilteredEntries)
             {
-                <div class="px-3 py-0" style="line-height:1.45;border-bottom:1px solid #2d2d2d">
+                <div class="logrow px-3 py-0" style="line-height:1.45;border-bottom:1px solid #2d2d2d;position:relative">
                     <span style="color:#888;font-size:0.72rem;user-select:none">
                         @entry.Timestamp.ToLocalTime().ToString("MMM d HH:mm:ss.fff")
                     </span>
                     <span class="ms-2" style="color:#569cd6;font-size:0.72rem;user-select:none" title="@entry.Namespace">@entry.Pod</span>
                     <span class="ms-2" style="@LineStyle(entry.Level); font-size:0.8rem; white-space:pre-wrap; word-break:break-all">@entry.Line</span>
+                    @if (entry.DeploymentId is Guid depId)
+                    {
+                        <button type="button" class="logrow-nav btn btn-dark border border-secondary py-0 px-1"
+                                style="position:absolute;right:6px;top:2px;font-size:0.68rem"
+                                title="Go to this deployment"
+                                @onclick="() => OnNavigateToDeployment.InvokeAsync(depId)">
+                            <span class="bi bi-box-arrow-up-right me-1"></span>Deployment
+                        </button>
+                    }
                 </div>
             }
         </div>
@@ -146,6 +161,11 @@ else
 
 @code {
     [Parameter] public Customer? Customer { get; set; }
+
+    /// Raised with the deployment Id when a customer clicks a log row's
+    /// "Go to deployment" action. The parent resolves it to the full
+    /// AppDeployment and switches to the operations view.
+    [Parameter] public EventCallback<Guid> OnNavigateToDeployment { get; set; }
 
     private Guid? loadedCustomerId;
     private List<DeploymentRow> deployments = [];
@@ -202,7 +222,7 @@ else
         using ApplicationDbContext db = DbFactory.CreateDbContext();
         deployments = await db.AppDeployments
             .Where(d => appIds.Contains(d.AppId))
-            .Select(d => new DeploymentRow(d.AppId, d.EnvironmentId, d.ClusterId, d.Namespace))
+            .Select(d => new DeploymentRow(d.Id, d.AppId, d.EnvironmentId, d.ClusterId, d.Namespace))
             .ToListAsync();
 
         List<Guid> envIds = deployments.Select(d => d.EnvironmentId).Distinct().ToList();
@@ -239,10 +259,19 @@ else
         if (selectedEnvId is Guid envId)
             targets = targets.Where(d => d.EnvironmentId == envId);
 
-        // Group namespaces by cluster — one Loki query per cluster.
+        // Group namespaces by cluster — one Loki query per cluster. Also keep a
+        // namespace → deployment map so each returned stream can be tagged back to
+        // the deployment it came from. (If two deployments share a namespace in the
+        // same cluster — rare — the first wins; Loki labels can't disambiguate.)
         var byCluster = targets
             .GroupBy(d => d.ClusterId)
-            .Select(g => new { ClusterId = g.Key, Namespaces = g.Select(d => d.Namespace).Distinct().ToList() })
+            .Select(g => new
+            {
+                ClusterId = g.Key,
+                Namespaces = g.Select(d => d.Namespace).Distinct().ToList(),
+                NsToDeployment = g.GroupBy(d => d.Namespace)
+                                  .ToDictionary(x => x.Key, x => x.First().Id)
+            })
             .ToList();
 
         List<LogRow> collected = [];
@@ -260,10 +289,13 @@ else
                 {
                     stream.Labels.TryGetValue("namespace", out string? ns);
                     stream.Labels.TryGetValue("pod", out string? podName);
+                    Guid? depId = ns is not null && cluster.NsToDeployment.TryGetValue(ns, out Guid did)
+                        ? did
+                        : null;
                     foreach (LokiLogEntry e in stream.Entries)
                         collected.Add(new LogRow(
                             e.Timestamp, e.Line, e.DetectedLevel,
-                            ns ?? "", podName ?? ""));
+                            ns ?? "", podName ?? "", depId));
                 }
             }
             else if (!string.IsNullOrEmpty(result.Error))
@@ -280,11 +312,29 @@ else
 
         // Only surface errors if we got nothing — partial success shouldn't nag.
         if (entries.Count == 0 && errors.Count > 0)
-            queryError = string.Join(" · ", errors.Distinct());
+            queryError = FriendlyError(errors);
 
         queried = DateTime.UtcNow;
         hasQueried = true;
         isQuerying = false;
+    }
+
+    // Map the common "Loki is down / not Ready / 503" failures to a clear, actionable
+    // message instead of echoing a raw HTTP status the customer can't act on.
+    private static string FriendlyError(IEnumerable<string> errors)
+    {
+        string joined = string.Join(" · ", errors.Distinct());
+        bool unavailable =
+            joined.Contains("503") ||
+            joined.Contains("Service Unavailable", StringComparison.OrdinalIgnoreCase) ||
+            joined.Contains("no reachable", StringComparison.OrdinalIgnoreCase) ||
+            joined.Contains("not Ready", StringComparison.OrdinalIgnoreCase) ||
+            joined.Contains("connection refused", StringComparison.OrdinalIgnoreCase);
+
+        return unavailable
+            ? "Loki is currently unavailable — the log backend may be starting up or unhealthy. "
+              + "Logs will return once it is ready; try again in a moment."
+            : joined;
     }
 
     private static string LineStyle(LogLevel level) => level switch
@@ -296,7 +346,7 @@ else
         _ => "color:#d4d4d4"
     };
 
-    private record DeploymentRow(Guid AppId, Guid EnvironmentId, Guid ClusterId, string Namespace);
+    private record DeploymentRow(Guid Id, Guid AppId, Guid EnvironmentId, Guid ClusterId, string Namespace);
     private record EnvRow(Guid Id, string Name);
-    private record LogRow(DateTime Timestamp, string Line, LogLevel Level, string Namespace, string Pod);
+    private record LogRow(DateTime Timestamp, string Line, LogLevel Level, string Namespace, string Pod, Guid? DeploymentId);
 }
