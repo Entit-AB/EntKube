@@ -364,6 +364,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<string>("HelmValues")
                         .HasColumnType("text");
 
+                    b.Property<bool>("IsManaged")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
+
                     b.Property<DateTime?>("LastSyncedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -663,6 +668,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<bool>("IsEnabled")
                         .HasColumnType("boolean");
+
+                    b.Property<bool>("IsManaged")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
 
                     b.Property<string>("TlsCertificate")
                         .HasColumnType("text");

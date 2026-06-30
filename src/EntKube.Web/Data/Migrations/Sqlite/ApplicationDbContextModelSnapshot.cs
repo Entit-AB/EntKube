@@ -359,6 +359,11 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<string>("HelmValues")
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("IsManaged")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(true);
+
                     b.Property<DateTime?>("LastSyncedAt")
                         .HasColumnType("TEXT");
 
@@ -658,6 +663,11 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<bool>("IsEnabled")
                         .HasColumnType("INTEGER");
+
+                    b.Property<bool>("IsManaged")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(true);
 
                     b.Property<string>("TlsCertificate")
                         .HasColumnType("TEXT");

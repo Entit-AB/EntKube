@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using EntKube.Web.Data;
 using k8s;
 using k8s.Models;
@@ -867,6 +868,10 @@ public class KubernetesOperationsService(
         if (deployment is null)
             return KubernetesOperationResult<string>.Failure("Deployment not found.");
 
+        if (!deployment.IsManaged)
+            return KubernetesOperationResult<string>.Failure(
+                "This deployment is observed only (imported / managed by ArgoCD or Flux). Enable management to let EntKube apply it.");
+
         if (deployment.Cluster is null || string.IsNullOrWhiteSpace(deployment.Cluster.Kubeconfig))
             return KubernetesOperationResult<string>.Failure(
                 "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
@@ -972,6 +977,10 @@ public class KubernetesOperationsService(
         if (dr is null)
             return KubernetesOperationResult<string>.Failure("Deployment route not found.");
 
+        if (!dr.AppRoute.IsManaged)
+            return KubernetesOperationResult<string>.Failure(
+                "This route is observed only (imported / managed by ArgoCD or Flux). Enable management to let EntKube apply it.");
+
         if (string.IsNullOrWhiteSpace(dr.AppDeployment?.Cluster?.Kubeconfig))
             return KubernetesOperationResult<string>.Failure(
                 "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
@@ -995,7 +1004,8 @@ public class KubernetesOperationsService(
                 .ThenInclude(d => d.Cluster)
             .Where(r => r.AppRoute.Hostname == hostname
                      && r.AppDeployment.ClusterId == clusterId
-                     && r.IsEnabled)
+                     && r.IsEnabled
+                     && r.AppRoute.IsManaged)
             .OrderByDescending(r => r.PathPrefix.Length)
             .ThenBy(r => r.PathPrefix)
             .ToListAsync(ct);
@@ -1078,6 +1088,56 @@ public class KubernetesOperationsService(
     }
 
     /// <summary>
+    /// Turns EntKube management of an AppRoute on or off. Enabling reconciles the
+    /// HTTPRoute immediately (no manual apply step); disabling relinquishes ownership
+    /// and removes any HTTPRoute EntKube previously applied for this hostname. Used by
+    /// the External Access panel's management switch (imported routes start unmanaged).
+    /// </summary>
+    public async Task<KubernetesOperationResult<string>> SetRouteManagementAsync(
+        Guid appRouteId, bool managed, CancellationToken ct = default)
+    {
+        Guid? applyRouteId;
+        bool wasApplied;
+        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        {
+            AppRoute? route = await db.AppRoutes
+                .Include(r => r.DeploymentRoutes)
+                .FirstOrDefaultAsync(r => r.Id == appRouteId, ct);
+
+            if (route is null)
+                return KubernetesOperationResult<string>.Failure("Route not found.");
+
+            if (route.IsManaged == managed)
+                return KubernetesOperationResult<string>.Success("No change.");
+
+            route.IsManaged = managed;
+
+            // Any one enabled deployment route drives the combined HTTPRoute for the hostname.
+            applyRouteId = route.DeploymentRoutes
+                .Where(dr => dr.IsEnabled)
+                .Select(dr => (Guid?)dr.Id)
+                .FirstOrDefault();
+            wasApplied = route.DeploymentRoutes.Any(dr => dr.ClusterAppliedAt != null);
+
+            await db.SaveChangesAsync(ct);
+        }
+
+        if (applyRouteId is null)
+            return KubernetesOperationResult<string>.Success(
+                managed ? "Management enabled. Add a deployment route to publish it." : "Management disabled.");
+
+        // Enabling → reconcile now (IsManaged is already true so the apply queries include it).
+        if (managed)
+            return await ApplyDeploymentRouteAsync(applyRouteId.Value, ct);
+
+        // Disabling → only remove the HTTPRoute if EntKube had actually applied one.
+        if (wasApplied)
+            return await DeleteDeploymentRouteFromClusterAsync(applyRouteId.Value, ct);
+
+        return KubernetesOperationResult<string>.Success("Management disabled.");
+    }
+
+    /// <summary>
     /// Deletes the HTTPRoute (and Certificate if ClusterIssuer) for an AppDeploymentRoute
     /// from its cluster. Should be called before deleting the route from the database.
     /// Uses --ignore-not-found so it is safe to call even if the resource was never applied.
@@ -1116,7 +1176,8 @@ public class KubernetesOperationsService(
             .Where(r => r.AppRoute.Hostname == hostname
                      && r.AppDeployment.ClusterId == clusterId
                      && r.Id != deploymentRouteId
-                     && r.IsEnabled)
+                     && r.IsEnabled
+                     && r.AppRoute.IsManaged)
             .OrderByDescending(r => r.PathPrefix.Length)
             .ThenBy(r => r.PathPrefix)
             .ToListAsync(ct);
@@ -1181,7 +1242,7 @@ public class KubernetesOperationsService(
             .ToList();
 
         List<AppRoute> appRoutes = await db.AppRoutes
-            .Where(r => r.IsEnabled && r.DeploymentRoutes.Any(dr =>
+            .Where(r => r.IsEnabled && r.IsManaged && r.DeploymentRoutes.Any(dr =>
                 dr.IsEnabled && dr.AppDeployment.ClusterId == clusterId))
             .ToListAsync(ct);
 
@@ -1242,6 +1303,10 @@ public class KubernetesOperationsService(
 
         if (deployment is null)
             return KubernetesOperationResult<string>.Failure("Deployment not found.");
+
+        if (!deployment.IsManaged)
+            return KubernetesOperationResult<string>.Failure(
+                "This deployment is observed only (imported / managed by ArgoCD or Flux). Enable management to let EntKube apply it.");
 
         if (deployment.Cluster is null || string.IsNullOrWhiteSpace(deployment.Cluster.Kubeconfig))
             return KubernetesOperationResult<string>.Failure(
@@ -2063,6 +2128,112 @@ public class KubernetesOperationsService(
     }
 
     // ──────── Resource YAML ────────
+
+    /// <summary>
+    /// Turns EntKube management of a deployment on or off. Enabling first refreshes the
+    /// stored manifests from the live cluster — so EntKube adopts whatever ArgoCD/Flux
+    /// last applied rather than the (possibly stale) import-time snapshot — then marks
+    /// the deployment managed so it can be applied. Disabling only flips the flag and
+    /// never touches the cluster (the workload keeps running under its current owner).
+    /// </summary>
+    public async Task<KubernetesOperationResult<string>> SetDeploymentManagementAsync(
+        Guid deploymentId, bool managed, CancellationToken ct = default)
+    {
+        AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
+        if (deployment is null)
+            return KubernetesOperationResult<string>.Failure("Deployment not found.");
+
+        if (deployment.IsManaged == managed)
+            return KubernetesOperationResult<string>.Success("No change.");
+
+        if (!managed)
+        {
+            await UpdateDeploymentIsManagedAsync(deploymentId, false, ct);
+            return KubernetesOperationResult<string>.Success(
+                "Management disabled — EntKube will no longer apply this deployment.");
+        }
+
+        // Enabling → adopt the current live spec before allowing apply.
+        (int refreshed, int missing) = (0, 0);
+        if (!string.IsNullOrWhiteSpace(deployment.Cluster?.Kubeconfig))
+            (refreshed, missing) = await RefreshManifestsFromLiveAsync(deployment, ct);
+
+        await UpdateDeploymentIsManagedAsync(deploymentId, true, ct);
+
+        string note = $"Management enabled. Refreshed {refreshed} manifest(s) from the live cluster";
+        note += missing > 0 ? $"; {missing} not found live (kept as imported)." : ".";
+        return KubernetesOperationResult<string>.Success(note);
+    }
+
+    private async Task UpdateDeploymentIsManagedAsync(Guid deploymentId, bool managed, CancellationToken ct)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        AppDeployment? d = await db.AppDeployments.FirstOrDefaultAsync(x => x.Id == deploymentId, ct);
+        if (d is null) return;
+        d.IsManaged = managed;
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Re-reads each stored manifest from the cluster (kubectl get -o json), sanitizes
+    /// it the same way the importer does, and overwrites the stored YAML — so the
+    /// deployment reflects the current live spec. Best-effort: a resource that no longer
+    /// exists live is left as-is and counted as missing.
+    /// </summary>
+    private async Task<(int refreshed, int missing)> RefreshManifestsFromLiveAsync(
+        AppDeployment deployment, CancellationToken ct)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        List<DeploymentManifest> manifests = await db.DeploymentManifests
+            .Where(m => m.DeploymentId == deployment.Id)
+            .ToListAsync(ct);
+
+        if (manifests.Count == 0)
+            return (0, 0);
+
+        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
+        int refreshed = 0, missing = 0;
+        try
+        {
+            await File.WriteAllTextAsync(tempKubeconfig, deployment.Cluster!.Kubeconfig!, ct);
+
+            foreach (DeploymentManifest m in manifests)
+            {
+                HelmExecutionResult res = await RunCliAsync(
+                    "kubectl",
+                    $"get {m.Kind.ToLowerInvariant()} {m.Name} -n {deployment.Namespace}" +
+                    $" --kubeconfig {tempKubeconfig} -o json",
+                    ct);
+
+                if (!res.Success)
+                {
+                    missing++;
+                    continue;
+                }
+
+                try
+                {
+                    JsonNode? node = JsonNode.Parse(res.Output);
+                    if (node is null) { missing++; continue; }
+                    m.YamlContent = ImportManifestSanitizer.ToYaml(node);
+                    m.UpdatedAt = DateTime.UtcNow;
+                    refreshed++;
+                }
+                catch
+                {
+                    missing++;
+                }
+            }
+
+            await db.SaveChangesAsync(ct);
+        }
+        finally
+        {
+            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+        }
+
+        return (refreshed, missing);
+    }
 
     /// <summary>
     /// Returns the raw YAML for a single namespaced resource via "kubectl get -o yaml".

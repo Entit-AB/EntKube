@@ -1225,6 +1225,10 @@ public class CnpgService(
         sb.AppendLine("metadata:");
         sb.AppendLine($"  name: {secretName}");
         sb.AppendLine($"  namespace: {ns}");
+        // Mark as EntKube-managed so the deployment importer won't re-adopt it.
+        sb.AppendLine("  labels:");
+        sb.AppendLine($"    {VaultService.ManagedByLabelKey}: {VaultService.ManagedByLabelValue}");
+        sb.AppendLine("    entkube.io/managed: \"true\"");
         sb.AppendLine("type: Opaque");
         sb.AppendLine("data:");
 
@@ -1944,6 +1948,10 @@ public class CnpgService(
         sb.AppendLine("metadata:");
         sb.AppendLine($"  name: {secretName}");
         sb.AppendLine($"  namespace: {ns}");
+        // Mark as EntKube-managed so the deployment importer won't re-adopt it.
+        sb.AppendLine("  labels:");
+        sb.AppendLine($"    {VaultService.ManagedByLabelKey}: {VaultService.ManagedByLabelValue}");
+        sb.AppendLine("    entkube.io/managed: \"true\"");
         sb.AppendLine("type: Opaque");
         sb.AppendLine("data:");
         sb.AppendLine($"  ACCESS_KEY: {accessKeyB64}");

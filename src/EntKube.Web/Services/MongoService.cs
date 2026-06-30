@@ -1171,6 +1171,10 @@ public class MongoService(
             bsb.AppendLine("metadata:");
             bsb.AppendLine($"  name: {binding.KubernetesSecretName}");
             bsb.AppendLine($"  namespace: {ns}");
+            // Mark as EntKube-managed so the deployment importer won't re-adopt it.
+            bsb.AppendLine("  labels:");
+            bsb.AppendLine($"    {VaultService.ManagedByLabelKey}: {VaultService.ManagedByLabelValue}");
+            bsb.AppendLine("    entkube.io/managed: \"true\"");
             bsb.AppendLine("type: Opaque");
             bsb.AppendLine("stringData:");
             foreach (KeyValuePair<string, string> kv in credentials)

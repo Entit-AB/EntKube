@@ -203,9 +203,29 @@
                             <span>@GetTypeBadge(selectedDeployment.Type)</span>
                             <span><i class="bi bi-hdd-network me-1"></i>@selectedDeployment.Cluster?.Name</span>
                             <span><i class="bi bi-box me-1"></i>@selectedDeployment.Namespace</span>
+                            @if (!selectedDeployment.IsManaged)
+                            {
+                                <span class="badge bg-info-subtle text-info-emphasis border border-info"
+                                      title="Observed only — the live workload is owned elsewhere (e.g. ArgoCD/Flux). EntKube tracks it but won't apply manifests until you enable management.">
+                                    <i class="bi bi-eye me-1"></i>Observed
+                                </span>
+                            }
                         </div>
                     </div>
                     <div class="d-flex align-items-start gap-1">
+                        <button class="btn btn-sm @(selectedDeployment.IsManaged ? "btn-outline-success" : "btn-outline-info")"
+                                title="@(selectedDeployment.IsManaged ? "EntKube manages this deployment — click to stop managing (observe only)" : "Observed only — click to refresh manifests from the live cluster and let EntKube manage it")"
+                                disabled="@managingDeployment"
+                                @onclick="ToggleDeploymentManagement">
+                            @if (managingDeployment)
+                            {
+                                <span class="spinner-border spinner-border-sm"></span>
+                            }
+                            else
+                            {
+                                <i class="bi @(selectedDeployment.IsManaged ? "bi-shield-check" : "bi-shield")"></i>
+                            }
+                        </button>
                         <button class="btn btn-link p-0 border-0 bg-transparent" title="View resources"
                                 @onclick="OpenDeploymentResourcesTab">
                             @GetSyncBadge(selectedDeployment.SyncStatus)
@@ -468,11 +488,21 @@
                 <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
                     <div><i class="bi bi-file-earmark-code me-2 text-primary"></i><strong>Manifests</strong></div>
                     <div class="d-flex gap-1">
-                        <button class="btn btn-sm btn-success" @onclick="ApplyYamlDeployment"
-                                disabled="@(applyingYaml || manifests is null || manifests.Count == 0)">
-                            @if (applyingYaml) { <span class="spinner-border spinner-border-sm me-1"></span><span>Applying…</span> }
-                            else { <i class="bi bi-cloud-upload me-1"></i><span>Apply to Cluster</span> }
-                        </button>
+                        @if (selectedDeployment.IsManaged)
+                        {
+                            <button class="btn btn-sm btn-success" @onclick="ApplyYamlDeployment"
+                                    disabled="@(applyingYaml || manifests is null || manifests.Count == 0)">
+                                @if (applyingYaml) { <span class="spinner-border spinner-border-sm me-1"></span><span>Applying…</span> }
+                                else { <i class="bi bi-cloud-upload me-1"></i><span>Apply to Cluster</span> }
+                            </button>
+                        }
+                        else
+                        {
+                            <span class="badge bg-light text-muted border align-self-center"
+                                  title="Observed only — enable management (shield icon above) to apply.">
+                                <i class="bi bi-eye me-1"></i>observed — not applied by EntKube
+                            </span>
+                        }
                         @if (!IsGitManaged)
                         {
                             <button class="btn btn-sm btn-outline-primary" @onclick="() => showAddManifest = !showAddManifest">
@@ -2696,6 +2726,30 @@
             yamlApplyOutput = result.IsSuccess ? result.Data : result.Error;
         }
         finally { applyingYaml = false; }
+    }
+
+    private bool managingDeployment;
+
+    // Enable management (refresh manifests from the live cluster, then allow apply) or
+    // disable it (observe only). No manual step; the workload is never deleted.
+    private async Task ToggleDeploymentManagement()
+    {
+        if (selectedDeployment is null) return;
+        managingDeployment = true; yamlApplyOutput = null; yamlApplySuccess = null;
+        try
+        {
+            bool enabling = !selectedDeployment.IsManaged;
+            KubernetesOperationResult<string> result =
+                await K8sOps.SetDeploymentManagementAsync(selectedDeployment.Id, enabling);
+            yamlApplySuccess = result.IsSuccess;
+            yamlApplyOutput = result.IsSuccess ? result.Data : result.Error;
+
+            // Reflect the new state (and any refreshed manifests) in the UI.
+            await LoadDeployments();
+            selectedDeployment = deployments?.FirstOrDefault(d => d.Id == selectedDeployment.Id) ?? selectedDeployment;
+            await LoadManifests();
+        }
+        finally { managingDeployment = false; }
     }
 
     private async Task InstallOrUpgradeHelm()

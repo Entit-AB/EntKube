@@ -465,6 +465,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(d => d.Type).HasConversion<string>().HasMaxLength(20);
             entity.Property(d => d.SyncStatus).HasConversion<string>().HasMaxLength(20);
             entity.Property(d => d.HealthStatus).HasConversion<string>().HasMaxLength(20);
+            // Existing deployments predate management gating — default them to managed.
+            entity.Property(d => d.IsManaged).HasDefaultValue(true);
             entity.Property(d => d.HelmRepoUrl).HasMaxLength(500);
             entity.Property(d => d.HelmChartName).HasMaxLength(200);
             entity.Property(d => d.HelmChartVersion).HasMaxLength(50);
@@ -1477,6 +1479,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(r => r.Hostname).HasMaxLength(253).IsRequired();
             entity.Property(r => r.TlsMode).HasConversion<string>().HasMaxLength(20);
             entity.Property(r => r.ClusterIssuerName).HasMaxLength(200);
+            // Existing routes predate management gating — default them to managed.
+            entity.Property(r => r.IsManaged).HasDefaultValue(true);
 
             entity.HasOne(r => r.App)
                 .WithMany(a => a.Routes)

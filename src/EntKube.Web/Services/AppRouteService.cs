@@ -11,6 +11,13 @@ public class AppRouteRequest
     public string? TlsCertificate { get; set; }
     public string? TlsPrivateKey { get; set; }
     public bool IsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// When false the route is observed only and never applied/reconciled by EntKube
+    /// (ownership stays with ArgoCD/Flux). Imported routes pass false; routes created
+    /// in EntKube leave this true.
+    /// </summary>
+    public bool IsManaged { get; set; } = true;
 }
 
 public class AppDeploymentRouteRequest
@@ -88,7 +95,8 @@ public class AppRouteService(
             ClusterIssuerName = request.ClusterIssuerName?.Trim(),
             TlsCertificate = request.TlsCertificate,
             TlsPrivateKey = request.TlsPrivateKey,
-            IsEnabled = request.IsEnabled
+            IsEnabled = request.IsEnabled,
+            IsManaged = request.IsManaged
         };
 
         db.AppRoutes.Add(route);

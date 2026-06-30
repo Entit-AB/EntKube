@@ -1071,6 +1071,9 @@ public class RabbitMQService(
             metadata:
               name: {binding.KubernetesSecretName}
               namespace: {binding.AppDeployment.Namespace}
+              labels:
+                app.kubernetes.io/managed-by: entkube
+                entkube.io/managed: "true"
             type: Opaque
             data:
             {secretData}

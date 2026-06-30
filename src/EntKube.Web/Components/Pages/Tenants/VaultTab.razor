@@ -1334,8 +1334,14 @@ else
             syncSecretName = secret.KubernetesSecretName ?? "";
             syncNamespace = secret.KubernetesNamespace ?? "";
             syncClusterId = secret.KubernetesClusterId ?? Guid.Empty;
+            // Imported/observed secrets already carry a target with sync disabled — for
+            // those we re-read the live value on enable so we don't push a stale snapshot.
+            syncWasPreconfigured = secret.KubernetesClusterId is not null
+                && !string.IsNullOrEmpty(secret.KubernetesSecretName);
         }
     }
+
+    private bool syncWasPreconfigured;
 
     private async Task DisableSync(Guid secretId)
     {
@@ -1359,7 +1365,15 @@ else
             ns: syncNamespace.Trim(),
             clusterId: clusterId);
 
+        // Taking ownership of an observed/imported secret: adopt the current live value
+        // (e.g. what ArgoCD/Flux last set) so the next sync doesn't revert it.
+        if (syncWasPreconfigured)
+        {
+            await VaultService.RefreshAppSecretFromClusterAsync(syncConfigSecretId.Value);
+        }
+
         syncConfigSecretId = null;
+        syncWasPreconfigured = false;
         await LoadSecrets();
     }
 

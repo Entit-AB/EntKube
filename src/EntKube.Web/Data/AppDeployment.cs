@@ -54,6 +54,16 @@ public class AppDeployment
     public string? StatusMessage { get; set; }
     public DateTime? LastSyncedAt { get; set; }
 
+    /// <summary>
+    /// When false the deployment is observed only: EntKube tracks live state and shows
+    /// drift but never applies manifests to the cluster — leaving ownership to whatever
+    /// created the workload (commonly ArgoCD or Flux). Imported deployments start
+    /// unmanaged; enabling management refreshes the manifests from the live cluster
+    /// (adopting ArgoCD/Flux's current spec) before EntKube will apply. Defaults to true
+    /// so deployments created in EntKube manage themselves as before.
+    /// </summary>
+    public bool IsManaged { get; set; } = true;
+
     // ── Helm-specific fields (only used when Type == HelmChart) ──
 
     /// <summary>

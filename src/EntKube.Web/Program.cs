@@ -145,6 +145,7 @@ public class Program
         builder.Services.AddScoped<StorageService>();
         builder.Services.AddScoped<StorageBrowserService>();
         builder.Services.AddScoped<ComponentScanService>();
+        builder.Services.AddScoped<DeploymentImportService>();
         builder.Services.AddScoped<KeycloakService>();
         builder.Services.AddScoped<RabbitMQService>();
         builder.Services.AddScoped<RedisService>();
@@ -180,6 +181,7 @@ public class Program
         builder.Services.AddHostedService<UptimeTrackingService>();
         builder.Services.AddHostedService<HeadscaleCertSyncService>();
         builder.Services.AddHostedService<SecretExpiryNotificationService>();
+        builder.Services.AddHostedService<ObservedSecretRefreshService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<GitSyncService>());
 
         builder.Services.AddHttpClient("Notifications", client =>

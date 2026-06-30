@@ -153,12 +153,32 @@
                             {
                                 <span class="badge bg-secondary ms-1">Disabled</span>
                             }
+                            @if (!route.IsManaged)
+                            {
+                                <span class="badge bg-info-subtle text-info-emphasis border border-info ms-1"
+                                      title="Observed only — the live HTTPRoute is owned elsewhere (e.g. ArgoCD/Flux). EntKube tracks it but won't apply or reconcile it until you enable management.">
+                                    <i class="bi bi-eye me-1"></i>Observed
+                                </span>
+                            }
                             <span class="badge bg-light text-dark border ms-1">
                                 @route.DeploymentRoutes.Count deployment@(route.DeploymentRoutes.Count != 1 ? "s" : "")
                             </span>
                             @if (!IsPortalView)
                             {
                                 <div class="ms-auto d-flex gap-1" @onclick:stopPropagation="true">
+                                    <button class="btn btn-sm @(route.IsManaged ? "btn-outline-success" : "btn-outline-info") py-0"
+                                            title="@(route.IsManaged ? "EntKube manages this route — click to stop managing (relinquish ownership)" : "Observed only — click to let EntKube manage and reconcile this route now")"
+                                            disabled="@(managingRouteId == route.Id)"
+                                            @onclick="() => ToggleRouteManagement(route)">
+                                        @if (managingRouteId == route.Id)
+                                        {
+                                            <span class="spinner-border spinner-border-sm"></span>
+                                        }
+                                        else
+                                        {
+                                            <i class="bi @(route.IsManaged ? "bi-shield-check" : "bi-shield")"></i>
+                                        }
+                                    </button>
                                     <button class="btn btn-sm btn-outline-secondary py-0"
                                             title="Toggle enabled"
                                             @onclick="() => ToggleRouteEnabled(route)">
@@ -180,6 +200,19 @@
                                 </div>
                             }
                         </div>
+
+                        @* ── Cutover hint shown right after management is first enabled ── *@
+                        @if (justManagedRouteId == route.Id)
+                        {
+                            <div class="alert alert-info py-2 small mx-3 mb-2">
+                                <i class="bi bi-info-circle me-1"></i>
+                                EntKube now manages <code>@route.Hostname</code> and applied its own HTTPRoute.
+                                If this app is also synced by <strong>ArgoCD or Flux</strong>, remove the HTTPRoute
+                                from that source so two controllers don't compete for the same hostname.
+                                <button type="button" class="btn-close btn-close-sm float-end"
+                                        @onclick="() => justManagedRouteId = null"></button>
+                            </div>
+                        }
 
                         @* ── Deployment routes (expanded) ── *@
                         @if (isExpanded)
@@ -226,7 +259,13 @@
                                                     <td class="small align-middle">@ClusterStatusBadge(dr)</td>
                                                     <td class="small align-middle">@HealthBadge(dr)</td>
                                                     <td class="text-end align-middle" style="white-space: nowrap;">
-                                                        @if (dr.ClusterAppliedAt is null)
+                                                        @if (!route.IsManaged)
+                                                        {
+                                                            <span class="badge bg-light text-muted border" title="Observed only — EntKube does not apply this route. Enable management to take ownership.">
+                                                                <i class="bi bi-eye me-1"></i>observed
+                                                            </span>
+                                                        }
+                                                        else if (dr.ClusterAppliedAt is null)
                                                         {
                                                             <button class="btn btn-sm btn-primary py-0"
                                                                     title="Apply HTTPRoute to cluster"
@@ -625,6 +664,38 @@
             IsEnabled = !route.IsEnabled
         });
         await LoadAsync();
+    }
+
+    private Guid? managingRouteId;
+    private Guid? justManagedRouteId;
+
+    // Turn EntKube management on (reconcile the HTTPRoute now) or off (relinquish
+    // ownership and remove any HTTPRoute EntKube applied). No manual apply step.
+    private async Task ToggleRouteManagement(AppRoute route)
+    {
+        bool enabling = !route.IsManaged;
+        managingRouteId = route.Id;
+        applyRouteError = null;
+        try
+        {
+            KubernetesOperationResult<string> result = await K8sOps.SetRouteManagementAsync(route.Id, enabling);
+            if (!result.IsSuccess)
+            {
+                applyRouteError = result.Error;
+                justManagedRouteId = null;
+            }
+            else
+            {
+                // Remind the operator to drop the route from ArgoCD/Flux so the two
+                // controllers don't both manage the same hostname.
+                justManagedRouteId = enabling ? route.Id : null;
+            }
+            await LoadAsync();
+        }
+        finally
+        {
+            managingRouteId = null;
+        }
     }
 
     private async Task DeleteRoute(Guid routeId)

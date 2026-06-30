@@ -1,0 +1,555 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject DeploymentImportService ImportService
+@inject TenantService TenantService
+
+@* ═══════════════════════════════════════════════════════════════════
+   Import Deployment wizard — adopt a workload already running in a
+   cluster into EntKube as a new App + Yaml deployment.
+   Steps: Source → Review → Target → Result.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="modal fade show d-block" style="background:rgba(0,0,0,.5)" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-box-arrow-in-down me-2"></i>Import Deployment
+                    <span class="text-muted small ms-2">from @Cluster.Name</span>
+                </h5>
+                <button type="button" class="btn-close" @onclick="Close"></button>
+            </div>
+
+            <div class="modal-body">
+                @* ── Step indicator ── *@
+                <div class="d-flex gap-2 mb-3 small">
+                    <span class="badge @(step >= Step.Source ? "bg-primary" : "bg-secondary")">1. Source</span>
+                    <span class="badge @(step >= Step.Review ? "bg-primary" : "bg-secondary")">2. Review</span>
+                    <span class="badge @(step >= Step.Target ? "bg-primary" : "bg-secondary")">3. Target</span>
+                    <span class="badge @(step >= Step.Done ? "bg-success" : "bg-secondary")">4. Done</span>
+                </div>
+
+                @if (!string.IsNullOrEmpty(error))
+                {
+                    <div class="alert alert-danger py-2 small"><i class="bi bi-exclamation-triangle me-1"></i>@error</div>
+                }
+
+                @* ════════ Step 1: Source ════════ *@
+                @if (step == Step.Source)
+                {
+                    <p class="text-muted small">
+                        Enter the namespace(s) to scan. Add more than one if related resources (e.g. HTTPRoutes)
+                        live in a separate namespace.
+                    </p>
+                    <label class="form-label small fw-semibold">Namespaces (one per line)</label>
+                    <textarea class="form-control font-monospace" rows="4" @bind="namespacesText"
+                              placeholder="my-app&#10;gateway-system"></textarea>
+                }
+
+                @* ════════ Step 2: Review ════════ *@
+                else if (step == Step.Review && preview is not null)
+                {
+                    @if (preview.Resources.Count == 0 && preview.Secrets.Count == 0)
+                    {
+                        <div class="alert alert-warning py-2 small">No supported resources were found in the scanned namespace(s).</div>
+                    }
+
+                    @* Resources grouped by category *@
+                    @foreach (IGrouping<ImportCategory, DiscoveredResource> group in preview.Resources.GroupBy(r => r.Category))
+                    {
+                        <div class="card mb-2">
+                            <div class="card-header py-1 d-flex justify-content-between align-items-center">
+                                <strong class="small">@CategoryLabel(group.Key)</strong>
+                                <span class="badge bg-secondary">@group.Count()</span>
+                            </div>
+                            <div class="card-body p-0">
+                                <table class="table table-sm table-hover mb-0 align-middle">
+                                    <tbody>
+                                        @foreach (DiscoveredResource res in group)
+                                        {
+                                            <tr>
+                                                <td style="width:2rem">
+                                                    <input type="checkbox" class="form-check-input" @bind="res.Selected" />
+                                                </td>
+                                                <td class="fw-semibold">@res.Kind</td>
+                                                <td><code>@res.Name</code></td>
+                                                <td><code class="text-muted">@res.Namespace</code></td>
+                                                <td class="text-muted small">@res.Detail</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    }
+
+                    @* HTTPRoutes → external access *@
+                    @if (preview.Routes.Count > 0)
+                    {
+                        <div class="card mb-2 border-success">
+                            <div class="card-header py-1 bg-success bg-opacity-10">
+                                <strong class="small"><i class="bi bi-globe me-1"></i>External access (from HTTPRoutes)</strong>
+                            </div>
+                            <div class="card-body p-2">
+                                @foreach (DetectedRoute route in preview.Routes)
+                                {
+                                    <div class="border-bottom pb-2 mb-2 small">
+                                        <div class="form-check">
+                                            <input type="checkbox" class="form-check-input" @bind="route.Import" id="@($"route-{route.Namespace}-{route.Hostname}")" />
+                                            <label class="form-check-label fw-semibold" for="@($"route-{route.Namespace}-{route.Hostname}")">
+                                                <code>@route.Hostname</code>
+                                                @if (!string.IsNullOrEmpty(route.GatewayName))
+                                                {
+                                                    <span class="text-muted">via gateway @route.GatewayName</span>
+                                                }
+                                            </label>
+                                        </div>
+                                        <div class="ms-4">
+                                            @foreach (DetectedRouteRule rule in route.Rules)
+                                            {
+                                                <div class="text-muted">
+                                                    <code>@rule.PathPrefix</code> → <code>@rule.ServiceName</code>:@rule.ServicePort
+                                                    @if (!string.IsNullOrEmpty(rule.RewritePath))
+                                                    {
+                                                        <span>(rewrite → <code>@rule.RewritePath</code>)</span>
+                                                    }
+                                                </div>
+                                            }
+                                            <div class="d-flex gap-2 align-items-center mt-1">
+                                                <span>TLS</span>
+                                                <select class="form-select form-select-sm" style="width:auto" @bind="route.TlsMode">
+                                                    <option value="@TlsMode.ClusterIssuer">ClusterIssuer</option>
+                                                    <option value="@TlsMode.Manual">Manual</option>
+                                                    <option value="@TlsMode.Passthrough">Passthrough</option>
+                                                </select>
+                                                @if (route.TlsMode == TlsMode.ClusterIssuer)
+                                                {
+                                                    <input class="form-control form-control-sm" style="width:auto" placeholder="cluster issuer" @bind="route.ClusterIssuerName" />
+                                                }
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+                                <div class="text-muted fst-italic">Imported as EntKube routes — review and apply them from the app's External Access panel.</div>
+                            </div>
+                        </div>
+                    }
+
+                    @* Secrets → vault *@
+                    @if (preview.Secrets.Count > 0)
+                    {
+                        <div class="card mb-2 border-warning">
+                            <div class="card-header py-1 bg-warning bg-opacity-10">
+                                <strong class="small"><i class="bi bi-key me-1"></i>Secrets → Vault (synced back)</strong>
+                            </div>
+                            <div class="card-body p-2">
+                                @foreach (DetectedSecret secret in preview.Secrets)
+                                {
+                                    <div class="border-bottom pb-2 mb-2">
+                                        <div class="form-check">
+                                            <input type="checkbox" class="form-check-input" @bind="secret.ImportToVault" id="@($"sec-{secret.Namespace}-{secret.SecretName}")" />
+                                            <label class="form-check-label" for="@($"sec-{secret.Namespace}-{secret.SecretName}")">
+                                                <code>@secret.SecretName</code>
+                                                <span class="text-muted">@secret.Namespace</span>
+                                                @if (secret.Source == "ExternalSecret")
+                                                {
+                                                    <span class="badge bg-info ms-1">via ExternalSecret</span>
+                                                }
+                                            </label>
+                                        </div>
+                                        <div class="ms-4 small">
+                                            @foreach (DetectedSecretKey key in secret.Keys)
+                                            {
+                                                <span class="badge bg-light text-dark border me-1">@key.Key @(key.HasValue ? "" : "(empty)")</span>
+                                            }
+                                            @if (!string.IsNullOrEmpty(secret.Warning))
+                                            {
+                                                <div class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>@secret.Warning</div>
+                                            }
+                                        </div>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+
+                    @* Image-pull secrets → registry credentials *@
+                    @if (preview.RegistryCredentials.Count > 0)
+                    {
+                        <div class="card mb-2 border-primary">
+                            <div class="card-header py-1 bg-primary bg-opacity-10">
+                                <strong class="small"><i class="bi bi-box-seam me-1"></i>Image-pull secrets → Registry credentials</strong>
+                            </div>
+                            <div class="card-body p-2">
+                                @foreach (DetectedRegistryCredential reg in preview.RegistryCredentials)
+                                {
+                                    <div class="form-check small">
+                                        <input type="checkbox" class="form-check-input" @bind="reg.Import" id="@($"reg-{reg.Namespace}-{reg.SecretName}-{reg.Server}")" />
+                                        <label class="form-check-label" for="@($"reg-{reg.Namespace}-{reg.SecretName}-{reg.Server}")">
+                                            <code>@reg.SecretName</code> <span class="text-muted">@reg.Namespace</span> —
+                                            <span class="badge bg-secondary">@reg.RegistryType</span>
+                                            <code>@reg.Server</code>
+                                            @if (!string.IsNullOrEmpty(reg.Username))
+                                            {
+                                                <span class="text-muted">user @reg.Username</span>
+                                            }
+                                        </label>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+
+                    @* Secrets excluded because another controller manages them *@
+                    @if (preview.SkippedSecrets.Count > 0)
+                    {
+                        <div class="card mb-2">
+                            <div class="card-header py-1">
+                                <strong class="small text-muted"><i class="bi bi-shield-lock me-1"></i>Externally managed — not imported</strong>
+                            </div>
+                            <div class="card-body p-2 small text-muted">
+                                @foreach (SkippedSecret s in preview.SkippedSecrets)
+                                {
+                                    <div>
+                                        <code>@s.Name</code> <span>@s.Namespace</span> — @s.Reason
+                                    </div>
+                                }
+                                <div class="mt-1 fst-italic">These are recreated by their controller, so EntKube does not adopt them.</div>
+                            </div>
+                        </div>
+                    }
+
+                    @* Postgres connections *@
+                    @if (preview.PostgresConnections.Count > 0)
+                    {
+                        <div class="card mb-2 border-info">
+                            <div class="card-header py-1 bg-info bg-opacity-10">
+                                <strong class="small"><i class="bi bi-database me-1"></i>Detected Postgres connections</strong>
+                            </div>
+                            <div class="card-body p-2">
+                                @foreach (DetectedPostgres pg in preview.PostgresConnections)
+                                {
+                                    <div class="border-bottom pb-2 mb-2 small">
+                                        <div class="fw-semibold">@pg.Source</div>
+                                        <div class="text-muted">
+                                            host=<code>@pg.Host</code> port=<code>@pg.Port</code>
+                                            db=<code>@pg.Database</code> user=<code>@pg.Username</code>
+                                            @if (pg.MatchedInstanceId is not null)
+                                            {
+                                                <span class="badge bg-success ms-1">matches @pg.MatchedInstanceName</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-secondary ms-1">no registered instance</span>
+                                            }
+                                        </div>
+                                        <div class="mt-1">
+                                            <select class="form-select form-select-sm d-inline-block" style="width:auto"
+                                                    @bind="pg.Action">
+                                                <option value="@PostgresImportAction.Skip">Skip</option>
+                                                @if (pg.MatchedInstanceId is not null)
+                                                {
+                                                    <option value="@PostgresImportAction.ImportDatabase">Adopt database</option>
+                                                }
+                                                <option value="@PostgresImportAction.RegisterAndImport">Register instance + adopt</option>
+                                            </select>
+                                        </div>
+                                        @if (pg.Action == PostgresImportAction.RegisterAndImport)
+                                        {
+                                            <div class="row g-1 mt-1">
+                                                <div class="col"><input class="form-control form-control-sm" placeholder="admin pod" @bind="pg.AdminPodName" /></div>
+                                                <div class="col"><input class="form-control form-control-sm" placeholder="admin user" @bind="pg.AdminUsername" /></div>
+                                                <div class="col"><input class="form-control form-control-sm" type="password" placeholder="admin password" @bind="pg.AdminPassword" /></div>
+                                                <div class="col"><input class="form-control form-control-sm" placeholder="service name" @bind="pg.ServiceName" /></div>
+                                            </div>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+
+                    @if (preview.Warnings.Count > 0)
+                    {
+                        <details class="small text-muted">
+                            <summary>@preview.Warnings.Count note(s)</summary>
+                            <ul class="mb-0">
+                                @foreach (string w in preview.Warnings)
+                                {
+                                    <li>@w</li>
+                                }
+                            </ul>
+                        </details>
+                    }
+                }
+
+                @* ════════ Step 3: Target ════════ *@
+                else if (step == Step.Target && preview is not null)
+                {
+                    <div class="mb-2">
+                        <label class="form-label small fw-semibold">Customer</label>
+                        <select class="form-select" @bind="selectedCustomerId" @bind:after="OnCustomerChanged">
+                            <option value="">— select —</option>
+                            @foreach (Customer c in customers)
+                            {
+                                <option value="@c.Id">@c.Name</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small fw-semibold">App name</label>
+                        <input class="form-control" @bind="appName" @bind:event="oninput" list="existing-app-names" placeholder="my-app" />
+                        <datalist id="existing-app-names">
+                            @foreach (Data.App a in customerApps)
+                            {
+                                <option value="@a.Name"></option>
+                            }
+                        </datalist>
+                        @if (MatchingApp is not null)
+                        {
+                            <div class="form-text text-info">
+                                <i class="bi bi-info-circle me-1"></i>App exists — this import adds the selected environment to it.
+                            </div>
+                        }
+                        else if (!string.IsNullOrWhiteSpace(appName))
+                        {
+                            <div class="form-text text-muted"><i class="bi bi-plus-circle me-1"></i>A new app will be created.</div>
+                        }
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small fw-semibold">Environment</label>
+                        <select class="form-select" @bind="selectedEnvironmentId">
+                            <option value="">— select —</option>
+                            @foreach (EntKube.Web.Data.Environment e in environments)
+                            {
+                                <option value="@e.Id">@e.Name</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="alert alert-secondary py-2 small mb-0">
+                        Primary namespace: <code>@preview.PrimaryNamespace</code> ·
+                        @preview.Resources.Count(r => r.Selected) resource(s) ·
+                        @preview.Secrets.Count(s => s.ImportToVault) secret(s) → vault
+                    </div>
+                }
+
+                @* ════════ Step 4: Done ════════ *@
+                else if (step == Step.Done && result is not null)
+                {
+                    <div class="alert @(result.Success ? "alert-success" : "alert-warning") py-2">
+                        <i class="bi @(result.Success ? "bi-check-circle" : "bi-exclamation-triangle") me-1"></i>
+                        @(result.AppCreated ? "Created app" : "Updated app") <strong>@result.AppName</strong> ·
+                        @(result.DeploymentCreated ? "new deployment" : "updated deployment") <code>@result.DeploymentName</code>:
+                        @result.ManifestCount manifest(s) added@(result.ManifestSkipped > 0 ? $", {result.ManifestSkipped} already present" : ""),
+                        @result.SecretCount secret(s) (@result.SecretKeyCount key(s)) → vault@(result.RegistryCredentialCount > 0 ? $", {result.RegistryCredentialCount} registry credential(s)" : "")@(result.RouteCount > 0 ? $", {result.RouteCount} route(s) ({result.RouteRuleCount} rule(s))" : "").
+                    </div>
+                    @if (result.PostgresOutcomes.Count > 0)
+                    {
+                        <ul class="small">
+                            @foreach (string o in result.PostgresOutcomes)
+                            {
+                                <li>@o</li>
+                            }
+                        </ul>
+                    }
+                    @if (result.Warnings.Count > 0)
+                    {
+                        <div class="small text-warning">
+                            @foreach (string w in result.Warnings)
+                            {
+                                <div><i class="bi bi-exclamation-triangle me-1"></i>@w</div>
+                            }
+                        </div>
+                    }
+                    @if (result.Errors.Count > 0)
+                    {
+                        <div class="small text-danger">
+                            @foreach (string e in result.Errors)
+                            {
+                                <div><i class="bi bi-x-circle me-1"></i>@e</div>
+                            }
+                        </div>
+                    }
+                }
+            </div>
+
+            <div class="modal-footer">
+                @if (step == Step.Source)
+                {
+                    <button class="btn btn-secondary" @onclick="Close">Cancel</button>
+                    <button class="btn btn-primary" @onclick="Scan" disabled="@(busy || string.IsNullOrWhiteSpace(namespacesText))">
+                        @if (busy)
+                        {
+                            <span class="spinner-border spinner-border-sm me-1"></span><span>Scanning…</span>
+                        }
+                        else
+                        {
+                            <span>Scan</span>
+                        }
+                    </button>
+                }
+                else if (step == Step.Review)
+                {
+                    <button class="btn btn-secondary" @onclick="() => step = Step.Source">Back</button>
+                    <button class="btn btn-primary" @onclick="GoToTarget" disabled="@(preview is null || !HasImportableContent)">Next</button>
+                }
+                else if (step == Step.Target)
+                {
+                    <button class="btn btn-secondary" @onclick="() => step = Step.Review">Back</button>
+                    <button class="btn btn-success" @onclick="RunImport" disabled="@(busy || !CanImport)">
+                        @if (busy)
+                        {
+                            <span class="spinner-border spinner-border-sm me-1"></span><span>Importing…</span>
+                        }
+                        else
+                        {
+                            <span><i class="bi bi-download me-1"></i>Import</span>
+                        }
+                    </button>
+                }
+                else if (step == Step.Done)
+                {
+                    <button class="btn btn-primary" @onclick="Close">Close</button>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public required KubernetesCluster Cluster { get; set; }
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private enum Step { Source, Review, Target, Done }
+    private Step step = Step.Source;
+
+    private string namespacesText = "";
+    private bool busy;
+    private string? error;
+
+    private ImportPreview? preview;
+
+    private List<Customer> customers = [];
+    private List<EntKube.Web.Data.Environment> environments = [];
+    private List<Data.App> customerApps = [];
+    private Guid selectedCustomerId;
+    private Guid selectedEnvironmentId;
+    private string appName = "";
+
+    private Data.App? MatchingApp =>
+        customerApps.FirstOrDefault(a => string.Equals(a.Name, appName.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    private ImportResult? result;
+
+    private bool CanImport =>
+        selectedCustomerId != Guid.Empty && selectedEnvironmentId != Guid.Empty && !string.IsNullOrWhiteSpace(appName);
+
+    private bool HasImportableContent =>
+        preview is not null && (preview.Resources.Count > 0 || preview.Secrets.Count > 0
+            || preview.RegistryCredentials.Count > 0 || preview.Routes.Count > 0);
+
+    private async Task Scan()
+    {
+        error = null;
+        busy = true;
+        try
+        {
+            List<string> namespaces = namespacesText
+                .Split(['\n', '\r', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToList();
+
+            preview = await ImportService.ScanAsync(Cluster, namespaces);
+            step = Step.Review;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task GoToTarget()
+    {
+        if (customers.Count == 0)
+        {
+            customers = await TenantService.GetCustomersAsync(TenantId);
+        }
+        if (environments.Count == 0)
+        {
+            environments = await TenantService.GetEnvironmentsAsync(TenantId);
+        }
+        // Default the environment to the cluster's environment if present.
+        if (selectedEnvironmentId == Guid.Empty)
+        {
+            selectedEnvironmentId = Cluster.EnvironmentId;
+        }
+        if (string.IsNullOrWhiteSpace(appName) && preview is not null)
+        {
+            appName = preview.PrimaryNamespace;
+        }
+        if (selectedCustomerId != Guid.Empty)
+        {
+            await OnCustomerChanged();
+        }
+        step = Step.Target;
+    }
+
+    private async Task OnCustomerChanged()
+    {
+        customerApps = selectedCustomerId == Guid.Empty
+            ? []
+            : await TenantService.GetAppsAsync(selectedCustomerId);
+    }
+
+    private async Task RunImport()
+    {
+        if (preview is null || !CanImport)
+        {
+            return;
+        }
+
+        error = null;
+        busy = true;
+        try
+        {
+            ImportRequest request = new()
+            {
+                CustomerId = selectedCustomerId,
+                AppName = appName.Trim(),
+                EnvironmentId = selectedEnvironmentId,
+                Preview = preview,
+                PerformedBy = "import-wizard"
+            };
+
+            result = await ImportService.ImportAsync(Cluster, request);
+            step = Step.Done;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task Close()
+    {
+        await OnClose.InvokeAsync();
+    }
+
+    private static string CategoryLabel(ImportCategory category) => category switch
+    {
+        ImportCategory.Workload => "Workloads",
+        ImportCategory.Storage => "Storage",
+        ImportCategory.Config => "Config",
+        ImportCategory.Networking => "Networking",
+        ImportCategory.CustomResource => "Custom Resources",
+        _ => category.ToString()
+    };
+}
