@@ -325,7 +325,7 @@ public class LokiService(
         return LogLevel.None;
     }
 
-    private sealed record ResolvedLokiInfo(string Kubeconfig, LokiConfig Config);
+    private sealed record ResolvedLokiInfo(string Kubeconfig, string ClusterName, LokiConfig Config);
 
     private async Task<(ResolvedLokiInfo? Info, string? Error)> ResolveLokiInfoAsync(
         Guid clusterId, CancellationToken ct)
@@ -337,17 +337,19 @@ public class LokiService(
             .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
 
         if (cluster is null) return (null, "Cluster not found.");
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig)) return (null, "No kubeconfig configured.");
+        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            return (null, $"No kubeconfig configured for cluster '{cluster.Name}'.");
 
         ClusterComponent? lokiComponent = cluster.Components.FirstOrDefault(c =>
             (c.HelmChartName ?? "").Contains("loki", StringComparison.OrdinalIgnoreCase) ||
             c.Name.Contains("loki", StringComparison.OrdinalIgnoreCase));
 
-        if (lokiComponent is null) return (null, "No Loki component found on this cluster.");
-        if (lokiComponent.Status != ComponentStatus.Installed) return (null, "Loki is not installed.");
+        if (lokiComponent is null) return (null, $"No Loki component found on cluster '{cluster.Name}'.");
+        if (lokiComponent.Status != ComponentStatus.Installed)
+            return (null, $"Loki is not installed on cluster '{cluster.Name}'.");
 
         LokiConfig config = BuildLokiConfig(lokiComponent);
-        return (new ResolvedLokiInfo(cluster.Kubeconfig, config), null);
+        return (new ResolvedLokiInfo(cluster.Kubeconfig, cluster.Name, config), null);
     }
 
     private static LokiConfig BuildLokiConfig(ClusterComponent component)
@@ -382,17 +384,8 @@ public class LokiService(
             KubernetesClientConfiguration k8sConfig = KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
             using Kubernetes k8s = new(k8sConfig);
 
-            V1EndpointAddress? addr = await FindLokiEndpointAsync(k8s, info.Config, ct);
-            if (addr?.TargetRef is null)
-                throw new InvalidOperationException(
-                    $"No ready pods for Loki service {info.Config.ServiceName} in {info.Config.Namespace}.");
-
-            string podName = addr.TargetRef.Name;
-            string podNs   = addr.TargetRef.NamespaceProperty ?? info.Config.Namespace;
-            string baseUrl = k8s.BaseUri.ToString().TrimEnd('/')
-                + $"/api/v1/namespaces/{podNs}/pods/{podName}:{info.Config.ServicePort}/proxy";
-
-            logger.LogDebug("Loki proxy → pod {Pod} ({PodNs}) at {BaseUrl}", podName, podNs, baseUrl);
+            string baseUrl = await BuildLokiProxyBaseAsync(k8s, info, ct);
+            logger.LogDebug("Loki proxy base {BaseUrl}", baseUrl);
 
             T result = await action(k8s.HttpClient, baseUrl, ct);
             return KubernetesOperationResult<T>.Success(result);
@@ -402,6 +395,67 @@ public class LokiService(
             logger.LogWarning(ex, "Loki query failed ({Context})", logContext);
             return KubernetesOperationResult<T>.Failure(ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Resolves the API-server proxy base URL used to reach Loki's HTTP API. Prefers a specific
+    /// Ready pod behind the Loki service (lowest latency, no kube-proxy hop). When no Ready pod
+    /// endpoint can be parsed — e.g. on newer Kubernetes where the legacy core/v1 Endpoints API
+    /// is incomplete — it falls back to proxying via the Service itself, letting the API server
+    /// route to a healthy backend. Throws (naming the cluster) only when neither is reachable.
+    /// </summary>
+    private async Task<string> BuildLokiProxyBaseAsync(
+        Kubernetes k8s, ResolvedLokiInfo info, CancellationToken ct)
+    {
+        string apiBase = k8s.BaseUri.ToString().TrimEnd('/');
+        int port = info.Config.ServicePort;
+        string ns = info.Config.Namespace;
+
+        // Preferred: a Ready pod behind the service.
+        V1EndpointAddress? addr = await FindLokiEndpointAsync(k8s, info.Config, ct);
+        if (addr?.TargetRef is not null)
+        {
+            string podName = addr.TargetRef.Name;
+            string podNs   = addr.TargetRef.NamespaceProperty ?? ns;
+            return apiBase + $"/api/v1/namespaces/{podNs}/pods/{podName}:{port}/proxy";
+        }
+
+        // Fallback: proxy through the Service so the API server selects a healthy endpoint.
+        string? svc = await FindLokiServiceNameAsync(k8s, info.Config, ct);
+        if (svc is not null)
+            return apiBase + $"/api/v1/namespaces/{ns}/services/{svc}:{port}/proxy";
+
+        throw new InvalidOperationException(
+            $"No reachable Loki endpoint for service '{info.Config.ServiceName}' in namespace " +
+            $"'{ns}' on cluster '{info.ClusterName}'. The Loki pod may not be Ready yet.");
+    }
+
+    /// <summary>
+    /// Finds a non-headless Loki ClusterIP service exposing the query port, for service-proxy
+    /// fallback. Tries the configured name first, then scans for any "loki" service on that port.
+    /// </summary>
+    private async Task<string?> FindLokiServiceNameAsync(
+        Kubernetes k8s, LokiConfig config, CancellationToken ct)
+    {
+        try
+        {
+            await k8s.CoreV1.ReadNamespacedServiceAsync(config.ServiceName, config.Namespace, cancellationToken: ct);
+            return config.ServiceName;
+        }
+        catch (k8s.Autorest.HttpOperationException ex)
+            when (ex.Response.StatusCode == System.Net.HttpStatusCode.NotFound) { }
+
+        V1ServiceList services = await k8s.CoreV1.ListNamespacedServiceAsync(config.Namespace, cancellationToken: ct);
+        V1Service? match = services.Items
+            .Where(s => s.Metadata.Name.Contains("loki", StringComparison.OrdinalIgnoreCase))
+            // Skip headless services — the API server can't proxy to ClusterIP: None.
+            .Where(s => !string.Equals(s.Spec?.ClusterIP, "None", StringComparison.OrdinalIgnoreCase))
+            // Match the query port (3100) — naturally excludes gateway (80), canary (3500), memberlist (7946).
+            .Where(s => s.Spec?.Ports?.Any(p => p.Port == config.ServicePort) ?? false)
+            .OrderBy(s => s.Metadata.Name)
+            .FirstOrDefault();
+
+        return match?.Metadata.Name;
     }
 
     private async Task<V1EndpointAddress?> FindLokiEndpointAsync(
