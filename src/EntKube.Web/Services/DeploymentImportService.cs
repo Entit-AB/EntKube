@@ -57,9 +57,14 @@ public class DeploymentImportService(
         Kubernetes client = CreateClient(cluster.Kubeconfig);
         HashSet<string> boundPvNames = new(StringComparer.Ordinal);
 
+        // Secrets EntKube already syncs from the vault to this cluster, keyed "name|namespace".
+        // A live secret matching one of these is EntKube's own — recognize it instead of
+        // re-importing it (covers secrets synced before the managed-by label existed).
+        IReadOnlySet<string> managedTargets = await GetManagedSecretTargetsAsync(cluster, ct);
+
         foreach (string ns in preview.Namespaces)
         {
-            await ScanNamespaceAsync(client, ns, preview, boundPvNames, ct);
+            await ScanNamespaceAsync(client, ns, preview, boundPvNames, managedTargets, ct);
         }
 
         // Pull in only the PersistentVolumes bound to the PVCs we discovered.
@@ -85,7 +90,8 @@ public class DeploymentImportService(
     }
 
     private async Task ScanNamespaceAsync(
-        Kubernetes client, string ns, ImportPreview preview, HashSet<string> boundPvNames, CancellationToken ct)
+        Kubernetes client, string ns, ImportPreview preview, HashSet<string> boundPvNames,
+        IReadOnlySet<string> managedTargets, CancellationToken ct)
     {
         // ── Workloads ──
         await SafeAsync(preview, ns, "deployments", async () =>
@@ -203,7 +209,7 @@ public class DeploymentImportService(
         }
 
         // ── Secrets + ExternalSecret hints (→ vault, never manifests) ──
-        await ScanSecretsAsync(client, ns, preview, ct);
+        await ScanSecretsAsync(client, ns, preview, managedTargets, ct);
     }
 
     /// <summary>
@@ -211,7 +217,9 @@ public class DeploymentImportService(
     /// <see cref="DetectedSecret"/> entries. An ExternalSecret's target Secret is
     /// preferred — the plain Secret it produces is not imported twice.
     /// </summary>
-    private async Task ScanSecretsAsync(Kubernetes client, string ns, ImportPreview preview, CancellationToken ct)
+    private async Task ScanSecretsAsync(
+        Kubernetes client, string ns, ImportPreview preview,
+        IReadOnlySet<string> managedTargets, CancellationToken ct)
     {
         Dictionary<string, V1Secret> secretsByName = new(StringComparer.Ordinal);
 
@@ -286,19 +294,42 @@ public class DeploymentImportService(
                 continue;
             }
 
+            // Already an EntKube vault secret synced to this name/namespace — recognize it
+            // rather than re-importing a duplicate (the live Secret may predate the
+            // managed-by label, so we match against the vault's recorded sync targets).
+            if (managedTargets.Contains($"{name}|{ns}"))
+            {
+                preview.SkippedSecrets.Add(new SkippedSecret
+                {
+                    Name = name,
+                    Namespace = ns,
+                    Reason = "already an EntKube vault secret (this is its Kubernetes sync target)"
+                });
+                continue;
+            }
+
+            // Image-pull secrets become registry credentials, not opaque vault secrets.
+            // Detect by type OR by the presence of the dockerconfig data key — some charts
+            // create the secret as Opaque (or untyped) with a .dockerconfigjson payload.
+            // Checked before the controller-managed guard so a pull secret that carries an
+            // ownerReference still becomes a registry credential (these never auto-push).
+            bool isDockerConfig =
+                secret.Type is "kubernetes.io/dockerconfigjson" or "kubernetes.io/dockercfg"
+                || (secret.Data?.ContainsKey(".dockerconfigjson") ?? false)
+                || (secret.Data?.ContainsKey(".dockercfg") ?? false);
+
+            if (isDockerConfig)
+            {
+                AddRegistryCredentials(secret, name, ns, preview);
+                continue;
+            }
+
             // Skip secrets that another controller owns/derives (ExternalSecret target,
             // cert-manager Certificate, any ownerReference). These are recreated by their
             // controller, so EntKube must not adopt them — even if the CR wasn't discovered.
             if (IsControllerManaged(secret, out string reason))
             {
                 preview.SkippedSecrets.Add(new SkippedSecret { Name = name, Namespace = ns, Reason = reason });
-                continue;
-            }
-
-            // Image-pull secrets become registry credentials, not opaque vault secrets.
-            if (secret.Type is "kubernetes.io/dockerconfigjson" or "kubernetes.io/dockercfg")
-            {
-                AddRegistryCredentials(secret, name, ns, preview);
                 continue;
             }
 
@@ -322,6 +353,34 @@ public class DeploymentImportService(
             DetectPostgres($"Secret {name}", detected.Values, preview);
             preview.Secrets.Add(detected);
         }
+    }
+
+    /// <summary>
+    /// Returns the set of Kubernetes Secrets this tenant's vault already syncs to the
+    /// cluster, keyed "secretName|namespace". A live Secret matching one of these is
+    /// EntKube's own sync output, so the importer recognizes it instead of creating a
+    /// duplicate vault secret. Reliable even for secrets synced before the managed-by
+    /// label was introduced.
+    /// </summary>
+    private async Task<IReadOnlySet<string>> GetManagedSecretTargetsAsync(
+        KubernetesCluster cluster, CancellationToken ct)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<(string? Name, string? Namespace)> targets = await db.Set<VaultSecret>()
+            .Where(s => s.Vault.TenantId == cluster.TenantId
+                && s.SyncToKubernetes
+                && s.KubernetesSecretName != null
+                && (s.KubernetesClusterId == cluster.Id || s.KubernetesClusterId == null))
+            .Select(s => new ValueTuple<string?, string?>(s.KubernetesSecretName, s.KubernetesNamespace))
+            .ToListAsync(ct);
+
+        HashSet<string> set = new(StringComparer.Ordinal);
+        foreach ((string? secretName, string? secretNs) in targets)
+        {
+            set.Add($"{secretName}|{secretNs ?? "default"}");
+        }
+        return set;
     }
 
     /// <summary>
