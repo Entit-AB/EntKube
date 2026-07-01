@@ -260,7 +260,7 @@ public class ComponentLifecycleService(
 
         // Look up the catalog entry to find subchart toggle fields.
 
-        CatalogEntry? entry = ComponentCatalog.GetByKey(component.Name);
+        CatalogEntry? entry = ComponentCatalog.ResolveForComponent(component.Name, component.HelmChartName);
 
         if (entry is null)
         {
@@ -392,7 +392,7 @@ public class ComponentLifecycleService(
             .FirstOrDefaultAsync(c => c.Id == componentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
-        CatalogEntry? entry = ComponentCatalog.GetByKey(component.Name);
+        CatalogEntry? entry = ComponentCatalog.ResolveForComponent(component.Name, component.HelmChartName);
 
         if (entry is null)
         {
@@ -667,7 +667,7 @@ public class ComponentLifecycleService(
 
         // Catalog-registered components keep their key as the component Name, so we can
         // look the entry back up for an extended install timeout (heavy/DaemonSet charts).
-        string installTimeout = ComponentCatalog.GetByKey(component.Name)?.InstallTimeout ?? "10m0s";
+        string installTimeout = ComponentCatalog.ResolveForComponent(component.Name, component.HelmChartName)?.InstallTimeout ?? "10m0s";
 
         return new HelmCommand
         {
@@ -875,7 +875,7 @@ public class ComponentLifecycleService(
     private async Task<string> SubstituteManifestPlaceholdersAsync(
         string manifestYaml, ClusterComponent component, CancellationToken ct)
     {
-        CatalogEntry? catalog = ComponentCatalog.GetByKey(component.Name);
+        CatalogEntry? catalog = ComponentCatalog.ResolveForComponent(component.Name, component.HelmChartName);
         if (catalog is null)
             return manifestYaml;
 
@@ -908,7 +908,7 @@ public class ComponentLifecycleService(
     {
         // Look up the catalog entry to know which fields are secret-backed.
 
-        CatalogEntry? catalog = ComponentCatalog.GetByKey(component.Name);
+        CatalogEntry? catalog = ComponentCatalog.ResolveForComponent(component.Name, component.HelmChartName);
 
         if (catalog is null)
         {
@@ -1009,7 +1009,7 @@ public class ComponentLifecycleService(
 
         // Build a lookup of secret name → FormField so we can apply transformations
         // (e.g. BcryptOnSync) before writing to the K8s Secret.
-        CatalogEntry? catalog = ComponentCatalog.GetByKey(component.Name);
+        CatalogEntry? catalog = ComponentCatalog.ResolveForComponent(component.Name, component.HelmChartName);
         Dictionary<string, ComponentFormField> secretFieldsByName = catalog?.FormFields
             .Where(f => f.StoreAsSecret)
             .ToDictionary(f => f.SecretName ?? f.Key, f => f, StringComparer.OrdinalIgnoreCase)

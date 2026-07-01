@@ -47,6 +47,16 @@ public class CatalogEntry
     /// <summary>Default namespace where this should be deployed.</summary>
     public required string DefaultNamespace { get; init; }
 
+    /// <summary>
+    /// CRD names in "plural.group" form (e.g. "rabbitmqclusters.rabbitmq.com") whose
+    /// presence on a cluster indicates this component is already installed. Used by the
+    /// component scan to detect operators installed from raw manifests (ComponentType
+    /// "ManifestUrl", e.g. via <c>kubectl apply</c> or Terraform) — these leave no
+    /// "owner=helm" release secret, so the Helm scan can't see them. Detection succeeds
+    /// if ANY listed CRD is present.
+    /// </summary>
+    public IReadOnlyList<string> DetectionCrds { get; init; } = [];
+
     /// <summary>Default release name for Helm.</summary>
     public string? DefaultReleaseName { get; init; }
 
@@ -1657,6 +1667,7 @@ public static class ComponentCatalog
             HelmChartName = "",
             DefaultNamespace = "rabbitmq-system",
             DefaultReleaseName = "rabbitmq-cluster-operator",
+            DetectionCrds = ["rabbitmqclusters.rabbitmq.com"],
             FormFields = [],
             DefaultValues = ""
         },
@@ -1673,6 +1684,17 @@ public static class ComponentCatalog
             HelmChartName = "",
             DefaultNamespace = "rabbitmq-system",
             DefaultReleaseName = "rabbitmq-topology-operator",
+            // The topology operator registers the messaging-topology CRDs. Any one of
+            // these being present means the operator is installed.
+            DetectionCrds =
+            [
+                "queues.rabbitmq.com",
+                "exchanges.rabbitmq.com",
+                "bindings.rabbitmq.com",
+                "users.rabbitmq.com",
+                "vhosts.rabbitmq.com",
+                "permissions.rabbitmq.com"
+            ],
             Dependencies = ["rabbitmq-cluster-operator", "cert-manager"],
             FormFields = [],
             DefaultValues = ""
@@ -2738,6 +2760,20 @@ public static class ComponentCatalog
     public static CatalogEntry? GetByKey(string key)
     {
         return Entries.FirstOrDefault(e => string.Equals(e.Key, key, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Resolves the catalog entry for a stored component. Components registered from
+    /// the catalog store the catalog Key as their name, so <see cref="GetByKey"/>
+    /// matches directly. Scan-imported components store the Helm release name instead
+    /// (e.g. "cnpg" rather than "cloudnative-pg"), so we fall back to
+    /// <see cref="FindByRelease"/> — matching on release/chart name. This keeps title,
+    /// icon, form fields, install timeout, and other catalog-derived behaviour
+    /// consistent regardless of how the component was added. Returns null if unknown.
+    /// </summary>
+    public static CatalogEntry? ResolveForComponent(string componentName, string? helmChartName)
+    {
+        return GetByKey(componentName) ?? FindByRelease(componentName, helmChartName);
     }
 
     /// <summary>

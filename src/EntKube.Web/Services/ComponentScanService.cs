@@ -38,6 +38,30 @@ public class DiscoveredHelmRelease
 }
 
 /// <summary>
+/// A manifest-installed catalog component discovered on a cluster by CRD probing
+/// rather than by reading Helm secrets. Represents operators applied from raw
+/// manifests (e.g. via kubectl/Terraform) that the Helm scan cannot see because
+/// they leave no "owner=helm" release secret.
+/// </summary>
+public class DiscoveredManifestComponent
+{
+    /// <summary>Catalog entry key (e.g. "rabbitmq-cluster-operator").</summary>
+    public required string CatalogKey { get; set; }
+
+    /// <summary>Human-friendly display name from the catalog.</summary>
+    public required string DisplayName { get; set; }
+
+    /// <summary>Namespace the catalog expects this component in (its default).</summary>
+    public required string Namespace { get; set; }
+
+    /// <summary>The CRD whose presence triggered detection (e.g. "rabbitmqclusters.rabbitmq.com").</summary>
+    public required string DetectedVia { get; set; }
+
+    /// <summary>True if a ClusterComponent for this catalog key already exists on the cluster.</summary>
+    public bool AlreadyTracked { get; set; }
+}
+
+/// <summary>
 /// Scans a Kubernetes cluster for installed Helm releases by reading the Helm
 /// storage secrets. Helm 3 stores release state as Kubernetes Secrets with the
 /// label "owner=helm" in the release's target namespace.
@@ -946,6 +970,168 @@ public class ComponentScanService(
                 await vaultService.SetComponentSecretAsync(tenantId, component.Id, secretName, value, ct);
             }
         }
+    }
+
+    /// <summary>
+    /// Scans for catalog components that were installed from raw manifests (catalog
+    /// ComponentType "ManifestUrl") rather than Helm — e.g. the RabbitMQ operators,
+    /// which Terraform/kubectl applies directly. These leave no "owner=helm" release
+    /// secret, so <see cref="ScanHelmReleasesAsync"/> cannot see them.
+    ///
+    /// Detection is by CRD presence: a catalog entry is considered installed if any of
+    /// its <see cref="CatalogEntry.DetectionCrds"/> exists on the cluster. Returns the
+    /// discovered components with an AlreadyTracked flag mirroring the Helm scan.
+    /// </summary>
+    public async Task<List<DiscoveredManifestComponent>> ScanManifestComponentsAsync(
+        KubernetesCluster cluster, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        {
+            return [];
+        }
+
+        Kubernetes client;
+
+        try
+        {
+            client = CreateClient(cluster.Kubeconfig);
+        }
+        catch
+        {
+            return [];
+        }
+
+        // Existing tracked names, so we can flag components already registered.
+        // Mirror the Helm scan: match on both Name (catalog key) and ReleaseName.
+
+        List<ClusterComponent> existingComponents = await vaultService.GetComponentsAsync(cluster.Id, ct);
+
+        HashSet<string> trackedNames = new(StringComparer.OrdinalIgnoreCase);
+        foreach (ClusterComponent c in existingComponents)
+        {
+            trackedNames.Add(c.Name);
+            if (!string.IsNullOrEmpty(c.ReleaseName))
+            {
+                trackedNames.Add(c.ReleaseName);
+            }
+        }
+
+        // Cache CRD lookups — different catalog entries may probe the same CRD, and a
+        // missing CRD returns 404 (thrown) which we don't want to repeat.
+
+        Dictionary<string, bool> crdPresent = new(StringComparer.OrdinalIgnoreCase);
+
+        async Task<bool> CrdExistsAsync(string crd)
+        {
+            if (crdPresent.TryGetValue(crd, out bool cached))
+            {
+                return cached;
+            }
+
+            bool present;
+
+            try
+            {
+                await client.ApiextensionsV1.ReadCustomResourceDefinitionAsync(crd, cancellationToken: ct);
+                present = true;
+            }
+            catch
+            {
+                // 404 (CRD absent) or any transient error — treat as not present.
+                present = false;
+            }
+
+            crdPresent[crd] = present;
+            return present;
+        }
+
+        List<DiscoveredManifestComponent> found = [];
+
+        foreach (CatalogEntry entry in ComponentCatalog.Entries)
+        {
+            if (entry.DetectionCrds.Count == 0)
+            {
+                continue;
+            }
+
+            string? matchedCrd = null;
+
+            foreach (string crd in entry.DetectionCrds)
+            {
+                if (await CrdExistsAsync(crd))
+                {
+                    matchedCrd = crd;
+                    break;
+                }
+            }
+
+            if (matchedCrd is null)
+            {
+                continue;
+            }
+
+            bool tracked = trackedNames.Contains(entry.Key)
+                || (!string.IsNullOrEmpty(entry.DefaultReleaseName) && trackedNames.Contains(entry.DefaultReleaseName));
+
+            found.Add(new DiscoveredManifestComponent
+            {
+                CatalogKey = entry.Key,
+                DisplayName = entry.DisplayName,
+                Namespace = entry.DefaultNamespace,
+                DetectedVia = matchedCrd,
+                AlreadyTracked = tracked
+            });
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// Tracks a manifest-installed component discovered by
+    /// <see cref="ScanManifestComponentsAsync"/>, creating (or updating) a
+    /// ClusterComponent with Status=Installed so the rest of the platform recognises it.
+    /// Idempotent: re-tracking an existing component just refreshes its status.
+    /// </summary>
+    public async Task<ClusterComponent> ImportManifestComponentAsync(
+        KubernetesCluster cluster, DiscoveredManifestComponent discovered, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        CatalogEntry? catalog = ComponentCatalog.GetByKey(discovered.CatalogKey);
+
+        // Match existing by the catalog key (stored as ClusterComponent.Name), which is
+        // how manifest components are always registered.
+
+        ClusterComponent? existing = await db.ClusterComponents
+            .FirstOrDefaultAsync(c => c.ClusterId == cluster.Id && c.Name == discovered.CatalogKey, ct);
+
+        if (existing is not null)
+        {
+            existing.Status = ComponentStatus.Installed;
+            existing.Namespace = discovered.Namespace;
+            existing.InstalledAt ??= DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+            return existing;
+        }
+
+        ClusterComponent component = new()
+        {
+            Id = Guid.NewGuid(),
+            ClusterId = cluster.Id,
+            Name = discovered.CatalogKey,
+            ComponentType = catalog?.ComponentType ?? "ManifestUrl",
+            Status = ComponentStatus.Installed,
+            Namespace = discovered.Namespace,
+            HelmRepoUrl = catalog?.HelmRepoUrl,
+            ReleaseName = catalog?.DefaultReleaseName,
+            InstalledAt = DateTime.UtcNow,
+            CreatedAt = DateTime.UtcNow
+        };
+
+        db.ClusterComponents.Add(component);
+        await db.SaveChangesAsync(ct);
+
+        return component;
     }
 
     /// <summary>
