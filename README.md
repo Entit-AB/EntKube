@@ -76,9 +76,6 @@ Replace `entit.azurecr.io/entkube` with your actual registry and image path.
 Copy `.env.example` to `.env` and fill in the required values, then authenticate with the registry and start the stack:
 
 ```bash
-# Authenticate with the container registry (once per machine / token expiry)
-docker login entit.azurecr.io -u $REGISTRY_USERNAME -p $REGISTRY_PASSWORD
-
 docker compose up -d
 ```
 
