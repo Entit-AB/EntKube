@@ -73,7 +73,7 @@ Replace `entit.azurecr.io/entkube` with your actual registry and image path.
 
 ### Run with Docker Compose
 
-Copy `.env.example` to `.env` and fill in the required values, then authenticate with the registry and start the stack:
+Copy `.env.example` to `.env` and fill in the required values, then start the stack:
 
 ```bash
 docker compose up -d
