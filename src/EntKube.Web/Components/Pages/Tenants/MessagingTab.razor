@@ -256,9 +256,7 @@
                                                     <td class="align-middle fw-semibold">@v.VhostName</td>
                                                     <td class="align-middle text-muted font-monospace">@v.K8sName</td>
                                                     <td class="align-middle text-end">
-                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteVhost(cluster, v.K8sName)">
-                                                            <i class="bi bi-trash"></i>
-                                                        </button>
+                                                        @TopoDeleteBtn($"vhost:{v.K8sName}", () => DeleteVhost(cluster, v.K8sName))
                                                     </td>
                                                 </tr>
                                             }
@@ -334,9 +332,7 @@
                                                                 @onclick="() => PrepareAppLink(cluster, q.QueueName, null, q.Vhost)">
                                                             <i class="bi bi-link-45deg me-1"></i>Link to App
                                                         </button>
-                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteQueue(cluster, q.K8sName)">
-                                                            <i class="bi bi-trash"></i>
-                                                        </button>
+                                                        @TopoDeleteBtn($"queue:{q.K8sName}", () => DeleteQueue(cluster, q.K8sName))
                                                     </td>
                                                 </tr>
                                             }
@@ -413,9 +409,7 @@
                                                                 @onclick="() => PrepareAppLink(cluster, null, ex.ExchangeName, ex.Vhost)">
                                                             <i class="bi bi-link-45deg me-1"></i>Link to App
                                                         </button>
-                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteExchange(cluster, ex.K8sName)">
-                                                            <i class="bi bi-trash"></i>
-                                                        </button>
+                                                        @TopoDeleteBtn($"exchange:{ex.K8sName}", () => DeleteExchange(cluster, ex.K8sName))
                                                     </td>
                                                 </tr>
                                             }
@@ -560,12 +554,10 @@
                                                     <td class="align-middle text-muted font-monospace">@u.K8sName</td>
                                                     <td class="align-middle text-end">
                                                         <button class="btn btn-sm btn-outline-warning me-1"
-                                                                @onclick="() => PreparePermission(u.Username)">
+                                                                @onclick="() => PreparePermission(cluster, u.Username)">
                                                             <i class="bi bi-shield-check me-1"></i>Permissions
                                                         </button>
-                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteUser(cluster, u.K8sName)">
-                                                            <i class="bi bi-trash"></i>
-                                                        </button>
+                                                        @TopoDeleteBtn($"user:{u.K8sName}", () => DeleteUser(cluster, u.K8sName))
                                                     </td>
                                                 </tr>
                                             }
@@ -746,6 +738,35 @@
                                             <i class="bi bi-cloud-arrow-up me-1"></i>Export Now
                                         </button>
                                     </div>
+
+                                    @* ── Scheduled backups ── *@
+                                    <div class="card border-secondary mb-3">
+                                        <div class="card-body py-2">
+                                            <div class="row g-2 align-items-end">
+                                                <div class="col-md-5">
+                                                    <label class="form-label small mb-1">Backup Schedule (cron)</label>
+                                                    <input class="form-control form-control-sm" @bind="scheduleInput"
+                                                           placeholder="0 2 * * *  (empty = disabled)" />
+                                                    <div class="form-text small">Deploys a CronJob that exports definitions to S3. 5-field cron.</div>
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <label class="form-label small mb-1">Keep last</label>
+                                                    <input type="number" class="form-control form-control-sm" @bind="maxBackupsInput" min="1" />
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <button class="btn btn-sm btn-secondary" @onclick="() => SaveSchedule(cluster)" disabled="@savingSchedule">
+                                                        @if (savingSchedule) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                        <i class="bi bi-clock me-1"></i>Save Schedule
+                                                    </button>
+                                                    @if (!string.IsNullOrEmpty(cluster.BackupSchedule))
+                                                    {
+                                                        <span class="badge bg-info-subtle text-info border border-info-subtle ms-2">@cluster.BackupSchedule</span>
+                                                    }
+                                                </div>
+                                            </div>
+                                            @if (!string.IsNullOrEmpty(scheduleError)) { <div class="alert alert-danger py-1 small mt-2 mb-0">@scheduleError</div> }
+                                        </div>
+                                    </div>
                                 }
 
                                 @if (!string.IsNullOrEmpty(backupError))
@@ -870,8 +891,50 @@
 
                                 <hr class="my-3" />
 
-                                <div class="d-flex justify-content-end">
-                                    <button class="btn btn-sm btn-outline-danger" @onclick="() => ConfirmDeleteCluster(cluster)">
+                                @* ── Cluster settings (edit) ── *@
+                                @if (editClusterId == cluster.Id)
+                                {
+                                    <div class="card border-warning mb-3"><div class="card-body py-2">
+                                        <h6 class="small fw-semibold mb-2"><i class="bi bi-pencil me-1"></i>Edit Cluster</h6>
+                                        <div class="row g-2">
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Version</label>
+                                                <input class="form-control form-control-sm" @bind="editVersion" />
+                                            </div>
+                                            <div class="col-md-2">
+                                                <label class="form-label small mb-1">Replicas</label>
+                                                <input type="number" class="form-control form-control-sm" @bind="editReplicas" min="1" max="9" />
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Storage Size</label>
+                                                <input class="form-control form-control-sm" @bind="editStorageSize" />
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Storage Class</label>
+                                                <input class="form-control form-control-sm" @bind="editStorageClass" />
+                                            </div>
+                                        </div>
+                                        <div class="form-text small mt-1">Storage can only grow; the operator applies a rolling update.</div>
+                                        @if (!string.IsNullOrEmpty(editError)) { <div class="alert alert-danger py-1 small mt-2 mb-0">@editError</div> }
+                                        <div class="mt-2 d-flex gap-1">
+                                            <button class="btn btn-sm btn-warning" @onclick="() => SaveClusterEdit(cluster)" disabled="@savingEdit">
+                                                @if (savingEdit) { <span class="spinner-border spinner-border-sm me-1"></span> }Save Changes
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => editClusterId = null">Cancel</button>
+                                        </div>
+                                    </div></div>
+                                }
+
+                                <div class="d-flex gap-2">
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => RefreshClusterStatus(cluster)"
+                                            disabled="@(refreshingStatus == cluster.Id)">
+                                        @if (refreshingStatus == cluster.Id) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        <i class="bi bi-arrow-repeat me-1"></i>Refresh Status
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-warning" @onclick="() => ShowClusterEdit(cluster)">
+                                        <i class="bi bi-pencil me-1"></i>Edit Cluster
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-danger ms-auto" @onclick="() => ConfirmDeleteCluster(cluster)">
                                         <i class="bi bi-trash me-1"></i>Delete Cluster
                                     </button>
                                 </div>
@@ -1036,6 +1099,25 @@
     private RabbitMQCluster? deleteTarget;
     private bool deleting;
 
+    // Cluster edit / status refresh
+    private Guid? editClusterId;
+    private string editVersion = "";
+    private int editReplicas;
+    private string editStorageSize = "";
+    private string? editStorageClass;
+    private bool savingEdit;
+    private string? editError;
+    private Guid? refreshingStatus;
+
+    // Scheduled backups
+    private string scheduleInput = "";
+    private int maxBackupsInput = 10;
+    private bool savingSchedule;
+    private string? scheduleError;
+
+    // Inline topology delete confirmation (key = "kind:k8sName")
+    private string? pendingTopoDelete;
+
     // ── Lifecycle ──────────────────────────────────────────────────────────────
 
     protected override async Task OnInitializedAsync() => await LoadAsync();
@@ -1121,6 +1203,91 @@
 
     private void ConfirmDeleteCluster(RabbitMQCluster cluster) => deleteTarget = cluster;
 
+    private void ShowClusterEdit(RabbitMQCluster cluster)
+    {
+        editClusterId = cluster.Id;
+        editVersion = cluster.RabbitMQVersion;
+        editReplicas = cluster.Replicas;
+        editStorageSize = cluster.StorageSize;
+        editStorageClass = cluster.StorageClass;
+        editError = null;
+    }
+
+    private async Task SaveClusterEdit(RabbitMQCluster cluster)
+    {
+        savingEdit = true;
+        editError = null;
+        try
+        {
+            await RabbitMQService.UpdateClusterAsync(TenantId, cluster.Id,
+                editVersion.Trim(), editReplicas, editStorageSize.Trim(),
+                string.IsNullOrWhiteSpace(editStorageClass) ? null : editStorageClass!.Trim());
+            editClusterId = null;
+            await LoadAsync();
+        }
+        catch (Exception ex) { editError = ex.Message; }
+        finally { savingEdit = false; }
+    }
+
+    private async Task RefreshClusterStatus(RabbitMQCluster cluster)
+    {
+        refreshingStatus = cluster.Id;
+        try
+        {
+            await RabbitMQService.ReconcileStatusAsync(TenantId, cluster.Id);
+            await LoadAsync();
+        }
+        catch { }
+        finally { refreshingStatus = null; }
+    }
+
+    private async Task SaveSchedule(RabbitMQCluster cluster)
+    {
+        savingSchedule = true;
+        scheduleError = null;
+        try
+        {
+            await RabbitMQService.UpdateBackupScheduleAsync(
+                TenantId, cluster.Id,
+                string.IsNullOrWhiteSpace(scheduleInput) ? null : scheduleInput.Trim(),
+                maxBackupsInput);
+            await LoadAsync();
+        }
+        catch (Exception ex) { scheduleError = ex.Message; }
+        finally { savingSchedule = false; }
+    }
+
+    // Inline delete-confirm button shared by topology tables (vhosts/queues/exchanges/users).
+    private RenderFragment TopoDeleteBtn(string key, Func<Task> onConfirm) => builder =>
+    {
+        if (pendingTopoDelete == key)
+        {
+            builder.OpenElement(0, "button");
+            builder.AddAttribute(1, "class", "btn btn-sm btn-danger me-1");
+            builder.AddAttribute(2, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this,
+                async () => { await onConfirm(); pendingTopoDelete = null; }));
+            builder.AddContent(3, "Confirm");
+            builder.CloseElement();
+
+            builder.OpenElement(4, "button");
+            builder.AddAttribute(5, "class", "btn btn-sm btn-outline-secondary");
+            builder.AddAttribute(6, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, () => pendingTopoDelete = null));
+            builder.AddContent(7, "Cancel");
+            builder.CloseElement();
+        }
+        else
+        {
+            builder.OpenElement(0, "button");
+            builder.AddAttribute(1, "class", "btn btn-sm btn-outline-danger");
+            builder.AddAttribute(2, "title", "Delete");
+            builder.AddAttribute(3, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, () => pendingTopoDelete = key));
+            builder.OpenElement(4, "i");
+            builder.AddAttribute(5, "class", "bi bi-trash");
+            builder.CloseElement();
+            builder.CloseElement();
+        }
+    };
+
     private async Task DeleteCluster()
     {
         if (deleteTarget is null) return;
@@ -1161,7 +1328,11 @@
                 await LoadAppLinks(clusterId);
                 break;
             case "backup":
-                await LoadBackupsAsync(clusters.First(c => c.Id == clusterId));
+                RabbitMQCluster bc = clusters.First(c => c.Id == clusterId);
+                scheduleInput = bc.BackupSchedule ?? "";
+                maxBackupsInput = bc.MaxBackups;
+                scheduleError = null;
+                await LoadBackupsAsync(bc);
                 break;
             case "credentials":
                 await LoadCredentials(clusters.First(c => c.Id == clusterId));
@@ -1340,11 +1511,26 @@
         catch (Exception ex) { topologyError = ex.Message; }
     }
 
-    private void PreparePermission(string username)
+    private async Task PreparePermission(RabbitMQCluster cluster, string username)
     {
         permissionTargetUser = username;
         permVhost = "/"; permConfigure = ".*"; permWrite = ".*"; permRead = ".*";
         showPermissionForm = true;
+
+        // Pre-populate from an existing Permission CRD for this user, if any.
+        try
+        {
+            List<RabbitMQPermissionInfo> perms = await RabbitMQService.GetPermissionsAsync(TenantId, cluster.Id);
+            RabbitMQPermissionInfo? existing = perms.FirstOrDefault(p => p.User == username);
+            if (existing is not null)
+            {
+                permVhost = existing.Vhost;
+                permConfigure = existing.Configure;
+                permWrite = existing.Write;
+                permRead = existing.Read;
+            }
+        }
+        catch { /* fall back to defaults */ }
     }
 
     private async Task SetPermission(RabbitMQCluster cluster)

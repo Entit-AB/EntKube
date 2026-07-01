@@ -2476,6 +2476,66 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
             .ToListAsync(ct);
     }
 
+    // ── Kafka cluster secrets ────────────────────────────────────────────────────
+
+    public async Task<VaultSecret> SetKafkaClusterSecretAsync(
+        Guid tenantId, Guid clusterId, string name, string value, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+
+        VaultSecret? existing = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
+                && s.KafkaClusterId == clusterId
+                && s.Name == name, ct);
+
+        (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, value);
+
+        if (existing is not null)
+        {
+            await ArchiveVersionAsync(db, existing, ct);
+            existing.EncryptedValue = ciphertext;
+            existing.Nonce = nonce;
+            existing.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+            return existing;
+        }
+
+        SecretVault vault = (await GetVaultAsync(tenantId, ct))!;
+
+        VaultSecret secret = new()
+        {
+            Id = Guid.NewGuid(),
+            VaultId = vault.Id,
+            Name = name,
+            EncryptedValue = ciphertext,
+            Nonce = nonce,
+            KafkaClusterId = clusterId,
+            SyncToKubernetes = false
+        };
+
+        db.Set<VaultSecret>().Add(secret);
+        await db.SaveChangesAsync(ct);
+        return secret;
+    }
+
+    public async Task<string?> GetKafkaClusterSecretValueAsync(
+        Guid tenantId, Guid clusterId, string name, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        VaultSecret? secret = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
+                && s.KafkaClusterId == clusterId
+                && s.Name == name, ct);
+
+        if (secret is null) return null;
+
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+        return encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
+    }
+
     // ── VPN remote endpoint secrets ──────────────────────────────────────────────
 
     public async Task<VaultSecret> SetVpnRemoteEndpointSecretAsync(

@@ -1,0 +1,855 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject KafkaService KafkaService
+@inject TenantService TenantService
+
+@* ===========================================================================
+   Kafka Tab — Apache Kafka cluster management via the Strimzi operator.
+   Manages Kafka + KafkaNodePool CRs (KRaft), KafkaTopic and KafkaUser
+   (SCRAM-SHA-512 + simple ACLs) CRs, and app bindings that sync the bootstrap
+   address + SASL credentials into consuming app namespaces.
+   =========================================================================== *@
+
+<LoadingPanel Loading="@loading" LoadingText="Loading Kafka clusters…">
+@if (!loading)
+{
+    @* ── Operator availability badge ── *@
+    <div class="d-flex gap-2 mb-4 flex-wrap">
+        @if (operatorStatus?.OperatorAvailable == true)
+        {
+            <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2">
+                <i class="bi bi-hdd-stack me-1"></i>Strimzi Kafka Operator
+                @if (operatorStatus.OperatorClusterName is not null)
+                {
+                    <small class="ms-1 opacity-75">on @operatorStatus.OperatorClusterName</small>
+                }
+            </span>
+        }
+        else
+        {
+            <span class="badge bg-secondary-subtle text-secondary border px-3 py-2">
+                <i class="bi bi-hdd-stack me-1"></i>Strimzi Kafka Operator — not installed
+            </span>
+        }
+    </div>
+
+    <div class="mb-4">
+        <h5 class="d-flex align-items-center gap-2 mb-3">
+            <i class="bi bi-diagram-2 text-primary"></i>Kafka Clusters
+            <span class="badge bg-secondary rounded-pill">@clusters.Count</span>
+            <button class="btn btn-sm btn-secondary ms-auto" @onclick="ShowCreateForm"
+                    disabled="@(showCreateForm || operatorStatus?.OperatorAvailable != true)">
+                <i class="bi bi-plus-lg me-1"></i>Create Cluster
+            </button>
+        </h5>
+
+        @if (showCreateForm)
+        {
+            <div class="card shadow-sm mb-3 border-secondary">
+                <div class="card-header bg-secondary bg-opacity-10 d-flex align-items-center justify-content-between">
+                    <h6 class="mb-0"><i class="bi bi-plus-circle me-2"></i>New Kafka Cluster</h6>
+                    <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CancelCreate"><i class="bi bi-x-lg"></i></button>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label small">Cluster Name</label>
+                            <input class="form-control form-control-sm" @bind="createName" placeholder="kafka" />
+                            <div class="form-text small">DNS-safe, max 63 chars.</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">Kubernetes Cluster</label>
+                            <select class="form-select form-select-sm" @bind="createK8sClusterId">
+                                <option value="@Guid.Empty">Select cluster...</option>
+                                @foreach (KubernetesCluster k in allK8sClusters)
+                                {
+                                    <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Namespace</label>
+                            <input class="form-control form-control-sm" @bind="createNamespace" placeholder="kafka" />
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Brokers</label>
+                            <input type="number" class="form-control form-control-sm" @bind="createReplicas" min="1" max="9" step="1" />
+                            <div class="form-text small">3+ for HA</div>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">Kafka Version</label>
+                            <input class="form-control form-control-sm" @bind="createVersion" placeholder="4.3.0" />
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">Storage / Broker</label>
+                            <input class="form-control form-control-sm" @bind="createStorageSize" placeholder="20Gi" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Storage Class (optional)</label>
+                            <input class="form-control form-control-sm" @bind="createStorageClass" placeholder="default" />
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">CPU Request</label>
+                            <input class="form-control form-control-sm" @bind="createCpuRequest" placeholder="500m" />
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">Memory Request</label>
+                            <input class="form-control form-control-sm" @bind="createMemoryRequest" placeholder="1Gi" />
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">Memory Limit</label>
+                            <input class="form-control form-control-sm" @bind="createMemoryLimit" placeholder="2Gi" />
+                        </div>
+                        <div class="col-md-12 d-flex align-items-end">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" @bind="createAuthEnabled" id="kafkaAuthEnabled" />
+                                <label class="form-check-label small" for="kafkaAuthEnabled">
+                                    Enable authentication (TLS + SCRAM-SHA-512) — required for per-app users/ACLs.
+                                    Uncheck for a plaintext internal listener (rely on NetworkPolicy).
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    @if (createError is not null)
+                    {
+                        <div class="alert alert-danger mt-3 py-2 small">@createError</div>
+                    }
+
+                    <div class="mt-3 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="CreateCluster" disabled="@creating">
+                            @if (creating) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Create Cluster
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelCreate">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @foreach (KafkaCluster cluster in clusters)
+        {
+            bool expanded = expandedId == cluster.Id;
+
+            <div class="card shadow-sm mb-3">
+                <div class="card-header d-flex align-items-center gap-2 py-2"
+                     style="cursor:pointer" @onclick="() => ToggleCluster(cluster.Id)">
+                    <i class="bi bi-diagram-2 text-primary"></i>
+                    <strong>@cluster.Name</strong>
+                    <small class="text-muted ms-1">@cluster.Namespace · @cluster.KubernetesCluster.Name</small>
+                    <span class="badge @StatusBadgeClass(cluster.Status) ms-1">@cluster.Status</span>
+                    @if (cluster.AuthEnabled)
+                    {
+                        <span class="badge bg-info-subtle text-info border border-info-subtle ms-1">TLS + SCRAM</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-warning-subtle text-warning border border-warning-subtle ms-1">plaintext</span>
+                    }
+                    <small class="text-muted ms-auto">@cluster.Replicas brokers · @cluster.KafkaVersion · @cluster.StorageSize/broker</small>
+                    <i class="bi @(expanded ? "bi-chevron-up" : "bi-chevron-down") ms-2 text-muted"></i>
+                </div>
+
+                @if (cluster.LastError is not null && cluster.Status == KafkaClusterStatus.Failed)
+                {
+                    <div class="alert alert-danger m-2 py-2 small mb-0">@cluster.LastError</div>
+                }
+
+                @if (expanded)
+                {
+                    <div class="card-body pt-2">
+                        @* ── Details ── *@
+                        <dl class="row small mb-3">
+                            <dt class="col-sm-3">Brokers</dt>
+                            <dd class="col-sm-9">@cluster.Replicas (dual-role KRaft nodes)</dd>
+                            <dt class="col-sm-3">Kafka Version</dt>
+                            <dd class="col-sm-9">@cluster.KafkaVersion</dd>
+                            <dt class="col-sm-3">Bootstrap</dt>
+                            <dd class="col-sm-9"><code>@cluster.BootstrapAddress</code></dd>
+                            <dt class="col-sm-3">Storage / Broker</dt>
+                            <dd class="col-sm-9">@cluster.StorageSize @(cluster.StorageClass is not null ? $"({cluster.StorageClass})" : "")</dd>
+                            <dt class="col-sm-3">Created</dt>
+                            <dd class="col-sm-9">@cluster.CreatedAt.ToString("yyyy-MM-dd HH:mm") UTC</dd>
+                        </dl>
+
+                        @* ── Live pod status ── *@
+                        <div class="mb-3">
+                            <div class="d-flex align-items-center gap-2 mb-2">
+                                <small class="text-muted">Phase:</small>
+                                @if (loadingDetail && expandedId == cluster.Id)
+                                {
+                                    <span class="spinner-border spinner-border-sm"></span>
+                                }
+                                else
+                                {
+                                    <small>@(expandedDetail?.Phase ?? "—")</small>
+                                }
+                                <button class="btn btn-xs btn-sm btn-link p-0 ms-2" @onclick="() => RefreshDetail(cluster.Id)">
+                                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                                </button>
+                            </div>
+                            @if (expandedDetail?.Cluster.Id == cluster.Id && expandedDetail.Pods.Count > 0)
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>Pod</th><th>Role</th><th>Status</th><th>Ready</th><th>Restarts</th><th>Node</th></tr></thead>
+                                    <tbody>
+                                        @foreach (KafkaPodInfo pod in expandedDetail.Pods)
+                                        {
+                                            <tr>
+                                                <td><code>@pod.Name</code></td>
+                                                <td><span class="badge bg-secondary">@pod.Role</span></td>
+                                                <td>@pod.Status</td>
+                                                <td>
+                                                    @if (pod.Ready) { <i class="bi bi-check-circle-fill text-success"></i> }
+                                                    else { <i class="bi bi-clock text-warning"></i> }
+                                                </td>
+                                                <td>@pod.Restarts</td>
+                                                <td class="text-muted">@(pod.Node ?? "—")</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        @* ── Topics ── *@
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-collection me-1"></i>Topics</strong>
+                                <button class="btn btn-xs btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                        @onclick="() => ShowAddTopic(cluster.Id)">
+                                    <i class="bi bi-plus-lg me-1"></i>Add
+                                </button>
+                            </div>
+                            @if (addTopicClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Name</label>
+                                            <input class="form-control form-control-sm" @bind="topicName" placeholder="events" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Partitions</label>
+                                            <input type="number" class="form-control form-control-sm" @bind="topicPartitions" min="1" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Replicas</label>
+                                            <input type="number" class="form-control form-control-sm" @bind="topicReplicas" min="1" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Retention (h)</label>
+                                            <input type="number" class="form-control form-control-sm" @bind="topicRetentionHours" min="0" placeholder="∞" />
+                                        </div>
+                                        <div class="col-md-2 d-flex align-items-end gap-1">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => AddTopic(cluster.Id)"
+                                                    disabled="@string.IsNullOrWhiteSpace(topicName)">Add</button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => addTopicClusterId = null">Cancel</button>
+                                        </div>
+                                    </div>
+                                    @if (topicError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0">@topicError</div> }
+                                </div></div>
+                            }
+                            @{ List<KafkaTopic> topics = allTopics.TryGetValue(cluster.Id, out List<KafkaTopic>? tl) ? tl : []; }
+                            @if (topics.Count == 0) { <p class="text-muted small mb-0">No topics yet.</p> }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>Topic</th><th>Partitions</th><th>Replicas</th><th>Retention</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (KafkaTopic t in topics)
+                                        {
+                                            <tr>
+                                                <td><code>@t.Name</code></td>
+                                                <td>@t.Partitions</td>
+                                                <td>@t.Replicas</td>
+                                                <td class="text-muted">@(t.RetentionMs.HasValue ? $"{t.RetentionMs.Value / 3600000}h" : "default")</td>
+                                                <td>@RenderDeleteCell($"topic:{t.Id}", () => DeleteTopic(cluster.Id, t.Id))</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        @* ── Users (SCRAM + ACLs) ── *@
+                        @{ List<KafkaUser> users = allUsers.TryGetValue(cluster.Id, out List<KafkaUser>? ul) ? ul : []; }
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-person-badge me-1"></i>Users &amp; ACLs</strong>
+                                @if (cluster.AuthEnabled)
+                                {
+                                    <button class="btn btn-xs btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                            @onclick="() => ShowAddUser(cluster.Id)">
+                                        <i class="bi bi-plus-lg me-1"></i>Add
+                                    </button>
+                                }
+                            </div>
+                            @if (!cluster.AuthEnabled)
+                            {
+                                <p class="text-muted small mb-0">Authentication is disabled on this cluster — users/ACLs are unavailable.</p>
+                            }
+                            else
+                            {
+                                @if (addUserClusterId == cluster.Id)
+                                {
+                                    <div class="card border-primary mb-2"><div class="card-body py-2">
+                                        <div class="row g-2">
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Username</label>
+                                                <input class="form-control form-control-sm" @bind="userName" placeholder="app-producer" />
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Produce to (csv, * = all)</label>
+                                                <input class="form-control form-control-sm" @bind="userProducerTopics" placeholder="events,logs" />
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Consume from (csv, * = all)</label>
+                                                <input class="form-control form-control-sm" @bind="userConsumerTopics" placeholder="events" />
+                                            </div>
+                                            <div class="col-md-1 d-flex align-items-end">
+                                                <div class="form-check" title="Superuser (all ACLs)">
+                                                    <input class="form-check-input" type="checkbox" @bind="userSuperUser" id="kafkaSuper" />
+                                                    <label class="form-check-label small" for="kafkaSuper">Super</label>
+                                                </div>
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Consumer group (default *)</label>
+                                                <input class="form-control form-control-sm" @bind="userConsumerGroup" placeholder="*" />
+                                            </div>
+                                            <div class="col-md-8 d-flex align-items-end gap-1">
+                                                <button class="btn btn-sm btn-primary" @onclick="() => AddUser(cluster.Id)"
+                                                        disabled="@string.IsNullOrWhiteSpace(userName)">Add User</button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => addUserClusterId = null">Cancel</button>
+                                            </div>
+                                        </div>
+                                        @if (userError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0">@userError</div> }
+                                    </div></div>
+                                }
+                                @if (users.Count == 0) { <p class="text-muted small mb-0">No users yet.</p> }
+                                else
+                                {
+                                    <table class="table table-sm table-borderless small mb-0">
+                                        <thead class="text-muted"><tr><th>User</th><th>Produce</th><th>Consume</th><th>Group</th><th></th></tr></thead>
+                                        <tbody>
+                                            @foreach (KafkaUser u in users)
+                                            {
+                                                <tr>
+                                                    <td><code>@u.Username</code> @if (u.SuperUser) { <span class="badge bg-danger-subtle text-danger">super</span> }</td>
+                                                    <td class="text-muted">@(string.IsNullOrWhiteSpace(u.ProducerTopics) ? "—" : u.ProducerTopics)</td>
+                                                    <td class="text-muted">@(string.IsNullOrWhiteSpace(u.ConsumerTopics) ? "—" : u.ConsumerTopics)</td>
+                                                    <td class="text-muted">@(u.ConsumerGroup ?? "*")</td>
+                                                    <td>@RenderDeleteCell($"user:{u.Id}", () => DeleteUser(cluster.Id, u.Id))</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            }
+                        </div>
+
+                        @* ── App bindings ── *@
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-link-45deg me-1"></i>App Bindings</strong>
+                                <button class="btn btn-xs btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                        @onclick="() => ShowAddBinding(cluster)">
+                                    <i class="bi bi-plus-lg me-1"></i>Add
+                                </button>
+                            </div>
+                            @if (addBindingClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">App Deployment</label>
+                                            <select class="form-select form-select-sm" @bind="bindingDeploymentId">
+                                                <option value="@Guid.Empty">Select deployment...</option>
+                                                @foreach (AppDeployment dep in allDeployments)
+                                                {
+                                                    <option value="@dep.Id">@dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
+                                                }
+                                            </select>
+                                        </div>
+                                        @if (cluster.AuthEnabled)
+                                        {
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Kafka User</label>
+                                                <select class="form-select form-select-sm" @bind="bindingUserId">
+                                                    <option value="@Guid.Empty">Select user...</option>
+                                                    @foreach (KafkaUser u in (allUsers.TryGetValue(cluster.Id, out List<KafkaUser>? bu) ? bu : []))
+                                                    {
+                                                        <option value="@u.Id">@u.Username</option>
+                                                    }
+                                                </select>
+                                            </div>
+                                        }
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Secret Name</label>
+                                            <input class="form-control form-control-sm" @bind="bindingSecretName" placeholder="kafka" />
+                                        </div>
+                                        <div class="col-md-2 d-flex align-items-end gap-1">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => AddBinding(cluster)"
+                                                    disabled="@(bindingDeploymentId == Guid.Empty || string.IsNullOrWhiteSpace(bindingSecretName) || (cluster.AuthEnabled && bindingUserId == Guid.Empty))">
+                                                Bind
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => addBindingClusterId = null">Cancel</button>
+                                        </div>
+                                    </div>
+                                    @if (bindingError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0">@bindingError</div> }
+                                </div></div>
+                            }
+                            @{ List<KafkaBinding> binds = allBindings.TryGetValue(cluster.Id, out List<KafkaBinding>? bl) ? bl : []; }
+                            @if (binds.Count == 0) { <p class="text-muted small mb-0">No app bindings yet.</p> }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>App / Deployment</th><th>User</th><th>Secret</th><th>Last Synced</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (KafkaBinding bind in binds)
+                                        {
+                                            <tr>
+                                                <td>@bind.AppDeployment.App.Name <span class="text-muted">/</span> @bind.AppDeployment.Name</td>
+                                                <td class="text-muted">@(bind.KafkaUser?.Username ?? "—")</td>
+                                                <td><code>@bind.KubernetesSecretName</code></td>
+                                                <td class="text-muted">@(bind.LastSyncedAt.HasValue ? bind.LastSyncedAt.Value.ToString("yyyy-MM-dd HH:mm") : "Never")</td>
+                                                <td class="text-nowrap">
+                                                    <button class="btn btn-xs btn-sm btn-outline-secondary border-0 py-0" title="Re-sync"
+                                                            @onclick="() => SyncBinding(cluster.Id, bind.Id)">
+                                                        <i class="bi bi-arrow-repeat"></i>
+                                                    </button>
+                                                    @RenderDeleteCell($"binding:{bind.Id}", () => RemoveBinding(cluster.Id, bind.Id))
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        @* ── Edit form ── *@
+                        @if (editClusterId == cluster.Id)
+                        {
+                            <div class="card border-warning mb-3"><div class="card-body py-2">
+                                <h6 class="small fw-semibold mb-2"><i class="bi bi-pencil me-1"></i>Edit Cluster</h6>
+                                <div class="row g-2">
+                                    <div class="col-md-2">
+                                        <label class="form-label small mb-1">Brokers</label>
+                                        <input type="number" class="form-control form-control-sm" @bind="editReplicas" min="1" max="9" />
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small mb-1">Version</label>
+                                        <input class="form-control form-control-sm" @bind="editVersion" />
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small mb-1">Storage / Broker</label>
+                                        <input class="form-control form-control-sm" @bind="editStorageSize" />
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label small mb-1">Mem Request</label>
+                                        <input class="form-control form-control-sm" @bind="editMemoryRequest" placeholder="1Gi" />
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label small mb-1">Mem Limit</label>
+                                        <input class="form-control form-control-sm" @bind="editMemoryLimit" placeholder="2Gi" />
+                                    </div>
+                                </div>
+                                <div class="form-text small mt-1">Storage can only grow; reducing broker count may require partition reassignment.</div>
+                                @if (editError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0">@editError</div> }
+                                <div class="mt-2 d-flex gap-1">
+                                    <button class="btn btn-sm btn-warning" @onclick="() => SaveEdit(cluster.Id)" disabled="@savingEdit">
+                                        @if (savingEdit) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        Save Changes
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => editClusterId = null">Cancel</button>
+                                </div>
+                            </div></div>
+                        }
+
+                        @* ── Actions ── *@
+                        <div class="d-flex gap-2 border-top pt-3">
+                            <button class="btn btn-sm btn-outline-warning" @onclick="() => ShowEdit(cluster)">
+                                <i class="bi bi-pencil me-1"></i>Edit
+                            </button>
+
+                            @if (deleteTarget?.Id == cluster.Id)
+                            {
+                                <span class="small text-danger align-self-center ms-auto me-2">Delete cluster and all its data?</span>
+                                <button class="btn btn-sm btn-danger" @onclick="DeleteCluster" disabled="@deleting">
+                                    @if (deleting) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Confirm Delete
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => deleteTarget = null">Cancel</button>
+                            }
+                            else
+                            {
+                                <button class="btn btn-sm btn-outline-danger ms-auto" @onclick="() => deleteTarget = cluster">
+                                    <i class="bi bi-trash me-1"></i>Delete
+                                </button>
+                            }
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+
+        @if (clusters.Count == 0 && !showCreateForm)
+        {
+            <p class="text-muted">No Kafka clusters. Install the Strimzi Kafka Operator from the Components tab, then create a cluster here.</p>
+        }
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private List<KafkaCluster> clusters = [];
+    private List<KubernetesCluster> allK8sClusters = [];
+    private List<AppDeployment> allDeployments = [];
+    private KafkaOperatorStatus? operatorStatus;
+
+    private readonly Dictionary<Guid, List<KafkaTopic>> allTopics = [];
+    private readonly Dictionary<Guid, List<KafkaUser>> allUsers = [];
+    private readonly Dictionary<Guid, List<KafkaBinding>> allBindings = [];
+
+    // Create form
+    private bool showCreateForm;
+    private string createName = "";
+    private Guid createK8sClusterId;
+    private string createNamespace = "kafka";
+    private int createReplicas = 3;
+    private string createVersion = "4.3.0";
+    private string createStorageSize = "20Gi";
+    private string? createStorageClass;
+    private string? createCpuRequest;
+    private string? createMemoryRequest;
+    private string? createMemoryLimit;
+    private bool createAuthEnabled = true;
+    private bool creating;
+    private string? createError;
+
+    // Expand / detail
+    private Guid? expandedId;
+    private KafkaClusterDetail? expandedDetail;
+    private bool loadingDetail;
+
+    // Edit
+    private Guid? editClusterId;
+    private int editReplicas;
+    private string editVersion = "";
+    private string editStorageSize = "";
+    private string? editStorageClass;
+    private string? editCpuRequest;
+    private string? editMemoryRequest;
+    private string? editMemoryLimit;
+    private bool savingEdit;
+    private string? editError;
+
+    // Delete
+    private KafkaCluster? deleteTarget;
+    private bool deleting;
+    private string? pendingRowDelete;   // inline delete confirm key for topics/users/bindings
+
+    // Topic form
+    private Guid? addTopicClusterId;
+    private string topicName = "";
+    private int topicPartitions = 3;
+    private int topicReplicas = 3;
+    private int topicRetentionHours;
+    private string? topicError;
+
+    // User form
+    private Guid? addUserClusterId;
+    private string userName = "";
+    private string? userProducerTopics;
+    private string? userConsumerTopics;
+    private string? userConsumerGroup = "*";
+    private bool userSuperUser;
+    private string? userError;
+
+    // Binding form
+    private Guid? addBindingClusterId;
+    private Guid bindingDeploymentId;
+    private Guid bindingUserId;
+    private string bindingSecretName = "kafka";
+    private string? bindingError;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+
+        Task<List<KafkaCluster>> clustersTask = KafkaService.GetClustersAsync(TenantId);
+        Task<List<KubernetesCluster>> k8sTask = TenantService.GetClustersAsync(TenantId);
+        Task<KafkaOperatorStatus> operatorTask = KafkaService.GetOperatorStatusAsync(TenantId);
+        Task<List<AppDeployment>> depTask = KafkaService.GetTenantDeploymentsAsync(TenantId);
+
+        await Task.WhenAll(clustersTask, k8sTask, operatorTask, depTask);
+
+        clusters = clustersTask.Result;
+        allK8sClusters = k8sTask.Result;
+        operatorStatus = operatorTask.Result;
+        allDeployments = depTask.Result;
+
+        allTopics.Clear();
+        allUsers.Clear();
+        allBindings.Clear();
+        foreach (KafkaCluster c in clusters)
+        {
+            allTopics[c.Id] = await KafkaService.GetTopicsAsync(TenantId, c.Id);
+            allUsers[c.Id] = await KafkaService.GetUsersAsync(TenantId, c.Id);
+            allBindings[c.Id] = await KafkaService.GetBindingsAsync(TenantId, c.Id);
+        }
+
+        loading = false;
+    }
+
+    // Create
+    private void ShowCreateForm() { showCreateForm = true; createError = null; }
+    private void CancelCreate() { showCreateForm = false; createError = null; }
+
+    private async Task CreateCluster()
+    {
+        if (string.IsNullOrWhiteSpace(createName) || createK8sClusterId == Guid.Empty)
+        {
+            createError = "Cluster name and Kubernetes cluster are required.";
+            return;
+        }
+
+        creating = true;
+        createError = null;
+        try
+        {
+            await KafkaService.CreateClusterAsync(
+                TenantId, createK8sClusterId, createName.Trim(), createNamespace.Trim(),
+                createReplicas, createVersion.Trim(), createStorageSize.Trim(),
+                Blank(createStorageClass), createAuthEnabled,
+                Blank(createCpuRequest), Blank(createMemoryRequest), Blank(createMemoryLimit));
+
+            showCreateForm = false;
+            createName = "";
+            await LoadAsync();
+        }
+        catch (Exception ex) { createError = ex.Message; }
+        finally { creating = false; }
+    }
+
+    // Expand / detail
+    private async Task ToggleCluster(Guid id)
+    {
+        if (expandedId == id) { expandedId = null; expandedDetail = null; return; }
+        expandedId = id;
+        await RefreshDetail(id);
+    }
+
+    private async Task RefreshDetail(Guid id)
+    {
+        expandedDetail = null;
+        loadingDetail = true;
+        StateHasChanged();
+        expandedDetail = await KafkaService.GetClusterDetailAsync(TenantId, id);
+        loadingDetail = false;
+        // Reflect any status change the reconcile made.
+        KafkaCluster? c = clusters.FirstOrDefault(x => x.Id == id);
+        if (c is not null && expandedDetail is not null)
+            c.Status = expandedDetail.Ready ? KafkaClusterStatus.Running : c.Status;
+    }
+
+    // Edit
+    private void ShowEdit(KafkaCluster c)
+    {
+        editClusterId = c.Id;
+        editReplicas = c.Replicas;
+        editVersion = c.KafkaVersion;
+        editStorageSize = c.StorageSize;
+        editStorageClass = c.StorageClass;
+        editCpuRequest = c.CpuRequest;
+        editMemoryRequest = c.MemoryRequest;
+        editMemoryLimit = c.MemoryLimit;
+        editError = null;
+    }
+
+    private async Task SaveEdit(Guid id)
+    {
+        savingEdit = true;
+        editError = null;
+        try
+        {
+            await KafkaService.UpdateClusterAsync(
+                TenantId, id, editReplicas, editVersion.Trim(), editStorageSize.Trim(),
+                Blank(editStorageClass), Blank(editCpuRequest), Blank(editMemoryRequest), Blank(editMemoryLimit));
+            editClusterId = null;
+            await LoadAsync();
+        }
+        catch (Exception ex) { editError = ex.Message; }
+        finally { savingEdit = false; }
+    }
+
+    // Delete cluster
+    private async Task DeleteCluster()
+    {
+        if (deleteTarget is null) return;
+        deleting = true;
+        try
+        {
+            await KafkaService.DeleteClusterAsync(TenantId, deleteTarget.Id);
+            deleteTarget = null;
+            expandedId = null;
+            await LoadAsync();
+        }
+        catch (Exception ex) { if (deleteTarget is not null) deleteTarget.LastError = ex.Message; }
+        finally { deleting = false; }
+    }
+
+    // Topics
+    private void ShowAddTopic(Guid clusterId)
+    {
+        addTopicClusterId = clusterId;
+        topicName = ""; topicPartitions = 3; topicReplicas = 3; topicRetentionHours = 0; topicError = null;
+    }
+
+    private async Task AddTopic(Guid clusterId)
+    {
+        topicError = null;
+        try
+        {
+            long? retentionMs = topicRetentionHours > 0 ? topicRetentionHours * 3600000L : null;
+            await KafkaService.CreateTopicAsync(TenantId, clusterId, topicName.Trim(), topicPartitions, topicReplicas, retentionMs);
+            addTopicClusterId = null;
+            allTopics[clusterId] = await KafkaService.GetTopicsAsync(TenantId, clusterId);
+        }
+        catch (Exception ex) { topicError = ex.Message; }
+    }
+
+    private async Task DeleteTopic(Guid clusterId, Guid topicId)
+    {
+        pendingRowDelete = null;
+        try
+        {
+            await KafkaService.DeleteTopicAsync(TenantId, topicId);
+            allTopics[clusterId] = await KafkaService.GetTopicsAsync(TenantId, clusterId);
+        }
+        catch { }
+    }
+
+    // Users
+    private void ShowAddUser(Guid clusterId)
+    {
+        addUserClusterId = clusterId;
+        userName = ""; userProducerTopics = null; userConsumerTopics = null;
+        userConsumerGroup = "*"; userSuperUser = false; userError = null;
+    }
+
+    private async Task AddUser(Guid clusterId)
+    {
+        userError = null;
+        try
+        {
+            await KafkaService.CreateUserAsync(TenantId, clusterId, userName.Trim(),
+                Blank(userProducerTopics), Blank(userConsumerTopics), Blank(userConsumerGroup), userSuperUser);
+            addUserClusterId = null;
+            allUsers[clusterId] = await KafkaService.GetUsersAsync(TenantId, clusterId);
+        }
+        catch (Exception ex) { userError = ex.Message; }
+    }
+
+    private async Task DeleteUser(Guid clusterId, Guid userId)
+    {
+        pendingRowDelete = null;
+        try
+        {
+            await KafkaService.DeleteUserAsync(TenantId, userId);
+            allUsers[clusterId] = await KafkaService.GetUsersAsync(TenantId, clusterId);
+        }
+        catch { }
+    }
+
+    // Bindings
+    private void ShowAddBinding(KafkaCluster cluster)
+    {
+        addBindingClusterId = cluster.Id;
+        bindingDeploymentId = Guid.Empty;
+        bindingUserId = Guid.Empty;
+        bindingSecretName = "kafka";
+        bindingError = null;
+    }
+
+    private async Task AddBinding(KafkaCluster cluster)
+    {
+        bindingError = null;
+        try
+        {
+            Guid? userId = cluster.AuthEnabled ? bindingUserId : null;
+            await KafkaService.CreateBindingAsync(TenantId, cluster.Id, bindingDeploymentId, userId, bindingSecretName.Trim());
+            addBindingClusterId = null;
+            allBindings[cluster.Id] = await KafkaService.GetBindingsAsync(TenantId, cluster.Id);
+        }
+        catch (Exception ex) { bindingError = ex.Message; }
+    }
+
+    private async Task SyncBinding(Guid clusterId, Guid bindingId)
+    {
+        try
+        {
+            await KafkaService.SyncBindingAsync(TenantId, bindingId);
+            allBindings[clusterId] = await KafkaService.GetBindingsAsync(TenantId, clusterId);
+        }
+        catch { }
+    }
+
+    private async Task RemoveBinding(Guid clusterId, Guid bindingId)
+    {
+        pendingRowDelete = null;
+        try
+        {
+            await KafkaService.DeleteBindingAsync(TenantId, bindingId);
+            allBindings[clusterId] = await KafkaService.GetBindingsAsync(TenantId, clusterId);
+        }
+        catch { }
+    }
+
+    // Inline delete-confirm cell shared by topics/users/bindings.
+    private RenderFragment RenderDeleteCell(string key, Func<Task> onConfirm) => builder =>
+    {
+        if (pendingRowDelete == key)
+        {
+            builder.OpenElement(0, "button");
+            builder.AddAttribute(1, "class", "btn btn-xs btn-sm btn-danger border-0 py-0 me-1");
+            builder.AddAttribute(2, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, onConfirm));
+            builder.AddContent(3, "Confirm");
+            builder.CloseElement();
+
+            builder.OpenElement(4, "button");
+            builder.AddAttribute(5, "class", "btn btn-xs btn-sm btn-outline-secondary border-0 py-0");
+            builder.AddAttribute(6, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, () => pendingRowDelete = null));
+            builder.AddContent(7, "Cancel");
+            builder.CloseElement();
+        }
+        else
+        {
+            builder.OpenElement(0, "button");
+            builder.AddAttribute(1, "class", "btn btn-xs btn-sm btn-outline-danger border-0 py-0");
+            builder.AddAttribute(2, "title", "Delete");
+            builder.AddAttribute(3, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, () => pendingRowDelete = key));
+            builder.OpenElement(4, "i");
+            builder.AddAttribute(5, "class", "bi bi-trash");
+            builder.CloseElement();
+            builder.CloseElement();
+        }
+    };
+
+    private static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
+    private static string StatusBadgeClass(KafkaClusterStatus status) => status switch
+    {
+        KafkaClusterStatus.Running => "badge bg-success",
+        KafkaClusterStatus.Creating => "badge bg-info text-dark",
+        KafkaClusterStatus.Updating => "badge bg-info text-dark",
+        KafkaClusterStatus.Failed => "badge bg-danger",
+        KafkaClusterStatus.Deleting => "badge bg-secondary",
+        _ => "badge bg-secondary"
+    };
+}

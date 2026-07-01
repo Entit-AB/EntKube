@@ -149,6 +149,7 @@ public class Program
         builder.Services.AddScoped<KeycloakService>();
         builder.Services.AddScoped<RabbitMQService>();
         builder.Services.AddScoped<RedisService>();
+        builder.Services.AddScoped<KafkaService>();
         builder.Services.AddScoped<HarborService>();
         builder.Services.AddScoped<TailscaleService>();
         builder.Services.AddScoped<HeadscaleService>();
@@ -160,6 +161,8 @@ public class Program
         builder.Services.AddScoped<OnCallService>();
         builder.Services.AddScoped<AlertRoutingService>();
         builder.Services.AddScoped<LokiService>();
+        builder.Services.AddScoped<MimirService>();
+        builder.Services.AddScoped<TempoService>();
         builder.Services.AddScoped<BackupService>();
         builder.Services.AddScoped<VpnService>();
         builder.Services.AddScoped<KyvernoPolicyService>();
@@ -182,6 +185,7 @@ public class Program
         builder.Services.AddHostedService<HeadscaleCertSyncService>();
         builder.Services.AddHostedService<SecretExpiryNotificationService>();
         builder.Services.AddHostedService<ObservedSecretRefreshService>();
+        builder.Services.AddHostedService<MessagingStatusPollingService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<GitSyncService>());
 
         builder.Services.AddHttpClient("Notifications", client =>

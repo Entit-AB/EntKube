@@ -62,6 +62,16 @@ public class RabbitMQUserInfo
     public List<string> Tags { get; set; } = [];
 }
 
+public class RabbitMQPermissionInfo
+{
+    public required string K8sName { get; set; }
+    public required string User { get; set; }
+    public required string Vhost { get; set; }
+    public string Configure { get; set; } = "";
+    public string Write { get; set; } = "";
+    public string Read { get; set; } = "";
+}
+
 // kept for backward compat with any existing callers
 public class RabbitMQLiveTopology
 {
@@ -231,6 +241,43 @@ public class RabbitMQService(
         }
 
         return cluster;
+    }
+
+    /// <summary>
+    /// Updates a cluster's version, replica count, storage size, or storage class and
+    /// re-applies the RabbitmqCluster manifest. The operator applies a rolling update.
+    /// Note: the operator rejects storage size decreases and some in-place changes;
+    /// such updates surface as a Failed status with the operator's message.
+    /// </summary>
+    public async Task UpdateClusterAsync(
+        Guid tenantId, Guid clusterId,
+        string version, int replicas, string storageSize, string? storageClass,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        RabbitMQCluster cluster = await db.RabbitMQClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("RabbitMQ cluster not found.");
+
+        cluster.RabbitMQVersion = version;
+        cluster.Replicas = replicas;
+        cluster.StorageSize = storageSize;
+        cluster.StorageClass = storageClass;
+        await db.SaveChangesAsync(ct);
+
+        try
+        {
+            await k8s.ApplyManifestAsync(BuildClusterManifest(cluster), cluster.KubernetesCluster.Kubeconfig!, ct);
+        }
+        catch (Exception ex)
+        {
+            cluster.Status = RabbitMQClusterStatus.Failed;
+            cluster.LastError = ex.Message;
+            await db.SaveChangesAsync(ct);
+            throw;
+        }
     }
 
     public async Task DeleteClusterAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
@@ -464,6 +511,28 @@ public class RabbitMQService(
         }
 
         await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Reconciles the status of every non-deleting RabbitMQ cluster against the live
+    /// cluster state. Called on an interval by the background status poller so clusters
+    /// don't get stuck in "Creating" when the operator finishes out of band.
+    /// </summary>
+    public async Task ReconcileAllAsync(CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<RabbitMQCluster> clusters = await db.RabbitMQClusters
+            .Where(c => c.Status == RabbitMQClusterStatus.Creating
+                     || c.Status == RabbitMQClusterStatus.Running)
+            .ToListAsync(ct);
+
+        foreach (RabbitMQCluster cluster in clusters)
+        {
+            if (ct.IsCancellationRequested) break;
+            try { await ReconcileStatusAsync(cluster.TenantId, cluster.Id, ct); }
+            catch { /* cluster unreachable — leave status as-is */ }
+        }
     }
 
     // ── Live topology (read from K8s topology operator CRDs) ──────────────────
@@ -1038,6 +1107,39 @@ public class RabbitMQService(
 
     // ── Topology — Permissions ────────────────────────────────────────────────
 
+    /// <summary>
+    /// Lists the Permission CRDs on the cluster so the UI can show and pre-populate
+    /// existing user→vhost permissions instead of always starting from blank regexes.
+    /// </summary>
+    public async Task<List<RabbitMQPermissionInfo>> GetPermissionsAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+        string json = await k8s.GetJsonAsync(
+            "permissions.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!,
+            $"rabbitmq.com/cluster={cluster.Name}", ct);
+
+        return ParseTopologyItems(json, item =>
+        {
+            string k8sName = GetSpecField(item, "metadata", "name") ?? "";
+            string user = GetSpecField(item, "spec", "user") ?? "";
+            string vhost = GetSpecField(item, "spec", "vhost") ?? "";
+            string configure = "", write = "", read = "";
+            if (item.TryGetProperty("spec", out JsonElement spec)
+                && spec.TryGetProperty("permissions", out JsonElement perms))
+            {
+                configure = perms.TryGetProperty("configure", out JsonElement c) ? c.GetString() ?? "" : "";
+                write = perms.TryGetProperty("write", out JsonElement w) ? w.GetString() ?? "" : "";
+                read = perms.TryGetProperty("read", out JsonElement r) ? r.GetString() ?? "" : "";
+            }
+            return new RabbitMQPermissionInfo
+            {
+                K8sName = k8sName, User = user, Vhost = vhost,
+                Configure = configure, Write = write, Read = read
+            };
+        });
+    }
+
     public async Task SetPermissionAsync(
         Guid tenantId, Guid clusterId,
         string vhost, string username, string configure, string write, string read,
@@ -1462,6 +1564,150 @@ public class RabbitMQService(
             && (f.ValueKind == JsonValueKind.True || f.ValueKind == JsonValueKind.False))
             return f.GetBoolean();
         return null;
+    }
+
+    // ── Scheduled backups ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Sets (or clears) the automated backup schedule for a cluster. When a cron
+    /// expression and an S3 storage link are present, a Kubernetes CronJob is applied
+    /// that exports the broker definitions via the management API and uploads them to
+    /// S3. Clearing the schedule removes the CronJob.
+    /// </summary>
+    public async Task UpdateBackupScheduleAsync(
+        Guid tenantId, Guid clusterId, string? schedule, int maxBackups, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        RabbitMQCluster cluster = await db.RabbitMQClusters
+            .Include(c => c.KubernetesCluster)
+            .Include(c => c.StorageLink)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("RabbitMQ cluster not found.");
+
+        cluster.BackupSchedule = string.IsNullOrWhiteSpace(schedule) ? null : schedule.Trim();
+        cluster.MaxBackups = maxBackups;
+        await db.SaveChangesAsync(ct);
+
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string cronName = $"{cluster.Name}-scheduled-backup";
+
+        if (!string.IsNullOrWhiteSpace(cluster.BackupSchedule) && cluster.StorageLink is not null)
+        {
+            string s3SecretName = $"{cluster.Name}-s3-credentials";
+            await EnsureStorageSecretsInK8sAsync(tenantId, cluster.StorageLink, s3SecretName, cluster.Namespace, kubeconfig, ct);
+            await k8s.ApplyManifestAsync(
+                BuildScheduledBackupCronJobManifest(cluster, cluster.StorageLink, s3SecretName), kubeconfig, ct);
+        }
+        else
+        {
+            try { await k8s.DeleteManifestAsync("cronjob", cronName, cluster.Namespace, kubeconfig, ct); }
+            catch { /* CronJob may not exist — ignore. */ }
+        }
+    }
+
+    /// <summary>Creates/updates a K8s Secret holding the storage link's S3 credentials for the CronJob.</summary>
+    private async Task EnsureStorageSecretsInK8sAsync(
+        Guid tenantId, StorageLink link, string secretName, string ns, string kubeconfig, CancellationToken ct)
+    {
+        string? accessKey = await vaultService.GetStorageLinkSecretValueAsync(tenantId, link.Id, "ACCESS_KEY", ct);
+        string? secretKey = await vaultService.GetStorageLinkSecretValueAsync(tenantId, link.Id, "SECRET_KEY", ct);
+        if (accessKey is null || secretKey is null)
+            throw new InvalidOperationException("Storage link credentials not found in vault.");
+
+        string manifest = $"""
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: {secretName}
+              namespace: {ns}
+            type: Opaque
+            data:
+              ACCESS_KEY: {B64(accessKey)}
+              SECRET_KEY: {B64(secretKey)}
+            """;
+        await k8s.ApplyManifestAsync(manifest, kubeconfig, ct);
+    }
+
+    /// <summary>
+    /// Builds a CronJob that exports the broker definitions via the management HTTP API
+    /// (init container, curl + admin creds from the operator's default-user secret) and
+    /// uploads the JSON to S3 (aws-cli container). Mirrors the MongoDB scheduled-backup pattern.
+    /// </summary>
+    private static string BuildScheduledBackupCronJobManifest(
+        RabbitMQCluster cluster, StorageLink storageLink, string s3SecretName)
+    {
+        string mgmtUrl = $"http://{cluster.Name}.{cluster.Namespace}.svc.cluster.local:15672/api/definitions";
+        string s3Base = $"s3://{storageLink.BucketName}/rabbitmq/{cluster.Name}";
+        string defaultUserSecret = $"{cluster.Name}-default-user";
+
+        // Kubernetes CronJob accepts a 5-field cron; drop a leading seconds field if present.
+        string cronSchedule = cluster.BackupSchedule!;
+        string[] parts = cronSchedule.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 6) cronSchedule = string.Join(' ', parts[1..]);
+
+        StringBuilder sb = new();
+        sb.AppendLine("apiVersion: batch/v1");
+        sb.AppendLine("kind: CronJob");
+        sb.AppendLine("metadata:");
+        sb.AppendLine($"  name: {cluster.Name}-scheduled-backup");
+        sb.AppendLine($"  namespace: {cluster.Namespace}");
+        sb.AppendLine("  labels:");
+        sb.AppendLine($"    entkube.io/rabbitmq-cluster: {cluster.Name}");
+        sb.AppendLine("spec:");
+        sb.AppendLine($"  schedule: \"{cronSchedule}\"");
+        sb.AppendLine("  concurrencyPolicy: Forbid");
+        sb.AppendLine("  jobTemplate:");
+        sb.AppendLine("    spec:");
+        sb.AppendLine("      backoffLimit: 1");
+        sb.AppendLine("      ttlSecondsAfterFinished: 86400");
+        sb.AppendLine("      template:");
+        sb.AppendLine("        spec:");
+        sb.AppendLine("          restartPolicy: Never");
+        sb.AppendLine("          volumes:");
+        sb.AppendLine("            - name: backup-data");
+        sb.AppendLine("              emptyDir: {}");
+        sb.AppendLine("          initContainers:");
+        sb.AppendLine("            - name: export");
+        sb.AppendLine("              image: curlimages/curl:latest");
+        sb.AppendLine("              command: [\"/bin/sh\", \"-c\"]");
+        sb.AppendLine($"              args: [\"curl -sfS -u \\\"$RABBITMQ_USERNAME:$RABBITMQ_PASSWORD\\\" {mgmtUrl} -o /backup/definitions.json\"]");
+        sb.AppendLine("              env:");
+        sb.AppendLine("                - name: RABBITMQ_USERNAME");
+        sb.AppendLine("                  valueFrom:");
+        sb.AppendLine("                    secretKeyRef:");
+        sb.AppendLine($"                      name: {defaultUserSecret}");
+        sb.AppendLine("                      key: username");
+        sb.AppendLine("                - name: RABBITMQ_PASSWORD");
+        sb.AppendLine("                  valueFrom:");
+        sb.AppendLine("                    secretKeyRef:");
+        sb.AppendLine($"                      name: {defaultUserSecret}");
+        sb.AppendLine("                      key: password");
+        sb.AppendLine("              volumeMounts:");
+        sb.AppendLine("                - name: backup-data");
+        sb.AppendLine("                  mountPath: /backup");
+        sb.AppendLine("          containers:");
+        sb.AppendLine("            - name: upload");
+        sb.AppendLine("              image: amazon/aws-cli");
+        sb.AppendLine("              command: [\"/bin/sh\", \"-c\"]");
+        sb.AppendLine($"              args: [\"aws s3 cp /backup/definitions.json {s3Base}/scheduled-$(date -u +%Y%m%dT%H%M%SZ).json --endpoint-url {storageLink.Endpoint}\"]");
+        sb.AppendLine("              env:");
+        sb.AppendLine("                - name: AWS_ACCESS_KEY_ID");
+        sb.AppendLine("                  valueFrom:");
+        sb.AppendLine("                    secretKeyRef:");
+        sb.AppendLine($"                      name: {s3SecretName}");
+        sb.AppendLine("                      key: ACCESS_KEY");
+        sb.AppendLine("                - name: AWS_SECRET_ACCESS_KEY");
+        sb.AppendLine("                  valueFrom:");
+        sb.AppendLine("                    secretKeyRef:");
+        sb.AppendLine($"                      name: {s3SecretName}");
+        sb.AppendLine("                      key: SECRET_KEY");
+        sb.AppendLine("                - name: AWS_DEFAULT_REGION");
+        sb.AppendLine($"                  value: \"{storageLink.Region ?? "us-east-1"}\"");
+        sb.AppendLine("              volumeMounts:");
+        sb.AppendLine("                - name: backup-data");
+        sb.AppendLine("                  mountPath: /backup");
+        return sb.ToString();
     }
 
     // ── S3 helpers ────────────────────────────────────────────────────────────

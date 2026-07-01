@@ -68,6 +68,10 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<VpnRemoteEndpoint> VpnRemoteEndpoints => Set<VpnRemoteEndpoint>();
     public DbSet<RedisCluster> RedisClusters => Set<RedisCluster>();
     public DbSet<CacheBinding> CacheBindings => Set<CacheBinding>();
+    public DbSet<KafkaCluster> KafkaClusters => Set<KafkaCluster>();
+    public DbSet<KafkaTopic> KafkaTopics => Set<KafkaTopic>();
+    public DbSet<KafkaUser> KafkaUsers => Set<KafkaUser>();
+    public DbSet<KafkaBinding> KafkaBindings => Set<KafkaBinding>();
     public DbSet<GitRepository> GitRepositories => Set<GitRepository>();
     public DbSet<GitKnownHost> GitKnownHosts => Set<GitKnownHost>();
     public DbSet<CustomerGitRepoPolicy> CustomerGitRepoPolicies => Set<CustomerGitRepoPolicy>();
@@ -369,6 +373,11 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(s => s.RedisCluster)
                 .WithMany()
                 .HasForeignKey(s => s.RedisClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(s => s.KafkaCluster)
+                .WithMany()
+                .HasForeignKey(s => s.KafkaClusterId)
                 .OnDelete(DeleteBehavior.Cascade);
 
             entity.HasMany(s => s.Versions)
@@ -1045,6 +1054,79 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
 
             entity.HasOne(b => b.AppDeployment)
                 .WithMany(d => d.CacheBindings)
+                .HasForeignKey(b => b.AppDeploymentId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<KafkaCluster>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.Name).HasMaxLength(63).IsRequired();
+            entity.Property(c => c.Namespace).HasMaxLength(63).IsRequired();
+            entity.Property(c => c.KafkaVersion).HasMaxLength(20).IsRequired();
+            entity.Property(c => c.StorageSize).HasMaxLength(20).IsRequired();
+            entity.Property(c => c.StorageClass).HasMaxLength(63);
+            entity.Property(c => c.CpuRequest).HasMaxLength(20);
+            entity.Property(c => c.MemoryRequest).HasMaxLength(20);
+            entity.Property(c => c.MemoryLimit).HasMaxLength(20);
+
+            entity.HasIndex(c => new { c.KubernetesClusterId, c.Name, c.Namespace }).IsUnique();
+
+            entity.HasOne(c => c.Tenant)
+                .WithMany()
+                .HasForeignKey(c => c.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(c => c.KubernetesCluster)
+                .WithMany()
+                .HasForeignKey(c => c.KubernetesClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasMany(c => c.Topics)
+                .WithOne(t => t.KafkaCluster)
+                .HasForeignKey(t => t.KafkaClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasMany(c => c.Users)
+                .WithOne(u => u.KafkaCluster)
+                .HasForeignKey(u => u.KafkaClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<KafkaTopic>(entity =>
+        {
+            entity.HasKey(t => t.Id);
+            entity.Property(t => t.Name).HasMaxLength(249).IsRequired();
+            entity.HasIndex(t => new { t.KafkaClusterId, t.Name }).IsUnique();
+        });
+
+        builder.Entity<KafkaUser>(entity =>
+        {
+            entity.HasKey(u => u.Id);
+            entity.Property(u => u.Username).HasMaxLength(63).IsRequired();
+            entity.Property(u => u.ProducerTopics).HasMaxLength(1000);
+            entity.Property(u => u.ConsumerTopics).HasMaxLength(1000);
+            entity.Property(u => u.ConsumerGroup).HasMaxLength(255);
+            entity.HasIndex(u => new { u.KafkaClusterId, u.Username }).IsUnique();
+        });
+
+        builder.Entity<KafkaBinding>(entity =>
+        {
+            entity.HasKey(b => b.Id);
+            entity.Property(b => b.KubernetesSecretName).HasMaxLength(253).IsRequired();
+
+            entity.HasOne(b => b.KafkaCluster)
+                .WithMany()
+                .HasForeignKey(b => b.KafkaClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(b => b.KafkaUser)
+                .WithMany()
+                .HasForeignKey(b => b.KafkaUserId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(b => b.AppDeployment)
+                .WithMany()
                 .HasForeignKey(b => b.AppDeploymentId)
                 .OnDelete(DeleteBehavior.Cascade);
         });

@@ -130,6 +130,11 @@ public class VaultSecret
     public Guid? RedisClusterId { get; set; }
 
     /// <summary>
+    /// If set, this secret belongs to a managed Kafka cluster (per-binding SASL credentials, CA cert).
+    /// </summary>
+    public Guid? KafkaClusterId { get; set; }
+
+    /// <summary>
     /// If set, this secret belongs to a VPN remote endpoint (e.g. PSK or certificate).
     /// </summary>
     public Guid? VpnRemoteEndpointId { get; set; }
@@ -193,6 +198,7 @@ public class VaultSecret
     public KubernetesCluster? KubernetesCluster { get; set; }
     public RabbitMQCluster? RabbitMQCluster { get; set; }
     public RedisCluster? RedisCluster { get; set; }
+    public KafkaCluster? KafkaCluster { get; set; }
     public VpnRemoteEndpoint? VpnRemoteEndpoint { get; set; }
     public GitRepository? GitRepository { get; set; }
     public CustomerGitCredential? CustomerGitCredential { get; set; }
