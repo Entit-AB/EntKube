@@ -236,4 +236,48 @@ public class YamlFormMergerTests
         // It should NOT inject the standard ports again on top of an existing list.
         result.Should().NotContain("name: status-port");
     }
+
+    // ──────── Numeric sequence-index paths ────────
+
+    [Fact]
+    public void MergeFormValues_WithSequenceIndexPath_OverwritesExistingListElement()
+    {
+        // Regression for the Loki S3 storage bug: linking an S3 bucket must flip the
+        // active schema period's object_store from "filesystem" to "s3". The path
+        // reaches into an existing sequence element by numeric index
+        // (loki.schemaConfig.configs.0.object_store). If this stops resolving, chunks
+        // are written to the read-only filesystem store instead of S3 and the ingester
+        // OOMKills in a loop.
+
+        string baseYaml = """
+            loki:
+              storage:
+                type: filesystem
+              schemaConfig:
+                configs:
+                  - from: "2024-04-01"
+                    store: tsdb
+                    object_store: filesystem
+                    schema: v13
+                    index:
+                      prefix: index_
+                      period: 24h
+            """;
+
+        Dictionary<string, string> formValues = new()
+        {
+            ["loki.storage.type"] = "s3",
+            ["loki.schemaConfig.configs.0.object_store"] = "s3"
+        };
+
+        string result = YamlFormMerger.MergeFormValues(baseYaml, formValues);
+
+        // The schema period now points at S3, and the sibling keys survive.
+        result.Should().Contain("object_store: s3");
+        result.Should().NotContain("object_store: filesystem");
+        result.Should().Contain("store: tsdb");
+        result.Should().Contain("prefix: index_");
+        // It must remain a list element, not become a mapping keyed "0".
+        result.Should().NotContain("0:");
+    }
 }
