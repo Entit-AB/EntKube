@@ -31,6 +31,15 @@ public class AppRoute
     /// <summary>When false the route is kept in the database but no Kubernetes resources are applied.</summary>
     public bool IsEnabled { get; set; } = true;
 
+    /// <summary>
+    /// When false the route is observed only: EntKube tracks the external access and
+    /// shows it, but never applies or reconciles the HTTPRoute — leaving ownership to
+    /// whatever created it (commonly ArgoCD or Flux). Imported routes start unmanaged;
+    /// turning management on makes EntKube reconcile the HTTPRoute automatically.
+    /// Defaults to true so routes created inside EntKube manage themselves as before.
+    /// </summary>
+    public bool IsManaged { get; set; } = true;
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation

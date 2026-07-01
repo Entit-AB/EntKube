@@ -1093,6 +1093,9 @@ public class ComponentLifecycleService(
 
                 if (createResult.Success)
                 {
+                    // Mark as EntKube-managed so the deployment importer won't re-adopt it.
+                    await RunProcessAsync("kubectl",
+                        $"label secret {k8sSecretName} --namespace {ns} {VaultService.ManagedByLabelKey}={VaultService.ManagedByLabelValue} entkube.io/managed=true --overwrite --kubeconfig {tempKubeconfig}", ct);
                     results.Add($"✓ Secret '{k8sSecretName}' synced to namespace '{ns}' ({group.Count()} keys)");
                 }
                 else

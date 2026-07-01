@@ -30,6 +30,11 @@
             {
                 <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">no policies</span>
             }
+            <button class="btn btn-sm btn-outline-secondary" @onclick="DetectApplied" disabled="@detecting">
+                @if (detecting) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                else { <i class="bi bi-search me-1"></i> }
+                Detect applied
+            </button>
             <button class="btn btn-sm btn-success" @onclick="ApplyToAllNamespaces" disabled="@applying">
                 @if (applying) { <span class="spinner-border spinner-border-sm me-1"></span> }
                 else { <i class="bi bi-cloud-upload me-1"></i> }
@@ -53,6 +58,15 @@
         }
         else
         {
+            @if (detectMessage is not null)
+            {
+                <div class="alert @(detectIsError ? "alert-danger" : "alert-info") py-2 small mb-3 d-flex align-items-center">
+                    <i class="bi @(detectIsError ? "bi-exclamation-triangle" : "bi-info-circle") me-2"></i>
+                    <span>@detectMessage</span>
+                    <button type="button" class="btn-close btn-close-sm ms-auto" @onclick="() => detectMessage = null"></button>
+                </div>
+            }
+
             @if (applyResults is not null)
             {
                 <div class="alert @(applyAllOk ? "alert-success" : "alert-danger") py-2 small mb-3">
@@ -343,6 +357,35 @@
                     <i class="bi bi-plus me-1"></i>Add custom policy
                 </button>
             }
+
+            @* ── Cluster-wide policies (observed, not owned by EntKube) ── *@
+            @if (clusterPolicies.Count > 0)
+            {
+                <h6 class="text-muted fw-semibold mb-2 mt-4 d-flex align-items-center gap-1">
+                    <i class="bi bi-globe2 text-primary"></i> Cluster-wide Policies
+                    <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">observed</span>
+                </h6>
+                <p class="text-muted small mb-2">
+                    These are cluster-scoped <code>ClusterPolicy</code> resources applied across every namespace.
+                    EntKube only manages namespaced policies, so these are shown read-only — manage them where they
+                    were defined (e.g. ArgoCD/Flux or kubectl).
+                </p>
+                <div class="list-group list-group-flush mb-3">
+                    @foreach (KyvernoClusterPolicyInfo cp in clusterPolicies)
+                    {
+                        <div class="list-group-item d-flex align-items-center justify-content-between px-0 py-1">
+                            <div class="small d-flex align-items-center gap-2">
+                                <code>@cp.Name</code>
+                                <span class="text-muted"><i class="bi bi-server me-1"></i>@cp.ClusterName</span>
+                                <span class="text-muted">@cp.RuleCount rule@(cp.RuleCount == 1 ? "" : "s")</span>
+                            </div>
+                            <span class="badge @(cp.Mode == KyvernoValidationFailureAction.Enforce ? "bg-danger-subtle text-danger border border-danger-subtle" : "bg-warning-subtle text-warning border border-warning-subtle")">
+                                @(cp.Mode == KyvernoValidationFailureAction.Enforce ? "Enforce" : "Audit")
+                            </span>
+                        </div>
+                    }
+                </div>
+            }
         }
 
     </div>
@@ -356,11 +399,16 @@
     private string? loadError;
 
     private List<KyvernoPolicy> kyvernoPolicies = [];
+    private List<KyvernoClusterPolicyInfo> clusterPolicies = [];
     private bool kyvernoAvailable = true;
 
     private bool applying;
     private List<(string Target, bool Success, string Output)>? applyResults;
     private bool applyAllOk;
+
+    private bool detecting;
+    private string? detectMessage;
+    private bool detectIsError;
 
     private string registryInput = "";
     private string labelInput = "";
@@ -387,6 +435,7 @@
         {
             kyvernoPolicies  = await KyvernoService.GetPoliciesAsync(TenantId, EnvironmentId);
             kyvernoAvailable = await KyvernoService.IsKyvernoAvailableAsync(TenantId, EnvironmentId);
+            clusterPolicies  = await KyvernoService.GetClusterPoliciesAsync(TenantId, EnvironmentId);
         }
         catch (Exception ex)
         {
@@ -415,6 +464,41 @@
         finally
         {
             applying = false;
+        }
+    }
+
+    private async Task DetectApplied()
+    {
+        detecting = true;
+        detectMessage = null;
+        detectIsError = false;
+        try
+        {
+            KyvernoDiscoveryResult res = await KyvernoService.DiscoverPoliciesAsync(TenantId, EnvironmentId);
+            await LoadAsync();
+
+            if (res.Detected == 0)
+            {
+                detectMessage = res.Errors.Count > 0
+                    ? $"No policies adopted. {string.Join("; ", res.Errors)}"
+                    : "No new applied policies found — everything live is already reflected here.";
+                detectIsError = res.Errors.Count > 0;
+            }
+            else
+            {
+                detectMessage = $"Adopted {res.Detected} applied "
+                    + $"{(res.Detected == 1 ? "policy" : "policies")}: {string.Join(", ", res.PolicyNames)}."
+                    + (res.Errors.Count > 0 ? $" Some targets errored: {string.Join("; ", res.Errors)}" : "");
+            }
+        }
+        catch (Exception ex)
+        {
+            detectIsError = true;
+            detectMessage = $"Detection failed: {ex.Message}";
+        }
+        finally
+        {
+            detecting = false;
         }
     }
 

@@ -115,7 +115,9 @@ public class CustomerAccessService(IDbContextFactory<ApplicationDbContext> dbFac
             .Where(ca => ca.UserId == userId)
             .Select(ca => ca.CustomerId)
             .Join(
-                db.Customers.Include(c => c.Apps).ThenInclude(a => a.AppEnvironments),
+                db.Customers
+                    .Include(c => c.Tenant)
+                    .Include(c => c.Apps).ThenInclude(a => a.AppEnvironments),
                 id => id,
                 c => c.Id,
                 (id, customer) => customer)

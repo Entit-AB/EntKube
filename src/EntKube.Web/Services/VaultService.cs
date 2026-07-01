@@ -1571,6 +1571,125 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
     }
 
     /// <summary>
+    /// Re-reads an app secret's value from the live Kubernetes Secret and updates the
+    /// stored vault value. Used before taking ownership of an observed/imported secret
+    /// so EntKube pushes the current live value (e.g. whatever ArgoCD/Flux last set)
+    /// rather than the stale import-time snapshot. Returns true when a value was read
+    /// and updated; false if there is no sync target or the live key is absent.
+    /// </summary>
+    public async Task<bool> RefreshAppSecretFromClusterAsync(Guid secretId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        VaultSecret? secret = await db.Set<VaultSecret>()
+            .Include(s => s.Vault)
+            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+
+        if (secret is null
+            || secret.KubernetesClusterId is null
+            || string.IsNullOrEmpty(secret.KubernetesSecretName))
+        {
+            return false;
+        }
+
+        KubernetesCluster? cluster = await db.KubernetesClusters
+            .FirstOrDefaultAsync(c => c.Id == secret.KubernetesClusterId, ct);
+
+        if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        {
+            return false;
+        }
+
+        string ns = secret.KubernetesNamespace ?? "default";
+        string? liveValue = await ReadLiveSecretValueAsync(
+            secret.KubernetesSecretName!, secret.Name, ns, cluster.Kubeconfig!, ct);
+
+        if (liveValue is null)
+        {
+            return false;
+        }
+
+        byte[] dataKey = await UnsealVaultAsync(secret.Vault.TenantId, ct);
+
+        // Skip the write (and version-history churn) when the live value is unchanged —
+        // important because the background refresher polls these on an interval.
+        string currentValue = encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
+        if (string.Equals(currentValue, liveValue, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, liveValue);
+
+        await ArchiveVersionAsync(db, secret, ct);
+        secret.EncryptedValue = ciphertext;
+        secret.Nonce = nonce;
+        secret.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return true;
+    }
+
+    /// <summary>
+    /// Returns the IDs of app secrets that are "observed": Kubernetes sync is disabled
+    /// but a target cluster + Secret name are recorded — the state imported secrets land
+    /// in. The background refresher re-reads their live values so the vault copy tracks
+    /// whatever ArgoCD/Flux last set, until the operator takes ownership (enables sync).
+    /// </summary>
+    public async Task<List<Guid>> GetObservedAppSecretIdsAsync(CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.Set<VaultSecret>()
+            .Where(s => s.AppId != null
+                && !s.SyncToKubernetes
+                && s.KubernetesClusterId != null
+                && s.KubernetesSecretName != null)
+            .Select(s => s.Id)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>Reads one key from a live Secret via kubectl and base64-decodes it.</summary>
+    private static async Task<string?> ReadLiveSecretValueAsync(
+        string secretName, string key, string ns, string kubeconfig, CancellationToken ct)
+    {
+        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
+        try
+        {
+            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+
+            HelmExecutionResult result = await RunProcessAsync(
+                "kubectl", $"get secret {secretName} -n {ns} --kubeconfig {tempKubeconfig} -o json", ct);
+
+            if (!result.Success || string.IsNullOrWhiteSpace(result.Output))
+            {
+                return null;
+            }
+
+            // Index the data map by the literal key so dotted keys (e.g. tls.crt) work.
+            System.Text.Json.Nodes.JsonNode? node = System.Text.Json.Nodes.JsonNode.Parse(result.Output);
+            string? base64 = node?["data"]?[key]?.GetValue<string>();
+
+            if (string.IsNullOrEmpty(base64))
+            {
+                return null;
+            }
+
+            return Encoding.UTF8.GetString(Convert.FromBase64String(base64));
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (File.Exists(tempKubeconfig))
+            {
+                File.Delete(tempKubeconfig);
+            }
+        }
+    }
+
+    /// <summary>
     /// Syncs all app-scoped secrets that have <see cref="VaultSecret.SyncToKubernetes"/>
     /// enabled to their target Kubernetes cluster. Secrets are grouped by
     /// (KubernetesSecretName, KubernetesNamespace) and written as Opaque Secrets.
@@ -1736,6 +1855,7 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
 
                     if (createResult.Success)
                     {
+                        await LabelManagedSecretAsync(k8sSecretName, ns, tempKubeconfig, ct);
                         results.Add($"✓ Secret '{k8sSecretName}' synced to '{ns}' on '{cluster.Name}' ({group.Count()} keys)");
                     }
                     else
@@ -1768,6 +1888,24 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
             Success = allSucceeded,
             Output = string.Join("\n", results)
         };
+    }
+
+    /// <summary>
+    /// Label key/value stamped on every Secret EntKube writes to a cluster.
+    /// Lets other parts of the platform (notably the deployment importer) recognize
+    /// an EntKube-managed Secret and avoid re-adopting it into the vault.
+    /// </summary>
+    public const string ManagedByLabelKey = "app.kubernetes.io/managed-by";
+    public const string ManagedByLabelValue = "entkube";
+
+    /// <summary>
+    /// Stamps the EntKube managed-by labels onto a freshly-synced Secret. Best-effort:
+    /// a labeling failure must not fail the sync, so the result is not inspected.
+    /// </summary>
+    private async Task LabelManagedSecretAsync(string name, string ns, string tempKubeconfig, CancellationToken ct)
+    {
+        await RunProcessAsync("kubectl",
+            $"label secret {name} --namespace {ns} {ManagedByLabelKey}={ManagedByLabelValue} entkube.io/managed=true --overwrite --kubeconfig {tempKubeconfig}", ct);
     }
 
     /// <summary>
@@ -1843,6 +1981,7 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
 
             if (createResult.Success)
             {
+                await LabelManagedSecretAsync(k8sSecretName, ns, tempKubeconfig, ct);
                 results.Add($"✓ Certificate '{k8sSecretName}' synced to '{ns}' on '{cluster.Name}' (kubernetes.io/tls, tls.crt + tls.key + fullchain.crt{(caFile is not null ? " + ca.crt" : "")})");
             }
             else
@@ -1923,6 +2062,7 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
 
             if (createResult.Success)
             {
+                await LabelManagedSecretAsync(k8sSecretName, ns, tempKubeconfig, ct);
                 results.Add($"✓ OAuth client '{k8sSecretName}' synced to '{ns}' on '{cluster.Name}' ({data.Count} keys)");
             }
             else

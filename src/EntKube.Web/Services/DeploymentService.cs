@@ -56,7 +56,8 @@ public class DeploymentService(
         string? gitUrl = null,
         string? gitPath = null,
         string? gitRevision = null,
-        bool gitAutoSync = true)
+        bool gitAutoSync = true,
+        bool isManaged = true)
     {
         await EnforceNamespaceAsync(appId, environmentId, ns, ct);
 
@@ -77,7 +78,8 @@ public class DeploymentService(
             GitUrl = gitUrl,
             GitPath = gitPath,
             GitRevision = gitRevision,
-            GitAutoSync = gitAutoSync
+            GitAutoSync = gitAutoSync,
+            IsManaged = isManaged
         };
 
         db.AppDeployments.Add(deployment);

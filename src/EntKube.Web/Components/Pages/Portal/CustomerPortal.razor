@@ -56,26 +56,40 @@ else
             <h2 class="mb-0">My Customers</h2>
         </div>
 
-        <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-3">
-            @foreach (Customer customer in customers)
-            {
-                <div class="col">
-                    <div class="card shadow-sm h-100" role="button" style="cursor: pointer;"
-                         @onclick="() => SelectCustomer(customer)">
-                        <div class="card-body">
-                            <div class="d-flex align-items-center mb-2">
-                                <i class="bi bi-people fs-4 me-2 text-primary"></i>
-                                <h5 class="mb-0">@customer.Name</h5>
-                            </div>
-                            <div class="text-muted small">
-                                <i class="bi bi-app-indicator me-1"></i>
-                                @customer.Apps.Count app@(customer.Apps.Count != 1 ? "s" : "")
+        @* Customers are grouped under their owning tenant. *@
+        @foreach (IGrouping<Guid, Customer> tenantGroup in customers
+            .GroupBy(c => c.TenantId)
+            .OrderBy(g => g.First().Tenant?.Name))
+        {
+            <div class="mb-4">
+                <div class="d-flex align-items-center mb-2 pb-1 border-bottom">
+                    <i class="bi bi-building me-2 text-secondary"></i>
+                    <h5 class="mb-0 text-secondary">@(tenantGroup.First().Tenant?.Name ?? "Unknown tenant")</h5>
+                    <span class="badge bg-light text-muted ms-2">@tenantGroup.Count() customer@(tenantGroup.Count() != 1 ? "s" : "")</span>
+                </div>
+
+                <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-3">
+                    @foreach (Customer customer in tenantGroup.OrderBy(c => c.Name))
+                    {
+                        <div class="col">
+                            <div class="card shadow-sm h-100" role="button" style="cursor: pointer;"
+                                 @onclick="() => SelectCustomer(customer)">
+                                <div class="card-body">
+                                    <div class="d-flex align-items-center mb-2">
+                                        <i class="bi bi-people fs-4 me-2 text-primary"></i>
+                                        <h5 class="mb-0">@customer.Name</h5>
+                                    </div>
+                                    <div class="text-muted small">
+                                        <i class="bi bi-app-indicator me-1"></i>
+                                        @customer.Apps.Count app@(customer.Apps.Count != 1 ? "s" : "")
+                                    </div>
+                                </div>
                             </div>
                         </div>
-                    </div>
+                    }
                 </div>
-            }
-        </div>
+            </div>
+        }
     }
 
     @* ════════════════════════════════════════════════════════════════

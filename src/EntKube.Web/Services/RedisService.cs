@@ -306,6 +306,9 @@ public class RedisService(
             metadata:
               name: {binding.KubernetesSecretName}
               namespace: {binding.AppDeployment.Namespace}
+              labels:
+                app.kubernetes.io/managed-by: entkube
+                entkube.io/managed: "true"
             type: Opaque
             data:
               REDIS_HOST: {B64(host)}

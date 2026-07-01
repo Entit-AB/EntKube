@@ -489,7 +489,15 @@ else if (section == "components")
                     <i class="bi bi-search me-1"></i><span>Scan Components</span>
                 }
             </button>
+            <button class="btn btn-outline-primary btn-sm" @onclick="() => showImportWizard = true">
+                <i class="bi bi-box-arrow-in-down me-1"></i><span>Import Deployment</span>
+            </button>
         </div>
+    }
+
+    @if (showImportWizard)
+    {
+        <ImportDeploymentWizard Cluster="Cluster" TenantId="TenantId" OnClose="() => showImportWizard = false" />
     }
 
     @if (!string.IsNullOrEmpty(componentError))
@@ -1379,6 +1387,7 @@ else if (section == "components")
 
     private string section = "monitoring";
     private bool confirmDelete;
+    private bool showImportWizard;
 
     // Components
     private List<ClusterComponent>? components;

@@ -56,10 +56,24 @@
         <h5 class="d-flex align-items-center gap-2 mb-3">
             <i class="bi bi-collection text-primary"></i>RabbitMQ Clusters
             <span class="badge bg-secondary rounded-pill">@clusters.Count</span>
-            <button class="btn btn-sm btn-secondary ms-auto" @onclick="ShowCreateForm" disabled="@showCreateForm">
+            <button class="btn btn-sm btn-outline-secondary ms-auto" @onclick="DiscoverClusters" disabled="@(discovering || showCreateForm)">
+                @if (discovering) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                else { <i class="bi bi-search me-1"></i> }
+                Discover existing
+            </button>
+            <button class="btn btn-sm btn-secondary" @onclick="ShowCreateForm" disabled="@showCreateForm">
                 <i class="bi bi-plus-lg me-1"></i>Create Cluster
             </button>
         </h5>
+
+        @if (discoverMessage is not null)
+        {
+            <div class="alert @(discoverIsError ? "alert-danger" : "alert-info") py-2 small d-flex align-items-center">
+                <i class="bi @(discoverIsError ? "bi-exclamation-triangle" : "bi-info-circle") me-2"></i>
+                <span>@discoverMessage</span>
+                <button type="button" class="btn-close btn-close-sm ms-auto" @onclick="() => discoverMessage = null"></button>
+            </div>
+        }
 
         @if (showCreateForm)
         {
@@ -918,6 +932,11 @@
     private bool topologyOperatorAvailable;
     private RabbitMQOperatorStatus? operatorStatus;
 
+    // Discover existing clusters
+    private bool discovering;
+    private string? discoverMessage;
+    private bool discoverIsError;
+
     // Create cluster form
     private bool showCreateForm;
     private bool creating;
@@ -1049,6 +1068,30 @@
 
     private void ShowCreateForm() { showCreateForm = true; createError = null; }
     private void CancelCreate() { showCreateForm = false; createError = null; }
+
+    private async Task DiscoverClusters()
+    {
+        discovering = true;
+        discoverMessage = null;
+        discoverIsError = false;
+        try
+        {
+            int found = await RabbitMQService.DiscoverClustersAsync(TenantId);
+            await LoadAsync();
+            discoverMessage = found == 0
+                ? "No new RabbitMQ clusters found. Everything running in your clusters is already tracked."
+                : $"Adopted {found} existing RabbitMQ cluster{(found == 1 ? "" : "s")}.";
+        }
+        catch (Exception ex)
+        {
+            discoverIsError = true;
+            discoverMessage = $"Discovery failed: {ex.Message}";
+        }
+        finally
+        {
+            discovering = false;
+        }
+    }
 
     private async Task CreateCluster()
     {

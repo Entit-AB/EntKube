@@ -1202,6 +1202,9 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
             metadata:
               name: {binding.KubernetesSecretName}
               namespace: {ns}
+              labels:
+                app.kubernetes.io/managed-by: entkube
+                entkube.io/managed: "true"
             type: Opaque
             data:
               STORAGE_ACCESS_KEY: {B64(accessKey)}
