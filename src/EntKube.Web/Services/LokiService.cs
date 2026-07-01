@@ -174,7 +174,17 @@ public class LokiService(
             ["loki.storage.s3.s3ForcePathStyle"] = "true",
             ["loki.storage.bucketNames.chunks"] = bucket,
             ["loki.storage.bucketNames.ruler"] = bucket,
-            ["loki.storage.bucketNames.admin"] = bucket
+            ["loki.storage.bucketNames.admin"] = bucket,
+            // The active schema period's object_store — NOT storage.type — is what actually
+            // decides where the ingester writes chunks. The catalog default seeds this as
+            // "filesystem", so without flipping it here Loki ignores the S3 client we just
+            // wired up and writes chunks to the (read-only, unconfigured) filesystem store
+            // instead: every flush fails with "store put chunk: mkdir fake: read-only file
+            // system", chunks accumulate in the ingester, and the pod OOMKills in a loop
+            // while the S3 bucket stays empty. Index 0 is the sole schema period the catalog
+            // seeds (ComponentCatalog loki DefaultValues). The list already exists in
+            // HelmValues at this point, so the numeric-index merge path resolves.
+            ["loki.schemaConfig.configs.0.object_store"] = "s3"
         };
 
         if (!string.IsNullOrWhiteSpace(link.Endpoint))
