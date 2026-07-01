@@ -72,6 +72,14 @@ public class RabbitMQPermissionInfo
     public string Read { get; set; } = "";
 }
 
+// A topology CRD that would be removed as part of a cascade delete.
+public class RabbitMQCascadeItem
+{
+    public required string Kind { get; set; }     // vhost | queue | exchange | binding | permission
+    public required string K8sName { get; set; }
+    public required string Display { get; set; }
+}
+
 // kept for backward compat with any existing callers
 public class RabbitMQLiveTopology
 {
@@ -995,6 +1003,73 @@ public class RabbitMQService(
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
         await k8s.DeleteManifestAsync("binding", k8sName, cluster.Namespace,
             cluster.KubernetesCluster.Kubeconfig!, ct);
+    }
+
+    // ── Cascade delete ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Lists the topology CRDs that would be cascade-deleted along with the target, in the
+    /// order they must be removed (bindings → queues/exchanges → permissions). The target
+    /// itself is not included. <paramref name="targetKind"/> is "vhost", "queue" or "exchange";
+    /// for "queue"/"exchange" <paramref name="name"/> is the resource name and
+    /// <paramref name="vhost"/> its vhost, for "vhost" both are the vhost path. Bindings have
+    /// no dependents.
+    /// </summary>
+    public async Task<List<RabbitMQCascadeItem>> GetCascadeDependentsAsync(
+        Guid tenantId, Guid clusterId, string targetKind, string vhost, string name,
+        CancellationToken ct = default)
+    {
+        List<RabbitMQCascadeItem> dependents = [];
+
+        if (targetKind == "vhost")
+        {
+            List<RabbitMQRoutingBindingInfo> bindings = await GetRoutingBindingsAsync(tenantId, clusterId, ct);
+            List<RabbitMQQueueInfo> queues = await GetQueuesAsync(tenantId, clusterId, ct);
+            List<RabbitMQExchangeInfo> exchanges = await GetExchangesAsync(tenantId, clusterId, ct);
+            List<RabbitMQPermissionInfo> permissions = await GetPermissionsAsync(tenantId, clusterId, ct);
+
+            foreach (RabbitMQRoutingBindingInfo b in bindings.Where(b => b.Vhost == name))
+                dependents.Add(new() { Kind = "binding", K8sName = b.K8sName, Display = $"{b.Source} → {b.Destination}" });
+            foreach (RabbitMQQueueInfo q in queues.Where(q => q.Vhost == name))
+                dependents.Add(new() { Kind = "queue", K8sName = q.K8sName, Display = q.QueueName });
+            foreach (RabbitMQExchangeInfo ex in exchanges.Where(ex => ex.Vhost == name))
+                dependents.Add(new() { Kind = "exchange", K8sName = ex.K8sName, Display = ex.ExchangeName });
+            foreach (RabbitMQPermissionInfo p in permissions.Where(p => p.Vhost == name))
+                dependents.Add(new() { Kind = "permission", K8sName = p.K8sName, Display = $"{p.User} @ {p.Vhost}" });
+        }
+        else if (targetKind == "exchange")
+        {
+            List<RabbitMQRoutingBindingInfo> bindings = await GetRoutingBindingsAsync(tenantId, clusterId, ct);
+            foreach (RabbitMQRoutingBindingInfo b in bindings.Where(b => b.Vhost == vhost &&
+                (b.Source == name || (b.Destination == name && b.DestinationType == "exchange"))))
+                dependents.Add(new() { Kind = "binding", K8sName = b.K8sName, Display = $"{b.Source} → {b.Destination}" });
+        }
+        else if (targetKind == "queue")
+        {
+            List<RabbitMQRoutingBindingInfo> bindings = await GetRoutingBindingsAsync(tenantId, clusterId, ct);
+            foreach (RabbitMQRoutingBindingInfo b in bindings.Where(b => b.Vhost == vhost &&
+                b.Destination == name && b.DestinationType == "queue"))
+                dependents.Add(new() { Kind = "binding", K8sName = b.K8sName, Display = $"{b.Source} → {b.Destination}" });
+        }
+
+        return dependents;
+    }
+
+    /// <summary>
+    /// Deletes the supplied dependent topology CRDs (in the given order) and then the target
+    /// CRD itself. <paramref name="targetKind"/> is a CRD short name (vhost/queue/exchange/binding).
+    /// </summary>
+    public async Task DeleteTopologyCascadeAsync(
+        Guid tenantId, Guid clusterId, string targetKind, string targetK8sName,
+        IReadOnlyList<RabbitMQCascadeItem> dependents, CancellationToken ct = default)
+    {
+        RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+
+        foreach (RabbitMQCascadeItem dep in dependents)
+            await k8s.DeleteManifestAsync(dep.Kind, dep.K8sName, cluster.Namespace, kubeconfig, ct);
+
+        await k8s.DeleteManifestAsync(targetKind, targetK8sName, cluster.Namespace, kubeconfig, ct);
     }
 
     // ── Topology — Users ──────────────────────────────────────────────────────

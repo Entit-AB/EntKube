@@ -173,7 +173,11 @@
                                 <i class="bi bi-cloud me-1"></i>Backups
                             </span>
                         }
-                        <i class="bi @(expanded ? "bi-chevron-up" : "bi-chevron-down") ms-auto text-muted"></i>
+                        <button class="btn btn-sm btn-link text-warning p-0 ms-auto" title="Edit cluster"
+                                @onclick="() => ShowClusterEdit(cluster)" @onclick:stopPropagation="true">
+                            <i class="bi bi-pencil"></i>
+                        </button>
+                        <i class="bi @(expanded ? "bi-chevron-up" : "bi-chevron-down") ms-2 text-muted"></i>
                     </div>
 
                     @if (!string.IsNullOrEmpty(cluster.LastError) && cluster.Status == RabbitMQClusterStatus.Failed)
@@ -256,7 +260,10 @@
                                                     <td class="align-middle fw-semibold">@v.VhostName</td>
                                                     <td class="align-middle text-muted font-monospace">@v.K8sName</td>
                                                     <td class="align-middle text-end">
-                                                        @TopoDeleteBtn($"vhost:{v.K8sName}", () => DeleteVhost(cluster, v.K8sName))
+                                                        <button class="btn btn-sm btn-outline-danger" title="Delete"
+                                                                @onclick='() => PrepareCascadeDelete(cluster, "vhost", v.K8sName, v.VhostName, v.VhostName)'>
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
                                                     </td>
                                                 </tr>
                                             }
@@ -332,7 +339,10 @@
                                                                 @onclick="() => PrepareAppLink(cluster, q.QueueName, null, q.Vhost)">
                                                             <i class="bi bi-link-45deg me-1"></i>Link to App
                                                         </button>
-                                                        @TopoDeleteBtn($"queue:{q.K8sName}", () => DeleteQueue(cluster, q.K8sName))
+                                                        <button class="btn btn-sm btn-outline-danger" title="Delete"
+                                                                @onclick='() => PrepareCascadeDelete(cluster, "queue", q.K8sName, q.QueueName, q.Vhost)'>
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
                                                     </td>
                                                 </tr>
                                             }
@@ -409,7 +419,10 @@
                                                                 @onclick="() => PrepareAppLink(cluster, null, ex.ExchangeName, ex.Vhost)">
                                                             <i class="bi bi-link-45deg me-1"></i>Link to App
                                                         </button>
-                                                        @TopoDeleteBtn($"exchange:{ex.K8sName}", () => DeleteExchange(cluster, ex.K8sName))
+                                                        <button class="btn btn-sm btn-outline-danger" title="Delete"
+                                                                @onclick='() => PrepareCascadeDelete(cluster, "exchange", ex.K8sName, ex.ExchangeName, ex.Vhost)'>
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
                                                     </td>
                                                 </tr>
                                             }
@@ -484,7 +497,8 @@
                                                     <td class="align-middle font-monospace text-muted">@rb.RoutingKey</td>
                                                     <td class="align-middle text-muted">@rb.Vhost</td>
                                                     <td class="align-middle text-end">
-                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteRoutingBinding(cluster, rb.K8sName)">
+                                                        <button class="btn btn-sm btn-outline-danger" title="Delete"
+                                                                @onclick='() => PrepareCascadeDelete(cluster, "binding", rb.K8sName, $"{rb.Source} → {rb.Destination}", rb.Vhost)'>
                                                             <i class="bi bi-trash"></i>
                                                         </button>
                                                     </td>
@@ -891,40 +905,6 @@
 
                                 <hr class="my-3" />
 
-                                @* ── Cluster settings (edit) ── *@
-                                @if (editClusterId == cluster.Id)
-                                {
-                                    <div class="card border-warning mb-3"><div class="card-body py-2">
-                                        <h6 class="small fw-semibold mb-2"><i class="bi bi-pencil me-1"></i>Edit Cluster</h6>
-                                        <div class="row g-2">
-                                            <div class="col-md-3">
-                                                <label class="form-label small mb-1">Version</label>
-                                                <input class="form-control form-control-sm" @bind="editVersion" />
-                                            </div>
-                                            <div class="col-md-2">
-                                                <label class="form-label small mb-1">Replicas</label>
-                                                <input type="number" class="form-control form-control-sm" @bind="editReplicas" min="1" max="9" />
-                                            </div>
-                                            <div class="col-md-3">
-                                                <label class="form-label small mb-1">Storage Size</label>
-                                                <input class="form-control form-control-sm" @bind="editStorageSize" />
-                                            </div>
-                                            <div class="col-md-4">
-                                                <label class="form-label small mb-1">Storage Class</label>
-                                                <input class="form-control form-control-sm" @bind="editStorageClass" />
-                                            </div>
-                                        </div>
-                                        <div class="form-text small mt-1">Storage can only grow; the operator applies a rolling update.</div>
-                                        @if (!string.IsNullOrEmpty(editError)) { <div class="alert alert-danger py-1 small mt-2 mb-0">@editError</div> }
-                                        <div class="mt-2 d-flex gap-1">
-                                            <button class="btn btn-sm btn-warning" @onclick="() => SaveClusterEdit(cluster)" disabled="@savingEdit">
-                                                @if (savingEdit) { <span class="spinner-border spinner-border-sm me-1"></span> }Save Changes
-                                            </button>
-                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => editClusterId = null">Cancel</button>
-                                        </div>
-                                    </div></div>
-                                }
-
                                 <div class="d-flex gap-2">
                                     <button class="btn btn-sm btn-outline-secondary" @onclick="() => RefreshClusterStatus(cluster)"
                                             disabled="@(refreshingStatus == cluster.Id)">
@@ -972,6 +952,100 @@
                         <button class="btn btn-outline-secondary" @onclick="() => deleteTarget = null">Cancel</button>
                         <button class="btn btn-danger" @onclick="DeleteCluster" disabled="@deleting">
                             @if (deleting) { <span class="spinner-border spinner-border-sm me-1"></span> }Delete
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* ── Cluster edit modal ── *@
+    @if (editClusterId is not null)
+    {
+        RabbitMQCluster? editCluster = clusters.FirstOrDefault(c => c.Id == editClusterId);
+        if (editCluster is not null)
+        {
+            <div class="modal fade show d-block" tabindex="-1" style="background:rgba(0,0,0,0.5)">
+                <div class="modal-dialog modal-dialog-centered modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title"><i class="bi bi-pencil me-2 text-warning"></i>Edit Cluster — @editCluster.Name</h5>
+                            <button type="button" class="btn-close" @onclick="() => editClusterId = null"></button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="row g-2">
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-1">Version</label>
+                                    <input class="form-control form-control-sm" @bind="editVersion" />
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label small mb-1">Replicas</label>
+                                    <input type="number" class="form-control form-control-sm" @bind="editReplicas" min="1" max="9" />
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-1">Storage Size</label>
+                                    <input class="form-control form-control-sm" @bind="editStorageSize" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small mb-1">Storage Class</label>
+                                    <input class="form-control form-control-sm" @bind="editStorageClass" />
+                                </div>
+                            </div>
+                            <div class="form-text small mt-1">Storage can only grow; the operator applies a rolling update.</div>
+                            @if (!string.IsNullOrEmpty(editError)) { <div class="alert alert-danger py-1 small mt-2 mb-0">@editError</div> }
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn btn-outline-secondary" @onclick="() => editClusterId = null">Cancel</button>
+                            <button class="btn btn-warning" @onclick="() => SaveClusterEdit(editCluster)" disabled="@savingEdit">
+                                @if (savingEdit) { <span class="spinner-border spinner-border-sm me-1"></span> }Save Changes
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+    }
+
+    @* ── Cascade delete modal (vhost / queue / exchange / binding) ── *@
+    @if (cascadeCluster is not null && cascadeKind is not null)
+    {
+        <div class="modal fade show d-block" tabindex="-1" style="background:rgba(0,0,0,0.5)">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title text-danger"><i class="bi bi-trash me-2"></i>Delete @cascadeKind</h5>
+                        <button type="button" class="btn-close" @onclick="CancelCascadeDelete" disabled="@cascadeDeleting"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="mb-2">Delete <strong>@cascadeDisplay</strong>?</p>
+                        @if (cascadeLoading)
+                        {
+                            <div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Checking dependents…</div>
+                        }
+                        else if (cascadeDependents.Count == 0)
+                        {
+                            <p class="text-muted small mb-0">No dependent topology objects.</p>
+                        }
+                        else
+                        {
+                            <p class="text-danger small mb-1">
+                                <i class="bi bi-exclamation-triangle me-1"></i>
+                                The following @cascadeDependents.Count dependent object(s) will also be deleted:
+                            </p>
+                            <ul class="small mb-0" style="max-height:14rem;overflow-y:auto">
+                                @foreach (RabbitMQCascadeItem dep in cascadeDependents)
+                                {
+                                    <li><span class="badge bg-secondary-subtle text-secondary border me-1">@dep.Kind</span>@dep.Display</li>
+                                }
+                            </ul>
+                        }
+                        @if (!string.IsNullOrEmpty(cascadeError)) { <div class="alert alert-danger py-1 small mt-2 mb-0">@cascadeError</div> }
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-outline-secondary" @onclick="CancelCascadeDelete" disabled="@cascadeDeleting">Cancel</button>
+                        <button class="btn btn-danger" @onclick="ConfirmCascadeDelete" disabled="@(cascadeDeleting || cascadeLoading)">
+                            @if (cascadeDeleting) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Delete@(cascadeDependents.Count > 0 ? $" + {cascadeDependents.Count} dependent(s)" : "")
                         </button>
                     </div>
                 </div>
@@ -1098,6 +1172,17 @@
     // Delete cluster
     private RabbitMQCluster? deleteTarget;
     private bool deleting;
+
+    // Cascade delete (topology objects)
+    private RabbitMQCluster? cascadeCluster;
+    private string? cascadeKind;
+    private string? cascadeK8sName;
+    private string? cascadeDisplay;
+    private string cascadeVhost = "";
+    private bool cascadeLoading;
+    private List<RabbitMQCascadeItem> cascadeDependents = [];
+    private bool cascadeDeleting;
+    private string? cascadeError;
 
     // Cluster edit / status refresh
     private Guid? editClusterId;
@@ -1387,17 +1472,6 @@
         finally { submitting = false; }
     }
 
-    private async Task DeleteVhost(RabbitMQCluster cluster, string k8sName)
-    {
-        topologyError = null;
-        try
-        {
-            await RabbitMQService.DeleteVhostAsync(TenantId, cluster.Id, k8sName);
-            vhosts = await RabbitMQService.GetVhostsAsync(TenantId, cluster.Id);
-        }
-        catch (Exception ex) { topologyError = ex.Message; }
-    }
-
     // ── Queues ────────────────────────────────────────────────────────────────
 
     private async Task CreateQueue(RabbitMQCluster cluster)
@@ -1413,17 +1487,6 @@
         }
         catch (Exception ex) { topologyError = ex.Message; }
         finally { submitting = false; }
-    }
-
-    private async Task DeleteQueue(RabbitMQCluster cluster, string k8sName)
-    {
-        topologyError = null;
-        try
-        {
-            await RabbitMQService.DeleteQueueAsync(TenantId, cluster.Id, k8sName);
-            queues = await RabbitMQService.GetQueuesAsync(TenantId, cluster.Id);
-        }
-        catch (Exception ex) { topologyError = ex.Message; }
     }
 
     // ── Exchanges ─────────────────────────────────────────────────────────────
@@ -1443,17 +1506,6 @@
         finally { submitting = false; }
     }
 
-    private async Task DeleteExchange(RabbitMQCluster cluster, string k8sName)
-    {
-        topologyError = null;
-        try
-        {
-            await RabbitMQService.DeleteExchangeAsync(TenantId, cluster.Id, k8sName);
-            exchanges = await RabbitMQService.GetExchangesAsync(TenantId, cluster.Id);
-        }
-        catch (Exception ex) { topologyError = ex.Message; }
-    }
-
     // ── Routing bindings ──────────────────────────────────────────────────────
 
     private async Task CreateRoutingBinding(RabbitMQCluster cluster)
@@ -1471,15 +1523,61 @@
         finally { submitting = false; }
     }
 
-    private async Task DeleteRoutingBinding(RabbitMQCluster cluster, string k8sName)
+    // ── Cascade delete (vhost / queue / exchange / binding) ─────────────────────
+
+    private async Task PrepareCascadeDelete(
+        RabbitMQCluster cluster, string kind, string k8sName, string display, string vhost)
     {
-        topologyError = null;
+        cascadeCluster = cluster;
+        cascadeKind = kind;
+        cascadeK8sName = k8sName;
+        cascadeDisplay = display;
+        cascadeVhost = vhost;
+        cascadeDependents = [];
+        cascadeError = null;
+        cascadeDeleting = false;
+        cascadeLoading = kind != "binding";
+
+        if (cascadeLoading)
+        {
+            try
+            {
+                // For vhost the resource name is the vhost path itself.
+                cascadeDependents = await RabbitMQService.GetCascadeDependentsAsync(
+                    TenantId, cluster.Id, kind, vhost, display);
+            }
+            catch (Exception ex) { cascadeError = ex.Message; }
+            finally { cascadeLoading = false; }
+        }
+    }
+
+    private async Task ConfirmCascadeDelete()
+    {
+        if (cascadeCluster is null || cascadeKind is null || cascadeK8sName is null) return;
+        cascadeDeleting = true;
+        cascadeError = null;
         try
         {
-            await RabbitMQService.DeleteRoutingBindingAsync(TenantId, cluster.Id, k8sName);
-            routingBindings = await RabbitMQService.GetRoutingBindingsAsync(TenantId, cluster.Id);
+            Guid clusterId = cascadeCluster.Id;
+            await RabbitMQService.DeleteTopologyCascadeAsync(
+                TenantId, clusterId, cascadeKind, cascadeK8sName, cascadeDependents);
+            CancelCascadeDelete();
+            await LoadTopologyTab(clusterId);
         }
-        catch (Exception ex) { topologyError = ex.Message; }
+        catch (Exception ex) { cascadeError = ex.Message; cascadeDeleting = false; }
+    }
+
+    private void CancelCascadeDelete()
+    {
+        cascadeCluster = null;
+        cascadeKind = null;
+        cascadeK8sName = null;
+        cascadeDisplay = null;
+        cascadeVhost = "";
+        cascadeDependents = [];
+        cascadeError = null;
+        cascadeDeleting = false;
+        cascadeLoading = false;
     }
 
     // ── Users ─────────────────────────────────────────────────────────────────
