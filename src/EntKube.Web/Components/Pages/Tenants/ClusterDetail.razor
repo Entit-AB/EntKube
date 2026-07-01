@@ -604,6 +604,70 @@ else if (section == "components")
         </div>
     }
 
+    @* --- Manifest Components Panel (operators installed outside Helm) --- *@
+    @if (discoveredManifests is not null && discoveredManifests.Count > 0)
+    {
+        <div class="card shadow-sm mb-3 border-info">
+            <div class="card-header bg-info bg-opacity-10 d-flex align-items-center justify-content-between py-2">
+                <span>
+                    <i class="bi bi-box-seam me-2 text-info"></i>
+                    <strong>Discovered Operators (installed outside Helm)</strong>
+                    <span class="badge bg-info ms-2">@discoveredManifests.Count</span>
+                </span>
+                <div class="d-flex gap-2">
+                    @{
+                        int newManifestCount = discoveredManifests.Count(m => !m.AlreadyTracked);
+                    }
+                    @if (newManifestCount > 0)
+                    {
+                        <button class="btn btn-sm btn-success" @onclick="ImportAllManifests">
+                            <i class="bi bi-download me-1"></i>Track All New (@newManifestCount)
+                        </button>
+                    }
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => discoveredManifests = null">
+                        <i class="bi bi-x-lg"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Component</th>
+                                <th>Namespace</th>
+                                <th>Detected via CRD</th>
+                                <th class="text-end">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (DiscoveredManifestComponent manifest in discoveredManifests)
+                            {
+                                <tr class="@(manifest.AlreadyTracked ? "table-success" : "")">
+                                    <td class="fw-semibold">@manifest.DisplayName</td>
+                                    <td><code>@manifest.Namespace</code></td>
+                                    <td><code>@manifest.DetectedVia</code></td>
+                                    <td class="text-end">
+                                        @if (manifest.AlreadyTracked)
+                                        {
+                                            <span class="badge bg-success"><i class="bi bi-check-lg me-1"></i>Tracked</span>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-outline-success" @onclick="() => ImportSingleManifest(manifest)">
+                                                <i class="bi bi-download me-1"></i>Track
+                                            </button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    }
+
     @* --- Component List --- *@
     @if (components is null)
     {
@@ -625,7 +689,7 @@ else if (section == "components")
             {
                 <div class="col">
                     @{
-                        CatalogEntry? headerCatalog = ComponentCatalog.GetByKey(comp.Name);
+                        CatalogEntry? headerCatalog = ResolveCatalog(comp);
                         bool missingGatewayCrds = gatewayApiCrdsPresent == false
                             && headerCatalog?.Dependencies.Contains("gateway-api-crds") == true
                             && comp.Status == ComponentStatus.Installed;
@@ -1408,6 +1472,7 @@ else if (section == "components")
     // Scan
     private bool scanning;
     private List<DiscoveredHelmRelease>? discoveredReleases;
+    private List<DiscoveredManifestComponent>? discoveredManifests;
 
     // Register form
     private bool showRegisterForm;
@@ -1514,7 +1579,7 @@ else if (section == "components")
 
         bool anyNeedsCrds = components.Any(c =>
             c.Status == ComponentStatus.Installed &&
-            ComponentCatalog.GetByKey(c.Name)?.Dependencies.Contains("gateway-api-crds") == true);
+            ResolveCatalog(c)?.Dependencies.Contains("gateway-api-crds") == true);
 
         if (!anyNeedsCrds)
         {
@@ -1558,6 +1623,7 @@ else if (section == "components")
         try
         {
             discoveredReleases = await ScanService.ScanHelmReleasesAsync(Cluster);
+            discoveredManifests = await ScanService.ScanManifestComponentsAsync(Cluster);
         }
         catch (Exception ex)
         {
@@ -1566,6 +1632,44 @@ else if (section == "components")
         finally
         {
             scanning = false;
+        }
+    }
+
+    private async Task ImportSingleManifest(DiscoveredManifestComponent manifest)
+    {
+        try
+        {
+            await ScanService.ImportManifestComponentAsync(Cluster, manifest);
+            manifest.AlreadyTracked = true;
+            await LoadComponents();
+        }
+        catch (Exception ex)
+        {
+            componentError = $"Track failed: {ex.Message}";
+        }
+    }
+
+    private async Task ImportAllManifests()
+    {
+        if (discoveredManifests is null)
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (DiscoveredManifestComponent manifest in discoveredManifests.Where(m => !m.AlreadyTracked))
+            {
+                await ScanService.ImportManifestComponentAsync(Cluster, manifest);
+                manifest.AlreadyTracked = true;
+            }
+
+            await LoadComponents();
+        }
+        catch (Exception ex)
+        {
+            componentError = $"Track failed: {ex.Message}";
+            await LoadComponents();
         }
     }
 
@@ -1804,7 +1908,7 @@ else if (section == "components")
             // Reload secret-backed field values from the vault so they re-populate the
             // form when reopening the component (e.g. wg-easy's gateway / hostname).
             // Password fields are left blank — we never echo secrets back into the UI.
-            CatalogEntry? secretCatalog = ComponentCatalog.GetByKey(comp.Name);
+            CatalogEntry? secretCatalog = ResolveCatalog(comp);
             if (secretCatalog is not null)
             {
                 foreach (ComponentFormField field in secretCatalog.FormFields)
@@ -1826,7 +1930,7 @@ else if (section == "components")
             // For components with a CnpgDatabase field (e.g. Keycloak), load available
             // databases and pre-populate config fields from the existing KeycloakComponentConfig.
 
-            CatalogEntry? catalogMatch = ComponentCatalog.GetByKey(comp.Name);
+            CatalogEntry? catalogMatch = ResolveCatalog(comp);
             bool hasCnpgField = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.CnpgDatabase) == true;
             bool hasIssuerField = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.ClusterIssuer) == true;
             bool hasStorageLinkField = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.StorageLink) == true;
@@ -2522,8 +2626,19 @@ else if (section == "components")
     private CatalogEntry? GetCatalogMatchForSelected()
     {
         ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == selectedComponentId);
-        return comp is not null ? ComponentCatalog.GetByKey(comp.Name) : null;
+        return comp is not null ? ResolveCatalog(comp) : null;
     }
+
+    /// <summary>
+    /// Resolves the catalog entry for a component. Components registered from the
+    /// catalog store the catalog Key as their Name, so GetByKey matches directly.
+    /// Scan-imported components store the Helm release name instead (e.g. "cnpg"
+    /// rather than "cloudnative-pg"), so fall back to FindByRelease — the same
+    /// resolver used at import time — so the title, icon, and form fields resolve
+    /// consistently. Returns null for genuinely unknown components.
+    /// </summary>
+    private static CatalogEntry? ResolveCatalog(ClusterComponent comp)
+        => ComponentCatalog.ResolveForComponent(comp.Name, comp.HelmChartName);
 
     private string MergeRegFormFields()
     {
@@ -2606,7 +2721,7 @@ else if (section == "components")
         // Subchart fields are stored as comment markers, not as YAML values.
 
         ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == selectedComponentId);
-        CatalogEntry? catalogMatch = comp is not null ? ComponentCatalog.GetByKey(comp.Name) : null;
+        CatalogEntry? catalogMatch = comp is not null ? ResolveCatalog(comp) : null;
 
         if (catalogMatch is null || catalogMatch.FormFields.Count == 0)
         {
@@ -2706,7 +2821,7 @@ else if (section == "components")
     private async Task SaveSecretFieldsToVault(Guid componentId)
     {
         ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == componentId);
-        CatalogEntry? catalogMatch = comp is not null ? ComponentCatalog.GetByKey(comp.Name) : null;
+        CatalogEntry? catalogMatch = comp is not null ? ResolveCatalog(comp) : null;
 
         if (catalogMatch is null)
         {
@@ -2779,7 +2894,7 @@ else if (section == "components")
         // then initialize from defaults (or extract from existing YAML).
 
         editFormFieldValues = new();
-        CatalogEntry? catalogMatch = ComponentCatalog.GetByKey(comp.Name);
+        CatalogEntry? catalogMatch = ResolveCatalog(comp);
 
         if (catalogMatch is null)
         {
