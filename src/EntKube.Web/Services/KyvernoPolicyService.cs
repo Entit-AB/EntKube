@@ -1,10 +1,37 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
 namespace EntKube.Web.Services;
+
+/// <summary>
+/// A live, cluster-scoped Kyverno <c>ClusterPolicy</c> observed on a cluster but NOT
+/// owned by EntKube. Surfaced read-only for visibility — EntKube only authors namespaced
+/// <c>Policy</c> objects, so a ClusterPolicy is assumed to be managed outside EntKube.
+/// </summary>
+public class KyvernoClusterPolicyInfo
+{
+    public required string Name { get; set; }
+    public required string ClusterName { get; set; }
+    public KyvernoValidationFailureAction Mode { get; set; }
+    public int RuleCount { get; set; }
+}
+
+/// <summary>Summary of a reverse-discovery run that adopts live Kyverno policies into EntKube.</summary>
+public class KyvernoDiscoveryResult
+{
+    /// <summary>Number of policies newly adopted into the DB.</summary>
+    public int Detected { get; set; }
+
+    /// <summary>Display names of the adopted policies (custom ones flagged).</summary>
+    public List<string> PolicyNames { get; set; } = [];
+
+    /// <summary>Per-target failures (cluster/namespace unreachable, CRD missing, etc.).</summary>
+    public List<string> Errors { get; set; } = [];
+}
 
 /// <summary>
 /// Manages Kyverno admission policies at tenant+environment scope.
@@ -13,6 +40,7 @@ namespace EntKube.Web.Services;
 /// </summary>
 public class KyvernoPolicyService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    IKubernetesClientFactory k8s,
     ILogger<KyvernoPolicyService> logger)
 {
     // ── CRUD ──────────────────────────────────────────────────────────────────
@@ -183,6 +211,76 @@ public class KyvernoPolicyService(
                             || c.ReleaseName == "kyverno"), ct);
     }
 
+    // ── Cluster-wide policies (observed, not owned) ────────────────────────────
+
+    /// <summary>
+    /// Lists live cluster-scoped <c>ClusterPolicy</c> objects on every cluster registered
+    /// for this tenant+environment. These are surfaced read-only: EntKube only authors
+    /// namespaced <c>Policy</c> objects, so a ClusterPolicy is treated as externally managed
+    /// (ArgoCD/Flux/manual). Best-effort — clusters where the CRD is absent or that are
+    /// unreachable are silently skipped.
+    /// </summary>
+    public async Task<List<KyvernoClusterPolicyInfo>> GetClusterPoliciesAsync(
+        Guid tenantId, Guid environmentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<KubernetesCluster> clusters = await db.KubernetesClusters
+            .Where(c => c.TenantId == tenantId && c.EnvironmentId == environmentId && c.Kubeconfig != null)
+            .ToListAsync(ct);
+
+        List<KyvernoClusterPolicyInfo> result = [];
+
+        foreach (KubernetesCluster cluster in clusters)
+        {
+            string json;
+            try
+            {
+                json = await k8s.GetJsonAllNamespacesAsync(
+                    "clusterpolicies.kyverno.io", cluster.Kubeconfig!, ct: ct);
+            }
+            catch
+            {
+                // ClusterPolicy CRD not installed or cluster unreachable — skip.
+                continue;
+            }
+
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(json); }
+            catch { continue; }
+
+            using JsonDocument _ = doc;
+
+            if (!doc.RootElement.TryGetProperty("items", out JsonElement items)
+                || items.ValueKind != JsonValueKind.Array)
+                continue;
+
+            foreach (JsonElement item in items.EnumerateArray())
+            {
+                string? name = item.TryGetProperty("metadata", out JsonElement meta)
+                            && meta.TryGetProperty("name", out JsonElement nameEl)
+                    ? nameEl.GetString() : null;
+
+                if (string.IsNullOrWhiteSpace(name)) continue;
+
+                int ruleCount = item.TryGetProperty("spec", out JsonElement spec)
+                             && spec.TryGetProperty("rules", out JsonElement rules)
+                             && rules.ValueKind == JsonValueKind.Array
+                    ? rules.GetArrayLength() : 0;
+
+                result.Add(new KyvernoClusterPolicyInfo
+                {
+                    Name = name,
+                    ClusterName = cluster.Name,
+                    Mode = ReadFailureAction(item),
+                    RuleCount = ruleCount
+                });
+            }
+        }
+
+        return result.OrderBy(p => p.ClusterName).ThenBy(p => p.Name).ToList();
+    }
+
     // ── Apply to environment ──────────────────────────────────────────────────
 
     /// <summary>
@@ -199,6 +297,29 @@ public class KyvernoPolicyService(
         if (policies.Count == 0)
             return [("(no policies)", false, "No policies configured — nothing to apply.")];
 
+        List<(KubernetesCluster Cluster, string Namespace)> targets =
+            await ResolveTargetsAsync(db, tenantId, environmentId, ct);
+
+        if (targets.Count == 0)
+            return [("(no deployments)", false, "No deployments found for this tenant in this environment.")];
+
+        var results = new List<(string Target, bool Success, string Output)>();
+        foreach (var (cluster, ns) in targets)
+        {
+            (bool ok, string output) = await ApplyToNamespaceAsync(policies, cluster, ns, ct);
+            results.Add(($"{cluster.Name}/{ns}", ok, output));
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// Resolves the unique (cluster, namespace) pairs that make up this tenant's
+    /// app footprint in an environment — the same targets policies are applied to.
+    /// Uses the governance-locked AppEnvironment namespace when present.
+    /// </summary>
+    private static async Task<List<(KubernetesCluster Cluster, string Namespace)>> ResolveTargetsAsync(
+        ApplicationDbContext db, Guid tenantId, Guid environmentId, CancellationToken ct)
+    {
         // Collect all app IDs for this tenant (App → Customer → Tenant).
         List<Guid> appIds = await db.Apps
             .Where(a => a.Customer.TenantId == tenantId)
@@ -218,11 +339,8 @@ public class KyvernoPolicyService(
             .Where(d => appIds.Contains(d.AppId) && d.EnvironmentId == environmentId)
             .ToListAsync(ct);
 
-        if (deployments.Count == 0)
-            return [("(no deployments)", false, "No deployments found for this tenant in this environment.")];
-
         // Build unique (cluster, namespace) pairs using the locked ns when available.
-        var targets = deployments
+        return deployments
             .Select(d =>
             {
                 string? ns = lockedNs.TryGetValue(d.AppId, out string? locked) && !string.IsNullOrWhiteSpace(locked)
@@ -231,15 +349,237 @@ public class KyvernoPolicyService(
             })
             .Where(t => t.Cluster is not null && !string.IsNullOrWhiteSpace(t.Namespace))
             .DistinctBy(t => (t.Cluster.Id, t.Namespace))
+            .Select(t => (t.Cluster, t.Namespace!))
             .ToList();
+    }
 
-        var results = new List<(string Target, bool Success, string Output)>();
-        foreach (var (cluster, ns) in targets)
+    // ── Reverse discovery (adopt live policies) ────────────────────────────────
+
+    /// <summary>
+    /// Reverse of <see cref="ApplyToEnvironmentAsync"/>: scans the tenant's app
+    /// namespaces for live Kyverno <c>Policy</c> resources and adopts them into the
+    /// DB so an imported/pre-existing cluster reflects its true policy state instead
+    /// of showing everything disabled.
+    ///
+    /// Recognised EntKube-shaped policies (matched by resource name) become their
+    /// built-in <see cref="KyvernoPolicyType"/> with the live validationFailureAction;
+    /// parametrised ones (registries/labels) recover their list from the rule message.
+    /// Anything unrecognised is adopted as a Custom policy carrying the sanitised YAML.
+    /// Built-ins already present (singleton per type) and custom names already present
+    /// are skipped, so it is safe to re-run.
+    /// </summary>
+    public async Task<KyvernoDiscoveryResult> DiscoverPoliciesAsync(
+        Guid tenantId, Guid environmentId, CancellationToken ct = default)
+    {
+        KyvernoDiscoveryResult result = new();
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<(KubernetesCluster Cluster, string Namespace)> targets =
+            await ResolveTargetsAsync(db, tenantId, environmentId, ct);
+
+        if (targets.Count == 0)
         {
-            (bool ok, string output) = await ApplyToNamespaceAsync(policies, cluster, ns!, ct);
-            results.Add(($"{cluster.Name}/{ns}", ok, output));
+            result.Errors.Add("No app namespaces found for this tenant in this environment.");
+            return result;
         }
-        return results;
+
+        List<KyvernoPolicy> existing = await db.KyvernoPolicies
+            .Where(p => p.TenantId == tenantId && p.EnvironmentId == environmentId)
+            .ToListAsync(ct);
+
+        HashSet<KyvernoPolicyType> seenBuiltIns = existing
+            .Where(p => p.PolicyType != KyvernoPolicyType.Custom)
+            .Select(p => p.PolicyType)
+            .ToHashSet();
+
+        HashSet<string> seenCustomNames = existing
+            .Where(p => p.PolicyType == KyvernoPolicyType.Custom && p.Name is not null)
+            .Select(p => p.Name!)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        List<KyvernoPolicy> toAdd = [];
+
+        foreach ((KubernetesCluster cluster, string ns) in targets)
+        {
+            if (string.IsNullOrWhiteSpace(cluster.Kubeconfig)) continue;
+
+            string json;
+            try
+            {
+                json = await k8s.GetJsonAsync("policies.kyverno.io", ns, cluster.Kubeconfig!, ct: ct);
+            }
+            catch (Exception ex)
+            {
+                result.Errors.Add($"{cluster.Name}/{ns}: {ex.Message}");
+                continue;
+            }
+
+            ParseDiscoveredPolicies(json, tenantId, environmentId,
+                seenBuiltIns, seenCustomNames, toAdd, result);
+        }
+
+        if (toAdd.Count > 0)
+        {
+            db.KyvernoPolicies.AddRange(toAdd);
+            await db.SaveChangesAsync(ct);
+            logger.LogInformation(
+                "Adopted {Count} live Kyverno policies for tenant {Tenant} / env {Env}",
+                toAdd.Count, tenantId, environmentId);
+        }
+
+        return result;
+    }
+
+    /// <summary>Maps a live Kyverno Policy resource name back to its built-in type (reverse of BuildPolicyYaml).</summary>
+    private static readonly Dictionary<string, KyvernoPolicyType> NameToType = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["disallow-privileged-containers"]  = KyvernoPolicyType.DisallowPrivilegedContainers,
+        ["disallow-root-user"]              = KyvernoPolicyType.DisallowRootUser,
+        ["require-readonly-rootfs"]         = KyvernoPolicyType.RequireReadOnlyRootFilesystem,
+        ["disallow-privilege-escalation"]   = KyvernoPolicyType.DisallowPrivilegeEscalation,
+        ["disallow-host-network"]           = KyvernoPolicyType.DisallowHostNetwork,
+        ["disallow-host-pid"]               = KyvernoPolicyType.DisallowHostPID,
+        ["disallow-host-path"]              = KyvernoPolicyType.DisallowHostPath,
+        ["restrict-image-registries"]       = KyvernoPolicyType.RestrictImageRegistries,
+        ["require-resource-limits"]         = KyvernoPolicyType.RequireResourceLimits,
+        ["require-resource-requests"]       = KyvernoPolicyType.RequireResourceRequests,
+        ["require-seccomp-profile"]         = KyvernoPolicyType.RequireSeccompProfile,
+        ["require-pod-labels"]              = KyvernoPolicyType.RequirePodLabels,
+    };
+
+    private static void ParseDiscoveredPolicies(
+        string json, Guid tenantId, Guid environmentId,
+        HashSet<KyvernoPolicyType> seenBuiltIns, HashSet<string> seenCustomNames,
+        List<KyvernoPolicy> toAdd, KyvernoDiscoveryResult result)
+    {
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(json); }
+        catch { return; }
+
+        using JsonDocument _ = doc;
+
+        if (!doc.RootElement.TryGetProperty("items", out JsonElement items) || items.ValueKind != JsonValueKind.Array)
+            return;
+
+        foreach (JsonElement item in items.EnumerateArray())
+        {
+            string? name = item.TryGetProperty("metadata", out JsonElement meta)
+                        && meta.TryGetProperty("name", out JsonElement nameEl)
+                ? nameEl.GetString() : null;
+
+            if (string.IsNullOrWhiteSpace(name)) continue;
+
+            KyvernoValidationFailureAction mode = ReadFailureAction(item);
+
+            if (NameToType.TryGetValue(name, out KyvernoPolicyType type))
+            {
+                // Built-in singleton per type — skip if already known/seen.
+                if (!seenBuiltIns.Add(type)) continue;
+
+                KyvernoPolicy policy = new()
+                {
+                    Id = Guid.NewGuid(),
+                    TenantId = tenantId,
+                    EnvironmentId = environmentId,
+                    PolicyType = type,
+                    ValidationFailureAction = mode
+                };
+
+                // Recover the parametrised lists from the rule message where possible.
+                if (type == KyvernoPolicyType.RestrictImageRegistries)
+                    policy.Configuration = ExtractConfigFromMessage(item, "approved registry:");
+                else if (type == KyvernoPolicyType.RequirePodLabels)
+                    policy.Configuration = ExtractConfigFromMessage(item, "required labels:");
+
+                toAdd.Add(policy);
+                result.Detected++;
+                result.PolicyNames.Add(name);
+            }
+            else
+            {
+                // Unrecognised — adopt as a Custom policy preserving the live YAML.
+                if (!seenCustomNames.Add(name)) continue;
+
+                string yaml;
+                try { yaml = ImportManifestSanitizer.ToYaml(JsonNode.Parse(item.GetRawText())!); }
+                catch { continue; }
+
+                toAdd.Add(new KyvernoPolicy
+                {
+                    Id = Guid.NewGuid(),
+                    TenantId = tenantId,
+                    EnvironmentId = environmentId,
+                    PolicyType = KyvernoPolicyType.Custom,
+                    ValidationFailureAction = mode,
+                    Name = name,
+                    CustomYaml = yaml
+                });
+                result.Detected++;
+                result.PolicyNames.Add($"{name} (custom)");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads the effective validation failure action from a live Policy: the
+    /// spec-level <c>validationFailureAction</c> (what BuildPolicyYaml emits) with a
+    /// fallback to the newer per-rule <c>validate.failureAction</c>. Defaults to Audit.
+    /// </summary>
+    private static KyvernoValidationFailureAction ReadFailureAction(JsonElement policy)
+    {
+        if (!policy.TryGetProperty("spec", out JsonElement spec))
+            return KyvernoValidationFailureAction.Audit;
+
+        if (spec.TryGetProperty("validationFailureAction", out JsonElement vfa)
+            && string.Equals(vfa.GetString(), "Enforce", StringComparison.OrdinalIgnoreCase))
+            return KyvernoValidationFailureAction.Enforce;
+
+        if (spec.TryGetProperty("rules", out JsonElement rules) && rules.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement rule in rules.EnumerateArray())
+            {
+                if (rule.TryGetProperty("validate", out JsonElement validate)
+                    && validate.TryGetProperty("failureAction", out JsonElement fa)
+                    && string.Equals(fa.GetString(), "Enforce", StringComparison.OrdinalIgnoreCase))
+                    return KyvernoValidationFailureAction.Enforce;
+            }
+        }
+
+        return KyvernoValidationFailureAction.Audit;
+    }
+
+    /// <summary>
+    /// Recovers a comma-separated config list from a parametrised policy's rule message
+    /// (e.g. "…approved registry: ghcr.io/org, docker.io"). Returns a JSON array string,
+    /// or null when the marker isn't present. Mirrors the messages BuildPolicyYaml emits.
+    /// </summary>
+    private static string? ExtractConfigFromMessage(JsonElement policy, string marker)
+    {
+        if (!policy.TryGetProperty("spec", out JsonElement spec)
+            || !spec.TryGetProperty("rules", out JsonElement rules)
+            || rules.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (JsonElement rule in rules.EnumerateArray())
+        {
+            if (!rule.TryGetProperty("validate", out JsonElement validate)
+                || !validate.TryGetProperty("message", out JsonElement msgEl))
+                continue;
+
+            string? message = msgEl.GetString();
+            int idx = message?.IndexOf(marker, StringComparison.OrdinalIgnoreCase) ?? -1;
+            if (message is null || idx < 0) continue;
+
+            string tail = message[(idx + marker.Length)..].TrimEnd('.', ' ');
+            List<string> items = tail
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToList();
+
+            if (items.Count > 0)
+                return SerializeConfigList(items);
+        }
+
+        return null;
     }
 
     /// <summary>Applies the Kyverno Policy YAML for all policies to a single namespace via kubectl.</summary>

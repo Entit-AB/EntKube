@@ -262,6 +262,156 @@ public class RabbitMQService(
         await db.SaveChangesAsync(ct);
     }
 
+    // ── Reverse discovery (adopt live clusters) ───────────────────────────────
+
+    /// <summary>
+    /// Scans every Kubernetes cluster the tenant owns for live <c>RabbitmqCluster</c>
+    /// resources and adopts any that EntKube doesn't already track as
+    /// <see cref="RabbitMQCluster"/> records. This makes pre-existing clusters (created
+    /// outside EntKube, or by the operator before it was imported) visible in the
+    /// Messaging tab. Idempotent — a cluster already tracked by (k8s cluster, ns, name)
+    /// is skipped, so it is safe to re-run.
+    ///
+    /// Returns the number of newly adopted clusters.
+    /// </summary>
+    public async Task<int> DiscoverClustersAsync(Guid tenantId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<KubernetesCluster> k8sClusters = await db.KubernetesClusters
+            .Where(c => c.TenantId == tenantId && c.Kubeconfig != null)
+            .ToListAsync(ct);
+
+        if (k8sClusters.Count == 0) return 0;
+
+        HashSet<(Guid, string, string)> existing = (await db.RabbitMQClusters
+            .Where(c => c.TenantId == tenantId)
+            .Select(c => new { c.KubernetesClusterId, c.Namespace, c.Name })
+            .ToListAsync(ct))
+            .Select(x => (x.KubernetesClusterId, x.Namespace, x.Name))
+            .ToHashSet();
+
+        List<Guid> newClusterIds = [];
+
+        foreach (KubernetesCluster k in k8sClusters)
+        {
+            string json;
+            try
+            {
+                json = await k8s.GetJsonAllNamespacesAsync(
+                    "rabbitmqclusters.rabbitmq.com", k.Kubeconfig!, ct: ct);
+            }
+            catch
+            {
+                // Operator/CRD not installed on this cluster, or unreachable — skip.
+                continue;
+            }
+
+            foreach (RabbitMQCluster discovered in ParseDiscoveredClusters(json, tenantId, k.Id))
+            {
+                if (!existing.Add((k.Id, discovered.Namespace, discovered.Name))) continue;
+                db.RabbitMQClusters.Add(discovered);
+                newClusterIds.Add(discovered.Id);
+            }
+        }
+
+        if (newClusterIds.Count > 0) await db.SaveChangesAsync(ct);
+
+        // Best-effort: pull admin credentials for each newly adopted cluster into the
+        // vault. The operator secret exists for a running cluster; failures are ignored.
+        foreach (Guid id in newClusterIds)
+        {
+            try { await SyncCredentialsToVaultAsync(tenantId, id, ct); }
+            catch { }
+        }
+
+        return newClusterIds.Count;
+    }
+
+    /// <summary>Parses a RabbitmqCluster list (kubectl -o json) into unsaved RabbitMQCluster records.</summary>
+    private static IEnumerable<RabbitMQCluster> ParseDiscoveredClusters(string json, Guid tenantId, Guid k8sClusterId)
+    {
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(json); }
+        catch { yield break; }
+
+        using JsonDocument _ = doc;
+
+        if (!doc.RootElement.TryGetProperty("items", out JsonElement items) || items.ValueKind != JsonValueKind.Array)
+            yield break;
+
+        foreach (JsonElement item in items.EnumerateArray())
+        {
+            if (!item.TryGetProperty("metadata", out JsonElement meta)) continue;
+            string? name = meta.TryGetProperty("name", out JsonElement n) ? n.GetString() : null;
+            string? ns = meta.TryGetProperty("namespace", out JsonElement nsEl) ? nsEl.GetString() : null;
+            if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(ns)) continue;
+
+            item.TryGetProperty("spec", out JsonElement spec);
+
+            int replicas = spec.ValueKind == JsonValueKind.Object
+                        && spec.TryGetProperty("replicas", out JsonElement rep)
+                        && rep.ValueKind == JsonValueKind.Number
+                ? rep.GetInt32() : 1;
+
+            string version = "3.13";
+            if (spec.ValueKind == JsonValueKind.Object
+                && spec.TryGetProperty("image", out JsonElement img)
+                && img.GetString() is string image && image.Contains(':'))
+            {
+                // Use the LAST colon so a registry port (host:5000/rabbitmq:3.13) isn't mistaken for the tag.
+                version = image[(image.LastIndexOf(':') + 1)..].Replace("-management", "");
+            }
+
+            string storageSize = "10Gi";
+            string? storageClass = null;
+            if (spec.ValueKind == JsonValueKind.Object
+                && spec.TryGetProperty("persistence", out JsonElement persistence)
+                && persistence.ValueKind == JsonValueKind.Object)
+            {
+                if (persistence.TryGetProperty("storage", out JsonElement storage) && storage.GetString() is string s)
+                    storageSize = s;
+                if (persistence.TryGetProperty("storageClassName", out JsonElement sc) && sc.GetString() is string scn)
+                    storageClass = scn;
+            }
+
+            yield return new RabbitMQCluster
+            {
+                Id = Guid.NewGuid(),
+                TenantId = tenantId,
+                KubernetesClusterId = k8sClusterId,
+                Name = name,
+                Namespace = ns,
+                RabbitMQVersion = version,
+                Replicas = replicas,
+                StorageSize = storageSize,
+                StorageClass = storageClass,
+                Status = DiscoveredClusterStatus(item)
+            };
+        }
+    }
+
+    /// <summary>Derives an initial status for a discovered cluster from its status conditions.</summary>
+    private static RabbitMQClusterStatus DiscoveredClusterStatus(JsonElement item)
+    {
+        if (item.TryGetProperty("status", out JsonElement status)
+            && status.TryGetProperty("conditions", out JsonElement conditions)
+            && conditions.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement cond in conditions.EnumerateArray())
+            {
+                string? type = cond.TryGetProperty("type", out JsonElement t) ? t.GetString() : null;
+                string? cs = cond.TryGetProperty("status", out JsonElement s) ? s.GetString() : null;
+                if (type == "ClusterAvailable" && cs == "True")
+                    return RabbitMQClusterStatus.Running;
+            }
+        }
+
+        // Exists but not (yet) reporting available — treat as running so it's visible;
+        // ReconcileStatusAsync will correct it on the next live-status refresh.
+        return RabbitMQClusterStatus.Running;
+    }
+
     // ── Live K8s status ───────────────────────────────────────────────────────
 
     public async Task<RabbitMQClusterInfo?> GetLiveStatusAsync(

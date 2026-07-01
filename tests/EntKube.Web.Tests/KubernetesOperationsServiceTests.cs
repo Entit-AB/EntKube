@@ -4,6 +4,7 @@ using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 
 namespace EntKube.Web.Tests;
 
@@ -36,7 +37,7 @@ public class KubernetesOperationsServiceTests : IDisposable
         db.Database.EnsureCreated();
 
         sut = new KubernetesOperationsService(dbFactory, new AuditService(dbFactory),
-            new KyvernoPolicyService(dbFactory, NullLogger<KyvernoPolicyService>.Instance),
+            new KyvernoPolicyService(dbFactory, new Mock<IKubernetesClientFactory>().Object, NullLogger<KyvernoPolicyService>.Instance),
             NullLogger<KubernetesOperationsService>.Instance);
     }
 

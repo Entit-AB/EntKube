@@ -6,6 +6,8 @@ using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 
 namespace EntKube.Web.Tests;
 
@@ -42,7 +44,10 @@ public class ComponentScanServiceTests : IDisposable
 
         VaultEncryptionService encryption = new(TestRootKey);
         VaultService vaultService = new(dbFactory, encryption);
-        sut = new ComponentScanService(dbFactory, vaultService);
+        IKubernetesClientFactory k8sFactory = new Mock<IKubernetesClientFactory>().Object;
+        KyvernoPolicyService kyvernoService = new(dbFactory, k8sFactory, NullLogger<KyvernoPolicyService>.Instance);
+        RabbitMQService rabbitMQService = new(dbFactory, k8sFactory, vaultService);
+        sut = new ComponentScanService(dbFactory, vaultService, kyvernoService, rabbitMQService);
 
         // Seed tenant, environment, and cluster.
 

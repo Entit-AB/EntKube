@@ -48,7 +48,11 @@ public class DiscoveredHelmRelease
 /// Found releases can then be imported as ClusterComponents so the platform
 /// tracks what's already running — even if it was installed outside EntKube.
 /// </summary>
-public class ComponentScanService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService)
+public class ComponentScanService(
+    IDbContextFactory<ApplicationDbContext> dbFactory,
+    VaultService vaultService,
+    KyvernoPolicyService kyvernoPolicyService,
+    RabbitMQService rabbitMQService)
 {
     /// <summary>
     /// Scans the cluster for all installed Helm releases. Connects using the
@@ -212,6 +216,8 @@ public class ComponentScanService(IDbContextFactory<ApplicationDbContext> dbFact
                 // Route discovery failed (cluster unreachable, CRD missing, etc.)
             }
 
+            await TryAdoptManagedResourcesAsync(cluster, existing, ct);
+
             return existing;
         }
 
@@ -256,7 +262,41 @@ public class ComponentScanService(IDbContextFactory<ApplicationDbContext> dbFact
             // Route discovery failed (cluster unreachable, CRD missing, etc.)
         }
 
+        await TryAdoptManagedResourcesAsync(cluster, component, ct);
+
         return component;
+    }
+
+    /// <summary>
+    /// When an imported component is an operator/controller that EntKube manages the
+    /// resources of, adopt those live resources too so the cluster's true state shows up
+    /// instead of an empty view. Kyverno → adopt applied Policy resources; the RabbitMQ
+    /// Cluster Operator → adopt existing RabbitmqCluster instances. Best-effort: a failure
+    /// here never blocks the component import.
+    /// </summary>
+    private async Task TryAdoptManagedResourcesAsync(
+        KubernetesCluster cluster, ClusterComponent component, CancellationToken ct)
+    {
+        try
+        {
+            bool isKyverno = Matches(component, "kyverno");
+            bool isRabbitOperator = Matches(component, "rabbitmq-cluster-operator");
+
+            if (isKyverno)
+                await kyvernoPolicyService.DiscoverPoliciesAsync(cluster.TenantId, cluster.EnvironmentId, ct);
+
+            if (isRabbitOperator)
+                await rabbitMQService.DiscoverClustersAsync(cluster.TenantId, ct);
+        }
+        catch
+        {
+            // Adoption is best-effort; the component is already imported.
+        }
+
+        static bool Matches(ClusterComponent c, string key) =>
+            string.Equals(c.Name, key, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(c.ReleaseName, key, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(c.HelmChartName, key, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
