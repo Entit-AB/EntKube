@@ -9,6 +9,8 @@
 @inject KeycloakService KeycloakService
 @inject HarborService HarborService
 @inject LokiService LokiService
+@inject MimirService MimirService
+@inject TempoService TempoService
 @inject StorageService StorageService
 @inject HeadscaleService HeadscaleService
 
@@ -1721,6 +1723,12 @@ else if (section == "components")
 
             await SaveLokiConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
 
+            // Configure Mimir / Tempo S3 storage if a storage link was selected.
+
+            await SaveMimirConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
+
+            await SaveTempoConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
+
 
             showRegisterForm = false;
             ResetRegisterForm();
@@ -1873,6 +1881,26 @@ else if (section == "components")
                     }
                 }
 
+                // Load Mimir storage link ID from the component's Configuration JSON.
+                if (catalogMatch?.Key == "mimir")
+                {
+                    Guid? mimirStorageLinkId = await MimirService.GetStorageLinkIdForComponentAsync(TenantId, componentId);
+                    if (mimirStorageLinkId.HasValue)
+                    {
+                        editFormFieldValues["storage-link"] = mimirStorageLinkId.Value.ToString();
+                    }
+                }
+
+                // Load Tempo storage link ID from the component's Configuration JSON.
+                if (catalogMatch?.Key == "tempo")
+                {
+                    Guid? tempoStorageLinkId = await TempoService.GetStorageLinkIdForComponentAsync(TenantId, componentId);
+                    if (tempoStorageLinkId.HasValue)
+                    {
+                        editFormFieldValues["storage-link"] = tempoStorageLinkId.Value.ToString();
+                    }
+                }
+
                 // Pre-populate hostname and TLS fields from the existing external route.
                 List<ExternalRoute> routes = await RouteService.GetRoutesAsync(componentId);
                 ExternalRoute? route = routes.FirstOrDefault();
@@ -1936,6 +1964,12 @@ else if (section == "components")
             // Configure Loki S3 chunk storage if a storage link was selected.
 
             await SaveLokiConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
+
+            // Configure Mimir / Tempo S3 storage if a storage link was selected.
+
+            await SaveMimirConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
+
+            await SaveTempoConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
 
             await LoadComponents();
         }
@@ -2980,6 +3014,46 @@ else if (section == "components")
         }
 
         await LokiService.WriteStorageHelmValuesAsync(TenantId, componentId, storageLinkId);
+    }
+
+    /// <summary>
+    /// Configures Mimir S3 metrics storage when a storage link was selected. Writes
+    /// the external S3 config into HelmValues (disabling the bundled MinIO) and stores
+    /// the bucket credentials in the vault for injection at install time.
+    /// </summary>
+    private async Task SaveMimirConfigIfNeeded(
+        Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
+    {
+        if (catalogEntry?.Key != "mimir") return;
+
+        if (!fieldValues.TryGetValue("storage-link", out string? slIdStr)
+            || !Guid.TryParse(slIdStr, out Guid storageLinkId)
+            || storageLinkId == Guid.Empty)
+        {
+            return;
+        }
+
+        await MimirService.WriteStorageHelmValuesAsync(TenantId, componentId, storageLinkId);
+    }
+
+    /// <summary>
+    /// Configures Tempo S3 trace storage when a storage link was selected. Writes the
+    /// external S3 config into HelmValues and stores the bucket credentials in the
+    /// vault for injection at install time.
+    /// </summary>
+    private async Task SaveTempoConfigIfNeeded(
+        Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
+    {
+        if (catalogEntry?.Key != "tempo") return;
+
+        if (!fieldValues.TryGetValue("storage-link", out string? slIdStr)
+            || !Guid.TryParse(slIdStr, out Guid storageLinkId)
+            || storageLinkId == Guid.Empty)
+        {
+            return;
+        }
+
+        await TempoService.WriteStorageHelmValuesAsync(TenantId, componentId, storageLinkId);
     }
 
     private async Task SaveHarborConfigIfNeeded(

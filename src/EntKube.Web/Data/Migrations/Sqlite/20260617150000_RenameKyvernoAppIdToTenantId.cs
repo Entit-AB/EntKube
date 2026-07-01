@@ -10,27 +10,13 @@ namespace EntKube.Web.Data.Migrations.Sqlite
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropForeignKey(
-                name: "FK_KyvernoPolicies_Apps_AppId",
-                table: "KyvernoPolicies");
-
-            migrationBuilder.RenameColumn(
-                name: "AppId",
-                table: "KyvernoPolicies",
-                newName: "TenantId");
-
-            migrationBuilder.RenameIndex(
-                name: "IX_KyvernoPolicies_AppId_EnvironmentId_PolicyType",
-                table: "KyvernoPolicies",
-                newName: "IX_KyvernoPolicies_TenantId_EnvironmentId_PolicyType");
-
-            migrationBuilder.AddForeignKey(
-                name: "FK_KyvernoPolicies_Tenants_TenantId",
-                table: "KyvernoPolicies",
-                column: "TenantId",
-                principalTable: "Tenants",
-                principalColumn: "Id",
-                onDelete: ReferentialAction.Cascade);
+            // No-op on SQLite. The AddKyvernoPolicies migration creates the table with the
+            // final TenantId column (plus its Tenants FK and index) directly, so on a fresh
+            // SQLite database there is no AppId column to rename — the original strongly-typed
+            // rename here failed with "no such column: AppId" and aborted startup. SQLite
+            // cannot express a conditional column rename in migration SQL, and no released
+            // build ever created the AppId column on SQLite, so skipping is safe. Databases
+            // that already applied this migration keep it recorded in history and are unaffected.
         }
 
         /// <inheritdoc />

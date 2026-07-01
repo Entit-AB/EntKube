@@ -1910,6 +1910,202 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("IncidentNotes");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.KafkaBinding", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AppDeploymentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("KafkaClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("KafkaUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("KubernetesSecretName")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<DateTime?>("LastSyncedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("SyncEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppDeploymentId");
+
+                    b.HasIndex("KafkaClusterId");
+
+                    b.HasIndex("KafkaUserId");
+
+                    b.ToTable("KafkaBindings");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KafkaCluster", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("AuthEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("CpuRequest")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("KafkaVersion")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<Guid>("KubernetesClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("text");
+
+                    b.Property<string>("MemoryLimit")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("MemoryRequest")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
+
+                    b.Property<int>("Replicas")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("StorageClass")
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
+
+                    b.Property<string>("StorageSize")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("KubernetesClusterId", "Name", "Namespace")
+                        .IsUnique();
+
+                    b.ToTable("KafkaClusters");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KafkaTopic", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("KafkaClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(249)
+                        .HasColumnType("character varying(249)");
+
+                    b.Property<int>("Partitions")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Replicas")
+                        .HasColumnType("integer");
+
+                    b.Property<long?>("RetentionMs")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("KafkaClusterId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("KafkaTopics");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KafkaUser", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ConsumerGroup")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("ConsumerTopics")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("KafkaClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ProducerTopics")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<bool>("SuperUser")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Username")
+                        .IsRequired()
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("KafkaClusterId", "Username")
+                        .IsUnique();
+
+                    b.ToTable("KafkaUsers");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.KedaScaler", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3402,6 +3598,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid?>("GitRepositoryId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("KafkaClusterId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid?>("KubernetesClusterId")
                         .HasColumnType("uuid");
 
@@ -3478,6 +3677,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("EnvironmentId");
 
                     b.HasIndex("GitRepositoryId");
+
+                    b.HasIndex("KafkaClusterId");
 
                     b.HasIndex("KubernetesClusterId");
 
@@ -4595,6 +4796,73 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Incident");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.KafkaBinding", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.AppDeployment", "AppDeployment")
+                        .WithMany()
+                        .HasForeignKey("AppDeploymentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.KafkaCluster", "KafkaCluster")
+                        .WithMany()
+                        .HasForeignKey("KafkaClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.KafkaUser", "KafkaUser")
+                        .WithMany()
+                        .HasForeignKey("KafkaUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("AppDeployment");
+
+                    b.Navigation("KafkaCluster");
+
+                    b.Navigation("KafkaUser");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KafkaCluster", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KubernetesCluster", "KubernetesCluster")
+                        .WithMany()
+                        .HasForeignKey("KubernetesClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("KubernetesCluster");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KafkaTopic", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KafkaCluster", "KafkaCluster")
+                        .WithMany("Topics")
+                        .HasForeignKey("KafkaClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("KafkaCluster");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KafkaUser", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KafkaCluster", "KafkaCluster")
+                        .WithMany("Users")
+                        .HasForeignKey("KafkaClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("KafkaCluster");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.KedaScaler", b =>
                 {
                     b.HasOne("EntKube.Web.Data.App", "App")
@@ -5195,6 +5463,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasForeignKey("GitRepositoryId")
                         .OnDelete(DeleteBehavior.Cascade);
 
+                    b.HasOne("EntKube.Web.Data.KafkaCluster", "KafkaCluster")
+                        .WithMany()
+                        .HasForeignKey("KafkaClusterId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
                     b.HasOne("EntKube.Web.Data.KubernetesCluster", "KubernetesCluster")
                         .WithMany()
                         .HasForeignKey("KubernetesClusterId")
@@ -5253,6 +5526,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Environment");
 
                     b.Navigation("GitRepository");
+
+                    b.Navigation("KafkaCluster");
 
                     b.Navigation("KubernetesCluster");
 
@@ -5492,6 +5767,13 @@ namespace EntKube.Web.Data.Migrations.Postgres
             modelBuilder.Entity("EntKube.Web.Data.Group", b =>
                 {
                     b.Navigation("Memberships");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KafkaCluster", b =>
+                {
+                    b.Navigation("Topics");
+
+                    b.Navigation("Users");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KeycloakComponentConfig", b =>

@@ -223,7 +223,28 @@ else
                 <RegistryTab TenantId="tenant.Id" />
                 break;
             case "messaging":
-                <MessagingTab TenantId="tenant.Id" />
+                <ul class="nav nav-pills mb-3">
+                    <li class="nav-item">
+                        <button class="nav-link @(messagingSubTab == "rabbitmq" ? "active" : "")"
+                                @onclick='() => messagingSubTab = "rabbitmq"'>
+                            <i class="bi bi-collection me-1"></i>RabbitMQ
+                        </button>
+                    </li>
+                    <li class="nav-item">
+                        <button class="nav-link @(messagingSubTab == "kafka" ? "active" : "")"
+                                @onclick='() => messagingSubTab = "kafka"'>
+                            <i class="bi bi-hdd-stack me-1"></i>Kafka
+                        </button>
+                    </li>
+                </ul>
+                @if (messagingSubTab == "kafka")
+                {
+                    <KafkaTab TenantId="tenant.Id" />
+                }
+                else
+                {
+                    <MessagingTab TenantId="tenant.Id" />
+                }
                 break;
             case "cache":
                 <CacheTab TenantId="tenant.Id" />
@@ -277,6 +298,7 @@ else
     private Tenant? tenant;
     private string activeCategory = "apps";
     private string activeTab = "customers";
+    private string messagingSubTab = "rabbitmq";
     private bool tabLoading;
 
     private static readonly Dictionary<string, string> CategoryDefaults = new()

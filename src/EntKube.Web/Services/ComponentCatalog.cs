@@ -831,6 +831,160 @@ public static class ComponentCatalog
 
         new CatalogEntry
         {
+            Key = "mimir",
+            DisplayName = "Grafana Mimir",
+            Description = "Horizontally scalable, long-term storage for Prometheus metrics. Runs the ingest-storage architecture (writes buffer through Kafka before reaching ingesters), so it requires the Apache Kafka Cluster component. Prometheus-compatible query API — the remote-write target for kube-prometheus-stack or Grafana Alloy.",
+            Icon = "bi-graph-up",
+            Category = "Monitoring",
+            HelmRepoUrl = "https://grafana.github.io/helm-charts",
+            HelmChartName = "mimir-distributed",
+            HelmChartVersion = "6.1.0",
+            DefaultNamespace = "monitoring",
+            DefaultReleaseName = "mimir",
+            // Distributed microservices + object storage — slow to become Ready.
+            InstallTimeout = "20m0s",
+            // Ingest storage needs a Kafka backend. Install the Strimzi operator, then
+            // provision a Kafka cluster in the Messaging tab and point the Kafka Bootstrap
+            // Address field below at its bootstrap service.
+            Dependencies = ["strimzi-kafka-operator"],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "mimir-version", Label = "Mimir Version",
+                    YamlPath = "image.tag", Type = FormFieldType.Text,
+                    DefaultValue = "3.1.2", Placeholder = "e.g. 3.1.2",
+                    HelpText = "Grafana Mimir application image tag. Pinned by default; change to upgrade/downgrade."
+                },
+                new ComponentFormField
+                {
+                    Key = "kafka-address", Label = "Kafka Bootstrap Address",
+                    YamlPath = "mimir.structuredConfig.ingest_storage.kafka.address", Type = FormFieldType.Text,
+                    DefaultValue = "kafka-kafka-bootstrap.kafka.svc.cluster.local:9092",
+                    HelpText = "host:port of the Kafka bootstrap service used by the ingest-storage write path. Defaults to the Apache Kafka Cluster component's service."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-link", Label = "S3 Metrics Storage",
+                    YamlPath = "mimir:storage-link-id", Type = FormFieldType.StorageLink,
+                    HelpText = "S3-compatible bucket for long-term metric (block) storage. Leave empty to use the chart's bundled MinIO (fine for testing, not for production)."
+                },
+                // Hidden secret fields — written by MimirService.WriteStorageHelmValuesAsync,
+                // injected at install time via InjectSecretsIntoValuesAsync.
+                new ComponentFormField
+                {
+                    Key = "mimir-s3-access-key", Label = "S3 Access Key",
+                    YamlPath = "mimir.structuredConfig.common.storage.s3.access_key_id", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "mimir-s3-access-key", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "mimir-s3-secret-key", Label = "S3 Secret Key",
+                    YamlPath = "mimir.structuredConfig.common.storage.s3.secret_access_key", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "mimir-s3-secret-key", Hidden = true
+                }
+            ],
+            DefaultValues = """
+                # Grafana Mimir (mimir-distributed 6.x, ingest-storage architecture).
+                # The write path buffers through Kafka, so the chart's own bundled Kafka
+                # is disabled and Mimir points at the shared Apache Kafka Cluster component
+                # instead. Object storage defaults to the chart's bundled MinIO; select an
+                # S3 storage link to switch to external object storage — that flips
+                # minio.enabled to false and writes mimir.structuredConfig.common.storage
+                # (see MimirService.WriteStorageHelmValuesAsync).
+                image:
+                  tag: "3.1.2"
+
+                # Use the shared Strimzi-managed Kafka, not the chart's demo single-node one.
+                kafka:
+                  enabled: false
+
+                minio:
+                  enabled: true
+
+                mimir:
+                  structuredConfig:
+                    ingest_storage:
+                      enabled: true
+                      kafka:
+                        address: kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+                        topic: mimir-ingest
+                        auto_create_topic_enabled: true
+                        auto_create_topic_default_partitions: 100
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "tempo",
+            DisplayName = "Grafana Tempo",
+            Description = "Distributed tracing backend (microservices mode). Ingests spans via OTLP / Jaeger / Zipkin and stores them in object storage, queryable from Grafana by trace ID. Pairs with Grafana Alloy or the OpenTelemetry Collector as the trace pipeline. Note: the published chart tracks Tempo 2.9.x (classic distributor→ingester→S3); the Kafka-based 3.0 architecture is not yet in a released chart.",
+            Icon = "bi-diagram-3",
+            Category = "Monitoring",
+            HelmRepoUrl = "https://grafana.github.io/helm-charts",
+            HelmChartName = "tempo-distributed",
+            HelmChartVersion = "1.61.3",
+            DefaultNamespace = "monitoring",
+            DefaultReleaseName = "tempo",
+            // Distributed microservices + object storage — allow extra time to become Ready.
+            InstallTimeout = "20m0s",
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "tempo-version", Label = "Tempo Version",
+                    YamlPath = "tempo.image.tag", Type = FormFieldType.Text,
+                    DefaultValue = "2.9.0", Placeholder = "e.g. 2.9.0",
+                    HelpText = "Grafana Tempo application image tag. Defaults to the chart's app version; change to upgrade/downgrade."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-link", Label = "S3 Trace Storage",
+                    YamlPath = "tempo:storage-link-id", Type = FormFieldType.StorageLink,
+                    HelpText = "S3-compatible bucket for trace block storage. Strongly recommended — in microservices mode the components must share object storage; the local backend does not work across pods."
+                },
+                // Hidden secret fields — written by TempoService.WriteStorageHelmValuesAsync,
+                // injected at install time via InjectSecretsIntoValuesAsync.
+                new ComponentFormField
+                {
+                    Key = "tempo-s3-access-key", Label = "S3 Access Key",
+                    YamlPath = "storage.trace.s3.access_key", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "tempo-s3-access-key", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "tempo-s3-secret-key", Label = "S3 Secret Key",
+                    YamlPath = "storage.trace.s3.secret_key", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "tempo-s3-secret-key", Hidden = true
+                }
+            ],
+            DefaultValues = """
+                # Grafana Tempo (tempo-distributed, microservices mode). Trace blocks live
+                # in object storage — select an S3 storage link to configure storage.trace
+                # (see TempoService.WriteStorageHelmValuesAsync). In distributed mode the
+                # local backend can't be shared across pods, so S3 is effectively required.
+
+                # Apply the restricted Pod Security baseline to all components. The chart's
+                # global securityContext runs non-root but omits seccompProfile / the
+                # container hardening that the "restricted" PSA level checks.
+                global:
+                  podSecurityContext:
+                    runAsNonRoot: true
+                    seccompProfile:
+                      type: RuntimeDefault
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    runAsNonRoot: true
+                    capabilities:
+                      drop:
+                        - ALL
+                    seccompProfile:
+                      type: RuntimeDefault
+                """
+        },
+
+        new CatalogEntry
+        {
             Key = "grafana-alloy",
             DisplayName = "Grafana Alloy (Log Collector)",
             Description = "Node-level log collector. Runs as a DaemonSet, tails container logs on every node, and ships them to Loki tagged with namespace/pod/container labels so the EntKube log viewer can filter them. Required for the Operations → Logs view to show any data — Loki on its own only stores logs, it does not collect them.",
@@ -1522,6 +1676,49 @@ public static class ComponentCatalog
             Dependencies = ["rabbitmq-cluster-operator", "cert-manager"],
             FormFields = [],
             DefaultValues = ""
+        },
+
+        new CatalogEntry
+        {
+            Key = "strimzi-kafka-operator",
+            DisplayName = "Strimzi Kafka Operator",
+            Description = "Kubernetes operator that runs Apache Kafka (KRaft mode, no ZooKeeper). Manages Kafka and KafkaNodePool CRDs. Install this first, then add the 'Apache Kafka Cluster' component. Provides the self-hosted streaming backend for Grafana Mimir's ingest-storage architecture.",
+            Icon = "bi-hdd-stack",
+            Category = "Messaging",
+            ComponentType = "HelmChart",
+            HelmRepoUrl = "https://strimzi.io/charts/",
+            HelmChartName = "strimzi-kafka-operator",
+            HelmChartVersion = "1.1.0",
+            DefaultNamespace = "kafka",
+            DefaultReleaseName = "strimzi-kafka-operator",
+            FormFields = [],
+            DefaultValues = """
+                # Watch all namespaces so a single shared operator reconciles Kafka
+                # clusters wherever they live (the Kafka Cluster component installs into
+                # this same 'kafka' namespace by default).
+                watchAnyNamespace: true
+
+                # Make every pod the operator creates (Kafka brokers, entity operator)
+                # compliant with the "restricted" Pod Security Standard out of the box.
+                extraEnvs:
+                  - name: STRIMZI_POD_SECURITY_PROVIDER_CLASS
+                    value: restricted
+
+                # The chart ships empty securityContext/podSecurityContext, so apply the
+                # restricted baseline to the operator pod itself. The operator is a static
+                # controller and runs fine as non-root.
+                podSecurityContext:
+                  runAsNonRoot: true
+                  seccompProfile:
+                    type: RuntimeDefault
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  runAsNonRoot: true
+                  capabilities:
+                    drop: ["ALL"]
+                  seccompProfile:
+                    type: RuntimeDefault
+                """
         },
 
         // ── Cache ──
