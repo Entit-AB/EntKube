@@ -57,6 +57,16 @@ public class CatalogEntry
     /// </summary>
     public IReadOnlyList<string> DetectionCrds { get; init; } = [];
 
+    /// <summary>
+    /// A cluster-scoped custom resource whose live instances mark this manifest component
+    /// as installed. Use this instead of <see cref="DetectionCrds"/> when CRD presence would
+    /// false-positive because the CRD is owned by a dependency rather than this component.
+    /// The Let's Encrypt ClusterIssuer is the motivating case: clusterissuers.cert-manager.io
+    /// ships with cert-manager, so only the presence of an actual ClusterIssuer instance
+    /// means this issuer was applied. See <see cref="DetectionResource"/>.
+    /// </summary>
+    public DetectionResource? DetectionResource { get; init; }
+
     /// <summary>Default release name for Helm.</summary>
     public string? DefaultReleaseName { get; init; }
 
@@ -85,6 +95,19 @@ public class CatalogEntry
     /// </summary>
     public IReadOnlyList<ComponentFormField> FormFields { get; init; } = [];
 }
+
+/// <summary>
+/// Identifies a cluster-scoped custom resource whose live instances signal that a
+/// manifest-installed component is present. Detection lists the instances and, when
+/// <see cref="Matches"/> is set, keeps only those whose serialized JSON contains that
+/// substring — e.g. "letsencrypt.org" so a self-signed or CA ClusterIssuer doesn't
+/// masquerade as the Let's Encrypt issuer.
+/// </summary>
+/// <param name="Group">API group, e.g. "cert-manager.io".</param>
+/// <param name="Version">API version, e.g. "v1".</param>
+/// <param name="Plural">Resource plural, e.g. "clusterissuers".</param>
+/// <param name="Matches">Optional case-insensitive substring an instance's JSON must contain to count.</param>
+public sealed record DetectionResource(string Group, string Version, string Plural, string? Matches = null);
 
 /// <summary>
 /// A dependency requirement where any one of several components can satisfy it.
@@ -133,6 +156,15 @@ public static class ComponentCatalog
             HelmChartName = "",
             DefaultNamespace = "gateway-system",
             DefaultReleaseName = "gateway-api-crds",
+            // Applied from a raw manifest URL, so there's no owner=helm secret for the Helm
+            // scan to find. Detect by the presence of the Gateway API CRDs themselves — they
+            // ARE this component, so any one being present means it's installed.
+            DetectionCrds =
+            [
+                "gateways.gateway.networking.k8s.io",
+                "httproutes.gateway.networking.k8s.io",
+                "gatewayclasses.gateway.networking.k8s.io"
+            ],
             FormFields = [],
             DefaultValues = ""
         },
@@ -446,6 +478,11 @@ public static class ComponentCatalog
             DefaultReleaseName = "letsencrypt-issuer",
             Dependencies = ["cert-manager"],
             ComponentType = "Manifest",
+            // The clusterissuers CRD ships with cert-manager, so CRD presence can't tell us
+            // whether a Let's Encrypt issuer was actually applied. Detect the live instance
+            // instead, keeping only ACME issuers pointed at Let's Encrypt.
+            DetectionResource = new DetectionResource(
+                "cert-manager.io", "v1", "clusterissuers", Matches: "letsencrypt.org"),
             FormFields =
             [
                 new ComponentFormField
@@ -2782,17 +2819,46 @@ public static class ComponentCatalog
     /// </summary>
     public static CatalogEntry? FindByRelease(string releaseName, string? chartName)
     {
-        // First try exact matches on Key, DefaultReleaseName, or HelmChartName.
+        // First try exact matches on Key, DefaultReleaseName, or HelmChartName == releaseName.
 
         CatalogEntry? exact = Entries.FirstOrDefault(e =>
             string.Equals(e.Key, releaseName, StringComparison.OrdinalIgnoreCase)
             || string.Equals(e.DefaultReleaseName, releaseName, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(e.HelmChartName, releaseName, StringComparison.OrdinalIgnoreCase)
-            || (!string.IsNullOrEmpty(chartName) && string.Equals(e.HelmChartName, chartName, StringComparison.OrdinalIgnoreCase)));
+            || string.Equals(e.HelmChartName, releaseName, StringComparison.OrdinalIgnoreCase));
 
         if (exact is not null)
         {
             return exact;
+        }
+
+        // Match by chart name. When a single entry owns the chart this is unambiguous;
+        // when several share it (e.g. "istio" and "istio-internal" both use "gateway"),
+        // disambiguate by the external/internal qualifier in the release name so custom
+        // release names resolve to the correct entry instead of just the first one listed.
+
+        if (!string.IsNullOrEmpty(chartName))
+        {
+            List<CatalogEntry> chartMatches = Entries
+                .Where(e => string.Equals(e.HelmChartName, chartName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (chartMatches.Count == 1)
+            {
+                return chartMatches[0];
+            }
+
+            if (chartMatches.Count > 1)
+            {
+                CatalogEntry? qualified = chartMatches.FirstOrDefault(e => MatchesByChartQualifier(releaseName, e));
+
+                if (qualified is not null)
+                {
+                    return qualified;
+                }
+
+                // Ambiguous chart with no qualifier hint — fall through to partial matching
+                // rather than guessing at the first sibling.
+            }
         }
 
         // Fall back to partial matching — the release name might contain the
@@ -2804,6 +2870,39 @@ public static class ComponentCatalog
                 && (releaseName.Contains(e.DefaultReleaseName, StringComparison.OrdinalIgnoreCase)
                     || e.DefaultReleaseName.Contains(releaseName, StringComparison.OrdinalIgnoreCase)))
             || releaseName.Contains(e.Key, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Distinguishing qualifiers for catalog entries that share a Helm chart. The Istio
+    /// external and internal gateways are both the "gateway" chart, separated only by these
+    /// words in their Key/DefaultReleaseName. Real deployments pick custom release names
+    /// (e.g. "istio-gw-external"), so matching falls back to this qualifier.
+    /// </summary>
+    private static readonly string[] ChartQualifiers = ["external", "internal"];
+
+    /// <summary>
+    /// True when <paramref name="releaseName"/> carries the same external/internal qualifier
+    /// as <paramref name="entry"/> (via its Key or DefaultReleaseName) and none of the
+    /// conflicting qualifiers — so "istio-gw-internal" matches the internal entry but not the
+    /// external one. Returns false for entries that don't carry a qualifier at all.
+    /// </summary>
+    private static bool MatchesByChartQualifier(string releaseName, CatalogEntry entry)
+    {
+        string? entryQualifier = ChartQualifiers.FirstOrDefault(q =>
+            entry.Key.Contains(q, StringComparison.OrdinalIgnoreCase)
+            || (entry.DefaultReleaseName?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
+
+        if (entryQualifier is null)
+        {
+            return false;
+        }
+
+        bool releaseHasEntryQualifier = releaseName.Contains(entryQualifier, StringComparison.OrdinalIgnoreCase);
+        bool releaseHasConflictingQualifier = ChartQualifiers.Any(q =>
+            !string.Equals(q, entryQualifier, StringComparison.OrdinalIgnoreCase)
+            && releaseName.Contains(q, StringComparison.OrdinalIgnoreCase));
+
+        return releaseHasEntryQualifier && !releaseHasConflictingQualifier;
     }
 
     /// <summary>
@@ -2838,7 +2937,11 @@ public static class ComponentCatalog
             if (!string.IsNullOrEmpty(releaseName) && !string.IsNullOrEmpty(entry.DefaultReleaseName))
             {
                 return string.Equals(releaseName, entry.DefaultReleaseName, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(releaseName, entry.Key, StringComparison.OrdinalIgnoreCase);
+                    || string.Equals(releaseName, entry.Key, StringComparison.OrdinalIgnoreCase)
+                    // Real deployments use custom release names (e.g. "istio-gw-external") that
+                    // don't equal the catalog default, so fall back to the external/internal
+                    // qualifier that distinguishes the sibling entries.
+                    || MatchesByChartQualifier(releaseName, entry);
             }
             return true;
         }
