@@ -11,7 +11,12 @@ namespace EntKube.Web.Services;
 /// encrypted secrets for apps and cluster components, and configuring Kubernetes
 /// sync. Each operation unseals the vault transparently (auto-unseal via root key).
 /// </summary>
-public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultEncryptionService encryption)
+public class VaultService(
+    IDbContextFactory<ApplicationDbContext> dbFactory,
+    VaultEncryptionService encryption,
+    // Optional: used only to evict the cached kubeconfig plaintext after an update. Absent in
+    // unit tests, where there is no resolver cache to invalidate.
+    KubeconfigResolver? kubeconfigResolver = null)
 {
     // --- Vault Lifecycle ---
 
@@ -384,6 +389,140 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
         }
     }
 
+    // --- Cluster Kubeconfigs ---
+
+    /// <summary>
+    /// The conventional secret name for a cluster's kubeconfig. There is one kubeconfig
+    /// secret per cluster, scoped via <see cref="VaultSecret.OwnerClusterId"/>.
+    /// </summary>
+    public const string KubeconfigSecretName = "kubeconfig";
+
+    /// <summary>
+    /// Stores or updates a registered cluster's kubeconfig in the tenant vault. The bundle
+    /// is validated, serialized to JSON, and stored as a single encrypted value with
+    /// <see cref="VaultSecretType.Kubeconfig"/>, scoped to the cluster. The cluster's
+    /// <see cref="KubernetesCluster.KubeconfigSecretId"/> is set to point at the secret so
+    /// the materialization interceptor can resolve it on load. Upserts by (cluster, name)
+    /// and archives the previous value as a version. Returns the secret id on success.
+    /// </summary>
+    public async Task<(bool Ok, string? Error, Guid? SecretId)> SetClusterKubeconfigAsync(
+        Guid tenantId, Guid clusterId, KubeconfigBundle bundle,
+        string? updatedBy = null, CancellationToken ct = default)
+    {
+        (bool valid, string? validationError) = KubeconfigHelper.Validate(bundle);
+        if (!valid)
+        {
+            return (false, validationError, null);
+        }
+
+        // A kubeconfig may be the first secret a tenant ever stores, so ensure the vault exists.
+        await InitializeVaultAsync(tenantId, ct);
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+
+        KubernetesCluster? cluster = await db.Set<KubernetesCluster>()
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
+        if (cluster is null)
+        {
+            return (false, "Cluster not found.", null);
+        }
+
+        VaultSecret? existing = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
+                && s.OwnerClusterId == clusterId && s.Name == KubeconfigSecretName, ct);
+
+        // Serialize with the bundle's own (camelCase) options so it round-trips with
+        // KubeconfigBundle.Deserialize used by the reader, resolver, and expiry scanner.
+        string json = bundle.Serialize();
+        (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, json);
+
+        Guid secretId;
+        if (existing is not null)
+        {
+            await ArchiveVersionAsync(db, existing, ct);
+            existing.SecretType = VaultSecretType.Kubeconfig;
+            existing.EncryptedValue = ciphertext;
+            existing.Nonce = nonce;
+            existing.UpdatedAt = DateTime.UtcNow;
+            existing.UpdatedBy = updatedBy;
+            secretId = existing.Id;
+        }
+        else
+        {
+            SecretVault vault = (await GetVaultAsync(tenantId, ct))!;
+            secretId = Guid.NewGuid();
+            db.Set<VaultSecret>().Add(new VaultSecret
+            {
+                Id = secretId,
+                VaultId = vault.Id,
+                Name = KubeconfigSecretName,
+                SecretType = VaultSecretType.Kubeconfig,
+                EncryptedValue = ciphertext,
+                Nonce = nonce,
+                OwnerClusterId = clusterId,
+                UpdatedBy = updatedBy
+            });
+        }
+
+        cluster.KubeconfigSecretId = secretId;
+        await db.SaveChangesAsync(ct);
+
+        // Drop the cached plaintext so the next materialization re-decrypts the new value.
+        kubeconfigResolver?.Invalidate(secretId);
+
+        return (true, null, secretId);
+    }
+
+    /// <summary>
+    /// Decrypts a cluster kubeconfig secret and returns its full bundle (including the
+    /// kubeconfig YAML), or null when the secret does not exist or is not a kubeconfig.
+    /// </summary>
+    public async Task<KubeconfigBundle?> GetKubeconfigBundleByIdAsync(Guid secretId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        VaultSecret? secret = await db.Set<VaultSecret>()
+            .Include(s => s.Vault)
+            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+
+        if (secret is null || secret.SecretType != VaultSecretType.Kubeconfig)
+        {
+            return null;
+        }
+
+        byte[] dataKey = await UnsealVaultAsync(secret.Vault.TenantId, ct);
+        string json = encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
+        return KubeconfigBundle.Deserialize(json);
+    }
+
+    /// <summary>
+    /// Decrypts a cluster kubeconfig secret and returns its non-secret metadata (context,
+    /// API server, expiry) for list/badge display. Excludes the kubeconfig YAML.
+    /// </summary>
+    public async Task<KubeconfigInfo?> GetKubeconfigInfoByIdAsync(Guid secretId, CancellationToken ct = default)
+    {
+        KubeconfigBundle? bundle = await GetKubeconfigBundleByIdAsync(secretId, ct);
+        return bundle?.ToInfo();
+    }
+
+    /// <summary>
+    /// Lists every cluster kubeconfig secret in the tenant's vault (metadata only, with the
+    /// owning cluster loaded), ordered by cluster name. Used by the vault admin UI to browse
+    /// kubeconfigs alongside the other secret scopes.
+    /// </summary>
+    public async Task<List<VaultSecret>> GetClusterKubeconfigSecretsAsync(Guid tenantId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.Set<VaultSecret>()
+            .Include(s => s.OwnerCluster)
+            .Where(s => s.Vault.TenantId == tenantId && s.SecretType == VaultSecretType.Kubeconfig)
+            .OrderBy(s => s.OwnerCluster!.Name)
+            .ToListAsync(ct);
+    }
+
     /// <summary>
     /// Enumerates every certificate and OAuth/OIDC client secret in the tenant's vault,
     /// decrypting each just far enough to read its expiry, and projects the non-secret
@@ -407,8 +546,13 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
         List<VaultSecret> secrets = await db.Set<VaultSecret>()
             .Include(s => s.App)
             .Include(s => s.Environment)
+            .Include(s => s.OwnerCluster)
             .Where(s => s.VaultId == vault.Id
-                && (s.SecretType == VaultSecretType.Certificate || s.SecretType == VaultSecretType.OAuthClient)
+                && (s.SecretType == VaultSecretType.Certificate
+                    || s.SecretType == VaultSecretType.OAuthClient
+                    // Kubeconfigs are cluster-scoped (no app), so they are only surfaced
+                    // in the tenant-wide scan, never when filtering to a customer's apps.
+                    || (s.SecretType == VaultSecretType.Kubeconfig && customerId == null))
                 && (customerId == null || (s.AppId != null && s.App!.CustomerId == customerId)))
             .OrderBy(s => s.Name)
             .ToListAsync(ct);
@@ -439,11 +583,17 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
                         detail = info.Subject;
                     }
                 }
-                else // OAuthClient
+                else if (secret.SecretType == VaultSecretType.OAuthClient)
                 {
                     OAuthClientBundle bundle = DeserializeOAuthBundle(json);
                     expiresAt = bundle.ExpiresAt;
                     detail = $"{OAuthClientHelper.DisplayName(bundle.Provider)}{(string.IsNullOrWhiteSpace(bundle.ClientId) ? "" : $" · {bundle.ClientId}")}";
+                }
+                else // Kubeconfig
+                {
+                    KubeconfigBundle bundle = KubeconfigBundle.Deserialize(json);
+                    expiresAt = bundle.ExpiresAt;
+                    detail = string.IsNullOrWhiteSpace(bundle.ContextName) ? bundle.ApiServerUrl : bundle.ContextName;
                 }
             }
             catch
@@ -461,6 +611,8 @@ public class VaultService(IDbContextFactory<ApplicationDbContext> dbFactory, Vau
                 AppName = secret.App?.Name,
                 EnvironmentId = secret.EnvironmentId,
                 EnvironmentName = secret.Environment?.Name,
+                OwnerClusterId = secret.OwnerClusterId,
+                ClusterName = secret.OwnerCluster?.Name,
                 ExpiresAt = expiresAt,
                 Detail = detail
             });

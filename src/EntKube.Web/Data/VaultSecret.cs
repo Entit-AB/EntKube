@@ -24,6 +24,17 @@ public enum VaultSecretType
     /// credential parts as named keys.
     /// </summary>
     OAuthClient = 2,
+
+    /// <summary>
+    /// A Kubernetes kubeconfig used by EntKube to authenticate against a registered
+    /// cluster. The encrypted value holds a JSON
+    /// <see cref="EntKube.Web.Services.KubeconfigBundle"/> with the raw kubeconfig YAML,
+    /// the selected context/API server, and a manually entered expiry date (kubeconfigs
+    /// often embed short-lived client certificates or tokens). Scoped to a cluster via
+    /// <see cref="VaultSecret.OwnerClusterId"/>. This secret is internal to EntKube and
+    /// is never synced to Kubernetes as a Secret resource.
+    /// </summary>
+    Kubeconfig = 3,
 }
 
 /// <summary>
@@ -152,6 +163,12 @@ public class VaultSecret
     public Guid? CustomerGitCredentialId { get; set; }
 
     /// <summary>
+    /// If set, this secret is the kubeconfig for a registered Kubernetes cluster
+    /// (<see cref="VaultSecretType.Kubeconfig"/>). Deleting the cluster cascades the secret away.
+    /// </summary>
+    public Guid? OwnerClusterId { get; set; }
+
+    /// <summary>
     /// When true, this secret will be synced to Kubernetes as a Secret resource.
     /// </summary>
     public bool SyncToKubernetes { get; set; }
@@ -202,6 +219,9 @@ public class VaultSecret
     public VpnRemoteEndpoint? VpnRemoteEndpoint { get; set; }
     public GitRepository? GitRepository { get; set; }
     public CustomerGitCredential? CustomerGitCredential { get; set; }
+
+    /// <summary>The cluster this kubeconfig secret belongs to, when scoped via <see cref="OwnerClusterId"/>.</summary>
+    public KubernetesCluster? OwnerCluster { get; set; }
 
     public ICollection<VaultSecretVersion> Versions { get; set; } = [];
 }

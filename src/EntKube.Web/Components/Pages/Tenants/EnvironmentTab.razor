@@ -4,6 +4,7 @@
 @using Microsoft.EntityFrameworkCore
 @inject TenantService TenantService
 @inject VaultService VaultService
+@inject AuthenticationStateProvider AuthStateProvider
 
 @* ===========================================================================
    Three-level drill-down:  Environments ▸ Clusters ▸ Cluster Detail
@@ -97,12 +98,20 @@ else if (selectedEnv is not null)
                                    placeholder="e.g. production-eu-west"
                                    @bind="newClusterName" @bind:event="oninput" />
                         </div>
+                        <div class="col-auto" style="max-width: 200px;">
+                            <label class="form-label small mb-1">Kubeconfig expiry <span class="text-muted">(optional)</span></label>
+                            <input type="date" class="form-control form-control-sm" @bind="newClusterKubeconfigExpiry" />
+                        </div>
                         <div class="col-auto">
                             <button class="btn btn-sm btn-success" @onclick="CreateCluster"
                                     disabled="@(string.IsNullOrWhiteSpace(newClusterName) || string.IsNullOrWhiteSpace(selectedContext))">
                                 <i class="bi bi-check-lg me-1"></i>Register
                             </button>
                         </div>
+                    </div>
+                    <div class="form-text">
+                        The kubeconfig is stored encrypted in the tenant vault. Set an expiry if it embeds a
+                        short-lived certificate or token, so EntKube can warn you before it stops working.
                     </div>
                 }
 
@@ -271,6 +280,7 @@ else
     private string? selectedContext;
     private string? selectedServerUrl;
     private string newClusterName = "";
+    private DateTime? newClusterKubeconfigExpiry;
     private string? clusterError;
 
     protected override async Task OnInitializedAsync()
@@ -406,6 +416,7 @@ else
         selectedContext = null;
         selectedServerUrl = null;
         newClusterName = "";
+        newClusterKubeconfigExpiry = null;
         clusterError = null;
     }
 
@@ -421,9 +432,13 @@ else
 
         try
         {
+            AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
+
             await TenantService.CreateClusterAsync(
                 TenantId, selectedEnv!.Id, newClusterName.Trim(), selectedServerUrl,
-                contextName: selectedContext, kubeconfig: kubeconfigInput);
+                contextName: selectedContext, kubeconfig: kubeconfigInput,
+                kubeconfigExpiresAt: newClusterKubeconfigExpiry,
+                updatedBy: authState.User.Identity?.Name);
 
             showAddCluster = false;
             ResetClusterForm();

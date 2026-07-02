@@ -1453,6 +1453,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .IsRequired()
                         .HasColumnType("bytea");
 
+                    b.Property<Guid?>("EnvironmentId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid?>("KubernetesClusterId")
                         .HasColumnType("uuid");
 
@@ -1495,6 +1498,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasKey("Id");
 
                     b.HasIndex("AppId");
+
+                    b.HasIndex("EnvironmentId");
 
                     b.HasIndex("KubernetesClusterId");
 
@@ -2379,8 +2384,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid>("EnvironmentId")
                         .HasColumnType("uuid");
 
-                    b.Property<string>("Kubeconfig")
-                        .HasColumnType("text");
+                    b.Property<Guid?>("KubeconfigSecretId")
+                        .HasColumnType("uuid");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -3630,6 +3635,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid?>("OpenStackConnectionId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("OwnerClusterId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid?>("RabbitMQClusterId")
                         .HasColumnType("uuid");
 
@@ -3686,6 +3694,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.HasIndex("MongoDatabaseId");
 
+                    b.HasIndex("OwnerClusterId");
+
                     b.HasIndex("RabbitMQClusterId");
 
                     b.HasIndex("RedisClusterId");
@@ -3697,6 +3707,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("VpnRemoteEndpointId");
 
                     b.HasIndex("VaultId", "ComponentId", "Name")
+                        .IsUnique();
+
+                    b.HasIndex("VaultId", "OwnerClusterId", "Name")
                         .IsUnique();
 
                     b.HasIndex("VaultId", "AppId", "EnvironmentId", "Name")
@@ -4593,6 +4606,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasForeignKey("AppId")
                         .OnDelete(DeleteBehavior.Cascade);
 
+                    b.HasOne("EntKube.Web.Data.Environment", "Environment")
+                        .WithMany()
+                        .HasForeignKey("EnvironmentId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("EntKube.Web.Data.KubernetesCluster", "KubernetesCluster")
                         .WithMany()
                         .HasForeignKey("KubernetesClusterId")
@@ -4605,6 +4623,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .IsRequired();
 
                     b.Navigation("App");
+
+                    b.Navigation("Environment");
 
                     b.Navigation("KubernetesCluster");
 
@@ -5483,6 +5503,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasForeignKey("MongoDatabaseId")
                         .OnDelete(DeleteBehavior.Cascade);
 
+                    b.HasOne("EntKube.Web.Data.KubernetesCluster", "OwnerCluster")
+                        .WithMany()
+                        .HasForeignKey("OwnerClusterId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
                     b.HasOne("EntKube.Web.Data.RabbitMQCluster", "RabbitMQCluster")
                         .WithMany()
                         .HasForeignKey("RabbitMQClusterId")
@@ -5534,6 +5559,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("MongoCluster");
 
                     b.Navigation("MongoDatabase");
+
+                    b.Navigation("OwnerCluster");
 
                     b.Navigation("RabbitMQCluster");
 

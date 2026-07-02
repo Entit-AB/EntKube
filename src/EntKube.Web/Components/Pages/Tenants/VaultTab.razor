@@ -9,6 +9,7 @@
 @inject MongoService MongoService
 @inject RegisteredPostgresService RegisteredPostgresService
 @inject AppGovernanceService AppGovernanceService
+@inject AuthenticationStateProvider AuthStateProvider
 
 <div class="d-flex align-items-center mb-2">
     <i class="bi bi-shield-lock fs-4 me-2 text-primary"></i>
@@ -55,6 +56,9 @@ else
             </button>
             <button class="btn btn-sm @(scope == "docker" ? "btn-primary" : "btn-outline-primary")" @onclick='() => SwitchScope("docker")'>
                 <i class="bi bi-box-seam me-1"></i>Docker Registries
+            </button>
+            <button class="btn btn-sm @(scope == "kubeconfig" ? "btn-primary" : "btn-outline-primary")" @onclick='() => SwitchScope("kubeconfig")'>
+                <i class="bi bi-file-earmark-lock me-1"></i>Cluster Kubeconfigs
             </button>
         </div>
     </div>
@@ -217,10 +221,131 @@ else
     @* --- Docker Registries Panel --- *@
     @if (scope == "docker")
     {
+        @* Scope registry credentials to an app (and its environments), like other secrets,
+           or leave tenant-wide (shared across all apps). *@
+        @if (appOptions is not null && appOptions.Count > 0)
+        {
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body py-2">
+                    <div class="input-group">
+                        <span class="input-group-text bg-transparent"><i class="bi bi-app"></i></span>
+                        <select class="form-select" @bind="dockerAppId">
+                            <option value="@Guid.Empty">Tenant-wide (all apps)</option>
+                            @foreach ((string label, Guid id) in appOptions)
+                            {
+                                <option value="@id">@label</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+            </div>
+        }
         <DockerRegistriesPanel
             TenantId="TenantId"
-            AppId="Guid.Empty"
+            AppId="dockerAppId"
             IsAdmin="true" />
+    }
+
+    @* --- Cluster Kubeconfigs Panel --- *@
+    @if (scope == "kubeconfig")
+    {
+        <div class="card shadow-sm">
+            <div class="card-header bg-white d-flex align-items-center py-2">
+                <i class="bi bi-file-earmark-lock me-2 text-primary"></i>
+                <strong>Cluster Kubeconfigs</strong>
+                <span class="text-muted small ms-2">Encrypted credentials EntKube uses to connect to registered clusters. Rotate one from its cluster's Kubeconfig panel.</span>
+            </div>
+            <div class="card-body">
+                @if (kubeconfigSecrets is null)
+                {
+                    <p class="mb-0"><em>Loading…</em></p>
+                }
+                else if (kubeconfigSecrets.Count == 0)
+                {
+                    <p class="text-muted mb-0">No cluster kubeconfigs are stored in the vault yet.</p>
+                }
+                else
+                {
+                    @if (!string.IsNullOrEmpty(kubeconfigError))
+                    {
+                        <div class="alert alert-danger py-2 small">@kubeconfigError</div>
+                    }
+                    @if (!string.IsNullOrEmpty(kubeconfigSuccess))
+                    {
+                        <div class="alert alert-success py-2 small">@kubeconfigSuccess</div>
+                    }
+                    <table class="table table-sm align-middle mb-0" style="table-layout: fixed; width: 100%;">
+                        <thead>
+                            <tr>
+                                <th>Cluster</th>
+                                <th>Expiry</th>
+                                <th>Updated</th>
+                                <th>By</th>
+                                <th class="text-end" style="width: 130px;"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (VaultSecret kc in kubeconfigSecrets)
+                            {
+                                <tr>
+                                    <td class="text-truncate">@(kc.OwnerCluster?.Name ?? "—")</td>
+                                    <td>
+                                        @{ (string css, string text) = KubeconfigStatus(kc.Id); }
+                                        <span class="badge @css">@text</span>
+                                    </td>
+                                    <td><small class="text-muted">@kc.UpdatedAt.ToString("MMM d, HH:mm")</small></td>
+                                    <td class="text-truncate"><small class="text-muted">@(kc.UpdatedBy ?? "—")</small></td>
+                                    <td class="text-end">
+                                        <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => RevealKubeconfig(kc)"
+                                                disabled="@kubeconfigRevealLoading"
+                                                title="@(revealedKubeconfigId == kc.Id ? "Hide kubeconfig" : "Reveal kubeconfig")">
+                                            <i class="bi @(revealedKubeconfigId == kc.Id ? "bi-eye-slash" : "bi-eye")"></i>
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-warning" @onclick="() => StartKubeconfigUpdate(kc)"
+                                                title="Update kubeconfig">
+                                            <i class="bi bi-pencil"></i>
+                                        </button>
+                                    </td>
+                                </tr>
+                                @if (revealedKubeconfigId == kc.Id)
+                                {
+                                    <tr>
+                                        <td colspan="5" class="bg-light">
+                                            <pre class="mb-0 small user-select-all" style="white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow: auto;">@revealedKubeconfigYaml</pre>
+                                        </td>
+                                    </tr>
+                                }
+                                @if (updateKubeconfigId == kc.Id)
+                                {
+                                    <tr>
+                                        <td colspan="5" class="bg-light">
+                                            <div class="p-1">
+                                                <label class="form-label small mb-1">Replacement kubeconfig</label>
+                                                <KubeconfigPicker OnSelectionChanged="OnUpdateKubeconfigSelected" />
+                                                <div class="row g-2 align-items-end mt-2">
+                                                    <div class="col-auto" style="max-width: 220px;">
+                                                        <label class="form-label small mb-1">Expiry <span class="text-muted">(optional)</span></label>
+                                                        <input type="date" class="form-control form-control-sm" @bind="updateKubeconfigExpiry" />
+                                                    </div>
+                                                    <div class="col-auto">
+                                                        <button class="btn btn-sm btn-primary" @onclick="() => SaveKubeconfigUpdate(kc)"
+                                                                disabled="@(updateKubeconfigSelection is null || savingKubeconfig)">
+                                                            <i class="bi bi-save me-1"></i>@(savingKubeconfig ? "Saving…" : "Update")
+                                                        </button>
+                                                        <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="CancelKubeconfigUpdate">Cancel</button>
+                                                    </div>
+                                                </div>
+                                                <div class="form-text">Archives the current version and refreshes the expiry used for warnings. Never synced to Kubernetes.</div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                            }
+                        </tbody>
+                    </table>
+                }
+            </div>
+        </div>
     }
 
     @* --- Secrets Panel --- *@
@@ -820,6 +945,22 @@ else
     private string scopeEditValue = "";
     private bool savingScope;
 
+    // Docker registries scope: which app the admin is scoping credentials to (Empty = tenant-wide).
+    private Guid dockerAppId;
+
+    // Cluster kubeconfig scope state.
+    private List<VaultSecret>? kubeconfigSecrets;
+    private Dictionary<Guid, KubeconfigInfo?> kubeconfigInfos = new();
+    private Guid? revealedKubeconfigId;
+    private string? revealedKubeconfigYaml;
+    private bool kubeconfigRevealLoading;
+    private Guid? updateKubeconfigId;
+    private KubeconfigSelection? updateKubeconfigSelection;
+    private DateTime? updateKubeconfigExpiry;
+    private bool savingKubeconfig;
+    private string? kubeconfigError;
+    private string? kubeconfigSuccess;
+
     // Add-form mode for app secrets: "opaque" | "certificate" | "oauth".
     private string addMode = "opaque";
     // Shared busy flag for saving a structured (certificate/oauth) secret.
@@ -931,7 +1072,7 @@ else
             .ToList();
     }
 
-    private void SwitchScope(string newScope)
+    private async Task SwitchScope(string newScope)
     {
         scope = newScope;
         secrets = null;
@@ -950,7 +1091,152 @@ else
         addMode = "opaque";
         newCertBundle = new();
         newOAuthBundle = new();
+        dockerAppId = Guid.Empty;
+        revealedKubeconfigId = null;
+        revealedKubeconfigYaml = null;
+        CancelKubeconfigUpdate();
+        kubeconfigError = null;
+        kubeconfigSuccess = null;
         // Docker registries panel manages its own state; no reset needed here.
+
+        // Cluster kubeconfigs have no per-owner selector, so load them on scope switch.
+        kubeconfigSecrets = null;
+        if (newScope == "kubeconfig")
+        {
+            await LoadKubeconfigSecrets();
+        }
+    }
+
+    private async Task LoadKubeconfigSecrets()
+    {
+        kubeconfigSecrets = await VaultService.GetClusterKubeconfigSecretsAsync(TenantId);
+
+        kubeconfigInfos = new();
+        foreach (VaultSecret kc in kubeconfigSecrets)
+        {
+            kubeconfigInfos[kc.Id] = await VaultService.GetKubeconfigInfoByIdAsync(kc.Id);
+        }
+    }
+
+    private async Task RevealKubeconfig(VaultSecret secret)
+    {
+        if (revealedKubeconfigId == secret.Id)
+        {
+            revealedKubeconfigId = null;
+            revealedKubeconfigYaml = null;
+            return;
+        }
+
+        kubeconfigRevealLoading = true;
+        try
+        {
+            KubeconfigBundle? bundle = await VaultService.GetKubeconfigBundleByIdAsync(secret.Id);
+            revealedKubeconfigYaml = bundle?.ConfigYaml;
+            revealedKubeconfigId = secret.Id;
+        }
+        finally
+        {
+            kubeconfigRevealLoading = false;
+        }
+    }
+
+    private void StartKubeconfigUpdate(VaultSecret secret)
+    {
+        kubeconfigError = null;
+        kubeconfigSuccess = null;
+        if (updateKubeconfigId == secret.Id)
+        {
+            CancelKubeconfigUpdate();
+            return;
+        }
+
+        updateKubeconfigId = secret.Id;
+        updateKubeconfigSelection = null;
+        // Seed the expiry with the current value so the admin can keep or adjust it.
+        updateKubeconfigExpiry = kubeconfigInfos.GetValueOrDefault(secret.Id)?.ExpiresAt;
+    }
+
+    private void CancelKubeconfigUpdate()
+    {
+        updateKubeconfigId = null;
+        updateKubeconfigSelection = null;
+        updateKubeconfigExpiry = null;
+    }
+
+    private void OnUpdateKubeconfigSelected(KubeconfigSelection? selection)
+    {
+        updateKubeconfigSelection = selection;
+    }
+
+    private async Task SaveKubeconfigUpdate(VaultSecret secret)
+    {
+        if (secret.OwnerClusterId is not Guid clusterId)
+        {
+            kubeconfigError = "This kubeconfig is not linked to a cluster.";
+            return;
+        }
+
+        if (updateKubeconfigSelection is null)
+        {
+            return;
+        }
+
+        kubeconfigError = null;
+        kubeconfigSuccess = null;
+        savingKubeconfig = true;
+
+        try
+        {
+            AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
+
+            KubeconfigBundle bundle = new()
+            {
+                ConfigYaml = updateKubeconfigSelection.Yaml,
+                ContextName = updateKubeconfigSelection.ContextName,
+                ApiServerUrl = updateKubeconfigSelection.ServerUrl,
+                ExpiresAt = updateKubeconfigExpiry,
+            };
+
+            (bool ok, string? error, _) = await VaultService.SetClusterKubeconfigAsync(
+                TenantId, clusterId, bundle, authState.User.Identity?.Name);
+
+            if (!ok)
+            {
+                kubeconfigError = error ?? "Failed to update the kubeconfig.";
+                return;
+            }
+
+            kubeconfigSuccess = $"Kubeconfig for '{secret.OwnerCluster?.Name}' updated.";
+            CancelKubeconfigUpdate();
+            revealedKubeconfigId = null;
+            revealedKubeconfigYaml = null;
+            await LoadKubeconfigSecrets();
+        }
+        finally
+        {
+            savingKubeconfig = false;
+        }
+    }
+
+    private (string Css, string Text) KubeconfigStatus(Guid secretId)
+    {
+        KubeconfigInfo? info = kubeconfigInfos.GetValueOrDefault(secretId);
+        if (info?.ExpiresAt is null)
+        {
+            return ("bg-light text-dark border", "No expiry");
+        }
+
+        int days = (int)Math.Floor((info.ExpiresAt.Value - DateTime.UtcNow).TotalDays);
+        if (days < 0)
+        {
+            return ("bg-danger", "Expired");
+        }
+        if (days <= 30)
+        {
+            return ("bg-warning text-dark", $"Expires in {days} d");
+        }
+
+        return ("bg-success", "Valid");
     }
 
     private bool HasSelection()

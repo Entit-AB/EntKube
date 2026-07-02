@@ -536,4 +536,146 @@ public class VaultServiceTests : IDisposable
         canDelete.Should().BeTrue();
         reason.Should().BeNull();
     }
+
+    // --- Cluster Kubeconfigs ---
+
+    private const string SampleKubeconfig = """
+        apiVersion: v1
+        kind: Config
+        clusters:
+        - name: prod
+          cluster:
+            server: https://k8s.example.com
+        contexts:
+        - name: prod
+          context:
+            cluster: prod
+            user: admin
+        users:
+        - name: admin
+          user:
+            token: abc123
+        """;
+
+    [Fact]
+    public async Task SetClusterKubeconfigAsync_StoresEncryptedAndLinksCluster()
+    {
+        (Tenant tenant, KubernetesCluster cluster) = CreateTenantWithCluster();
+        DateTime expiry = new(2030, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        KubeconfigBundle bundle = new()
+        {
+            ConfigYaml = SampleKubeconfig,
+            ContextName = "prod",
+            ApiServerUrl = "https://k8s.example.com",
+            ExpiresAt = expiry,
+        };
+
+        (bool ok, string? error, Guid? secretId) =
+            await sut.SetClusterKubeconfigAsync(tenant.Id, cluster.Id, bundle, "admin@example.com");
+
+        ok.Should().BeTrue();
+        error.Should().BeNull();
+        secretId.Should().NotBeNull();
+
+        // The cluster is linked to the secret.
+        KubernetesCluster reloaded = await db.KubernetesClusters.AsNoTracking().FirstAsync(c => c.Id == cluster.Id);
+        reloaded.KubeconfigSecretId.Should().Be(secretId);
+
+        // The secret is a cluster-scoped Kubeconfig secret, never synced to Kubernetes.
+        VaultSecret stored = await db.VaultSecrets.AsNoTracking().FirstAsync(s => s.Id == secretId);
+        stored.SecretType.Should().Be(VaultSecretType.Kubeconfig);
+        stored.OwnerClusterId.Should().Be(cluster.Id);
+        stored.SyncToKubernetes.Should().BeFalse();
+
+        // Round-trips the YAML and expiry.
+        KubeconfigBundle? got = await sut.GetKubeconfigBundleByIdAsync(secretId!.Value);
+        got.Should().NotBeNull();
+        got!.ConfigYaml.Should().Be(SampleKubeconfig);
+        got.ExpiresAt.Should().Be(expiry);
+    }
+
+    [Fact]
+    public async Task SetClusterKubeconfigAsync_Update_ArchivesPreviousVersion()
+    {
+        (Tenant tenant, KubernetesCluster cluster) = CreateTenantWithCluster();
+
+        KubeconfigBundle first = new() { ConfigYaml = SampleKubeconfig, ContextName = "prod" };
+        (bool ok1, _, Guid? secretId) = await sut.SetClusterKubeconfigAsync(tenant.Id, cluster.Id, first, "admin");
+        ok1.Should().BeTrue();
+
+        KubeconfigBundle second = new()
+        {
+            ConfigYaml = SampleKubeconfig.Replace("abc123", "xyz789"),
+            ContextName = "prod",
+        };
+        (bool ok2, _, Guid? secretId2) = await sut.SetClusterKubeconfigAsync(tenant.Id, cluster.Id, second, "admin");
+
+        ok2.Should().BeTrue();
+        secretId2.Should().Be(secretId); // upsert keeps the same secret
+
+        // The previous value was archived as a version.
+        int versions = await db.VaultSecretVersions.CountAsync(v => v.SecretId == secretId);
+        versions.Should().Be(1);
+
+        KubeconfigBundle? latest = await sut.GetKubeconfigBundleByIdAsync(secretId!.Value);
+        latest!.ConfigYaml.Should().Contain("xyz789");
+    }
+
+    [Fact]
+    public async Task SetClusterKubeconfigAsync_RejectsInvalidKubeconfig()
+    {
+        (Tenant tenant, KubernetesCluster cluster) = CreateTenantWithCluster();
+
+        KubeconfigBundle bundle = new() { ConfigYaml = "this is not a kubeconfig" };
+
+        (bool ok, string? error, Guid? secretId) =
+            await sut.SetClusterKubeconfigAsync(tenant.Id, cluster.Id, bundle, "admin");
+
+        ok.Should().BeFalse();
+        error.Should().NotBeNull();
+        secretId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task GetClusterKubeconfigSecretsAsync_ListsKubeconfigsWithOwnerCluster()
+    {
+        (Tenant tenant, KubernetesCluster cluster) = CreateTenantWithCluster();
+
+        await sut.SetClusterKubeconfigAsync(
+            tenant.Id, cluster.Id, new KubeconfigBundle { ConfigYaml = SampleKubeconfig }, "admin");
+
+        List<VaultSecret> list = await sut.GetClusterKubeconfigSecretsAsync(tenant.Id);
+
+        list.Should().ContainSingle();
+        list[0].SecretType.Should().Be(VaultSecretType.Kubeconfig);
+        list[0].OwnerClusterId.Should().Be(cluster.Id);
+        list[0].OwnerCluster.Should().NotBeNull();
+        list[0].OwnerCluster!.Name.Should().Be(cluster.Name);
+    }
+
+    [Fact]
+    public async Task GetExpiringSecretCandidatesAsync_IncludesClusterKubeconfig()
+    {
+        (Tenant tenant, KubernetesCluster cluster) = CreateTenantWithCluster();
+        DateTime expiry = DateTime.UtcNow.AddDays(10);
+
+        KubeconfigBundle bundle = new()
+        {
+            ConfigYaml = SampleKubeconfig,
+            ContextName = "prod",
+            ExpiresAt = expiry,
+        };
+        await sut.SetClusterKubeconfigAsync(tenant.Id, cluster.Id, bundle, "admin");
+
+        List<ExpiringSecretInfo> candidates = await sut.GetExpiringSecretCandidatesAsync(tenant.Id);
+
+        ExpiringSecretInfo? kubeconfig = candidates.SingleOrDefault(c => c.SecretType == VaultSecretType.Kubeconfig);
+        kubeconfig.Should().NotBeNull();
+        kubeconfig!.OwnerClusterId.Should().Be(cluster.Id);
+        kubeconfig.ClusterName.Should().Be(cluster.Name);
+        kubeconfig.TypeLabel.Should().Be("Kubeconfig");
+        kubeconfig.ScopeLabel.Should().Be($"Cluster: {cluster.Name}");
+        kubeconfig.DaysUntilExpiry.Should().BeInRange(9, 10);
+    }
 }

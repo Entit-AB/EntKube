@@ -125,12 +125,14 @@ public class StorageBrowserService(VaultService vaultService, IDbContextFactory<
         // Fast path: ComponentId set at registration.
         if (link.ComponentId is not null)
         {
-            string? kc = await db.ClusterComponents
+            // Project the cluster entity (not the unmapped Kubeconfig column) so the
+            // materialization interceptor resolves the kubeconfig from the vault.
+            KubernetesCluster? cluster = await db.ClusterComponents
                 .Where(c => c.Id == link.ComponentId.Value)
-                .Select(c => c.Cluster.Kubeconfig)
+                .Select(c => c.Cluster)
                 .FirstOrDefaultAsync(ct);
-            if (!string.IsNullOrWhiteSpace(kc))
-                return kc;
+            if (!string.IsNullOrWhiteSpace(cluster?.Kubeconfig))
+                return cluster.Kubeconfig;
         }
 
         // Fallback: find a MinIO component on any cluster for this tenant,
@@ -142,7 +144,7 @@ public class StorageBrowserService(VaultService vaultService, IDbContextFactory<
             .Where(c => c.Cluster.TenantId == link.TenantId
                 && (c.Name == "minio-operator" || c.Name == "minio")
                 && c.Status == ComponentStatus.Installed
-                && c.Cluster.Kubeconfig != null);
+                && c.Cluster.KubeconfigSecretId != null);
 
         if (parsed is not null)
             query = query.OrderByDescending(c => c.Namespace == parsed.Value.Namespace);

@@ -20,28 +20,21 @@ public class MongoServiceTests : IDisposable
     private static readonly byte[] TestRootKey = Convert.FromBase64String(
         "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
 
-    private readonly SqliteConnection connection;
+    private readonly InterceptingTestDb testDb;
     private readonly ApplicationDbContext db;
-    private readonly TestDbContextFactory dbFactory;
+    private readonly IDbContextFactory<ApplicationDbContext> dbFactory;
     private readonly VaultService vaultService;
     private readonly Mock<IKubernetesClientFactory> k8sFactory;
     private readonly MongoService sut;
 
     public MongoServiceTests()
     {
-        connection = new SqliteConnection("DataSource=:memory:");
-        connection.Open();
+        // Mirrors production: contexts resolve cluster.Kubeconfig from the vault via the interceptor.
+        testDb = new InterceptingTestDb(TestRootKey);
+        db = testDb.CreateContext();
+        dbFactory = testDb.Factory;
 
-        DbContextOptions<ApplicationDbContext> options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseSqlite(connection)
-            .Options;
-
-        db = new ApplicationDbContext(options);
-        dbFactory = new TestDbContextFactory(connection);
-        db.Database.EnsureCreated();
-
-        VaultEncryptionService encryption = new(TestRootKey);
-        vaultService = new VaultService(dbFactory, encryption);
+        vaultService = testDb.CreateVaultService();
         k8sFactory = new Mock<IKubernetesClientFactory>();
         sut = new MongoService(dbFactory, vaultService, k8sFactory.Object);
     }
@@ -49,7 +42,7 @@ public class MongoServiceTests : IDisposable
     public void Dispose()
     {
         db.Dispose();
-        connection.Dispose();
+        testDb.Dispose();
     }
 
     // ──────── Helpers ────────
@@ -75,7 +68,6 @@ public class MongoServiceTests : IDisposable
             EnvironmentId = env.Id,
             Name = "prod-cluster",
             ApiServerUrl = "https://k8s.example.com",
-            Kubeconfig = "apiVersion: v1\nkind: Config\nclusters: []"
         };
 
         db.KubernetesClusters.Add(cluster);
@@ -111,9 +103,10 @@ public class MongoServiceTests : IDisposable
         db.StorageLinks.Add(storageLink);
         await db.SaveChangesAsync();
 
-        // Initialize vault and store S3 credentials.
+        // Initialize vault and store S3 credentials + the cluster kubeconfig (resolved on load).
 
         await vaultService.InitializeVaultAsync(tenant.Id);
+        await testDb.SeedKubeconfigAsync(vaultService, tenant.Id, cluster.Id, TestKubeconfig.Valid);
         await vaultService.SetStorageLinkSecretAsync(tenant.Id, storageLink.Id, "ACCESS_KEY", "test-access-key");
         await vaultService.SetStorageLinkSecretAsync(tenant.Id, storageLink.Id, "SECRET_KEY", "test-secret-key");
 

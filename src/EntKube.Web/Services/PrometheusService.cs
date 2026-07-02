@@ -534,7 +534,7 @@ public class PrometheusService(
             List<AppDeployment> deployments = await db.AppDeployments
                 .Include(d => d.Cluster)
                     .ThenInclude(c => c.Components)
-                .Where(d => d.AppId == appId && d.Cluster.Kubeconfig != null && d.Cluster.Kubeconfig != "")
+                .Where(d => d.AppId == appId && d.Cluster.KubeconfigSecretId != null)
                 .ToListAsync(ct);
 
             if (deployments.Count == 0)
@@ -572,7 +572,7 @@ public class PrometheusService(
                 .Include(d => d.Cluster)
                     .ThenInclude(c => c.Components)
                 .Where(d => d.App.CustomerId == customerId
-                         && d.Cluster.Kubeconfig != null && d.Cluster.Kubeconfig != "")
+                         && d.Cluster.KubeconfigSecretId != null)
                 .ToListAsync(ct);
 
             if (deployments.Count == 0)

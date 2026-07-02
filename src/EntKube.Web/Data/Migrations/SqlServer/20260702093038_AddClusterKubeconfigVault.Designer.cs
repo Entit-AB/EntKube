@@ -4,6 +4,7 @@ using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.SqlServer
 {
     [DbContext(typeof(SqlServerApplicationDbContext))]
-    partial class SqlServerApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260702093038_AddClusterKubeconfigVault")]
+    partial class AddClusterKubeconfigVault
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1454,9 +1457,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired()
                         .HasColumnType("varbinary(max)");
 
-                    b.Property<Guid?>("EnvironmentId")
-                        .HasColumnType("uniqueidentifier");
-
                     b.Property<Guid?>("KubernetesClusterId")
                         .HasColumnType("uniqueidentifier");
 
@@ -1499,8 +1499,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasKey("Id");
 
                     b.HasIndex("AppId");
-
-                    b.HasIndex("EnvironmentId");
 
                     b.HasIndex("KubernetesClusterId");
 
@@ -4610,11 +4608,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasForeignKey("AppId")
                         .OnDelete(DeleteBehavior.Cascade);
 
-                    b.HasOne("EntKube.Web.Data.Environment", "Environment")
-                        .WithMany()
-                        .HasForeignKey("EnvironmentId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
                     b.HasOne("EntKube.Web.Data.KubernetesCluster", "KubernetesCluster")
                         .WithMany()
                         .HasForeignKey("KubernetesClusterId")
@@ -4627,8 +4620,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired();
 
                     b.Navigation("App");
-
-                    b.Navigation("Environment");
 
                     b.Navigation("KubernetesCluster");
 

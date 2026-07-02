@@ -9,6 +9,12 @@ namespace EntKube.Web.Services;
 public record KubeconfigContext(string Name, string ClusterServer, bool IsCurrent);
 
 /// <summary>
+/// The result of choosing a context in the kubeconfig picker: the raw kubeconfig YAML
+/// plus the selected context name and its cluster server URL.
+/// </summary>
+public record KubeconfigSelection(string Yaml, string ContextName, string ServerUrl);
+
+/// <summary>
 /// Parses kubeconfig YAML to extract available contexts and their associated
 /// cluster server URLs. This lets users paste or upload a kubeconfig and pick
 /// which context (cluster) to register.

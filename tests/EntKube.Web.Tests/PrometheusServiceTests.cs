@@ -15,31 +15,28 @@ namespace EntKube.Web.Tests;
 /// </summary>
 public class PrometheusServiceTests : IDisposable
 {
-    private readonly SqliteConnection connection;
+    private static readonly byte[] TestRootKey = Convert.FromBase64String(
+        "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
+
+    private readonly InterceptingTestDb testDb;
     private readonly ApplicationDbContext db;
-    private readonly TestDbContextFactory dbFactory;
+    private readonly VaultService vaultService;
     private readonly PrometheusService sut;
 
     public PrometheusServiceTests()
     {
-        connection = new SqliteConnection("DataSource=:memory:");
-        connection.Open();
+        // Mirrors production: contexts resolve cluster.Kubeconfig from the vault via the interceptor.
+        testDb = new InterceptingTestDb(TestRootKey);
+        db = testDb.CreateContext();
+        vaultService = testDb.CreateVaultService();
 
-        DbContextOptions<ApplicationDbContext> options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseSqlite(connection)
-            .Options;
-
-        db = new ApplicationDbContext(options);
-        dbFactory = new TestDbContextFactory(connection);
-        db.Database.EnsureCreated();
-
-        sut = new PrometheusService(dbFactory, NullLogger<PrometheusService>.Instance);
+        sut = new PrometheusService(testDb.Factory, NullLogger<PrometheusService>.Instance);
     }
 
     public void Dispose()
     {
         db.Dispose();
-        connection.Dispose();
+        testDb.Dispose();
     }
 
     // ──────── GetClusterHealthAsync — failure paths ────────
@@ -76,13 +73,17 @@ public class PrometheusServiceTests : IDisposable
             EnvironmentId = env.Id,
             Name = "prod-cluster",
             ApiServerUrl = "https://k8s.example.com",
-            Kubeconfig = "apiVersion: v1\nkind: Config"
         };
 
         db.Set<Tenant>().Add(tenant);
         db.Set<Data.Environment>().Add(env);
         db.KubernetesClusters.Add(cluster);
         await db.SaveChangesAsync();
+
+        // The cluster has a kubeconfig (stored in the vault), so the health check gets past the
+        // kubeconfig gate and fails on the missing prometheus component.
+        await vaultService.InitializeVaultAsync(tenant.Id);
+        await testDb.SeedKubeconfigAsync(vaultService, tenant.Id, cluster.Id, TestKubeconfig.Valid);
 
         // Act
 
