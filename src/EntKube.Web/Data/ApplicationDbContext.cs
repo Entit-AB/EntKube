@@ -95,6 +95,10 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<SecretExpiryNotification> SecretExpiryNotifications => Set<SecretExpiryNotification>();
     public DbSet<ClusterServer> ClusterServers => Set<ClusterServer>();
     public DbSet<IdentityBinding> IdentityBindings => Set<IdentityBinding>();
+    public DbSet<ClusterBlueprint> ClusterBlueprints => Set<ClusterBlueprint>();
+    public DbSet<BlueprintStep> BlueprintSteps => Set<BlueprintStep>();
+    public DbSet<BootstrapRun> BootstrapRuns => Set<BootstrapRun>();
+    public DbSet<BootstrapStepRun> BootstrapStepRuns => Set<BootstrapStepRun>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
@@ -1866,6 +1870,75 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(s => s.Cluster)
                 .WithMany(c => c.Servers)
                 .HasForeignKey(s => s.ClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ClusterBlueprint — a tenant-scoped bootstrap recipe. Name unique per tenant.
+        // Deleting a tenant cascades to its blueprints and their steps.
+
+        builder.Entity<ClusterBlueprint>(entity =>
+        {
+            entity.HasKey(b => b.Id);
+            entity.HasIndex(b => new { b.TenantId, b.Name }).IsUnique();
+            entity.Property(b => b.Name).HasMaxLength(200).IsRequired();
+            entity.Property(b => b.Description).HasMaxLength(2000);
+            entity.Property(b => b.ProvisioningProvider).HasMaxLength(100);
+
+            entity.HasOne(b => b.Tenant)
+                .WithMany(t => t.Blueprints)
+                .HasForeignKey(b => b.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BlueprintStep — ordered items within a blueprint; cascade from blueprint.
+
+        builder.Entity<BlueprintStep>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => new { s.BlueprintId, s.Order });
+            entity.Property(s => s.StepType).HasConversion<string>().HasMaxLength(20);
+            entity.Property(s => s.Key).HasMaxLength(200).IsRequired();
+            entity.Property(s => s.Name).HasMaxLength(200).IsRequired();
+            entity.Property(s => s.Namespace).HasMaxLength(253);
+
+            entity.HasOne(s => s.Blueprint)
+                .WithMany(b => b.Steps)
+                .HasForeignKey(s => s.BlueprintId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BootstrapRun — one execution of a blueprint against a cluster.
+        // Cascade from cluster so removing a cluster clears its run history.
+
+        builder.Entity<BootstrapRun>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => r.ClusterId);
+            entity.Property(r => r.BlueprintName).HasMaxLength(200).IsRequired();
+            entity.Property(r => r.Status).HasConversion<string>().HasMaxLength(20);
+            entity.Property(r => r.TriggeredBy).HasMaxLength(256);
+
+            entity.HasOne(r => r.Cluster)
+                .WithMany()
+                .HasForeignKey(r => r.ClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BootstrapStepRun — per-step snapshot + result; cascade from run.
+
+        builder.Entity<BootstrapStepRun>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => new { s.BootstrapRunId, s.Order });
+            entity.Property(s => s.StepType).HasConversion<string>().HasMaxLength(20);
+            entity.Property(s => s.Status).HasConversion<string>().HasMaxLength(20);
+            entity.Property(s => s.Key).HasMaxLength(200).IsRequired();
+            entity.Property(s => s.Name).HasMaxLength(200).IsRequired();
+            entity.Property(s => s.Namespace).HasMaxLength(253);
+
+            entity.HasOne(s => s.Run)
+                .WithMany(r => r.StepRuns)
+                .HasForeignKey(s => s.BootstrapRunId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }

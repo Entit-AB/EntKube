@@ -1,0 +1,307 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@implements IDisposable
+@inject ClusterBlueprintService BlueprintService
+
+@* Bootstrap a registered cluster from a tenant blueprint: pick a blueprint,
+   review/override per-step parameters, launch, and watch live progress. The
+   run executes server-side in BootstrapRunnerService, so this panel just polls
+   the run + step status. *@
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+    <div>
+        <h5 class="mb-0"><i class="bi bi-diagram-3 me-2"></i>Bootstrap from blueprint</h5>
+        <small class="text-muted">Install a blueprint's components and services onto this cluster, in order.</small>
+    </div>
+</div>
+
+@if (error is not null)
+{
+    <div class="alert alert-danger py-2">@error</div>
+}
+
+@if (activeRun is not null && (activeRun.Status == BootstrapRunStatus.Queued || activeRun.Status == BootstrapRunStatus.Running))
+{
+    <div class="alert alert-info py-2">
+        <i class="bi bi-hourglass-split me-1"></i>
+        A bootstrap is currently @(activeRun.Status.ToString().ToLowerInvariant()) for this cluster.
+    </div>
+}
+
+<!-- Launch a new bootstrap -->
+@if (activeRun is null || activeRun.Status is BootstrapRunStatus.Succeeded or BootstrapRunStatus.Failed or BootstrapRunStatus.Cancelled)
+{
+    <div class="card mb-3">
+        <div class="card-body">
+            <div class="mb-2" style="max-width: 480px;">
+                <label class="form-label small mb-0">Blueprint</label>
+                <select class="form-select form-select-sm" value="@selectedBlueprintId"
+                        @onchange="e => OnPickBlueprint(e.Value?.ToString())">
+                    <option value="">— select a blueprint —</option>
+                    @foreach (ClusterBlueprint b in blueprints)
+                    {
+                        <option value="@b.Id">@b.Name</option>
+                    }
+                </select>
+            </div>
+
+            @if (reviewBlueprint is not null)
+            {
+                @if (reviewBlueprint.Steps.Count == 0)
+                {
+                    <div class="text-muted">This blueprint has no steps.</div>
+                }
+                else
+                {
+                    <p class="small text-muted mb-2">Review the steps below. Adjust any environment-specific parameters (domains, sizes, storage classes) before starting.</p>
+                    <ol class="list-group list-group-numbered mb-3">
+                        @foreach (BlueprintStep step in reviewBlueprint.Steps.OrderBy(s => s.Order))
+                        {
+                            <li class="list-group-item">
+                                <div class="fw-semibold">
+                                    @step.Name
+                                    <span class="badge @(step.StepType == BlueprintStepType.Service ? "bg-info text-dark" : "bg-secondary")">@step.Key</span>
+                                    <span class="text-muted small">ns: @(step.Namespace ?? "default")</span>
+                                </div>
+                                @{
+                                    Dictionary<string, string> ps = overrides[step.Id];
+                                }
+                                @if (ps.Count > 0)
+                                {
+                                    <div class="row g-2 mt-1">
+                                        @foreach (string key in ps.Keys.ToList())
+                                        {
+                                            <div class="col-md-6">
+                                                <label class="form-label small mb-0">@key</label>
+                                                <input class="form-control form-control-sm"
+                                                       value="@ps[key]"
+                                                       @onchange="e => ps[key] = e.Value?.ToString() ?? string.Empty" />
+                                            </div>
+                                        }
+                                    </div>
+                                }
+                            </li>
+                        }
+                    </ol>
+                    <button class="btn btn-primary btn-sm" @onclick="StartBootstrap">
+                        <i class="bi bi-play-fill me-1"></i>Start bootstrap
+                    </button>
+                }
+            }
+        </div>
+    </div>
+}
+
+<!-- Run history + live progress -->
+@if (runs.Count > 0)
+{
+    <div class="card">
+        <div class="card-header fw-semibold">Bootstrap runs</div>
+        <div class="list-group list-group-flush">
+            @foreach (BootstrapRun run in runs)
+            {
+                <div class="list-group-item">
+                    <div class="d-flex justify-content-between align-items-center"
+                         role="button" @onclick="() => ToggleRun(run.Id)">
+                        <div>
+                            <span class="badge @StatusClass(run.Status)">@run.Status</span>
+                            <span class="fw-semibold ms-1">@run.BlueprintName</span>
+                            <small class="text-muted ms-2">@run.CreatedAt.ToString("yyyy-MM-dd HH:mm")</small>
+                        </div>
+                        <div class="btn-group btn-group-sm">
+                            @if (run.Status is BootstrapRunStatus.Failed or BootstrapRunStatus.Cancelled)
+                            {
+                                <button class="btn btn-outline-success" @onclick="() => Resume(run.Id)" @onclick:stopPropagation="true">
+                                    <i class="bi bi-arrow-clockwise me-1"></i>Resume
+                                </button>
+                            }
+                            @if (run.Status is BootstrapRunStatus.Queued or BootstrapRunStatus.Running)
+                            {
+                                <button class="btn btn-outline-danger" @onclick="() => Cancel(run.Id)" @onclick:stopPropagation="true">
+                                    <i class="bi bi-x-lg me-1"></i>Cancel
+                                </button>
+                            }
+                            <button class="btn btn-outline-secondary" @onclick:stopPropagation="true" @onclick="() => ToggleRun(run.Id)">
+                                <i class="bi @(expandedRunId == run.Id ? "bi-chevron-up" : "bi-chevron-down")"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    @if (expandedRunId == run.Id && runDetail is not null && runDetail.Id == run.Id)
+                    {
+                        <div class="mt-2">
+                            @foreach (BootstrapStepRun step in runDetail.StepRuns.OrderBy(s => s.Order))
+                            {
+                                <div class="border rounded p-2 mb-2">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <div>
+                                            <span class="badge @StepStatusClass(step.Status)">@step.Status</span>
+                                            <span class="fw-semibold ms-1">@step.Name</span>
+                                            <span class="badge bg-light text-dark">@step.Key</span>
+                                        </div>
+                                        @if (!string.IsNullOrWhiteSpace(step.Output) || !string.IsNullOrWhiteSpace(step.Error))
+                                        {
+                                            <button class="btn btn-sm btn-link p-0" @onclick="() => ToggleStepOutput(step.Id)">
+                                                @(expandedStepId == step.Id ? "Hide output" : "Show output")
+                                            </button>
+                                        }
+                                    </div>
+                                    @if (!string.IsNullOrWhiteSpace(step.Error))
+                                    {
+                                        <div class="text-danger small mt-1">@step.Error</div>
+                                    }
+                                    @if (expandedStepId == step.Id && !string.IsNullOrWhiteSpace(step.Output))
+                                    {
+                                        <pre class="bg-dark text-light p-2 rounded mt-2 small" style="max-height: 300px; overflow:auto;">@step.Output</pre>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public Guid ClusterId { get; set; }
+    [Parameter] public Guid TenantId { get; set; }
+
+    private List<ClusterBlueprint> blueprints = [];
+    private List<BootstrapRun> runs = [];
+    private BootstrapRun? activeRun;
+    private string? error;
+
+    private string? selectedBlueprintId;
+    private ClusterBlueprint? reviewBlueprint;
+    // Per-step editable parameters (step.Id → param map), pre-filled from the blueprint.
+    private Dictionary<Guid, Dictionary<string, string>> overrides = new();
+
+    private Guid? expandedRunId;
+    private BootstrapRun? runDetail;
+    private Guid? expandedStepId;
+
+    private Timer? pollTimer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        blueprints = await BlueprintService.GetBlueprintsAsync(TenantId);
+        await RefreshRuns();
+
+        // Poll every 3s so live run/step status updates without user action.
+        pollTimer = new Timer(async _ => await InvokeAsync(async () =>
+        {
+            await RefreshRuns();
+            if (expandedRunId is Guid id)
+            {
+                runDetail = await BlueprintService.GetRunAsync(id);
+            }
+            StateHasChanged();
+        }), null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
+    }
+
+    private async Task RefreshRuns()
+    {
+        runs = await BlueprintService.GetRunsForClusterAsync(ClusterId);
+        activeRun = runs.FirstOrDefault();
+    }
+
+    private void OnPickBlueprint(string? id)
+    {
+        selectedBlueprintId = id;
+        reviewBlueprint = null;
+        overrides = new();
+        if (Guid.TryParse(id, out Guid bid))
+        {
+            _ = LoadReviewAsync(bid);
+        }
+    }
+
+    private async Task LoadReviewAsync(Guid blueprintId)
+    {
+        reviewBlueprint = await BlueprintService.GetBlueprintAsync(blueprintId);
+        overrides = new();
+        if (reviewBlueprint is not null)
+        {
+            foreach (BlueprintStep step in reviewBlueprint.Steps)
+            {
+                overrides[step.Id] = ClusterBlueprintService.DeserializeParams(step.ParametersJson);
+            }
+        }
+        StateHasChanged();
+    }
+
+    private async Task StartBootstrap()
+    {
+        error = null;
+        try
+        {
+            if (reviewBlueprint is null) return;
+            await BlueprintService.StartBootstrapAsync(ClusterId, reviewBlueprint.Id, overrides, triggeredBy: null);
+            reviewBlueprint = null;
+            selectedBlueprintId = null;
+            await RefreshRuns();
+            if (activeRun is not null)
+            {
+                expandedRunId = activeRun.Id;
+                runDetail = await BlueprintService.GetRunAsync(activeRun.Id);
+            }
+        }
+        catch (InvalidOperationException ex) { error = ex.Message; }
+    }
+
+    private async Task ToggleRun(Guid runId)
+    {
+        if (expandedRunId == runId)
+        {
+            expandedRunId = null;
+            runDetail = null;
+        }
+        else
+        {
+            expandedRunId = runId;
+            runDetail = await BlueprintService.GetRunAsync(runId);
+        }
+    }
+
+    private void ToggleStepOutput(Guid stepId) =>
+        expandedStepId = expandedStepId == stepId ? null : stepId;
+
+    private async Task Resume(Guid runId)
+    {
+        error = null;
+        try
+        {
+            await BlueprintService.ResumeAsync(runId);
+            await RefreshRuns();
+        }
+        catch (InvalidOperationException ex) { error = ex.Message; }
+    }
+
+    private async Task Cancel(Guid runId)
+    {
+        await BlueprintService.CancelAsync(runId);
+        await RefreshRuns();
+    }
+
+    private static string StatusClass(BootstrapRunStatus s) => s switch
+    {
+        BootstrapRunStatus.Succeeded => "bg-success",
+        BootstrapRunStatus.Failed => "bg-danger",
+        BootstrapRunStatus.Running => "bg-primary",
+        BootstrapRunStatus.Cancelled => "bg-secondary",
+        _ => "bg-warning text-dark"
+    };
+
+    private static string StepStatusClass(BootstrapStepStatus s) => s switch
+    {
+        BootstrapStepStatus.Succeeded => "bg-success",
+        BootstrapStepStatus.Failed => "bg-danger",
+        BootstrapStepStatus.Running => "bg-primary",
+        BootstrapStepStatus.Skipped => "bg-secondary",
+        _ => "bg-light text-dark"
+    };
+
+    public void Dispose() => pollTimer?.Dispose();
+}

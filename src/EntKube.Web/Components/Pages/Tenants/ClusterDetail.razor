@@ -4,6 +4,7 @@
 @inject TenantService TenantService
 @inject VaultService VaultService
 @inject ComponentLifecycleService LifecycleService
+@inject ComponentInstallOrchestrator InstallOrchestrator
 @inject ExternalRouteService RouteService
 @inject ComponentScanService ScanService
 @inject KeycloakService KeycloakService
@@ -87,6 +88,11 @@
         </button>
     </li>
     <li class="nav-item">
+        <button class="nav-link @(section == "bootstrap" ? "active" : "")" @onclick='() => section = "bootstrap"'>
+            <i class="bi bi-diagram-3 me-1"></i>Bootstrap
+        </button>
+    </li>
+    <li class="nav-item">
         <button class="nav-link @(section == "logs" ? "active" : "")" @onclick='() => section = "logs"'>
             <i class="bi bi-journal-text me-1"></i>Logs
         </button>
@@ -113,6 +119,10 @@ else if (section == "logs")
 else if (section == "vpn")
 {
     <HeadscaleVpnTab ClusterId="Cluster.Id" TenantId="TenantId" />
+}
+else if (section == "bootstrap")
+{
+    <ClusterBootstrapPanel ClusterId="Cluster.Id" TenantId="TenantId" />
 }
 else if (section == "components")
 {
@@ -2091,101 +2101,9 @@ else if (section == "components")
 
         try
         {
-            await LifecycleService.PrepareInstallAsync(componentId);
-
-            // Refresh Keycloak DB config into HelmValues from the stored config (if any).
-            await KeycloakService.RefreshDatabaseHelmValuesIfConfiguredAsync(TenantId, componentId);
-            // Grant all schema privileges to the database owner so Liquibase can run on install.
-            await KeycloakService.GrantDatabaseOwnerPermissionsIfConfiguredAsync(TenantId, componentId);
-            // Release any stuck Liquibase lock so migrations can proceed on startup.
-            await KeycloakService.ReleaseLiquibaseLockIfConfiguredAsync(TenantId, componentId);
-            // Update realm frontendUrl to match the configured admin URL (fixes restored-database URL mismatch).
-            await KeycloakService.FixRealmUrlsIfConfiguredAsync(TenantId, componentId);
-            // Refresh Harbor CNPG + S3 credentials in Helm values before install/upgrade.
-            await HarborService.RefreshHelmValuesIfConfiguredAsync(TenantId, componentId);
-
-            HelmCommand command = await LifecycleService.GetInstallCommandAsync(componentId);
-
-            // Pre-sync component secrets so they exist in K8s before the pod starts.
-            // Components like Keycloak reference secrets via extraEnvFrom at pod startup,
-            // which happens during Helm's --wait phase, so the secret must exist first.
-            HelmExecutionResult preSyncResult = await LifecycleService.SyncComponentSecretsAsync(componentId);
-
-            HelmExecutionResult result = await LifecycleService.ExecuteHelmAsync(componentId, command);
-
-            // Prepend pre-sync output so the user can see exactly how many keys were synced.
-            if (!string.IsNullOrWhiteSpace(preSyncResult.Output))
-            {
-                result = new HelmExecutionResult
-                {
-                    Success = result.Success,
-                    ExitCode = result.ExitCode,
-                    Output = $"--- Pre-install Secret Sync ---\n{preSyncResult.Output}\n\n{result.Output}"
-                };
-            }
-
-            if (result.Success)
-            {
-                HelmExecutionResult subchartResult = await LifecycleService.InstallSubchartsAsync(componentId);
-
-                if (!string.IsNullOrWhiteSpace(subchartResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success && subchartResult.Success,
-                        Output = result.Output + "\n" + subchartResult.Output
-                    };
-                }
-            }
-
-            await LifecycleService.MarkInstallResultAsync(componentId, result.Success, result.Success ? null : result.Output);
-
-            // After successful install, sync any secrets marked for K8s sync.
-
-            if (result.Success)
-            {
-                HelmExecutionResult syncResult = await LifecycleService.SyncComponentSecretsAsync(componentId);
-
-                if (!string.IsNullOrWhiteSpace(syncResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success,
-                        Output = result.Output + "\n\n--- Secret Sync ---\n" + syncResult.Output
-                    };
-                }
-
-                // For components that self-expose (e.g. headscale): ensure the external route
-                // record exists before applying so it's included in the Gateway manifest.
-                await HeadscaleService.EnsureExternalRouteAfterInstallAsync(componentId);
-
-                // Apply HTTPRoute + Certificate manifests for any configured external routes.
-                HelmExecutionResult routeResult = await LifecycleService.ApplyExternalRoutesAsync(componentId);
-                if (!string.IsNullOrWhiteSpace(routeResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success && routeResult.Success,
-                        Output = result.Output + "\n\n--- Route Apply ---\n" + routeResult.Output
-                    };
-                }
-
-                // wg-easy: automatically re-apply its target Istio gateway so the
-                // gateway's LoadBalancer exposes the WireGuard UDP port — no manual
-                // Save & Apply on the gateway required.
-                if (components?.FirstOrDefault(c => c.Id == componentId)?.Name == "wg-easy")
-                {
-                    HelmExecutionResult? gwResult = await LifecycleService.EnsureGatewayWireGuardPortAsync(componentId);
-                    if (gwResult is not null && !string.IsNullOrWhiteSpace(gwResult.Output))
-                    {
-                        result = new HelmExecutionResult
-                        {
-                            Success = result.Success && gwResult.Success,
-                            Output = result.Output + "\n\n--- Gateway UDP Port ---\n" + gwResult.Output
-                        };
-                    }
-                }
-            }
+            // Delegate to the shared orchestrator so a manual install and a blueprint
+            // bootstrap step run through exactly the same sequence.
+            HelmExecutionResult result = await InstallOrchestrator.InstallAsync(TenantId, componentId);
 
             operationOutput = result.Output;
             operationComponentId = componentId;

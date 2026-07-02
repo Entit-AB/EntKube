@@ -800,6 +800,156 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("AuditEvents");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintStep", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("BlueprintId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Namespace")
+                        .HasMaxLength(253)
+                        .HasColumnType("nvarchar(253)");
+
+                    b.Property<bool>("Optional")
+                        .HasColumnType("bit");
+
+                    b.Property<int>("Order")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ParametersJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("StepType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BlueprintId", "Order");
+
+                    b.ToTable("BlueprintSteps");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.BootstrapRun", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("BlueprintId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("BlueprintName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("CurrentStepOrder")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("FinishedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("StartedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("TriggeredBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterId");
+
+                    b.ToTable("BootstrapRuns");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.BootstrapStepRun", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("BootstrapRunId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("CreatedComponentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Error")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("FinishedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Namespace")
+                        .HasMaxLength(253)
+                        .HasColumnType("nvarchar(253)");
+
+                    b.Property<int>("Order")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Output")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ResolvedParametersJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("StartedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("StepType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BootstrapRunId", "Order");
+
+                    b.ToTable("BootstrapStepRuns");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.CacheBinding", b =>
                 {
                     b.Property<Guid>("Id")
@@ -836,6 +986,42 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("RedisClusterId");
 
                     b.ToTable("CacheBindings");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("ProvisioningConfig")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ProvisioningProvider")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("ClusterBlueprints");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterComponent", b =>
@@ -4366,6 +4552,39 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Deployment");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintStep", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ClusterBlueprint", "Blueprint")
+                        .WithMany("Steps")
+                        .HasForeignKey("BlueprintId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Blueprint");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.BootstrapRun", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KubernetesCluster", "Cluster")
+                        .WithMany()
+                        .HasForeignKey("ClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Cluster");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.BootstrapStepRun", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.BootstrapRun", "Run")
+                        .WithMany("StepRuns")
+                        .HasForeignKey("BootstrapRunId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Run");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.CacheBinding", b =>
                 {
                     b.HasOne("EntKube.Web.Data.AppDeployment", "AppDeployment")
@@ -4383,6 +4602,17 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("AppDeployment");
 
                     b.Navigation("RedisCluster");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany("Blueprints")
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterComponent", b =>
@@ -5746,6 +5976,16 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("DeploymentRoutes");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.BootstrapRun", b =>
+                {
+                    b.Navigation("StepRuns");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
+                {
+                    b.Navigation("Steps");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ClusterComponent", b =>
                 {
                     b.Navigation("ExternalRoutes");
@@ -5883,6 +6123,8 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
             modelBuilder.Entity("EntKube.Web.Data.Tenant", b =>
                 {
+                    b.Navigation("Blueprints");
+
                     b.Navigation("Customers");
 
                     b.Navigation("Environments");
