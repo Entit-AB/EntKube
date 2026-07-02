@@ -310,6 +310,11 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .IsUnique()
                 .HasFilter(null);
 
+            // A cluster's kubeconfig is unique per (cluster, name).
+            entity.HasIndex(s => new { s.VaultId, s.OwnerClusterId, s.Name })
+                .IsUnique()
+                .HasFilter(null);
+
             entity.HasOne(s => s.Vault)
                 .WithMany(v => v.Secrets)
                 .HasForeignKey(s => s.VaultId)
@@ -380,6 +385,16 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .HasForeignKey(s => s.KafkaClusterId)
                 .OnDelete(DeleteBehavior.Cascade);
 
+            // A kubeconfig secret is owned by a cluster. Deleting the cluster cascades
+            // its kubeconfig secret away. Distinct from KubernetesClusterId, which is the
+            // (sync-target) cluster for app secrets. KubernetesCluster.KubeconfigSecretId is
+            // an intentionally unmapped scalar pointer back to this secret — the ownership
+            // relationship (and its cascade) is modelled solely here to avoid a two-way FK cycle.
+            entity.HasOne(s => s.OwnerCluster)
+                .WithMany()
+                .HasForeignKey(s => s.OwnerClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
             entity.HasMany(s => s.Versions)
                 .WithOne(v => v.Secret)
                 .HasForeignKey(v => v.SecretId)
@@ -419,6 +434,14 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithMany()
                 .HasForeignKey(d => d.AppId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            // Environment binding for app-scoped credentials. When the environment is deleted
+            // the FK is set to null (the credential falls back to "shared") rather than cascading
+            // the credential away. Mirrors VaultSecret.Environment.
+            entity.HasOne(d => d.Environment)
+                .WithMany()
+                .HasForeignKey(d => d.EnvironmentId)
+                .OnDelete(DeleteBehavior.SetNull);
 
             entity.HasOne(d => d.KubernetesCluster)
                 .WithMany()

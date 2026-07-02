@@ -3,6 +3,7 @@
 @using Microsoft.EntityFrameworkCore
 @inject TenantService TenantService
 @inject VaultService VaultService
+@inject AuthenticationStateProvider AuthStateProvider
 
 <h4>Kubernetes Clusters</h4>
 <p class="text-muted">Clusters registered in this tenant, each assigned to an environment.</p>
@@ -32,6 +33,10 @@
             </button>
         </div>
     </div>
+    <p class="form-text mt-0 mb-3">
+        Adding a cluster here registers it without a kubeconfig. Register from an environment (with a kubeconfig
+        upload) or use the <strong>Kubeconfig</strong> action below to store one in the vault.
+    </p>
 }
 else
 {
@@ -59,7 +64,8 @@ else
                 <th>Name</th>
                 <th>Environment</th>
                 <th>API Server</th>
-                <th style="width: 280px;"></th>
+                <th>Kubeconfig</th>
+                <th style="width: 360px;"></th>
             </tr>
         </thead>
         <tbody>
@@ -69,7 +75,11 @@ else
                     <td>@cluster.Name</td>
                     <td><span class="badge bg-secondary">@cluster.Environment.Name</span></td>
                     <td class="text-truncate" style="max-width: 300px;">@cluster.ApiServerUrl</td>
+                    <td>@KubeconfigBadge(cluster)</td>
                     <td>
+                        <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => ToggleKubeconfig(cluster.Id)">
+                            <i class="bi bi-file-earmark-lock"></i> Kubeconfig
+                        </button>
                         <button class="btn btn-sm btn-outline-success me-1" @onclick="() => ToggleHealth(cluster.Id)">
                             <i class="bi bi-heart-pulse"></i> Health
                         </button>
@@ -80,10 +90,63 @@ else
                     </td>
                 </tr>
 
+                @if (kubeconfigClusterId == cluster.Id)
+                {
+                    <tr>
+                        <td colspan="5">
+                            <div class="card card-body bg-light">
+                                <h6 class="mb-2"><i class="bi bi-file-earmark-lock me-1"></i>Manage kubeconfig — @cluster.Name</h6>
+
+                                @{
+                                    KubeconfigInfo? info = kubeconfigInfos.GetValueOrDefault(cluster.Id);
+                                }
+                                <p class="small mb-2">
+                                    Current status: @KubeconfigBadge(cluster)
+                                    @if (info?.ExpiresAt is not null)
+                                    {
+                                        <span class="text-muted ms-2">Expires @info.ExpiresAt.Value.ToString("yyyy-MM-dd")</span>
+                                    }
+                                </p>
+
+                                <div class="mb-2">
+                                    <label class="form-label small mb-1">Replacement kubeconfig</label>
+                                    <KubeconfigPicker OnSelectionChanged="OnKubeconfigSelected" />
+                                </div>
+                                <div class="row g-2 align-items-end">
+                                    <div class="col-auto" style="max-width: 220px;">
+                                        <label class="form-label small mb-1">Expiry <span class="text-muted">(optional)</span></label>
+                                        <input type="date" class="form-control form-control-sm" @bind="updateExpiry" />
+                                    </div>
+                                    <div class="col-auto">
+                                        <button class="btn btn-sm btn-primary" @onclick="() => SaveKubeconfig(cluster)"
+                                                disabled="@(updateSelection is null || savingKubeconfig)">
+                                            <i class="bi bi-save me-1"></i>@(savingKubeconfig ? "Saving..." : "Update kubeconfig")
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="() => kubeconfigClusterId = null">Cancel</button>
+                                    </div>
+                                </div>
+
+                                @if (!string.IsNullOrEmpty(kubeconfigError))
+                                {
+                                    <div class="text-danger small mt-2">@kubeconfigError</div>
+                                }
+                                @if (!string.IsNullOrEmpty(kubeconfigSuccess))
+                                {
+                                    <div class="text-success small mt-2">@kubeconfigSuccess</div>
+                                }
+                                <div class="form-text mt-2">
+                                    The kubeconfig is stored encrypted in the tenant vault. Updating it archives the previous
+                                    version and refreshes the expiry used for warnings. It is never synced to Kubernetes.
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                }
+
                 @if (expandedClusterId == cluster.Id)
                 {
                     <tr>
-                        <td colspan="4">
+                        <td colspan="5">
                             <ComponentPanel ClusterId="cluster.Id" TenantId="TenantId" OnClose="() => expandedClusterId = null" />
                         </td>
                     </tr>
@@ -92,7 +155,7 @@ else
                 @if (healthClusterId == cluster.Id)
                 {
                     <tr>
-                        <td colspan="4">
+                        <td colspan="5">
                             <ClusterHealthPanel ClusterId="cluster.Id" OnClose="() => healthClusterId = null" />
                         </td>
                     </tr>
@@ -107,12 +170,21 @@ else
 
     private List<KubernetesCluster>? clusters;
     private List<Data.Environment>? environments;
+    private readonly Dictionary<Guid, KubeconfigInfo?> kubeconfigInfos = [];
     private string newName = "";
     private string newApiUrl = "";
     private Guid selectedEnvironmentId;
     private string? errorMessage;
     private Guid? expandedClusterId;
     private Guid? healthClusterId;
+
+    // Kubeconfig management panel state.
+    private Guid? kubeconfigClusterId;
+    private KubeconfigSelection? updateSelection;
+    private DateTime? updateExpiry;
+    private bool savingKubeconfig;
+    private string? kubeconfigError;
+    private string? kubeconfigSuccess;
 
     protected override async Task OnInitializedAsync()
     {
@@ -123,6 +195,116 @@ else
     private async Task Load()
     {
         clusters = await TenantService.GetClustersAsync(TenantId);
+
+        kubeconfigInfos.Clear();
+        foreach (KubernetesCluster cluster in clusters)
+        {
+            kubeconfigInfos[cluster.Id] = cluster.KubeconfigSecretId is Guid secretId
+                ? await VaultService.GetKubeconfigInfoByIdAsync(secretId)
+                : null;
+        }
+    }
+
+    private RenderFragment KubeconfigBadge(KubernetesCluster cluster) => builder =>
+    {
+        (string css, string text) = KubeconfigStatus(cluster);
+        builder.OpenElement(0, "span");
+        builder.AddAttribute(1, "class", $"badge {css}");
+        builder.AddContent(2, text);
+        builder.CloseElement();
+    };
+
+    private (string Css, string Text) KubeconfigStatus(KubernetesCluster cluster)
+    {
+        if (cluster.KubeconfigSecretId is null)
+        {
+            return ("bg-secondary", "Not in vault");
+        }
+
+        KubeconfigInfo? info = kubeconfigInfos.GetValueOrDefault(cluster.Id);
+        if (info?.ExpiresAt is null)
+        {
+            return ("bg-light text-dark border", "No expiry");
+        }
+
+        int days = (int)Math.Floor((info.ExpiresAt.Value - DateTime.UtcNow).TotalDays);
+        if (days < 0)
+        {
+            return ("bg-danger", "Expired");
+        }
+        if (days <= 30)
+        {
+            return ("bg-warning text-dark", $"Expires in {days} d");
+        }
+
+        return ("bg-success", "Valid");
+    }
+
+    private void ToggleKubeconfig(Guid clusterId)
+    {
+        kubeconfigError = null;
+        kubeconfigSuccess = null;
+        if (kubeconfigClusterId == clusterId)
+        {
+            kubeconfigClusterId = null;
+            return;
+        }
+
+        kubeconfigClusterId = clusterId;
+        expandedClusterId = null;
+        healthClusterId = null;
+
+        // Seed the expiry field with the current value so the admin can keep or adjust it.
+        updateSelection = null;
+        updateExpiry = kubeconfigInfos.GetValueOrDefault(clusterId)?.ExpiresAt;
+    }
+
+    private void OnKubeconfigSelected(KubeconfigSelection? selection)
+    {
+        updateSelection = selection;
+    }
+
+    private async Task SaveKubeconfig(KubernetesCluster cluster)
+    {
+        if (updateSelection is null)
+        {
+            return;
+        }
+
+        kubeconfigError = null;
+        kubeconfigSuccess = null;
+        savingKubeconfig = true;
+
+        try
+        {
+            AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
+
+            KubeconfigBundle bundle = new()
+            {
+                ConfigYaml = updateSelection.Yaml,
+                ContextName = updateSelection.ContextName,
+                ApiServerUrl = updateSelection.ServerUrl,
+                ExpiresAt = updateExpiry,
+            };
+
+            (bool ok, string? error, _) = await VaultService.SetClusterKubeconfigAsync(
+                TenantId, cluster.Id, bundle, authState.User.Identity?.Name);
+
+            if (!ok)
+            {
+                kubeconfigError = error ?? "Failed to store the kubeconfig.";
+                return;
+            }
+
+            kubeconfigSuccess = "Kubeconfig updated.";
+            updateSelection = null;
+            kubeconfigClusterId = null;
+            await Load();
+        }
+        finally
+        {
+            savingKubeconfig = false;
+        }
     }
 
     private async Task Create()
@@ -149,6 +331,7 @@ else
         if (expandedClusterId is not null)
         {
             healthClusterId = null;
+            kubeconfigClusterId = null;
         }
     }
 
@@ -158,6 +341,7 @@ else
         if (healthClusterId is not null)
         {
             expandedClusterId = null;
+            kubeconfigClusterId = null;
         }
     }
 

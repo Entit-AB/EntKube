@@ -23,6 +23,10 @@ public sealed class ExpiringSecretInfo
     public Guid? EnvironmentId { get; init; }
     public string? EnvironmentName { get; init; }
 
+    /// <summary>Owning cluster id, when the secret is a cluster kubeconfig.</summary>
+    public Guid? OwnerClusterId { get; init; }
+    public string? ClusterName { get; init; }
+
     /// <summary>
     /// When the secret expires. Null for an OAuth client whose expiry was not entered
     /// (such secrets cannot be tracked and are surfaced as "no expiry set").
@@ -40,11 +44,17 @@ public sealed class ExpiringSecretInfo
 
     public bool IsExpired => ExpiresAt.HasValue && DateTime.UtcNow > ExpiresAt.Value;
 
-    /// <summary>A human-readable scope label, e.g. "Acme / Production" or "Acme (shared)".</summary>
+    /// <summary>A human-readable scope label, e.g. "Acme / Production", "Acme (shared)",
+    /// or "Cluster: prod-eu-west-1" for a kubeconfig.</summary>
     public string ScopeLabel
     {
         get
         {
+            if (SecretType == VaultSecretType.Kubeconfig)
+            {
+                return $"Cluster: {ClusterName ?? "—"}";
+            }
+
             string app = AppName ?? "—";
             string env = EnvironmentName is null ? "shared" : EnvironmentName;
             return EnvironmentName is null ? $"{app} ({env})" : $"{app} / {env}";
@@ -55,6 +65,7 @@ public sealed class ExpiringSecretInfo
     {
         VaultSecretType.Certificate => "Certificate",
         VaultSecretType.OAuthClient => "OAuth client",
+        VaultSecretType.Kubeconfig => "Kubeconfig",
         _ => SecretType.ToString()
     };
 }

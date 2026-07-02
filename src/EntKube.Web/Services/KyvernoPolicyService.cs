@@ -226,7 +226,7 @@ public class KyvernoPolicyService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         List<KubernetesCluster> clusters = await db.KubernetesClusters
-            .Where(c => c.TenantId == tenantId && c.EnvironmentId == environmentId && c.Kubeconfig != null)
+            .Where(c => c.TenantId == tenantId && c.EnvironmentId == environmentId && c.KubeconfigSecretId != null)
             .ToListAsync(ct);
 
         List<KyvernoClusterPolicyInfo> result = [];

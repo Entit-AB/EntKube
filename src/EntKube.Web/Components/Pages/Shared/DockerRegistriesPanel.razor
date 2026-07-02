@@ -3,6 +3,7 @@
 @inject DockerRegistryService DockerRegistryService
 @inject TenantService TenantService
 @inject VaultService VaultService
+@inject AppGovernanceService AppGovernanceService
 
 @* ═══════════════════════════════════════════════════════════════════
    Docker / OCI Registry Credentials panel.
@@ -90,6 +91,21 @@ else
                             <input class="form-control form-control-sm" placeholder="user@example.com"
                                    @bind="addEmail" @bind:event="oninput" />
                         </div>
+                        @if (ShowEnvScoping)
+                        {
+                            <div class="col-md-4">
+                                <label class="form-label small" title="Bind this credential to a single environment, or leave it shared across all of the app's environments.">
+                                    Scope
+                                </label>
+                                <select class="form-select form-select-sm" @bind="addEnvironmentId">
+                                    <option value="@Guid.Empty">Shared across environments</option>
+                                    @foreach ((string name, Guid id) in EnvOptions)
+                                    {
+                                        <option value="@id">@name only</option>
+                                    }
+                                </select>
+                            </div>
+                        }
                     </div>
 
                     @if (addError is not null)
@@ -160,6 +176,7 @@ else
                                 <th>Type</th>
                                 <th>Server</th>
                                 <th>Username</th>
+                                <th>Scope</th>
                                 <th>K8s Sync</th>
                                 <th>Updated</th>
                                 <th class="text-end" style="min-width: 130px;">Actions</th>
@@ -177,6 +194,20 @@ else
                                     </td>
                                     <td><small class="text-muted font-monospace">@cred.Server</small></td>
                                     <td><code class="small">@cred.Username</code></td>
+                                    <td>
+                                        @if (cred.AppId is null)
+                                        {
+                                            <span class="badge bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle">tenant-wide</span>
+                                        }
+                                        else if (cred.EnvironmentId is null)
+                                        {
+                                            <span class="badge bg-light text-dark border" title="Shared across all of the app's environments">shared</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="badge bg-info-subtle text-info-emphasis border border-info-subtle" title="Bound to a single environment"><i class="bi bi-diagram-3 me-1"></i>@ScopeLabel(cred)</span>
+                                        }
+                                    </td>
                                     <td>
                                         @if (!string.IsNullOrEmpty(cred.KubernetesSecretName))
                                         {
@@ -205,6 +236,14 @@ else
                                                     @onclick="() => StartEdit(cred)">
                                                 <i class="bi bi-pencil"></i>
                                             </button>
+                                            @* Change environment scope — only for app-scoped creds *@
+                                            @if (ShowEnvScoping && cred.AppId is not null)
+                                            {
+                                                <button class="btn btn-sm btn-outline-primary me-1" title="Change environment scope"
+                                                        @onclick="() => StartScopeEdit(cred)">
+                                                    <i class="bi bi-diagram-3"></i>
+                                                </button>
+                                            }
                                             @* Configure K8s sync *@
                                             <button class="btn btn-sm btn-outline-info me-1" title="Configure K8s sync"
                                                     @onclick="() => StartSyncConfig(cred)">
@@ -252,7 +291,7 @@ else
                                 @if (revealedId == cred.Id)
                                 {
                                     <tr class="table-light">
-                                        <td colspan="7">
+                                        <td colspan="8">
                                             <div class="d-flex align-items-center px-2 py-1 gap-2">
                                                 <span class="text-muted small">Password:</span>
                                                 @if (revealLoading)
@@ -268,11 +307,38 @@ else
                                     </tr>
                                 }
 
+                                @* ── Change-scope row ── *@
+                                @if (scopeEditId == cred.Id)
+                                {
+                                    <tr class="table-light">
+                                        <td colspan="8">
+                                            <div class="row g-2 p-2 align-items-end">
+                                                <div class="col-md-4">
+                                                    <label class="form-label small mb-1">Environment scope</label>
+                                                    <select class="form-select form-select-sm" @bind="scopeEditValue">
+                                                        <option value="@Guid.Empty">Shared across environments</option>
+                                                        @foreach ((string name, Guid id) in EnvOptions)
+                                                        {
+                                                            <option value="@id">@name only</option>
+                                                        }
+                                                    </select>
+                                                </div>
+                                                <div class="col-auto d-flex gap-1">
+                                                    <button class="btn btn-sm btn-success" @onclick="() => SaveScopeEdit(cred.Id)">
+                                                        <i class="bi bi-check-lg me-1"></i>Save
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="CancelScopeEdit">Cancel</button>
+                                                </div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+
                                 @* ── Edit row ── *@
                                 @if (editId == cred.Id)
                                 {
                                     <tr class="table-light">
-                                        <td colspan="7">
+                                        <td colspan="8">
                                             <div class="row g-2 p-2 align-items-end">
                                                 <div class="col-md-4">
                                                     <label class="form-label small mb-1">Username</label>
@@ -304,7 +370,7 @@ else
                                 @if (syncConfigId == cred.Id)
                                 {
                                     <tr class="table-light">
-                                        <td colspan="7">
+                                        <td colspan="8">
                                             <div class="row g-2 p-2 align-items-end">
                                                 <div class="col-md-3">
                                                     <label class="form-label small mb-1">Cluster</label>
@@ -351,7 +417,7 @@ else
                                 @if (syncOutput.TryGetValue(cred.Id, out (bool ok, string msg) syncResult))
                                 {
                                     <tr class="table-light">
-                                        <td colspan="7">
+                                        <td colspan="8">
                                             <div class="d-flex align-items-center justify-content-between px-2 pt-1 mb-1">
                                                 <span class="small fw-medium @(syncResult.ok ? "text-success" : "text-danger")">
                                                     <i class="bi @(syncResult.ok ? "bi-check-circle" : "bi-x-circle") me-1"></i>
@@ -381,9 +447,29 @@ else
     [Parameter] public Guid AppId { get; set; }   // Guid.Empty = tenant-wide
     [Parameter] public bool IsAdmin { get; set; }
 
+    /// <summary>
+    /// When set, this view is scoped to a single environment: only shared credentials and ones
+    /// bound to this environment are shown, and new credentials bind to it (or "shared"). Leave
+    /// null for an app-wide view (all of the app's environments) or a tenant-wide view.
+    /// </summary>
+    [Parameter] public Data.Environment? Environment { get; set; }
+
     private bool vaultInitialized;
     private List<DockerRegistryCredential>? credentials;
     private List<KubernetesCluster>? clusters;
+
+    // Environment scoping (only meaningful for an app-scoped view).
+    private List<(string Name, Guid Id)> appEnvironments = [];
+    private Guid addEnvironmentId;          // Guid.Empty = shared
+    private Guid? scopeEditId;
+    private Guid scopeEditValue;            // Guid.Empty = shared
+
+    // The environment options offered on add / change-scope: just this environment when the view
+    // is bound to one, otherwise all of the app's environments.
+    private IEnumerable<(string Name, Guid Id)> EnvOptions =>
+        Environment is not null ? appEnvironments.Where(e => e.Id == Environment.Id) : appEnvironments;
+
+    private bool ShowEnvScoping => AppId != Guid.Empty && appEnvironments.Count > 0;
 
     // Add form
     private bool showAddForm;
@@ -421,8 +507,22 @@ else
     // Delete confirm
     private Guid? confirmDeleteId;
 
-    protected override async Task OnInitializedAsync()
+    // Tracks the scope the current data was loaded for, so we reload when the parent changes the
+    // selected app or environment (e.g. the admin vault's app selector) rather than only once.
+    private (Guid Tenant, Guid App, Guid? Env) loadedScope = (Guid.Empty, Guid.Empty, null);
+
+    protected override async Task OnParametersSetAsync()
     {
+        (Guid, Guid, Guid?) current = (TenantId, AppId, Environment?.Id);
+        if (current == loadedScope && credentials is not null)
+        {
+            return;
+        }
+
+        loadedScope = current;
+        // Reset per-scope transient UI state.
+        scopeEditId = editId = revealedId = syncConfigId = confirmDeleteId = null;
+        addEnvironmentId = Guid.Empty;
         await CheckVaultAndLoad();
     }
 
@@ -431,9 +531,34 @@ else
         SecretVault? vault = await VaultService.GetVaultAsync(TenantId);
         vaultInitialized = vault is not null;
 
-        if (vaultInitialized)
+        if (!vaultInitialized)
         {
-            await LoadCredentials();
+            return;
+        }
+
+        await LoadEnvironments();
+        await LoadCredentials();
+    }
+
+    private async Task LoadEnvironments()
+    {
+        appEnvironments = [];
+        if (AppId == Guid.Empty)
+        {
+            return;
+        }
+
+        Dictionary<Guid, string> names = (await TenantService.GetEnvironmentsAsync(TenantId))
+            .ToDictionary(e => e.Id, e => e.Name);
+        List<AppEnvironment> appEnvs = await AppGovernanceService.GetAppEnvironmentsAsync(AppId);
+        appEnvironments = appEnvs
+            .Select(ae => (names.GetValueOrDefault(ae.EnvironmentId, "Unknown env"), ae.EnvironmentId))
+            .ToList();
+
+        // In a single-environment view, default new credentials to this environment.
+        if (Environment is not null)
+        {
+            addEnvironmentId = Environment.Id;
         }
     }
 
@@ -441,8 +566,14 @@ else
     {
         credentials = await DockerRegistryService.GetAsync(
             TenantId,
-            AppId == Guid.Empty ? null : AppId);
+            AppId == Guid.Empty ? null : AppId,
+            Environment?.Id);
     }
+
+    private string ScopeLabel(DockerRegistryCredential cred) =>
+        cred.AppId is null ? "tenant-wide"
+        : cred.EnvironmentId is null ? "shared"
+        : cred.Environment?.Name ?? appEnvironments.FirstOrDefault(e => e.Id == cred.EnvironmentId).Name ?? "environment";
 
     // ──────── Add ────────
 
@@ -476,7 +607,8 @@ else
                 addServer.Trim(),
                 addUsername.Trim(),
                 addPassword,
-                string.IsNullOrWhiteSpace(addEmail) ? null : addEmail.Trim());
+                string.IsNullOrWhiteSpace(addEmail) ? null : addEmail.Trim(),
+                environmentId: ShowEnvScoping && addEnvironmentId != Guid.Empty ? addEnvironmentId : null);
 
             addSuccess = $"Credential '{addName.Trim()}' added.";
             addName = addUsername = addPassword = addEmail = "";
@@ -541,6 +673,27 @@ else
         finally { saving = false; }
 
         editId = null;
+        await LoadCredentials();
+    }
+
+    // ──────── Change scope (environment binding) ────────
+
+    private void StartScopeEdit(DockerRegistryCredential cred)
+    {
+        scopeEditId = cred.Id;
+        scopeEditValue = cred.EnvironmentId ?? Guid.Empty;
+        editId = null;
+        syncConfigId = null;
+        revealedId = null;
+    }
+
+    private void CancelScopeEdit() => scopeEditId = null;
+
+    private async Task SaveScopeEdit(Guid credId)
+    {
+        await DockerRegistryService.ChangeScopeAsync(
+            credId, scopeEditValue == Guid.Empty ? null : scopeEditValue);
+        scopeEditId = null;
         await LoadCredentials();
     }
 

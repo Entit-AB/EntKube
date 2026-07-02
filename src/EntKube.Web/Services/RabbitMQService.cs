@@ -334,7 +334,7 @@ public class RabbitMQService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         List<KubernetesCluster> k8sClusters = await db.KubernetesClusters
-            .Where(c => c.TenantId == tenantId && c.Kubeconfig != null)
+            .Where(c => c.TenantId == tenantId && c.KubeconfigSecretId != null)
             .ToListAsync(ct);
 
         if (k8sClusters.Count == 0) return 0;

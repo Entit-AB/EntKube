@@ -8,7 +8,7 @@ namespace EntKube.Web.Services;
 /// (environments, customers, groups, clusters). Each method tells a simple
 /// story: load, validate, persist, return.
 /// </summary>
-public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vault)
 {
     // --- Tenant CRUD ---
 
@@ -342,7 +342,8 @@ public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task<KubernetesCluster> CreateClusterAsync(
         Guid tenantId, Guid environmentId, string name, string apiServerUrl,
-        string? contextName = null, string? kubeconfig = null, CancellationToken ct = default)
+        string? contextName = null, string? kubeconfig = null,
+        DateTime? kubeconfigExpiresAt = null, string? updatedBy = null, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -354,11 +355,36 @@ public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory)
             Name = name,
             ApiServerUrl = apiServerUrl,
             ContextName = contextName,
-            Kubeconfig = kubeconfig
         };
 
         db.KubernetesClusters.Add(cluster);
         await db.SaveChangesAsync(ct);
+
+        // The kubeconfig is sensitive and is stored encrypted in the tenant vault (not as a
+        // plaintext column). SetClusterKubeconfigAsync writes the secret and back-references it
+        // on the cluster via KubeconfigSecretId; the interceptor resolves it on future loads.
+        if (!string.IsNullOrWhiteSpace(kubeconfig))
+        {
+            KubeconfigBundle bundle = new()
+            {
+                ConfigYaml = kubeconfig,
+                ContextName = contextName,
+                ApiServerUrl = apiServerUrl,
+                ExpiresAt = kubeconfigExpiresAt,
+            };
+
+            (bool ok, string? error, Guid? secretId) =
+                await vault.SetClusterKubeconfigAsync(tenantId, cluster.Id, bundle, updatedBy, ct);
+            if (!ok)
+            {
+                throw new InvalidOperationException(error ?? "Failed to store the cluster kubeconfig.");
+            }
+
+            // Reflect the just-persisted values on the returned entity for the caller.
+            cluster.KubeconfigSecretId = secretId;
+            cluster.Kubeconfig = kubeconfig;
+        }
+
         return cluster;
     }
 

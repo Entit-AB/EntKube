@@ -35,6 +35,7 @@ public class DockerRegistryService(
         string username,
         string password,
         string? email,
+        Guid? environmentId = null,
         CancellationToken ct = default)
     {
         byte[] dataKey = await UnsealAsync(tenantId, ct);
@@ -46,6 +47,8 @@ public class DockerRegistryService(
             Id = Guid.NewGuid(),
             VaultId = vault.Id,
             AppId = appId,
+            // An environment binding only makes sense for an app-scoped credential.
+            EnvironmentId = appId.HasValue ? environmentId : null,
             Name = name,
             RegistryType = registryType,
             Server = server,
@@ -64,22 +67,53 @@ public class DockerRegistryService(
     /// <summary>
     /// Returns all credentials for a tenant, optionally filtered to a single app.
     /// Credentials with AppId = null are tenant-wide and are always included.
+    ///
+    /// When <paramref name="environmentId"/> is supplied, only credentials visible in that
+    /// environment are returned: environment-bound credentials for that environment plus
+    /// "shared" ones (EnvironmentId = null). This mirrors
+    /// <see cref="VaultService.GetAppSecretsForEnvironmentAsync"/> so a prod pull secret never
+    /// leaks into the test environment view.
     /// </summary>
     public async Task<List<DockerRegistryCredential>> GetAsync(
         Guid tenantId,
         Guid? appId = null,
+        Guid? environmentId = null,
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         IQueryable<DockerRegistryCredential> query = db.Set<DockerRegistryCredential>()
             .Include(c => c.KubernetesCluster)
+            .Include(c => c.Environment)
             .Where(c => c.Vault.TenantId == tenantId);
 
         if (appId.HasValue)
             query = query.Where(c => c.AppId == appId || c.AppId == null);
 
+        if (environmentId.HasValue)
+            query = query.Where(c => c.EnvironmentId == null || c.EnvironmentId == environmentId);
+
         return await query.OrderBy(c => c.Name).ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Changes the environment scope of an app-scoped credential: pass null to make it "shared"
+    /// across the app's environments, or an environment id to bind it to that environment.
+    /// No-op for tenant-wide credentials (which have no app to own the environment).
+    /// </summary>
+    public async Task ChangeScopeAsync(
+        Guid credentialId,
+        Guid? environmentId,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>().FindAsync([credentialId], ct);
+        if (cred is null || cred.AppId is null)
+            return;
+
+        cred.EnvironmentId = environmentId;
+        cred.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
     }
 
     /// <summary>
@@ -196,6 +230,13 @@ public class DockerRegistryService(
         if (cred.KubernetesCluster is null || string.IsNullOrEmpty(cred.KubernetesCluster.Kubeconfig))
             return KubernetesOperationResult<string>.Failure(
                 "No Kubernetes cluster configured for this credential. Configure sync first.");
+
+        // Cross-environment guard: an environment-bound credential may only be written to a cluster
+        // belonging to its own environment, so a prod pull secret can't be synced into a test cluster.
+        if (cred.EnvironmentId is Guid boundEnv && cred.KubernetesCluster.EnvironmentId != boundEnv)
+            return KubernetesOperationResult<string>.Failure(
+                "This credential is bound to a different environment than the target cluster. " +
+                "Change its scope or pick a cluster in the same environment.");
 
         if (string.IsNullOrEmpty(cred.KubernetesSecretName) || string.IsNullOrEmpty(cred.KubernetesNamespace))
             return KubernetesOperationResult<string>.Failure(

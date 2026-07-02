@@ -56,6 +56,13 @@ public class Program
         string connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
             ?? throw new InvalidOperationException("Connection string 'DefaultConnection' not found.");
 
+        // Transparently decrypts a registered cluster's kubeconfig from the vault when the
+        // cluster is materialized, so consumers can keep reading cluster.Kubeconfig even
+        // though it is no longer a database column. Registered as singletons and attached
+        // to every DbContext below (both the derived contexts and the factory-created ones).
+        builder.Services.AddSingleton<KubeconfigResolver>();
+        builder.Services.AddSingleton<KubeconfigMaterializationInterceptor>();
+
         // Register both AddDbContext (for Identity/migrations — needs derived type mapping)
         // and a DbContext factory for Blazor Server concurrency safety.
         // A single scoped DbContext is NOT safe in Blazor Server because multiple
@@ -64,32 +71,37 @@ public class Program
         switch (databaseProvider)
         {
             case "Postgres":
-                builder.Services.AddDbContext<ApplicationDbContext, PostgresApplicationDbContext>(options =>
-                    options.UseNpgsql(connectionString));
+                builder.Services.AddDbContext<ApplicationDbContext, PostgresApplicationDbContext>((sp, options) =>
+                    options.UseNpgsql(connectionString)
+                        .AddInterceptors(sp.GetRequiredService<KubeconfigMaterializationInterceptor>()));
                 builder.Services.AddSingleton<IDbContextFactory<ApplicationDbContext>>(
-                    _ => new DelegatingDbContextFactory(() =>
+                    sp => new DelegatingDbContextFactory(() =>
                     {
                         DbContextOptionsBuilder<PostgresApplicationDbContext> opts = new();
-                        opts.UseNpgsql(connectionString);
+                        opts.UseNpgsql(connectionString)
+                            .AddInterceptors(sp.GetRequiredService<KubeconfigMaterializationInterceptor>());
                         return new PostgresApplicationDbContext(opts.Options);
                     }));
                 break;
 
             case "SqlServer":
-                builder.Services.AddDbContext<ApplicationDbContext, SqlServerApplicationDbContext>(options =>
-                    options.UseSqlServer(connectionString));
+                builder.Services.AddDbContext<ApplicationDbContext, SqlServerApplicationDbContext>((sp, options) =>
+                    options.UseSqlServer(connectionString)
+                        .AddInterceptors(sp.GetRequiredService<KubeconfigMaterializationInterceptor>()));
                 builder.Services.AddSingleton<IDbContextFactory<ApplicationDbContext>>(
-                    _ => new DelegatingDbContextFactory(() =>
+                    sp => new DelegatingDbContextFactory(() =>
                     {
                         DbContextOptionsBuilder<SqlServerApplicationDbContext> opts = new();
-                        opts.UseSqlServer(connectionString);
+                        opts.UseSqlServer(connectionString)
+                            .AddInterceptors(sp.GetRequiredService<KubeconfigMaterializationInterceptor>());
                         return new SqlServerApplicationDbContext(opts.Options);
                     }));
                 break;
 
             default: // "Sqlite"
-                builder.Services.AddDbContextFactory<ApplicationDbContext>(options =>
-                    options.UseSqlite(connectionString));
+                builder.Services.AddDbContextFactory<ApplicationDbContext>((sp, options) =>
+                    options.UseSqlite(connectionString)
+                        .AddInterceptors(sp.GetRequiredService<KubeconfigMaterializationInterceptor>()));
                 break;
         }
 
@@ -239,6 +251,7 @@ public class Program
             await EnsureDeploymentRouteClusterAppliedAtAsync(db, app.Logger);
             await EnsureDeploymentRouteRewritePathAsync(db, app.Logger);
             await EnsureNotificationChannelFiltersAsync(db, app.Logger);
+            await EnsureClusterKubeconfigsMigratedAsync(db, scope.ServiceProvider, app.Logger);
 
             RoleManager<IdentityRole> roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
             if (!await roleManager.RoleExistsAsync("Admin"))
@@ -466,6 +479,167 @@ public class Program
         {
             logger.LogWarning(ex, "Schema repair for NotificationChannels filters skipped or failed (columns may already exist).");
         }
+    }
+
+    /// <summary>
+    /// One-time data migration: moves each registered cluster's plaintext kubeconfig out of the
+    /// legacy <c>KubernetesClusters.Kubeconfig</c> column and into the encrypted tenant vault
+    /// (as a <see cref="VaultSecretType.Kubeconfig"/> secret), setting each cluster's
+    /// <c>KubeconfigSecretId</c>. Once every cluster has been migrated, the legacy column is dropped.
+    ///
+    /// This runs in application code (not the EF migration) because encryption requires the tenant's
+    /// unsealed DEK. It is idempotent: on a database whose column has already been dropped it is a
+    /// no-op, and it only drops the column after confirming no cluster still holds an unmigrated
+    /// plaintext kubeconfig — so a partial failure keeps the column for the next startup.
+    /// </summary>
+    private static async Task EnsureClusterKubeconfigsMigratedAsync(
+        ApplicationDbContext db, IServiceProvider services, ILogger logger)
+    {
+        string? provider = db.Database.ProviderName;
+
+        try
+        {
+            // If the legacy column is already gone (fresh DB or previously migrated), nothing to do.
+            if (!await LegacyKubeconfigColumnExistsAsync(db, provider))
+            {
+                return;
+            }
+
+            List<(Guid Id, Guid TenantId, string? ContextName, string ApiServerUrl, string Kubeconfig)> rows =
+                await ReadLegacyKubeconfigsAsync(db, provider);
+
+            if (rows.Count > 0)
+            {
+                VaultService vault = services.GetRequiredService<VaultService>();
+                logger.LogInformation("Migrating {Count} cluster kubeconfig(s) into the vault.", rows.Count);
+
+                foreach ((Guid id, Guid tenantId, string? contextName, string apiServerUrl, string kubeconfig) in rows)
+                {
+                    try
+                    {
+                        KubeconfigBundle bundle = new()
+                        {
+                            ConfigYaml = kubeconfig,
+                            ContextName = contextName,
+                            ApiServerUrl = apiServerUrl,
+                        };
+
+                        (bool ok, string? error, _) = await vault.SetClusterKubeconfigAsync(
+                            tenantId, id, bundle, updatedBy: "system:migration");
+                        if (!ok)
+                        {
+                            logger.LogWarning("Kubeconfig migration for cluster {ClusterId} failed: {Error}", id, error);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "Kubeconfig migration for cluster {ClusterId} threw.", id);
+                    }
+                }
+            }
+
+            // Only drop the legacy column once nothing is left unmigrated.
+            long remaining = await CountUnmigratedKubeconfigsAsync(db, provider);
+            if (remaining == 0)
+            {
+                await db.Database.ExecuteSqlRawAsync(DropLegacyKubeconfigColumnSql(provider));
+                logger.LogInformation("Dropped legacy plaintext KubernetesClusters.Kubeconfig column after vault migration.");
+            }
+            else
+            {
+                logger.LogWarning(
+                    "{Count} cluster kubeconfig(s) remain unmigrated; keeping the legacy column for the next startup.",
+                    remaining);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Cluster kubeconfig vault migration skipped or failed.");
+        }
+    }
+
+    private static async Task<bool> LegacyKubeconfigColumnExistsAsync(ApplicationDbContext db, string? provider)
+    {
+        // CAST to BIGINT so the scalar reads back as long on every provider — SQL Server's COUNT(*)
+        // is int, which would otherwise fail SqlQueryRaw<long> and (being caught) silently skip the
+        // whole migration, leaving clusters unmigrated and the legacy column in place. EF Core maps a
+        // scalar SqlQuery result to a column named "Value", so the projection must be aliased as such.
+        string sql = provider switch
+        {
+            "Npgsql.EntityFrameworkCore.PostgreSQL" =>
+                "SELECT CAST(COUNT(*) AS BIGINT) AS \"Value\" FROM information_schema.columns WHERE table_name = 'KubernetesClusters' AND column_name = 'Kubeconfig'",
+            "Microsoft.EntityFrameworkCore.SqlServer" =>
+                "SELECT CAST(COUNT(*) AS BIGINT) AS \"Value\" FROM sys.columns WHERE object_id = OBJECT_ID(N'KubernetesClusters') AND name = N'Kubeconfig'",
+            _ => // Sqlite
+                "SELECT CAST(COUNT(*) AS BIGINT) AS \"Value\" FROM pragma_table_info('KubernetesClusters') WHERE name = 'Kubeconfig'",
+        };
+
+        return await db.Database.SqlQueryRaw<long>(sql).SingleAsync() > 0;
+    }
+
+    private static async Task<long> CountUnmigratedKubeconfigsAsync(ApplicationDbContext db, string? provider)
+    {
+        // A cluster is "unmigrated" if it still has a plaintext kubeconfig but no vault secret yet.
+        string col = provider == "Microsoft.EntityFrameworkCore.SqlServer" ? "[{0}]" : "\"{0}\"";
+        string table = string.Format(col, "KubernetesClusters");
+        string kubeconfig = string.Format(col, "Kubeconfig");
+        string secretId = string.Format(col, "KubeconfigSecretId");
+        // CAST to BIGINT + alias "Value" for cross-provider scalar typing (see LegacyKubeconfigColumnExistsAsync).
+        string sql = $"SELECT CAST(COUNT(*) AS BIGINT) AS \"Value\" FROM {table} WHERE {kubeconfig} IS NOT NULL AND {secretId} IS NULL";
+
+        return await db.Database.SqlQueryRaw<long>(sql).SingleAsync();
+    }
+
+    private static string DropLegacyKubeconfigColumnSql(string? provider) => provider switch
+    {
+        "Microsoft.EntityFrameworkCore.SqlServer" => "ALTER TABLE [KubernetesClusters] DROP COLUMN [Kubeconfig]",
+        _ => "ALTER TABLE \"KubernetesClusters\" DROP COLUMN \"Kubeconfig\"",
+    };
+
+    private static async Task<List<(Guid, Guid, string?, string, string)>> ReadLegacyKubeconfigsAsync(
+        ApplicationDbContext db, string? provider)
+    {
+        string col = provider == "Microsoft.EntityFrameworkCore.SqlServer" ? "[{0}]" : "\"{0}\"";
+        string sql =
+            $"SELECT {string.Format(col, "Id")}, {string.Format(col, "TenantId")}, " +
+            $"{string.Format(col, "ContextName")}, {string.Format(col, "ApiServerUrl")}, " +
+            $"{string.Format(col, "Kubeconfig")} FROM {string.Format(col, "KubernetesClusters")} " +
+            $"WHERE {string.Format(col, "Kubeconfig")} IS NOT NULL " +
+            $"AND {string.Format(col, "KubeconfigSecretId")} IS NULL";
+
+        List<(Guid, Guid, string?, string, string)> rows = [];
+
+        System.Data.Common.DbConnection conn = db.Database.GetDbConnection();
+        bool wasClosed = conn.State != System.Data.ConnectionState.Open;
+        if (wasClosed)
+        {
+            await conn.OpenAsync();
+        }
+
+        try
+        {
+            using System.Data.Common.DbCommand cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            using System.Data.Common.DbDataReader reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                rows.Add((
+                    reader.GetGuid(0),
+                    reader.GetGuid(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.GetString(3),
+                    reader.GetString(4)));
+            }
+        }
+        finally
+        {
+            if (wasClosed)
+            {
+                await conn.CloseAsync();
+            }
+        }
+
+        return rows;
     }
 
     private static void MigrateWithRetry(DbContext db, ILogger logger)

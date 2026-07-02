@@ -49,6 +49,15 @@ public class DockerRegistryCredential
     /// </summary>
     public Guid? AppId { get; set; }
 
+    /// <summary>
+    /// For app-scoped credentials only: the environment this credential is bound to.
+    /// When null, the credential is "shared" — visible and usable across all of the app's
+    /// environments. When set, it is only visible within that environment (a prod pull secret
+    /// is never shown in, nor synced to, the test environment). Mirrors
+    /// <see cref="VaultSecret.EnvironmentId"/>.
+    /// </summary>
+    public Guid? EnvironmentId { get; set; }
+
     /// <summary>Target Kubernetes cluster for the dockerconfigjson secret sync.</summary>
     public Guid? KubernetesClusterId { get; set; }
 
@@ -64,5 +73,6 @@ public class DockerRegistryCredential
     // Navigation properties
     public SecretVault Vault { get; set; } = null!;
     public App? App { get; set; }
+    public Environment? Environment { get; set; }
     public KubernetesCluster? KubernetesCluster { get; set; }
 }

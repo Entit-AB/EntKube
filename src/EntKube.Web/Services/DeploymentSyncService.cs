@@ -45,7 +45,7 @@ public class DeploymentSyncService(
         {
             deploymentIds = await db.AppDeployments
                 .Include(d => d.Cluster)
-                .Where(d => d.Cluster.Kubeconfig != null && d.Cluster.Kubeconfig != "")
+                .Where(d => d.Cluster.KubeconfigSecretId != null)
                 .Select(d => d.Id)
                 .ToListAsync(ct);
         }

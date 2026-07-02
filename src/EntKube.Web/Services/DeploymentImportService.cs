@@ -854,7 +854,7 @@ public class DeploymentImportService(
                     username: reg.Username ?? "",
                     password: reg.Password ?? "",
                     email: reg.Email,
-                    ct);
+                    ct: ct);
 
                 await dockerRegistryService.ConfigureSyncAsync(cred.Id, cluster.Id, reg.SecretName, reg.Namespace, ct);
                 result.RegistryCredentialCount++;

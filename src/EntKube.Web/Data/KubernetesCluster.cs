@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations.Schema;
+
 namespace EntKube.Web.Data;
 
 /// <summary>
@@ -30,10 +32,22 @@ public class KubernetesCluster
     public string? ContextName { get; set; }
 
     /// <summary>
-    /// The raw kubeconfig YAML content for connecting to this cluster.
-    /// Stored so the platform can authenticate against the K8s API later.
-    /// In production this should be encrypted via the tenant vault.
+    /// The vault secret (<see cref="VaultSecretType.Kubeconfig"/>) that holds this
+    /// cluster's encrypted kubeconfig, with expiry tracking and version history.
+    /// Null only until the cluster's kubeconfig has been stored in the vault.
     /// </summary>
+    public Guid? KubeconfigSecretId { get; set; }
+
+    /// <summary>
+    /// The raw kubeconfig YAML content for connecting to this cluster.
+    /// NOT persisted — the kubeconfig lives encrypted in the tenant vault
+    /// (see <see cref="KubeconfigSecretId"/>). This property is transparently
+    /// populated from the vault when a cluster is materialized (via the
+    /// kubeconfig materialization interceptor), so the many existing consumers
+    /// that read <c>cluster.Kubeconfig</c> keep working unchanged. It is also set
+    /// directly when registering a cluster, before the vault secret is written.
+    /// </summary>
+    [NotMapped]
     public string? Kubeconfig { get; set; }
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

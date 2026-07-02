@@ -807,7 +807,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
             .Where(c => c.Cluster.TenantId == link.TenantId
                 && (c.Name == "minio-operator" || c.Name == "minio")
                 && c.Status == ComponentStatus.Installed
-                && c.Cluster.Kubeconfig != null);
+                && c.Cluster.KubeconfigSecretId != null);
 
         // Prefer the component whose namespace matches the endpoint namespace.
         if (parsed is not null)
