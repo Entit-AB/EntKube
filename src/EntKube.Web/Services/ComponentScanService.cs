@@ -38,10 +38,11 @@ public class DiscoveredHelmRelease
 }
 
 /// <summary>
-/// A manifest-installed catalog component discovered on a cluster by CRD probing
-/// rather than by reading Helm secrets. Represents operators applied from raw
-/// manifests (e.g. via kubectl/Terraform) that the Helm scan cannot see because
-/// they leave no "owner=helm" release secret.
+/// A manifest-installed catalog component discovered on a cluster by probing the CRD API
+/// (or, when the CRD belongs to a dependency, a live custom-resource instance) rather than
+/// by reading Helm secrets. Represents operators and resources applied from raw manifests
+/// (e.g. via kubectl/Terraform) that the Helm scan cannot see because they leave no
+/// "owner=helm" release secret.
 /// </summary>
 public class DiscoveredManifestComponent
 {
@@ -54,7 +55,11 @@ public class DiscoveredManifestComponent
     /// <summary>Namespace the catalog expects this component in (its default).</summary>
     public required string Namespace { get; set; }
 
-    /// <summary>The CRD whose presence triggered detection (e.g. "rabbitmqclusters.rabbitmq.com").</summary>
+    /// <summary>
+    /// What triggered detection: either the CRD (e.g. "rabbitmqclusters.rabbitmq.com") or,
+    /// for instance-based detection, the matched resource (e.g.
+    /// "clusterissuers.cert-manager.io/letsencrypt-prod").
+    /// </summary>
     public required string DetectedVia { get; set; }
 
     /// <summary>True if a ClusterComponent for this catalog key already exists on the cluster.</summary>
@@ -979,8 +984,11 @@ public class ComponentScanService(
     /// secret, so <see cref="ScanHelmReleasesAsync"/> cannot see them.
     ///
     /// Detection is by CRD presence: a catalog entry is considered installed if any of
-    /// its <see cref="CatalogEntry.DetectionCrds"/> exists on the cluster. Returns the
-    /// discovered components with an AlreadyTracked flag mirroring the Helm scan.
+    /// its <see cref="CatalogEntry.DetectionCrds"/> exists on the cluster. Entries whose CRD
+    /// is owned by a dependency instead declare a <see cref="CatalogEntry.DetectionResource"/>
+    /// and are detected by the presence of a matching live instance (e.g. a Let's Encrypt
+    /// ClusterIssuer). Returns the discovered components with an AlreadyTracked flag mirroring
+    /// the Helm scan.
     /// </summary>
     public async Task<List<DiscoveredManifestComponent>> ScanManifestComponentsAsync(
         KubernetesCluster cluster, CancellationToken ct = default)
@@ -1045,27 +1053,82 @@ public class ComponentScanService(
             return present;
         }
 
+        // Lists cluster-scoped instances of a custom resource and returns the name of the
+        // first one that matches (or "" if unnamed). Used when CRD presence alone would
+        // false-positive because the CRD is owned by a dependency — see DetectionResource.
+        async Task<string?> FindMatchingInstanceAsync(DetectionResource dr)
+        {
+            try
+            {
+                object raw = await client.CustomObjects.ListClusterCustomObjectAsync(
+                    dr.Group, dr.Version, dr.Plural, cancellationToken: ct);
+
+                // The K8s client returns different types across versions; serialize to JSON
+                // and inspect uniformly, mirroring the HTTPRoute scan above.
+                using JsonDocument doc = JsonDocument.Parse(JsonSerializer.Serialize(raw));
+
+                if (!doc.RootElement.TryGetProperty("items", out JsonElement items))
+                {
+                    return null;
+                }
+
+                foreach (JsonElement item in items.EnumerateArray())
+                {
+                    if (dr.Matches is not null
+                        && !item.GetRawText().Contains(dr.Matches, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    return item.TryGetProperty("metadata", out JsonElement meta)
+                        && meta.TryGetProperty("name", out JsonElement name)
+                        ? name.GetString() ?? ""
+                        : "";
+                }
+
+                return null;
+            }
+            catch
+            {
+                // CRD absent (404), unreachable, or permission denied — treat as not present.
+                return null;
+            }
+        }
+
         List<DiscoveredManifestComponent> found = [];
 
         foreach (CatalogEntry entry in ComponentCatalog.Entries)
         {
-            if (entry.DetectionCrds.Count == 0)
+            if (entry.DetectionCrds.Count == 0 && entry.DetectionResource is null)
             {
                 continue;
             }
 
-            string? matchedCrd = null;
+            string? detectedVia = null;
 
             foreach (string crd in entry.DetectionCrds)
             {
                 if (await CrdExistsAsync(crd))
                 {
-                    matchedCrd = crd;
+                    detectedVia = crd;
                     break;
                 }
             }
 
-            if (matchedCrd is null)
+            // Fall back to instance-based detection when no CRD matched.
+            if (detectedVia is null && entry.DetectionResource is { } dr)
+            {
+                string? instanceName = await FindMatchingInstanceAsync(dr);
+
+                if (instanceName is not null)
+                {
+                    detectedVia = string.IsNullOrEmpty(instanceName)
+                        ? $"{dr.Plural}.{dr.Group}"
+                        : $"{dr.Plural}.{dr.Group}/{instanceName}";
+                }
+            }
+
+            if (detectedVia is null)
             {
                 continue;
             }
@@ -1078,7 +1141,7 @@ public class ComponentScanService(
                 CatalogKey = entry.Key,
                 DisplayName = entry.DisplayName,
                 Namespace = entry.DefaultNamespace,
-                DetectedVia = matchedCrd,
+                DetectedVia = detectedVia,
                 AlreadyTracked = tracked
             });
         }

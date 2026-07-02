@@ -57,6 +57,16 @@ public class CatalogEntry
     /// </summary>
     public IReadOnlyList<string> DetectionCrds { get; init; } = [];
 
+    /// <summary>
+    /// A cluster-scoped custom resource whose live instances mark this manifest component
+    /// as installed. Use this instead of <see cref="DetectionCrds"/> when CRD presence would
+    /// false-positive because the CRD is owned by a dependency rather than this component.
+    /// The Let's Encrypt ClusterIssuer is the motivating case: clusterissuers.cert-manager.io
+    /// ships with cert-manager, so only the presence of an actual ClusterIssuer instance
+    /// means this issuer was applied. See <see cref="DetectionResource"/>.
+    /// </summary>
+    public DetectionResource? DetectionResource { get; init; }
+
     /// <summary>Default release name for Helm.</summary>
     public string? DefaultReleaseName { get; init; }
 
@@ -85,6 +95,19 @@ public class CatalogEntry
     /// </summary>
     public IReadOnlyList<ComponentFormField> FormFields { get; init; } = [];
 }
+
+/// <summary>
+/// Identifies a cluster-scoped custom resource whose live instances signal that a
+/// manifest-installed component is present. Detection lists the instances and, when
+/// <see cref="Matches"/> is set, keeps only those whose serialized JSON contains that
+/// substring — e.g. "letsencrypt.org" so a self-signed or CA ClusterIssuer doesn't
+/// masquerade as the Let's Encrypt issuer.
+/// </summary>
+/// <param name="Group">API group, e.g. "cert-manager.io".</param>
+/// <param name="Version">API version, e.g. "v1".</param>
+/// <param name="Plural">Resource plural, e.g. "clusterissuers".</param>
+/// <param name="Matches">Optional case-insensitive substring an instance's JSON must contain to count.</param>
+public sealed record DetectionResource(string Group, string Version, string Plural, string? Matches = null);
 
 /// <summary>
 /// A dependency requirement where any one of several components can satisfy it.
@@ -133,6 +156,15 @@ public static class ComponentCatalog
             HelmChartName = "",
             DefaultNamespace = "gateway-system",
             DefaultReleaseName = "gateway-api-crds",
+            // Applied from a raw manifest URL, so there's no owner=helm secret for the Helm
+            // scan to find. Detect by the presence of the Gateway API CRDs themselves — they
+            // ARE this component, so any one being present means it's installed.
+            DetectionCrds =
+            [
+                "gateways.gateway.networking.k8s.io",
+                "httproutes.gateway.networking.k8s.io",
+                "gatewayclasses.gateway.networking.k8s.io"
+            ],
             FormFields = [],
             DefaultValues = ""
         },
@@ -446,6 +478,11 @@ public static class ComponentCatalog
             DefaultReleaseName = "letsencrypt-issuer",
             Dependencies = ["cert-manager"],
             ComponentType = "Manifest",
+            // The clusterissuers CRD ships with cert-manager, so CRD presence can't tell us
+            // whether a Let's Encrypt issuer was actually applied. Detect the live instance
+            // instead, keeping only ACME issuers pointed at Let's Encrypt.
+            DetectionResource = new DetectionResource(
+                "cert-manager.io", "v1", "clusterissuers", Matches: "letsencrypt.org"),
             FormFields =
             [
                 new ComponentFormField
