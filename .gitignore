@@ -428,3 +428,8 @@ FodyWeavers.xsd
 
 # Local reference infrastructure (not part of the project)
 CMKS - Infra/
+
+# ASP.NET Data Protection keys — machine/environment secrets, never commit.
+# These protect auth cookies and antiforgery tokens; persist them via a mounted
+# volume or key vault in production instead.
+src/EntKube.Web/keys/
