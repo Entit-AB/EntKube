@@ -375,4 +375,52 @@ public class ComponentCatalogTests : IDisposable
         entry.Should().NotBeNull();
         entry!.Dependencies.Should().Contain("cert-manager");
     }
+
+    // ──────── Istio gateway matching (shared "gateway" chart) ────────
+    // Both istio gateway entries use HelmChartName "gateway", distinguished only by
+    // release name. Real deployments use custom release names (e.g. "istio-gw-external")
+    // that don't equal the catalog DefaultReleaseName, so matching must not require an
+    // exact release-name match.
+
+    [Fact]
+    public void IsComponentMatch_ExternalGateway_CustomReleaseName_MatchesExternalEntry()
+    {
+        CatalogEntry external = ComponentCatalog.GetByKey("istio")!;
+
+        ComponentCatalog.IsComponentMatch(
+            "istio-gw-external", external, helmChartName: "gateway", releaseName: "istio-gw-external")
+            .Should().BeTrue();
+    }
+
+    [Fact]
+    public void IsComponentMatch_InternalGateway_CustomReleaseName_MatchesInternalEntry()
+    {
+        CatalogEntry @internal = ComponentCatalog.GetByKey("istio-internal")!;
+
+        ComponentCatalog.IsComponentMatch(
+            "istio-gw-internal", @internal, helmChartName: "gateway", releaseName: "istio-gw-internal")
+            .Should().BeTrue();
+    }
+
+    [Fact]
+    public void IsComponentMatch_Gateways_DoNotCrossMatch()
+    {
+        CatalogEntry external = ComponentCatalog.GetByKey("istio")!;
+        CatalogEntry @internal = ComponentCatalog.GetByKey("istio-internal")!;
+
+        // External component must not mark the Internal entry as added, and vice versa.
+        ComponentCatalog.IsComponentMatch(
+            "istio-gw-external", @internal, helmChartName: "gateway", releaseName: "istio-gw-external")
+            .Should().BeFalse();
+        ComponentCatalog.IsComponentMatch(
+            "istio-gw-internal", external, helmChartName: "gateway", releaseName: "istio-gw-internal")
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public void ResolveForComponent_Gateways_ResolveToDistinctEntries()
+    {
+        ComponentCatalog.ResolveForComponent("istio-gw-external", "gateway")?.Key.Should().Be("istio");
+        ComponentCatalog.ResolveForComponent("istio-gw-internal", "gateway")?.Key.Should().Be("istio-internal");
+    }
 }

@@ -2819,17 +2819,46 @@ public static class ComponentCatalog
     /// </summary>
     public static CatalogEntry? FindByRelease(string releaseName, string? chartName)
     {
-        // First try exact matches on Key, DefaultReleaseName, or HelmChartName.
+        // First try exact matches on Key, DefaultReleaseName, or HelmChartName == releaseName.
 
         CatalogEntry? exact = Entries.FirstOrDefault(e =>
             string.Equals(e.Key, releaseName, StringComparison.OrdinalIgnoreCase)
             || string.Equals(e.DefaultReleaseName, releaseName, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(e.HelmChartName, releaseName, StringComparison.OrdinalIgnoreCase)
-            || (!string.IsNullOrEmpty(chartName) && string.Equals(e.HelmChartName, chartName, StringComparison.OrdinalIgnoreCase)));
+            || string.Equals(e.HelmChartName, releaseName, StringComparison.OrdinalIgnoreCase));
 
         if (exact is not null)
         {
             return exact;
+        }
+
+        // Match by chart name. When a single entry owns the chart this is unambiguous;
+        // when several share it (e.g. "istio" and "istio-internal" both use "gateway"),
+        // disambiguate by the external/internal qualifier in the release name so custom
+        // release names resolve to the correct entry instead of just the first one listed.
+
+        if (!string.IsNullOrEmpty(chartName))
+        {
+            List<CatalogEntry> chartMatches = Entries
+                .Where(e => string.Equals(e.HelmChartName, chartName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (chartMatches.Count == 1)
+            {
+                return chartMatches[0];
+            }
+
+            if (chartMatches.Count > 1)
+            {
+                CatalogEntry? qualified = chartMatches.FirstOrDefault(e => MatchesByChartQualifier(releaseName, e));
+
+                if (qualified is not null)
+                {
+                    return qualified;
+                }
+
+                // Ambiguous chart with no qualifier hint — fall through to partial matching
+                // rather than guessing at the first sibling.
+            }
         }
 
         // Fall back to partial matching — the release name might contain the
@@ -2841,6 +2870,39 @@ public static class ComponentCatalog
                 && (releaseName.Contains(e.DefaultReleaseName, StringComparison.OrdinalIgnoreCase)
                     || e.DefaultReleaseName.Contains(releaseName, StringComparison.OrdinalIgnoreCase)))
             || releaseName.Contains(e.Key, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Distinguishing qualifiers for catalog entries that share a Helm chart. The Istio
+    /// external and internal gateways are both the "gateway" chart, separated only by these
+    /// words in their Key/DefaultReleaseName. Real deployments pick custom release names
+    /// (e.g. "istio-gw-external"), so matching falls back to this qualifier.
+    /// </summary>
+    private static readonly string[] ChartQualifiers = ["external", "internal"];
+
+    /// <summary>
+    /// True when <paramref name="releaseName"/> carries the same external/internal qualifier
+    /// as <paramref name="entry"/> (via its Key or DefaultReleaseName) and none of the
+    /// conflicting qualifiers — so "istio-gw-internal" matches the internal entry but not the
+    /// external one. Returns false for entries that don't carry a qualifier at all.
+    /// </summary>
+    private static bool MatchesByChartQualifier(string releaseName, CatalogEntry entry)
+    {
+        string? entryQualifier = ChartQualifiers.FirstOrDefault(q =>
+            entry.Key.Contains(q, StringComparison.OrdinalIgnoreCase)
+            || (entry.DefaultReleaseName?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
+
+        if (entryQualifier is null)
+        {
+            return false;
+        }
+
+        bool releaseHasEntryQualifier = releaseName.Contains(entryQualifier, StringComparison.OrdinalIgnoreCase);
+        bool releaseHasConflictingQualifier = ChartQualifiers.Any(q =>
+            !string.Equals(q, entryQualifier, StringComparison.OrdinalIgnoreCase)
+            && releaseName.Contains(q, StringComparison.OrdinalIgnoreCase));
+
+        return releaseHasEntryQualifier && !releaseHasConflictingQualifier;
     }
 
     /// <summary>
@@ -2875,7 +2937,11 @@ public static class ComponentCatalog
             if (!string.IsNullOrEmpty(releaseName) && !string.IsNullOrEmpty(entry.DefaultReleaseName))
             {
                 return string.Equals(releaseName, entry.DefaultReleaseName, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(releaseName, entry.Key, StringComparison.OrdinalIgnoreCase);
+                    || string.Equals(releaseName, entry.Key, StringComparison.OrdinalIgnoreCase)
+                    // Real deployments use custom release names (e.g. "istio-gw-external") that
+                    // don't equal the catalog default, so fall back to the external/internal
+                    // qualifier that distinguishes the sibling entries.
+                    || MatchesByChartQualifier(releaseName, entry);
             }
             return true;
         }
