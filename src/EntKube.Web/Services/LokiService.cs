@@ -80,6 +80,30 @@ public class LokiService(
             $"loki pods {clusterId} ns={namespaceName}", ct);
     }
 
+    /// <summary>
+    /// Returns the distinct container names seen in a namespace, for populating a
+    /// container filter dropdown. Mirrors <see cref="GetPodsAsync"/> but queries the
+    /// <c>container</c> label so multi-container pods (app + sidecars) can be split apart.
+    /// </summary>
+    public async Task<KubernetesOperationResult<List<string>>> GetContainersAsync(
+        Guid clusterId, string namespaceName, CancellationToken ct = default)
+    {
+        var (info, error) = await ResolveLokiInfoAsync(clusterId, ct);
+        if (info is null) return KubernetesOperationResult<List<string>>.Failure(error!);
+
+        string query = string.IsNullOrEmpty(namespaceName)
+            ? "/loki/api/v1/label/container/values"
+            : $"/loki/api/v1/label/container/values?query={Uri.EscapeDataString($"{{namespace=\"{namespaceName}\"}}")}";
+
+        return await WithLokiAsync<List<string>>(info,
+            async (http, baseUrl, token) =>
+            {
+                string json = await http.GetStringAsync($"{baseUrl}{query}", token);
+                return ParseLabelValues(json);
+            },
+            $"loki containers {clusterId} ns={namespaceName}", ct);
+    }
+
     public async Task<KubernetesOperationResult<List<LokiLogStream>>> QueryRangeAsync(
         Guid clusterId,
         string namespaceName,
@@ -297,6 +321,12 @@ public class LokiService(
                     foreach (JsonProperty p in labels.EnumerateObject())
                         ls.Labels[p.Name] = p.Value.GetString() ?? "";
 
+                // Loki (3.x, with level discovery enabled) tags each stream with a
+                // detected_level label — trust it over our substring heuristic, which
+                // false-positives on words like "information" containing "info".
+                ls.Labels.TryGetValue("detected_level", out string? levelLabel);
+                LogLevel? labelLevel = MapDetectedLevel(levelLabel);
+
                 if (stream.TryGetProperty("values", out JsonElement values))
                     foreach (JsonElement entry in values.EnumerateArray())
                     {
@@ -312,7 +342,7 @@ public class LokiService(
                         {
                             Timestamp = ts,
                             Line = line,
-                            DetectedLevel = DetectLevel(line)
+                            DetectedLevel = labelLevel ?? DetectLevel(line)
                         });
                     }
 
@@ -322,6 +352,18 @@ public class LokiService(
         catch { }
         return results;
     }
+
+    // Maps Loki's detected_level label value to our LogLevel. Returns null when absent
+    // or unrecognized so the caller can fall back to the line heuristic.
+    private static LogLevel? MapDetectedLevel(string? value) => value?.ToLowerInvariant() switch
+    {
+        "fatal" or "critical" => LogLevel.Fatal,
+        "error" or "err"      => LogLevel.Error,
+        "warn" or "warning"   => LogLevel.Warn,
+        "info"                => LogLevel.Info,
+        "debug" or "trace"    => LogLevel.Debug,
+        _ => null
+    };
 
     private static LogLevel DetectLevel(string line)
     {
