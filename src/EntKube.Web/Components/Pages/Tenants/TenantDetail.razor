@@ -1,4 +1,4 @@
-@page "/tenants/{Slug}"
+@page "/tenants/{Slug}/classic"
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
@@ -32,8 +32,8 @@ else
             <h2 class="mb-0">@tenant.Name</h2>
             <small class="text-muted"><code>@tenant.Slug</code></small>
         </div>
-        <a href="/tenants/@tenant.Slug/explore" class="btn btn-sm btn-outline-primary ms-auto">
-            <i class="bi bi-diagram-3 me-1"></i>Try new navigation
+        <a href="/tenants/@tenant.Slug" class="btn btn-sm btn-outline-primary ms-auto">
+            <i class="bi bi-diagram-3 me-1"></i>Switch to new navigation
         </a>
     </div>
 
