@@ -1,0 +1,319 @@
+@page "/tenants/{Slug}/explore"
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@rendermode InteractiveServer
+@inject TenantService TenantService
+@inject UserAccessService UserAccessService
+@inject AuthenticationStateProvider AuthStateProvider
+@inject NavigationManager Nav
+
+@* ═══════════════════════════════════════════════════════════════════
+   TenantExplorer — Phase 1 of the resource-tree navigation prototype.
+   A persistent left sidebar tree (Customers → Apps, Environments →
+   Clusters) with the existing AppDetail / ClusterDetail pages reused
+   as the right-hand detail pane. Non-destructive: the classic
+   /tenants/{slug} page is unchanged; this lives at /tenants/{slug}/explore.
+   Selection is deep-linked via ?app= / ?cluster=.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<PageTitle>@(tenant?.Name ?? "Tenant") — Explore</PageTitle>
+
+@if (tenant is null)
+{
+    <div class="text-center py-5">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="text-muted mt-2">Loading tenant…</p>
+    </div>
+}
+else
+{
+    <div class="explorer">
+        <aside class="tree-side">
+            <div class="tree-head">
+                <div class="tree-tenant"><i class="bi bi-building"></i> @tenant.Name</div>
+                <div class="tree-filter">
+                    <i class="bi bi-search text-muted small" aria-hidden="true"></i>
+                    <input type="search" placeholder="Filter resources…" aria-label="Filter resources"
+                           value="@filter" @oninput="OnFilterInput" />
+                </div>
+            </div>
+
+            <div class="tree-scroll" role="tree" aria-label="Tenant resources">
+                @* ── Customers → Apps ── *@
+                <button type="button" class="node group indent-1" @onclick="() => customersOpen = !customersOpen"
+                        aria-expanded="@customersOpen">
+                    <span class="caret">@(customersOpen ? "▾" : "▸")</span>
+                    <i class="ico bi bi-people-fill" aria-hidden="true"></i>
+                    <span class="label">Customers</span>
+                    <span class="badge-count">@customers.Count</span>
+                </button>
+                @if (customersOpen)
+                {
+                    List<Customer> visCustomers = VisibleCustomers();
+                    if (visCustomers.Count == 0)
+                    {
+                        <div class="tree-empty">@(HasFilter ? "No matches" : "No customers yet")</div>
+                    }
+                    foreach (Customer c in visCustomers)
+                    {
+                        bool open = CustomerOpen(c);
+                        <button type="button" class="node indent-2" @onclick="() => ToggleCustomer(c.Id)" aria-expanded="@open">
+                            <span class="caret">@(open ? "▾" : "▸")</span>
+                            <i class="ico bi bi-person-badge" aria-hidden="true"></i>
+                            <span class="label">@c.Name</span>
+                            <span class="badge-count">@AppsOf(c).Count</span>
+                        </button>
+                        @if (open)
+                        {
+                            List<Data.App> visApps = VisibleApps(c);
+                            if (visApps.Count == 0)
+                            {
+                                <div class="tree-empty" style="padding-left:2.3rem">@(HasFilter ? "—" : "No apps")</div>
+                            }
+                            foreach (Data.App app in visApps)
+                            {
+                                <button type="button"
+                                        class="node leaf indent-3 @(selectedApp?.Id == app.Id ? "selected" : "")"
+                                        @onclick="() => SelectApp(c, app)">
+                                    <span class="caret"></span>
+                                    <i class="ico bi bi-box-seam" aria-hidden="true"></i>
+                                    <span class="label">@app.Name</span>
+                                </button>
+                            }
+                        }
+                    }
+                }
+
+                @* ── Environments → Clusters ── *@
+                <button type="button" class="node group indent-1 mt-1" @onclick="() => envsOpen = !envsOpen"
+                        aria-expanded="@envsOpen">
+                    <span class="caret">@(envsOpen ? "▾" : "▸")</span>
+                    <i class="ico bi bi-hdd-network" aria-hidden="true"></i>
+                    <span class="label">Environments &amp; Clusters</span>
+                    <span class="badge-count">@clusters.Count</span>
+                </button>
+                @if (envsOpen)
+                {
+                    List<KubernetesCluster> visClusters = VisibleClusters();
+                    if (visClusters.Count == 0)
+                    {
+                        <div class="tree-empty">@(HasFilter ? "No matches" : "No clusters yet")</div>
+                    }
+                    foreach (KubernetesCluster cl in visClusters)
+                    {
+                        <button type="button"
+                                class="node leaf indent-2 @(selectedCluster?.Id == cl.Id ? "selected" : "")"
+                                @onclick="() => SelectCluster(cl)">
+                            <span class="caret"></span>
+                            <i class="ico bi bi-hexagon-fill" aria-hidden="true"></i>
+                            <span class="label">@cl.Name</span>
+                        </button>
+                    }
+                }
+            </div>
+
+            <div class="tree-foot">
+                <a href="/tenants/@Slug" class="small text-decoration-none text-muted">
+                    <i class="bi bi-arrow-left me-1"></i>Classic view
+                </a>
+            </div>
+        </aside>
+
+        <section class="detail-pane">
+            @if (selectedApp is not null && selectedAppCustomer is not null)
+            {
+                <AppDetail App="selectedApp"
+                           TenantId="tenant.Id"
+                           CustomerName="@selectedAppCustomer.Name"
+                           OnBack="ClearSelection"
+                           OnDeleted="OnAppDeleted"
+                           @key="selectedApp.Id" />
+            }
+            else if (selectedCluster is not null)
+            {
+                <ClusterDetail Cluster="selectedCluster"
+                               TenantId="tenant.Id"
+                               OnBack="ClearSelection"
+                               OnDeleted="OnClusterDeleted"
+                               @key="selectedCluster.Id" />
+            }
+            else
+            {
+                <div class="pane-placeholder">
+                    <i class="bi bi-diagram-3" aria-hidden="true"></i>
+                    <div class="fw-semibold">Select a resource</div>
+                    <div class="small">Pick an app or cluster on the left, or type to filter.</div>
+                </div>
+            }
+        </section>
+    </div>
+}
+
+@code {
+    [Parameter] public string Slug { get; set; } = "";
+    [SupplyParameterFromQuery(Name = "app")] private Guid? AppParam { get; set; }
+    [SupplyParameterFromQuery(Name = "cluster")] private Guid? ClusterParam { get; set; }
+
+    private Tenant? tenant;
+    private List<Customer> customers = [];
+    private readonly Dictionary<Guid, List<Data.App>> appsByCustomer = [];
+    private List<KubernetesCluster> clusters = [];
+
+    private bool customersOpen = true;
+    private bool envsOpen = true;
+    private readonly HashSet<Guid> expandedCustomers = [];
+    private string filter = "";
+
+    private Data.App? selectedApp;
+    private Customer? selectedAppCustomer;
+    private KubernetesCluster? selectedCluster;
+
+    private bool HasFilter => !string.IsNullOrWhiteSpace(filter);
+
+    protected override async Task OnInitializedAsync()
+    {
+        AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        System.Security.Claims.ClaimsPrincipal user = authState.User;
+        if (user.Identity?.IsAuthenticated != true)
+        {
+            Nav.NavigateTo("/Account/Login", forceLoad: true);
+            return;
+        }
+
+        string? userId = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        if (userId is null)
+        {
+            Nav.NavigateTo("/Account/Login", forceLoad: true);
+            return;
+        }
+
+        Tenant? t = await TenantService.GetTenantBySlugAsync(Slug);
+        if (t is null)
+        {
+            Nav.NavigateTo("/tenants");
+            return;
+        }
+
+        if (!await UserAccessService.HasTenantAccessAsync(userId, t.Id))
+        {
+            Nav.NavigateTo("/tenants");
+            return;
+        }
+
+        customers = await TenantService.GetCustomersAsync(t.Id);
+        foreach (Customer c in customers)
+            appsByCustomer[c.Id] = await TenantService.GetAppsAsync(c.Id);
+        clusters = await TenantService.GetClustersAsync(t.Id);
+
+        tenant = t;
+        RestoreSelectionFromQuery();
+    }
+
+    private void RestoreSelectionFromQuery()
+    {
+        if (AppParam is Guid appId)
+        {
+            foreach (Customer c in customers)
+            {
+                Data.App? match = AppsOf(c).FirstOrDefault(a => a.Id == appId);
+                if (match is not null)
+                {
+                    selectedApp = match;
+                    selectedAppCustomer = c;
+                    expandedCustomers.Add(c.Id);
+                    return;
+                }
+            }
+        }
+        else if (ClusterParam is Guid clusterId)
+        {
+            selectedCluster = clusters.FirstOrDefault(cl => cl.Id == clusterId);
+        }
+    }
+
+    // ── Tree data helpers ──
+    private List<Data.App> AppsOf(Customer c) =>
+        appsByCustomer.TryGetValue(c.Id, out List<Data.App>? l) ? l : [];
+
+    private bool Match(string? s) =>
+        s is not null && s.Contains(filter.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private List<Customer> VisibleCustomers()
+    {
+        if (!HasFilter) return customers;
+        return customers.Where(c => Match(c.Name) || AppsOf(c).Any(a => Match(a.Name))).ToList();
+    }
+
+    private List<Data.App> VisibleApps(Customer c)
+    {
+        List<Data.App> apps = AppsOf(c);
+        if (!HasFilter || Match(c.Name)) return apps;
+        return apps.Where(a => Match(a.Name)).ToList();
+    }
+
+    private List<KubernetesCluster> VisibleClusters()
+    {
+        if (!HasFilter) return clusters;
+        return clusters.Where(cl => Match(cl.Name)).ToList();
+    }
+
+    // When filtering, force-expand so matches are visible.
+    private bool CustomerOpen(Customer c) => HasFilter || expandedCustomers.Contains(c.Id);
+
+    private void ToggleCustomer(Guid id)
+    {
+        if (!expandedCustomers.Remove(id))
+            expandedCustomers.Add(id);
+    }
+
+    private void OnFilterInput(ChangeEventArgs e) => filter = e.Value?.ToString() ?? "";
+
+    // ── Selection + deep-linking ──
+    private void SelectApp(Customer c, Data.App app)
+    {
+        selectedApp = app;
+        selectedAppCustomer = c;
+        selectedCluster = null;
+        UpdateUrl(app.Id, null);
+    }
+
+    private void SelectCluster(KubernetesCluster cl)
+    {
+        selectedCluster = cl;
+        selectedApp = null;
+        selectedAppCustomer = null;
+        UpdateUrl(null, cl.Id);
+    }
+
+    private void ClearSelection()
+    {
+        selectedApp = null;
+        selectedAppCustomer = null;
+        selectedCluster = null;
+        UpdateUrl(null, null);
+    }
+
+    private void UpdateUrl(Guid? app, Guid? cluster)
+    {
+        string uri = Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["app"] = app,
+            ["cluster"] = cluster,
+        });
+        Nav.NavigateTo(uri, forceLoad: false, replace: true);
+    }
+
+    private async Task OnAppDeleted()
+    {
+        if (selectedAppCustomer is not null)
+            appsByCustomer[selectedAppCustomer.Id] = await TenantService.GetAppsAsync(selectedAppCustomer.Id);
+        ClearSelection();
+    }
+
+    private async Task OnClusterDeleted()
+    {
+        if (tenant is not null)
+            clusters = await TenantService.GetClustersAsync(tenant.Id);
+        ClearSelection();
+    }
+}
