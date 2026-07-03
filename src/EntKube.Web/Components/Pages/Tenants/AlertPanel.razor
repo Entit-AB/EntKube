@@ -1,4 +1,5 @@
 @using EntKube.Web.Services
+@inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════════════
    AlertPanel — shows active alerts from Alertmanager, allows creating silences,
@@ -24,9 +25,8 @@
                     @onclick="LoadSilences">
                 <i class="bi bi-bell-slash me-1"></i>Silences
             </button>
-            <button class="btn btn-sm btn-outline-secondary" @onclick="RefreshAlerts" disabled="@loading">
-                <i class="bi bi-arrow-clockwise"></i>
-            </button>
+            <AutoRefresh OnRefresh="RefreshQuietlyAsync" IntervalSeconds="15" Enabled="true"
+                         LastRefreshed="_lastRefreshed" />
         </div>
     </div>
     <div class="card-body p-0">
@@ -151,11 +151,12 @@
                     </div>
                 </div>
                 <div class="d-flex gap-2">
-                    <button class="btn btn-sm btn-warning" @onclick="SubmitSilence"
-                            disabled="@(string.IsNullOrWhiteSpace(silenceMatcherInput) || string.IsNullOrWhiteSpace(silenceComment))">
-                        <i class="bi bi-bell-slash me-1"></i>Create Silence
-                    </button>
-                    <button class="btn btn-sm btn-outline-secondary" @onclick="CancelSilence">Cancel</button>
+                    <AsyncButton CssClass="btn-sm btn-warning" Icon="bi-bell-slash" BusyText="Creating…"
+                                 Disabled="@(string.IsNullOrWhiteSpace(silenceMatcherInput) || string.IsNullOrWhiteSpace(silenceComment))"
+                                 OnClick="SubmitSilence">
+                        Create Silence
+                    </AsyncButton>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelSilence">Cancel</button>
                 </div>
                 @if (!string.IsNullOrEmpty(silenceError))
                 {
@@ -175,6 +176,7 @@
     private string view = "alerts";
     private bool loading;
     private string? errorMessage;
+    private DateTime? _lastRefreshed;
 
     // Silence form
     private bool showCreateSilence;
@@ -193,20 +195,30 @@
         loading = true;
         errorMessage = null;
         StateHasChanged();
+        await FetchAlertsAsync();
+        loading = false;
+    }
 
+    // Reload alerts in place without flipping the LoadingPanel spinner — used by the auto-refresh control.
+    // Does not change the active view, matching the existing manual-refresh behavior.
+    private async Task RefreshQuietlyAsync() => await FetchAlertsAsync();
+
+    private async Task FetchAlertsAsync()
+    {
         KubernetesOperationResult<List<AlertInfo>> result =
             await PrometheusService.GetAlertsAsync(ClusterId);
 
         if (result.IsSuccess)
         {
             alerts = result.Data;
+            errorMessage = null;
         }
         else
         {
             errorMessage = result.Error;
         }
 
-        loading = false;
+        _lastRefreshed = DateTime.UtcNow;
     }
 
     private async Task LoadSilences()
@@ -278,10 +290,12 @@
             silenceMatcherInput = "";
             silenceComment = "";
             await LoadSilences();
+            Toasts.Success("Silence created.");
         }
         else
         {
             silenceError = result.Error;
+            Toasts.Error($"Failed to create silence: {result.Error}");
         }
     }
 

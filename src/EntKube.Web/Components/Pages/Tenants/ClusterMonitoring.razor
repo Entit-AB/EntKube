@@ -41,9 +41,8 @@
                 {
                     <span class="spinner-border spinner-border-sm text-primary"></span>
                 }
-                <button class="btn btn-sm btn-outline-primary" @onclick="LoadAll" disabled="@loading">
-                    <i class="bi bi-arrow-clockwise me-1"></i>Refresh
-                </button>
+                <AutoRefresh OnRefresh="RefreshQuietlyAsync" IntervalSeconds="15" Enabled="true"
+                             LastRefreshed="_lastRefreshed" />
             </div>
         </div>
 
@@ -224,6 +223,7 @@
     private List<TimeSeriesDataPoint> podCountHistory = [];
     private bool loading;
     private string? errorMessage;
+    private DateTime? _lastRefreshed;
     private int timeRange = 60; // minutes
 
     protected override async Task OnInitializedAsync()
@@ -243,7 +243,15 @@
         Task metricsTask = LoadMetrics();
         await Task.WhenAll(healthTask, metricsTask);
 
+        _lastRefreshed = DateTime.UtcNow;
         loading = false;
+    }
+
+    // Reload health + metrics in place without flipping the full-page spinner — used by auto-refresh.
+    private async Task RefreshQuietlyAsync()
+    {
+        await Task.WhenAll(LoadHealth(), LoadMetrics());
+        _lastRefreshed = DateTime.UtcNow;
     }
 
     private async Task LoadHealth()

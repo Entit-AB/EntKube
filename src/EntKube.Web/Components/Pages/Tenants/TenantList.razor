@@ -1,4 +1,5 @@
 @page "/tenants"
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
@@ -7,6 +8,7 @@
 @inject UserAccessService UserAccessService
 @inject AuthenticationStateProvider AuthStateProvider
 @inject NavigationManager Navigation
+@inject ToastService Toasts
 
 <PageTitle>Tenants</PageTitle>
 
@@ -24,26 +26,20 @@
     {
         <div class="card border-0 shadow-sm mb-4">
             <div class="card-body py-2">
-                <div class="input-group">
-                    <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-plus-circle"></i></span>
-                    <input type="text" class="form-control border-start-0" placeholder="New tenant name (e.g. Acme Corp)"
-                           @bind="newTenantName" @bind:event="oninput"
-                           @onkeydown="@(async (e) => { if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(newTenantName)) await CreateTenant(); })" />
-                    <button class="btn btn-primary" @onclick="CreateTenant"
-                            disabled="@(string.IsNullOrWhiteSpace(newTenantName) || creating)">
-                        @if (creating) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                        else { <i class="bi bi-plus-lg me-1"></i> }
-                        Create Tenant
-                    </button>
-                </div>
-                @if (!string.IsNullOrEmpty(errorMessage))
-                {
-                    <div class="text-danger small mt-2"><i class="bi bi-exclamation-triangle me-1"></i>@errorMessage</div>
-                }
-                @if (!string.IsNullOrEmpty(successMessage))
-                {
-                    <div class="text-success small mt-2"><i class="bi bi-check-circle me-1"></i>@successMessage</div>
-                }
+                <EditForm Model="createModel" OnValidSubmit="CreateTenant">
+                    <DataAnnotationsValidator />
+                    <div class="input-group">
+                        <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-plus-circle"></i></span>
+                        <InputText class="form-control border-start-0" placeholder="New tenant name (e.g. Acme Corp)"
+                                   @bind-Value="createModel.Name" />
+                        <button type="submit" class="btn btn-primary" disabled="@creating">
+                            @if (creating) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            else { <i class="bi bi-plus-lg me-1"></i> }
+                            Create Tenant
+                        </button>
+                    </div>
+                    <ValidationMessage For="() => createModel.Name" class="text-danger small mt-1" />
+                </EditForm>
             </div>
         </div>
     }
@@ -74,7 +70,7 @@
                                 @if (isAdmin)
                                 {
                                     <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteId = tenant.Id"
-                                            title="Delete tenant">
+                                            title="Delete tenant" aria-label="@($"Delete tenant {tenant.Name}")">
                                         <i class="bi bi-trash"></i>
                                     </button>
                                 }
@@ -108,9 +104,7 @@
 
 @code {
     private List<Tenant>? tenants;
-    private string newTenantName = "";
-    private string? errorMessage;
-    private string? successMessage;
+    private readonly CreateTenantModel createModel = new();
     private Guid? confirmDeleteId;
     private bool isAdmin;
     private bool loaded;
@@ -155,32 +149,22 @@
         tenants = await UserAccessService.GetAccessibleTenantsAsync(userId);
     }
 
-    private async Task ShowSuccessAsync(string message)
-    {
-        successMessage = message;
-        StateHasChanged();
-        await Task.Delay(3500);
-        successMessage = null;
-        StateHasChanged();
-    }
-
     private async Task CreateTenant()
     {
         if (!isAdmin) return;
-        errorMessage = null;
         creating = true;
 
         try
         {
-            string name = newTenantName.Trim();
+            string name = createModel.Name.Trim();
             await TenantService.CreateTenantAsync(name);
-            newTenantName = "";
+            createModel.Name = "";
             await LoadTenants();
-            _ = ShowSuccessAsync($"Tenant '{name}' created.");
+            Toasts.Success($"Tenant '{name}' created.");
         }
         catch (DbUpdateException)
         {
-            errorMessage = "A tenant with that name already exists.";
+            Toasts.Error("A tenant with that name already exists.");
         }
         finally { creating = false; }
     }
@@ -189,9 +173,28 @@
     {
         if (!isAdmin) return;
         deleting = true;
-        await TenantService.DeleteTenantAsync(id);
-        deleting = false;
-        confirmDeleteId = null;
-        await LoadTenants();
+        try
+        {
+            string name = tenants?.FirstOrDefault(t => t.Id == id)?.Name ?? "Tenant";
+            await TenantService.DeleteTenantAsync(id);
+            await LoadTenants();
+            Toasts.Success($"Tenant '{name}' deleted.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete tenant: {ex.Message}");
+        }
+        finally
+        {
+            deleting = false;
+            confirmDeleteId = null;
+        }
+    }
+
+    public sealed class CreateTenantModel
+    {
+        [Required(ErrorMessage = "Enter a tenant name.")]
+        [StringLength(100, MinimumLength = 2, ErrorMessage = "Name must be 2–100 characters.")]
+        public string Name { get; set; } = "";
     }
 }

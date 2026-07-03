@@ -1,9 +1,11 @@
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject PrometheusService PrometheusService
 @inject RemediationService RemediationService
 @inject IncidentService IncidentService
+@inject ToastService Toasts
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject AuthenticationStateProvider AuthStateProvider
 @implements IAsyncDisposable
@@ -263,43 +265,46 @@ else
     <div class="card mt-3 border-warning">
         <div class="card-header d-flex justify-content-between align-items-center py-2">
             <h6 class="mb-0"><span class="bi bi-bell-slash me-1"></span>Silence @selectedKeys.Count selected alert@(selectedKeys.Count == 1 ? "" : "s")</h6>
-            <button class="btn-close btn-sm" @onclick="() => showBulkSilenceForm = false"></button>
+            <button type="button" class="btn-close btn-sm" @onclick="() => showBulkSilenceForm = false"></button>
         </div>
         <div class="card-body">
-            <div class="row g-2 mb-2">
-                <div class="col-md-3">
-                    <label class="form-label small">Duration</label>
-                    <select class="form-select form-select-sm" @bind="bulkSilenceHours">
-                        <option value="1">1 hour</option>
-                        <option value="2">2 hours</option>
-                        <option value="4">4 hours</option>
-                        <option value="8">8 hours</option>
-                        <option value="24">24 hours</option>
-                        <option value="72">3 days</option>
-                    </select>
+            <EditForm Model="bulkSilenceForm" OnValidSubmit="SubmitBulkSilence">
+                <DataAnnotationsValidator />
+                <div class="row g-2 mb-2">
+                    <div class="col-md-3">
+                        <label class="form-label small">Duration</label>
+                        <InputSelect class="form-select form-select-sm" @bind-Value="bulkSilenceForm.Hours">
+                            <option value="1">1 hour</option>
+                            <option value="2">2 hours</option>
+                            <option value="4">4 hours</option>
+                            <option value="8">8 hours</option>
+                            <option value="24">24 hours</option>
+                            <option value="72">3 days</option>
+                        </InputSelect>
+                    </div>
+                    <div class="col-md-9">
+                        <label class="form-label small">Comment</label>
+                        <InputText class="form-control form-control-sm" @bind-Value="bulkSilenceForm.Comment"
+                                   placeholder="Reason for silence" />
+                        <ValidationMessage For="() => bulkSilenceForm.Comment" class="text-danger small" />
+                    </div>
                 </div>
-                <div class="col-md-9">
-                    <label class="form-label small">Comment</label>
-                    <input class="form-control form-control-sm" @bind="bulkSilenceComment"
-                           placeholder="Reason for silence" />
+                @if (!string.IsNullOrEmpty(bulkSilenceError))
+                {
+                    <div class="alert alert-danger py-1 small mb-2">@bulkSilenceError</div>
+                }
+                @if (!string.IsNullOrEmpty(bulkSilenceResult))
+                {
+                    <div class="alert alert-success py-1 small mb-2">@bulkSilenceResult</div>
+                }
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-sm btn-warning" disabled="@isBulkSilencing">
+                        @if (isBulkSilencing) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        <span class="bi bi-bell-slash me-1"></span>Create Silences
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showBulkSilenceForm = false">Cancel</button>
                 </div>
-            </div>
-            @if (!string.IsNullOrEmpty(bulkSilenceError))
-            {
-                <div class="alert alert-danger py-1 small mb-2">@bulkSilenceError</div>
-            }
-            @if (!string.IsNullOrEmpty(bulkSilenceResult))
-            {
-                <div class="alert alert-success py-1 small mb-2">@bulkSilenceResult</div>
-            }
-            <div class="d-flex gap-2">
-                <button class="btn btn-sm btn-warning" @onclick="SubmitBulkSilence"
-                        disabled="@(string.IsNullOrWhiteSpace(bulkSilenceComment) || isBulkSilencing)">
-                    @if (isBulkSilencing) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                    <span class="bi bi-bell-slash me-1"></span>Create Silences
-                </button>
-                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showBulkSilenceForm = false">Cancel</button>
-            </div>
+            </EditForm>
         </div>
     </div>
 }
@@ -310,44 +315,48 @@ else
     <div class="card mt-3 border-warning">
         <div class="card-header d-flex justify-content-between align-items-center py-2">
             <h6 class="mb-0"><span class="bi bi-bell-slash me-1"></span>Silence — @silenceTarget.Alert.Name</h6>
-            <button class="btn-close btn-sm" @onclick="CancelSilence"></button>
+            <button type="button" class="btn-close btn-sm" @onclick="CancelSilence"></button>
         </div>
         <div class="card-body">
-            <div class="row g-2 mb-2">
-                <div class="col-md-4">
-                    <label class="form-label small">Matcher (label=value)</label>
-                    <input class="form-control form-control-sm font-monospace"
-                           @bind="silenceMatcher" placeholder="alertname=…" />
+            <EditForm Model="silenceForm" OnValidSubmit="SubmitSilence">
+                <DataAnnotationsValidator />
+                <div class="row g-2 mb-2">
+                    <div class="col-md-4">
+                        <label class="form-label small">Matcher (label=value)</label>
+                        <InputText class="form-control form-control-sm font-monospace"
+                                   @bind-Value="silenceForm.Matcher" placeholder="alertname=…" />
+                        <ValidationMessage For="() => silenceForm.Matcher" class="text-danger small" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small">Duration</label>
+                        <InputSelect class="form-select form-select-sm" @bind-Value="silenceForm.Hours">
+                            <option value="1">1 hour</option>
+                            <option value="2">2 hours</option>
+                            <option value="4">4 hours</option>
+                            <option value="8">8 hours</option>
+                            <option value="24">24 hours</option>
+                            <option value="72">3 days</option>
+                        </InputSelect>
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label small">Comment</label>
+                        <InputText class="form-control form-control-sm" @bind-Value="silenceForm.Comment"
+                                   placeholder="Reason for silence" />
+                        <ValidationMessage For="() => silenceForm.Comment" class="text-danger small" />
+                    </div>
                 </div>
-                <div class="col-md-3">
-                    <label class="form-label small">Duration</label>
-                    <select class="form-select form-select-sm" @bind="silenceHours">
-                        <option value="1">1 hour</option>
-                        <option value="2">2 hours</option>
-                        <option value="4">4 hours</option>
-                        <option value="8">8 hours</option>
-                        <option value="24">24 hours</option>
-                        <option value="72">3 days</option>
-                    </select>
+                @if (!string.IsNullOrEmpty(silenceError))
+                {
+                    <div class="alert alert-danger py-1 small mb-2">@silenceError</div>
+                }
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-sm btn-warning" disabled="@isSilencing">
+                        @if (isSilencing) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        <span class="bi bi-bell-slash me-1"></span>Create Silence
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelSilence">Cancel</button>
                 </div>
-                <div class="col-md-5">
-                    <label class="form-label small">Comment</label>
-                    <input class="form-control form-control-sm" @bind="silenceComment"
-                           placeholder="Reason for silence" />
-                </div>
-            </div>
-            @if (!string.IsNullOrEmpty(silenceError))
-            {
-                <div class="alert alert-danger py-1 small mb-2">@silenceError</div>
-            }
-            <div class="d-flex gap-2">
-                <button class="btn btn-sm btn-warning" @onclick="SubmitSilence"
-                        disabled="@(string.IsNullOrWhiteSpace(silenceMatcher) || string.IsNullOrWhiteSpace(silenceComment) || isSilencing)">
-                    @if (isSilencing) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                    <span class="bi bi-bell-slash me-1"></span>Create Silence
-                </button>
-                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelSilence">Cancel</button>
-            </div>
+            </EditForm>
         </div>
     </div>
 }
@@ -371,19 +380,38 @@ else
     // Silence form
     private bool showSilenceForm;
     private AlertRow? silenceTarget;
-    private string silenceMatcher = "";
-    private int silenceHours = 2;
-    private string silenceComment = "";
+    private SilenceForm silenceForm = new();
     private string? silenceError;
     private bool isSilencing;
 
     // Bulk silence form
     private bool showBulkSilenceForm;
-    private int bulkSilenceHours = 2;
-    private string bulkSilenceComment = "";
+    private BulkSilenceForm bulkSilenceForm = new();
     private string? bulkSilenceError;
     private string? bulkSilenceResult;
     private bool isBulkSilencing;
+
+    private sealed class SilenceForm
+    {
+        [Required(ErrorMessage = "Matcher is required.")]
+        [RegularExpression(@"^[^=]+=.*$", ErrorMessage = "Format: label=value")]
+        public string Matcher { get; set; } = "";
+
+        public int Hours { get; set; } = 2;
+
+        [Required(ErrorMessage = "A comment is required.")]
+        [StringLength(500)]
+        public string Comment { get; set; } = "";
+    }
+
+    private sealed class BulkSilenceForm
+    {
+        public int Hours { get; set; } = 2;
+
+        [Required(ErrorMessage = "A comment is required.")]
+        [StringLength(500)]
+        public string Comment { get; set; } = "";
+    }
 
     private HashSet<string> selectedKeys = [];
 
@@ -505,8 +533,7 @@ else
     private void StartSilence(AlertRow row)
     {
         silenceTarget = row;
-        silenceMatcher = $"alertname={row.Alert.Name}";
-        silenceComment = "";
+        silenceForm = new SilenceForm { Matcher = $"alertname={row.Alert.Name}" };
         silenceError = null;
         showSilenceForm = true;
         expandedKey = null;
@@ -558,7 +585,7 @@ else
 
     private void StartBulkSilence()
     {
-        bulkSilenceComment = "";
+        bulkSilenceForm = new BulkSilenceForm();
         bulkSilenceError = null;
         bulkSilenceResult = null;
         showBulkSilenceForm = true;
@@ -566,8 +593,6 @@ else
 
     private async Task SubmitBulkSilence()
     {
-        if (string.IsNullOrWhiteSpace(bulkSilenceComment)) return;
-
         bulkSilenceError = null;
         bulkSilenceResult = null;
         isBulkSilencing = true;
@@ -582,9 +607,9 @@ else
         {
             KubernetesOperationResult result = await PrometheusService.CreateSilenceAsync(
                 row.ClusterId,
-                bulkSilenceComment,
+                bulkSilenceForm.Comment,
                 currentUser ?? "entkube-user",
-                TimeSpan.FromHours(bulkSilenceHours),
+                TimeSpan.FromHours(bulkSilenceForm.Hours),
                 [new SilenceMatcher { Name = "alertname", Value = row.Alert.Name, IsEqual = true }]);
 
             if (result.IsSuccess) ok++; else fail++;
@@ -596,13 +621,16 @@ else
         if (fail == 0)
         {
             bulkSilenceResult = $"✓ Created {ok} silence{(ok == 1 ? "" : "s")} successfully.";
+            Toasts.Success($"Created {ok} silence{(ok == 1 ? "" : "s")}.");
             await Task.Delay(1500);
             showBulkSilenceForm = false;
             await Refresh();
         }
         else
         {
-            bulkSilenceError = $"{ok} silence{(ok == 1 ? "" : "s")} created, {fail} failed.";
+            string msg = $"{ok} silence{(ok == 1 ? "" : "s")} created, {fail} failed.";
+            bulkSilenceError = msg;
+            Toasts.Error(msg);
         }
     }
 
@@ -617,7 +645,7 @@ else
         if (silenceTarget is null) return;
         silenceError = null;
 
-        string[] parts = silenceMatcher.Split('=', 2);
+        string[] parts = silenceForm.Matcher.Split('=', 2);
         if (parts.Length != 2 || string.IsNullOrWhiteSpace(parts[0]))
         {
             silenceError = "Format: label=value";
@@ -629,9 +657,9 @@ else
 
         KubernetesOperationResult result = await PrometheusService.CreateSilenceAsync(
             silenceTarget.ClusterId,
-            silenceComment,
+            silenceForm.Comment,
             currentUser ?? "entkube-user",
-            TimeSpan.FromHours(silenceHours),
+            TimeSpan.FromHours(silenceForm.Hours),
             [new SilenceMatcher { Name = parts[0].Trim(), Value = parts[1].Trim(), IsEqual = true }]);
 
         isSilencing = false;
@@ -640,11 +668,13 @@ else
         {
             showSilenceForm = false;
             silenceTarget = null;
+            Toasts.Success("Silence created.");
             await Refresh();
         }
         else
         {
             silenceError = result.Error;
+            Toasts.Error(result.Error ?? "Unknown error", "Failed to create silence");
         }
     }
 

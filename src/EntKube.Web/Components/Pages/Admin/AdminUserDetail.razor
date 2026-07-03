@@ -1,4 +1,5 @@
 @page "/admin/users/{UserId}"
+@using System.ComponentModel.DataAnnotations
 @using Microsoft.AspNetCore.Authorization
 @using Microsoft.AspNetCore.Identity
 @using EntKube.Web.Data
@@ -8,6 +9,7 @@
 
 @inject UserManagementService UserManagement
 @inject NavigationManager NavigationManager
+@inject ToastService Toasts
 
 <PageTitle>@(user?.Email ?? "User")</PageTitle>
 
@@ -136,42 +138,48 @@ else if (user is not null)
                     @* Add tenant form *@
                     @if (availableTenants.Count > 0)
                     {
-                        <div class="d-flex gap-2 align-items-end flex-wrap">
-                            <div>
-                                <label class="form-label small text-muted mb-1">Tenant</label>
-                                <select class="form-select form-select-sm" @bind="addTenantId" style="min-width:180px">
-                                    <option value="">Select tenant…</option>
-                                    @foreach (Tenant t in availableTenants)
-                                    {
-                                        <option value="@t.Id">@t.Name</option>
-                                    }
-                                </select>
-                            </div>
-                            <div>
-                                <label class="form-label small text-muted mb-1">Role</label>
-                                @if (addTenantId != Guid.Empty && !rolesForSelectedTenant.Any())
-                                {
-                                    <div class="text-muted small">
-                                        <i class="bi bi-exclamation-circle me-1"></i>No roles defined for this tenant.
-                                        <a href="/admin/roles">Create roles first</a>.
-                                    </div>
-                                }
-                                else
-                                {
-                                    <select class="form-select form-select-sm" @bind="addTenantRoleId" style="min-width:150px">
-                                        <option value="">Select role…</option>
-                                        @foreach (TenantRole r in rolesForSelectedTenant)
+                        <EditForm Model="addTenantForm" OnValidSubmit="AddTenantMembership">
+                            <DataAnnotationsValidator />
+                            <div class="d-flex gap-2 align-items-end flex-wrap">
+                                <div>
+                                    <label class="form-label small text-muted mb-1">Tenant</label>
+                                    <InputSelect class="form-select form-select-sm" style="min-width:180px"
+                                                 @bind-Value="addTenantForm.TenantId" @bind-Value:after="OnAddTenantChanged">
+                                        <option value="">Select tenant…</option>
+                                        @foreach (Tenant t in availableTenants)
                                         {
-                                            <option value="@r.Id">@r.Name</option>
+                                            <option value="@t.Id">@t.Name</option>
                                         }
-                                    </select>
-                                }
+                                    </InputSelect>
+                                    <ValidationMessage For="() => addTenantForm.TenantId" class="text-danger small" />
+                                </div>
+                                <div>
+                                    <label class="form-label small text-muted mb-1">Role</label>
+                                    @if (addTenantForm.TenantId is not null && !rolesForSelectedTenant.Any())
+                                    {
+                                        <div class="text-muted small">
+                                            <i class="bi bi-exclamation-circle me-1"></i>No roles defined for this tenant.
+                                            <a href="/admin/roles">Create roles first</a>.
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <InputSelect class="form-select form-select-sm" style="min-width:150px"
+                                                     @bind-Value="addTenantForm.RoleId">
+                                            <option value="">Select role…</option>
+                                            @foreach (TenantRole r in rolesForSelectedTenant)
+                                            {
+                                                <option value="@r.Id">@r.Name</option>
+                                            }
+                                        </InputSelect>
+                                        <ValidationMessage For="() => addTenantForm.RoleId" class="text-danger small" />
+                                    }
+                                </div>
+                                <button type="submit" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-plus-lg me-1"></i>Add
+                                </button>
                             </div>
-                            <button class="btn btn-sm btn-primary" @onclick="AddTenantMembership"
-                                    disabled="@(addTenantId == Guid.Empty || addTenantRoleId == Guid.Empty)">
-                                <i class="bi bi-plus-lg me-1"></i>Add
-                            </button>
-                        </div>
+                        </EditForm>
                     }
                     else if (tenantMemberships.Count == 0)
                     {
@@ -235,32 +243,37 @@ else if (user is not null)
                     @* Add group form — only tenants this user is a member of have groups *@
                     @if (tenantMemberships.Count > 0)
                     {
-                        <div class="d-flex gap-2 align-items-end flex-wrap">
-                            <div>
-                                <label class="form-label small text-muted mb-1">Tenant</label>
-                                <select class="form-select form-select-sm" @bind="addGroupTenantId" style="min-width:180px">
-                                    <option value="">Select tenant…</option>
-                                    @foreach (TenantMembership m in tenantMemberships)
-                                    {
-                                        <option value="@m.TenantId">@m.Tenant.Name</option>
-                                    }
-                                </select>
+                        <EditForm Model="addGroupForm" OnValidSubmit="AddGroupMembership">
+                            <DataAnnotationsValidator />
+                            <div class="d-flex gap-2 align-items-end flex-wrap">
+                                <div>
+                                    <label class="form-label small text-muted mb-1">Tenant</label>
+                                    <InputSelect class="form-select form-select-sm" style="min-width:180px"
+                                                 @bind-Value="addGroupForm.TenantId" @bind-Value:after="OnAddGroupTenantChanged">
+                                        <option value="">Select tenant…</option>
+                                        @foreach (TenantMembership m in tenantMemberships)
+                                        {
+                                            <option value="@m.TenantId">@m.Tenant.Name</option>
+                                        }
+                                    </InputSelect>
+                                </div>
+                                <div>
+                                    <label class="form-label small text-muted mb-1">Group</label>
+                                    <InputSelect class="form-select form-select-sm" style="min-width:180px"
+                                                 @bind-Value="addGroupForm.GroupId">
+                                        <option value="">Select group…</option>
+                                        @foreach (Group g in availableGroupsForTenant)
+                                        {
+                                            <option value="@g.Id">@g.Name</option>
+                                        }
+                                    </InputSelect>
+                                    <ValidationMessage For="() => addGroupForm.GroupId" class="text-danger small" />
+                                </div>
+                                <button type="submit" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-plus-lg me-1"></i>Add
+                                </button>
                             </div>
-                            <div>
-                                <label class="form-label small text-muted mb-1">Group</label>
-                                <select class="form-select form-select-sm" @bind="addGroupId" style="min-width:180px">
-                                    <option value="">Select group…</option>
-                                    @foreach (Group g in availableGroupsForTenant)
-                                    {
-                                        <option value="@g.Id">@g.Name</option>
-                                    }
-                                </select>
-                            </div>
-                            <button class="btn btn-sm btn-primary" @onclick="AddGroupMembership"
-                                    disabled="@(addGroupId == Guid.Empty)">
-                                <i class="bi bi-plus-lg me-1"></i>Add
-                            </button>
-                        </div>
+                        </EditForm>
                     }
                     else if (groupMemberships.Count == 0)
                     {
@@ -308,36 +321,28 @@ else if (user is not null)
     private List<Tenant> availableTenants = [];
 
     // Add-tenant form state
-    private Guid _addTenantId;
-    private Guid addTenantId
-    {
-        get => _addTenantId;
-        set
-        {
-            _addTenantId = value;
-            addTenantRoleId = Guid.Empty;
-        }
-    }
-    private Guid addTenantRoleId;
+    private AddTenantForm addTenantForm = new();
     private IEnumerable<TenantRole> rolesForSelectedTenant =>
-        allTenants.FirstOrDefault(t => t.Id == addTenantId)?.Roles ?? [];
+        allTenants.FirstOrDefault(t => t.Id == addTenantForm.TenantId)?.Roles ?? [];
+
+    private void OnAddTenantChanged()
+    {
+        // Switching tenant invalidates the previously chosen role.
+        addTenantForm.RoleId = null;
+    }
 
     private List<GroupMembership> groupMemberships = [];
 
     // Add-group form state
-    private Guid _addGroupTenantId;
-    private Guid addGroupTenantId
-    {
-        get => _addGroupTenantId;
-        set
-        {
-            _addGroupTenantId = value;
-            addGroupId = Guid.Empty;
-            _ = LoadGroupsForSelectedTenant();
-        }
-    }
-    private Guid addGroupId;
+    private AddGroupForm addGroupForm = new();
     private List<Group> availableGroupsForTenant = [];
+
+    private async Task OnAddGroupTenantChanged()
+    {
+        // Switching tenant clears the chosen group and reloads the group options.
+        addGroupForm.GroupId = null;
+        await LoadGroupsForSelectedTenant();
+    }
 
     private Guid? confirmRemoveTenantId;
     private Guid? confirmRemoveGroupId;
@@ -372,21 +377,21 @@ else if (user is not null)
     {
         HashSet<Guid> joined = tenantMemberships.Select(m => m.TenantId).ToHashSet();
         availableTenants = allTenants.Where(t => !joined.Contains(t.Id)).ToList();
-        if (!availableTenants.Any(t => t.Id == addTenantId))
+        if (addTenantForm.TenantId is { } selected && availableTenants.All(t => t.Id != selected))
         {
-            addTenantId = Guid.Empty;
-            addTenantRoleId = Guid.Empty;
+            addTenantForm.TenantId = null;
+            addTenantForm.RoleId = null;
         }
     }
 
     private async Task LoadGroupsForSelectedTenant()
     {
-        if (_addGroupTenantId == Guid.Empty)
+        if (addGroupForm.TenantId is not { } tenantId)
         {
             availableGroupsForTenant = [];
             return;
         }
-        List<Group> all = await UserManagement.GetGroupsForTenantAsync(_addGroupTenantId);
+        List<Group> all = await UserManagement.GetGroupsForTenantAsync(tenantId);
         HashSet<Guid> joined = groupMemberships.Select(gm => gm.GroupId).ToHashSet();
         availableGroupsForTenant = all.Where(g => !joined.Contains(g.Id)).ToList();
         StateHasChanged();
@@ -410,19 +415,21 @@ else if (user is not null)
 
     private async Task AddTenantMembership()
     {
-        if (addTenantId == Guid.Empty || addTenantRoleId == Guid.Empty) return;
         errorMessage = null;
 
         try
         {
-            await UserManagement.AddTenantMembershipAsync(UserId, addTenantId, addTenantRoleId);
-            addTenantId = Guid.Empty;
+            await UserManagement.AddTenantMembershipAsync(UserId, addTenantForm.TenantId!.Value, addTenantForm.RoleId!.Value);
+            addTenantForm = new AddTenantForm();
             tenantMemberships = await UserManagement.GetUserTenantMembershipsAsync(UserId);
             RefreshAvailableTenants();
+            Toasts.Success("Tenant membership added.");
         }
         catch (Exception ex)
         {
-            errorMessage = $"Failed to add tenant membership: {ex.Message}";
+            string msg = $"Failed to add tenant membership: {ex.Message}";
+            errorMessage = msg;
+            Toasts.Error(msg);
         }
     }
 
@@ -451,18 +458,21 @@ else if (user is not null)
 
     private async Task AddGroupMembership()
     {
-        if (addGroupId == Guid.Empty) return;
         errorMessage = null;
 
         try
         {
-            await UserManagement.AddGroupMembershipAsync(UserId, addGroupId);
+            await UserManagement.AddGroupMembershipAsync(UserId, addGroupForm.GroupId!.Value);
+            addGroupForm.GroupId = null;
             groupMemberships = await UserManagement.GetUserGroupMembershipsAsync(UserId);
             await LoadGroupsForSelectedTenant();
+            Toasts.Success("Group membership added.");
         }
         catch (Exception ex)
         {
-            errorMessage = $"Failed to add group membership: {ex.Message}";
+            string msg = $"Failed to add group membership: {ex.Message}";
+            errorMessage = msg;
+            Toasts.Error(msg);
         }
     }
 
@@ -493,5 +503,23 @@ else if (user is not null)
             return;
         }
         NavigationManager.NavigateTo("/admin/users");
+    }
+
+    private sealed class AddTenantForm
+    {
+        [Required(ErrorMessage = "Select a tenant.")]
+        public Guid? TenantId { get; set; }
+
+        [Required(ErrorMessage = "Select a role.")]
+        public Guid? RoleId { get; set; }
+    }
+
+    private sealed class AddGroupForm
+    {
+        // Filters the group list only; not itself submitted, so not required.
+        public Guid? TenantId { get; set; }
+
+        [Required(ErrorMessage = "Select a group.")]
+        public Guid? GroupId { get; set; }
     }
 }

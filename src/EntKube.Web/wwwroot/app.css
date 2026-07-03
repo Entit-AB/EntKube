@@ -103,3 +103,27 @@ h1:focus {
 .card-header.bg-white {
     border-bottom: 1px solid rgba(0, 0, 0, .075);
 }
+
+/* In-app toast notifications (ToastHost) */
+.toast-host {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    z-index: 1080;
+    width: 22rem;
+    max-width: calc(100vw - 2rem);
+    pointer-events: none;
+}
+
+.toast-host .toast-item {
+    pointer-events: auto;
+}
+
+.m0-fade-in {
+    animation: m0-toast-in 0.18s ease-out;
+}
+
+@keyframes m0-toast-in {
+    from { opacity: 0; transform: translateY(-0.4rem); }
+    to { opacity: 1; transform: translateY(0); }
+}

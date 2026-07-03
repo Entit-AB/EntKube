@@ -10,6 +10,7 @@
 @inject RegisteredPostgresService RegisteredPostgresService
 @inject AppGovernanceService AppGovernanceService
 @inject AuthenticationStateProvider AuthStateProvider
+@inject ToastService Toasts
 
 <div class="d-flex align-items-center mb-2">
     <i class="bi bi-shield-lock fs-4 me-2 text-primary"></i>
@@ -298,11 +299,13 @@ else
                                     <td class="text-end">
                                         <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => RevealKubeconfig(kc)"
                                                 disabled="@kubeconfigRevealLoading"
-                                                title="@(revealedKubeconfigId == kc.Id ? "Hide kubeconfig" : "Reveal kubeconfig")">
+                                                title="@(revealedKubeconfigId == kc.Id ? "Hide kubeconfig" : "Reveal kubeconfig")"
+                                                aria-label="@($"{(revealedKubeconfigId == kc.Id ? "Hide" : "Reveal")} kubeconfig for cluster {kc.OwnerCluster?.Name ?? "unknown"}")">
                                             <i class="bi @(revealedKubeconfigId == kc.Id ? "bi-eye-slash" : "bi-eye")"></i>
                                         </button>
                                         <button class="btn btn-sm btn-outline-warning" @onclick="() => StartKubeconfigUpdate(kc)"
-                                                title="Update kubeconfig">
+                                                title="Update kubeconfig"
+                                                aria-label="@($"Update kubeconfig for cluster {kc.OwnerCluster?.Name ?? "unknown"}")">
                                             <i class="bi bi-pencil"></i>
                                         </button>
                                     </td>
@@ -365,6 +368,12 @@ else
                 }
             </div>
             <div class="card-body">
+                <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                               Message="@(pendingConfirm?.Message ?? "")"
+                               ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+                               IsBusy="confirmBusy"
+                               OnConfirm="RunPendingConfirmAsync"
+                               OnCancel="() => pendingConfirm = null" />
                 @* Add secret form — hidden for read-only DB scopes *@
                 @if (scope is not "mongodb" and not "regpostgres")
                 {
@@ -606,26 +615,33 @@ else
                                         <td><small class="text-muted">@secret.UpdatedAt.ToString("MMM d, HH:mm")</small></td>
                                         <td class="text-end">
                                             <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => RevealSecret(secret)"
-                                                    title="@(revealedSecretId == secret.Id ? "Hide value" : "Reveal value")">
+                                                    title="@(revealedSecretId == secret.Id ? "Hide value" : "Reveal value")"
+                                                    aria-label="@($"{(revealedSecretId == secret.Id ? "Hide" : "Reveal")} value of secret {secret.Name}")">
                                                 <i class="bi @(revealedSecretId == secret.Id ? "bi-eye-slash" : "bi-eye")"></i>
                                             </button>
-                                            <button class="btn btn-sm btn-outline-warning me-1" @onclick="() => StartEdit(secret)" title="Edit value">
+                                            <button class="btn btn-sm btn-outline-warning me-1" @onclick="() => StartEdit(secret)" title="Edit value"
+                                                    aria-label="@($"Edit value of secret {secret.Name}")">
                                                 <i class="bi bi-pencil"></i>
                                             </button>
                                             @if (scope == "app")
                                             {
-                                                <button class="btn btn-sm btn-outline-primary me-1" @onclick="() => StartScopeEdit(secret)" title="Change scope">
+                                                <button class="btn btn-sm btn-outline-primary me-1" @onclick="() => StartScopeEdit(secret)" title="Change scope"
+                                                        aria-label="@($"Change scope of secret {secret.Name}")">
                                                     <i class="bi bi-diagram-3"></i>
                                                 </button>
                                             }
-                                            <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => ToggleHistory(secret.Id)" title="Version history">
+                                            <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => ToggleHistory(secret.Id)" title="Version history"
+                                                    aria-label="@($"Version history of secret {secret.Name}")">
                                                 <i class="bi bi-clock-history"></i>
                                             </button>
                                             <button class="btn btn-sm btn-outline-info me-1" @onclick="() => ToggleSync(secret)"
-                                                    title="@(secret.SyncToKubernetes ? "Disable K8s sync" : "Enable K8s sync")">
+                                                    title="@(secret.SyncToKubernetes ? "Disable K8s sync" : "Enable K8s sync")"
+                                                    aria-label="@($"{(secret.SyncToKubernetes ? "Disable" : "Enable")} Kubernetes sync for secret {secret.Name}")">
                                                 <i class="bi @(secret.SyncToKubernetes ? "bi-cloud-slash" : "bi-cloud-arrow-up")"></i>
                                             </button>
-                                            <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteSecret(secret.Id)" title="Delete secret">
+                                            <button class="btn btn-sm btn-outline-danger" title="Delete secret"
+                                                    aria-label="@($"Delete secret {secret.Name}")"
+                                                    @onclick='() => pendingConfirm = new PendingConfirm($"Delete secret \"{secret.Name}\"? This permanently removes it from the vault and cannot be undone.", "Delete secret", () => DeleteSecret(secret.Id))'>
                                                 <i class="bi bi-trash"></i>
                                             </button>
                                         </td>
@@ -892,6 +908,19 @@ else
 
 @code {
     [Parameter] public Guid TenantId { get; set; }
+
+    // A destructive action awaiting user confirmation.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
 
     private bool vaultInitialized;
     private string scope = "app";
@@ -1462,20 +1491,30 @@ else
     {
         errorMessage = null;
 
-        // Check if deletion is blocked by active storage bindings.
-
-        (bool canDelete, string? reason) = await VaultService.CanDeleteSecretAsync(secretId);
-
-        if (!canDelete)
+        try
         {
-            errorMessage = reason;
-            return;
-        }
+            // Check if deletion is blocked by active storage bindings.
 
-        await VaultService.DeleteSecretAsync(secretId);
-        revealedSecretId = null;
-        editSecretId = null;
-        await LoadSecrets();
+            (bool canDelete, string? reason) = await VaultService.CanDeleteSecretAsync(secretId);
+
+            if (!canDelete)
+            {
+                errorMessage = reason;
+                Toasts.Warning(reason ?? "This secret cannot be deleted right now.");
+                return;
+            }
+
+            await VaultService.DeleteSecretAsync(secretId);
+            revealedSecretId = null;
+            editSecretId = null;
+            await LoadSecrets();
+            Toasts.Success("Secret deleted.");
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+            Toasts.Error($"Failed to delete secret: {ex.Message}");
+        }
     }
 
     private async Task RevealSecret(VaultSecret secret)

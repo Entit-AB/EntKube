@@ -1,7 +1,9 @@
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject TailscaleService TailscaleService
+@inject ToastService Toasts
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 
 <div class="d-flex align-items-center justify-content-between mb-3">
@@ -214,53 +216,58 @@ else
         @if (showCreateIngress)
         {
             <div class="card-body border-bottom bg-light py-2">
-                <div class="row g-2 align-items-end">
-                    <div class="col-md-2">
-                        <label class="form-label small mb-1">Ingress name</label>
-                        <input class="form-control form-control-sm font-monospace"
-                               placeholder="my-app" @bind="newIngressName" />
-                    </div>
-                    <div class="col-md-2">
-                        <label class="form-label small mb-1">Namespace</label>
-                        <input class="form-control form-control-sm font-monospace"
-                               placeholder="default" @bind="newIngressNamespace" />
-                    </div>
-                    <div class="col-md-2">
-                        <label class="form-label small mb-1">Service</label>
-                        <input class="form-control form-control-sm font-monospace"
-                               placeholder="my-service" @bind="newIngressService" />
-                    </div>
-                    <div class="col-md-1">
-                        <label class="form-label small mb-1">Port</label>
-                        <input class="form-control form-control-sm" type="number"
-                               @bind="newIngressPort" />
-                    </div>
-                    <div class="col-md-3">
-                        <label class="form-label small mb-1">
-                            Device hostname <span class="text-muted">(optional)</span>
-                        </label>
-                        <input class="form-control form-control-sm font-monospace"
-                               placeholder="@(newIngressName)" @bind="newIngressHostname" />
-                        <div class="form-text" style="font-size:.7rem">
-                            Appears as <em>hostname.tailnet.ts.net</em>. Defaults to ingress name.
+                <EditForm Model="ingressForm" OnValidSubmit="CreateIngressAsync">
+                    <DataAnnotationsValidator />
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-2">
+                            <label class="form-label small mb-1">Ingress name</label>
+                            <InputText class="form-control form-control-sm font-monospace"
+                                       placeholder="my-app" @bind-Value="ingressForm.Name" />
+                            <ValidationMessage For="() => ingressForm.Name" class="text-danger small" />
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small mb-1">Namespace</label>
+                            <InputText class="form-control form-control-sm font-monospace"
+                                       placeholder="default" @bind-Value="ingressForm.Namespace" />
+                            <ValidationMessage For="() => ingressForm.Namespace" class="text-danger small" />
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small mb-1">Service</label>
+                            <InputText class="form-control form-control-sm font-monospace"
+                                       placeholder="my-service" @bind-Value="ingressForm.ServiceName" />
+                            <ValidationMessage For="() => ingressForm.ServiceName" class="text-danger small" />
+                        </div>
+                        <div class="col-md-1">
+                            <label class="form-label small mb-1">Port</label>
+                            <InputNumber class="form-control form-control-sm" @bind-Value="ingressForm.Port" />
+                            <ValidationMessage For="() => ingressForm.Port" class="text-danger small" />
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small mb-1">
+                                Device hostname <span class="text-muted">(optional)</span>
+                            </label>
+                            <InputText class="form-control form-control-sm font-monospace"
+                                       placeholder="@ingressForm.Name" @bind-Value="ingressForm.Hostname" />
+                            <div class="form-text" style="font-size:.7rem">
+                                Appears as <em>hostname.tailnet.ts.net</em>. Defaults to ingress name.
+                            </div>
+                            <ValidationMessage For="() => ingressForm.Hostname" class="text-danger small" />
+                        </div>
+                        <div class="col-auto">
+                            <button type="submit" class="btn btn-sm btn-primary" disabled="@creatingIngress">
+                                @if (creatingIngress)
+                                {
+                                    <span class="spinner-border spinner-border-sm me-1"></span>
+                                }
+                                Create
+                            </button>
                         </div>
                     </div>
-                    <div class="col-auto">
-                        <button class="btn btn-sm btn-primary"
-                                @onclick="CreateIngressAsync"
-                                disabled="@(creatingIngress || string.IsNullOrWhiteSpace(newIngressName) || string.IsNullOrWhiteSpace(newIngressService))">
-                            @if (creatingIngress)
-                            {
-                                <span class="spinner-border spinner-border-sm me-1"></span>
-                            }
-                            Create
-                        </button>
-                    </div>
-                </div>
-                @if (ingressError is not null)
-                {
-                    <div class="alert alert-danger py-1 small mt-2 mb-0">@ingressError</div>
-                }
+                    @if (ingressError is not null)
+                    {
+                        <div class="alert alert-danger py-1 small mt-2 mb-0">@ingressError</div>
+                    }
+                </EditForm>
             </div>
         }
 
@@ -380,14 +387,39 @@ else
     private bool loadingIngresses;
     private List<TailscaleIngress> ingresses = [];
     private bool showCreateIngress;
-    private string newIngressName = "";
-    private string newIngressNamespace = "";
-    private string newIngressService = "";
-    private int newIngressPort = 80;
-    private string newIngressHostname = "";
+    private CreateIngressForm ingressForm = new();
     private bool creatingIngress;
     private string? ingressError;
     private string? confirmDeleteIngress;
+
+    private sealed class CreateIngressForm
+    {
+        [Required(ErrorMessage = "Ingress name is required.")]
+        [StringLength(63, MinimumLength = 1)]
+        [RegularExpression(@"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            ErrorMessage = "Lowercase letters, digits, and hyphens only (e.g. my-app).")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Namespace is required.")]
+        [StringLength(63, MinimumLength = 1)]
+        [RegularExpression(@"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            ErrorMessage = "Lowercase letters, digits, and hyphens only (e.g. default).")]
+        public string Namespace { get; set; } = "default";
+
+        [Required(ErrorMessage = "Service name is required.")]
+        [StringLength(63, MinimumLength = 1)]
+        [RegularExpression(@"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            ErrorMessage = "Lowercase letters, digits, and hyphens only (e.g. my-service).")]
+        public string ServiceName { get; set; } = "";
+
+        [Range(1, 65535, ErrorMessage = "Port must be between 1 and 65535.")]
+        public int Port { get; set; } = 80;
+
+        [StringLength(63)]
+        [RegularExpression(@"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            ErrorMessage = "Lowercase letters, digits, and hyphens only.")]
+        public string Hostname { get; set; } = "";
+    }
 
     private int exposedCount => allServices.Count(s => s.Exposed);
 
@@ -540,19 +572,20 @@ else
         try
         {
             string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
-            string? hostname = string.IsNullOrWhiteSpace(newIngressHostname) ? null : newIngressHostname.Trim();
+            string? hostname = string.IsNullOrWhiteSpace(ingressForm.Hostname) ? null : ingressForm.Hostname.Trim();
             await TailscaleService.CreateIngressAsync(
-                newIngressName.Trim(), newIngressNamespace.Trim(),
-                newIngressService.Trim(), newIngressPort, hostname, kubeconfig);
+                ingressForm.Name.Trim(), ingressForm.Namespace.Trim(),
+                ingressForm.ServiceName.Trim(), ingressForm.Port, hostname, kubeconfig);
 
             showCreateIngress = false;
-            newIngressName = newIngressNamespace = newIngressService = newIngressHostname = "";
-            newIngressPort = 80;
+            Toasts.Success($"Ingress '{ingressForm.Name.Trim()}' created.");
+            ingressForm = new CreateIngressForm();
             await LoadIngressesAsync();
         }
         catch (Exception ex)
         {
             ingressError = ex.Message;
+            Toasts.Error(ex.Message, "Failed to create ingress");
         }
         finally
         {

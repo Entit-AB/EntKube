@@ -1,3 +1,4 @@
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject DockerRegistryService DockerRegistryService
@@ -41,98 +42,101 @@ else
             @if (showAddForm)
             {
                 <div class="card-body">
-                    <div class="row g-2 mb-2">
-                        <div class="col-md-4">
-                            <label class="form-label small">Display Name</label>
-                            <input class="form-control form-control-sm" placeholder="e.g. Production ACR"
-                                   @bind="addName" @bind:event="oninput" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Registry Type</label>
-                            <select class="form-select form-select-sm" @bind="addType" @bind:after="OnAddTypeChanged">
-                                @foreach (DockerRegistryType t in Enum.GetValues<DockerRegistryType>())
-                                {
-                                    <option value="@t">@DockerRegistryService.TypeLabel(t)</option>
-                                }
-                            </select>
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">
-                                Registry Server
-                                @if (!string.IsNullOrEmpty(DockerRegistryService.DefaultServer(addType)))
-                                {
-                                    <span class="text-muted ms-1">(auto-filled)</span>
-                                }
-                            </label>
-                            <input class="form-control form-control-sm"
-                                   placeholder="@DockerRegistryService.ServerPlaceholder(addType)"
-                                   @bind="addServer" @bind:event="oninput"
-                                   readonly="@(!string.IsNullOrEmpty(DockerRegistryService.DefaultServer(addType)))" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Username</label>
-                            <input class="form-control form-control-sm"
-                                   placeholder="@(addType == DockerRegistryType.AzureContainerRegistry ? "Service principal ID" : "username")"
-                                   @bind="addUsername" @bind:event="oninput" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">
-                                Password / Token
-                                @if (addType == DockerRegistryType.AzureContainerRegistry)
-                                {
-                                    <span class="text-muted ms-1">or service principal secret</span>
-                                }
-                            </label>
-                            <input type="password" class="form-control form-control-sm"
-                                   @bind="addPassword" @bind:event="oninput" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Email <span class="text-muted">(optional)</span></label>
-                            <input class="form-control form-control-sm" placeholder="user@example.com"
-                                   @bind="addEmail" @bind:event="oninput" />
-                        </div>
-                        @if (ShowEnvScoping)
-                        {
+                    <EditForm Model="addForm" OnValidSubmit="AddCredential">
+                        <DataAnnotationsValidator />
+                        <div class="row g-2 mb-2">
                             <div class="col-md-4">
-                                <label class="form-label small" title="Bind this credential to a single environment, or leave it shared across all of the app's environments.">
-                                    Scope
-                                </label>
-                                <select class="form-select form-select-sm" @bind="addEnvironmentId">
-                                    <option value="@Guid.Empty">Shared across environments</option>
-                                    @foreach ((string name, Guid id) in EnvOptions)
+                                <label class="form-label small">Display Name</label>
+                                <InputText class="form-control form-control-sm" placeholder="e.g. Production ACR"
+                                           @bind-Value="addForm.Name" />
+                                <ValidationMessage For="() => addForm.Name" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Registry Type</label>
+                                <InputSelect class="form-select form-select-sm" @bind-Value="addForm.Type" @bind-Value:after="OnAddTypeChanged">
+                                    @foreach (DockerRegistryType t in Enum.GetValues<DockerRegistryType>())
                                     {
-                                        <option value="@id">@name only</option>
+                                        <option value="@t">@DockerRegistryService.TypeLabel(t)</option>
                                     }
-                                </select>
+                                </InputSelect>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">
+                                    Registry Server
+                                    @if (!string.IsNullOrEmpty(DockerRegistryService.DefaultServer(addForm.Type)))
+                                    {
+                                        <span class="text-muted ms-1">(auto-filled)</span>
+                                    }
+                                </label>
+                                <InputText class="form-control form-control-sm"
+                                           placeholder="@DockerRegistryService.ServerPlaceholder(addForm.Type)"
+                                           @bind-Value="addForm.Server"
+                                           readonly="@(!string.IsNullOrEmpty(DockerRegistryService.DefaultServer(addForm.Type)))" />
+                                <ValidationMessage For="() => addForm.Server" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Username</label>
+                                <InputText class="form-control form-control-sm"
+                                           placeholder="@(addForm.Type == DockerRegistryType.AzureContainerRegistry ? "Service principal ID" : "username")"
+                                           @bind-Value="addForm.Username" />
+                                <ValidationMessage For="() => addForm.Username" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">
+                                    Password / Token
+                                    @if (addForm.Type == DockerRegistryType.AzureContainerRegistry)
+                                    {
+                                        <span class="text-muted ms-1">or service principal secret</span>
+                                    }
+                                </label>
+                                <InputText type="password" class="form-control form-control-sm"
+                                           @bind-Value="addForm.Password" />
+                                <ValidationMessage For="() => addForm.Password" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Email <span class="text-muted">(optional)</span></label>
+                                <InputText class="form-control form-control-sm" placeholder="user@example.com"
+                                           @bind-Value="addForm.Email" />
+                                <ValidationMessage For="() => addForm.Email" class="text-danger small" />
+                            </div>
+                            @if (ShowEnvScoping)
+                            {
+                                <div class="col-md-4">
+                                    <label class="form-label small" title="Bind this credential to a single environment, or leave it shared across all of the app's environments.">
+                                        Scope
+                                    </label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="addEnvironmentId">
+                                        <option value="@Guid.Empty">Shared across environments</option>
+                                        @foreach ((string name, Guid id) in EnvOptions)
+                                        {
+                                            <option value="@id">@name only</option>
+                                        }
+                                    </InputSelect>
+                                </div>
+                            }
+                        </div>
+
+                        @if (addError is not null)
+                        {
+                            <div class="alert alert-danger py-1 small mb-2">
+                                <i class="bi bi-exclamation-triangle me-1"></i>@addError
                             </div>
                         }
-                    </div>
+                        @if (addSuccess is not null)
+                        {
+                            <div class="alert alert-success py-1 small mb-2">
+                                <i class="bi bi-check-circle me-1"></i>@addSuccess
+                            </div>
+                        }
 
-                    @if (addError is not null)
-                    {
-                        <div class="alert alert-danger py-1 small mb-2">
-                            <i class="bi bi-exclamation-triangle me-1"></i>@addError
+                        <div class="d-flex gap-1">
+                            <button type="submit" class="btn btn-sm btn-primary" disabled="@saving">
+                                @if (saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                <i class="bi bi-plus-lg me-1"></i>Add Credential
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="ResetAddForm">Cancel</button>
                         </div>
-                    }
-                    @if (addSuccess is not null)
-                    {
-                        <div class="alert alert-success py-1 small mb-2">
-                            <i class="bi bi-check-circle me-1"></i>@addSuccess
-                        </div>
-                    }
-
-                    <div class="d-flex gap-1">
-                        <button class="btn btn-sm btn-primary" @onclick="AddCredential"
-                                disabled="@(string.IsNullOrWhiteSpace(addName)
-                                           || string.IsNullOrWhiteSpace(addServer)
-                                           || string.IsNullOrWhiteSpace(addUsername)
-                                           || string.IsNullOrWhiteSpace(addPassword)
-                                           || saving)">
-                            @if (saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                            <i class="bi bi-plus-lg me-1"></i>Add Credential
-                        </button>
-                        <button class="btn btn-sm btn-outline-secondary" @onclick="ResetAddForm">Cancel</button>
-                    </div>
+                    </EditForm>
                 </div>
             }
         </div>
@@ -473,15 +477,35 @@ else
 
     // Add form
     private bool showAddForm;
-    private string addName = "";
-    private DockerRegistryType addType = DockerRegistryType.Generic;
-    private string addServer = "";
-    private string addUsername = "";
-    private string addPassword = "";
-    private string addEmail = "";
+    private AddCredentialForm addForm = new();
     private bool saving;
     private string? addError;
     private string? addSuccess;
+
+    private sealed class AddCredentialForm
+    {
+        [Required(ErrorMessage = "Display name is required.")]
+        [StringLength(100)]
+        public string Name { get; set; } = "";
+
+        public DockerRegistryType Type { get; set; } = DockerRegistryType.Generic;
+
+        [Required(ErrorMessage = "Registry server is required.")]
+        // Registry hosts are usually bare (quay.io, ghcr.io, myregistry.azurecr.io); an optional scheme/port/path is allowed too.
+        [RegularExpression(@"^(https?://)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:\d+)?(/.*)?$",
+            ErrorMessage = "Enter a registry host, e.g. registry.example.com.")]
+        public string Server { get; set; } = "";
+
+        [Required(ErrorMessage = "Username is required.")]
+        [StringLength(200)]
+        public string Username { get; set; } = "";
+
+        [Required(ErrorMessage = "Password or token is required.")]
+        public string Password { get; set; } = "";
+
+        [EmailAddress(ErrorMessage = "Enter a valid email address.")]
+        public string Email { get; set; } = "";
+    }
 
     // Reveal
     private Guid? revealedId;
@@ -579,15 +603,13 @@ else
 
     private void OnAddTypeChanged()
     {
-        string def = DockerRegistryService.DefaultServer(addType);
-        addServer = def; // auto-fill or clear
+        addForm.Server = DockerRegistryService.DefaultServer(addForm.Type); // auto-fill or clear
     }
 
     private void ResetAddForm()
     {
         showAddForm = false;
-        addName = addServer = addUsername = addPassword = addEmail = "";
-        addType = DockerRegistryType.Generic;
+        addForm = new AddCredentialForm();
         addError = addSuccess = null;
     }
 
@@ -602,17 +624,18 @@ else
             await DockerRegistryService.CreateAsync(
                 TenantId,
                 AppId == Guid.Empty ? null : AppId,
-                addName.Trim(),
-                addType,
-                addServer.Trim(),
-                addUsername.Trim(),
-                addPassword,
-                string.IsNullOrWhiteSpace(addEmail) ? null : addEmail.Trim(),
+                addForm.Name.Trim(),
+                addForm.Type,
+                addForm.Server.Trim(),
+                addForm.Username.Trim(),
+                addForm.Password,
+                string.IsNullOrWhiteSpace(addForm.Email) ? null : addForm.Email.Trim(),
                 environmentId: ShowEnvScoping && addEnvironmentId != Guid.Empty ? addEnvironmentId : null);
 
-            addSuccess = $"Credential '{addName.Trim()}' added.";
-            addName = addUsername = addPassword = addEmail = "";
-            // Keep form open so user can add another, but clear fields.
+            addSuccess = $"Credential '{addForm.Name.Trim()}' added.";
+            // Keep form open so user can add another to the same registry: clear the
+            // per-credential fields but preserve the selected Type and Server.
+            addForm.Name = addForm.Username = addForm.Password = addForm.Email = "";
             await LoadCredentials();
         }
         catch (Exception ex)

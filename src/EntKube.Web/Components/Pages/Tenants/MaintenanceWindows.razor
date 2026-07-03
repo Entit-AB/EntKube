@@ -1,9 +1,18 @@
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject IncidentService IncidentService
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject AuthenticationStateProvider AuthStateProvider
+@inject ToastService Toasts
+
+<ConfirmDialog Visible="@(pendingConfirm is not null)"
+               Message="@(pendingConfirm?.Message ?? "")"
+               ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+               IsBusy="confirmBusy"
+               OnConfirm="RunPendingConfirmAsync"
+               OnCancel="() => pendingConfirm = null" />
 
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h6 class="mb-0">Maintenance Windows</h6>
@@ -77,7 +86,9 @@ else
                         <td>
                             @if (!past)
                             {
-                                <button class="btn btn-sm btn-outline-danger" @onclick="() => Delete(w.Id)">
+                                <button class="btn btn-sm btn-outline-danger"
+                                        aria-label="@($"Delete maintenance window {w.Title}")"
+                                        @onclick='() => pendingConfirm = new PendingConfirm($"Delete the maintenance window \"{w.Title}\"? Alert suppression for its covered clusters will end. This cannot be undone.", "Delete window", () => Delete(w.Id))'>
                                     <span class="bi bi-trash"></span>
                                 </button>
                             }
@@ -97,42 +108,48 @@ else
             <button class="btn-close btn-sm" @onclick="() => showAdd = false"></button>
         </div>
         <div class="card-body">
-            <div class="row g-3">
-                <div class="col-12">
-                    <label class="form-label small">Title <span class="text-danger">*</span></label>
-                    <input class="form-control form-control-sm" @bind="newTitle" placeholder="e.g. Scheduled database maintenance" />
+            <EditForm Model="windowForm" OnValidSubmit="Save">
+                <DataAnnotationsValidator />
+                <div class="row g-3">
+                    <div class="col-12">
+                        <label class="form-label small">Title <span class="text-danger">*</span></label>
+                        <InputText class="form-control form-control-sm" @bind-Value="windowForm.Title" placeholder="e.g. Scheduled database maintenance" />
+                        <ValidationMessage For="() => windowForm.Title" class="text-danger small" />
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label small">Description</label>
+                        <InputTextArea class="form-control form-control-sm" rows="2" @bind-Value="windowForm.Description" placeholder="Optional details" />
+                        <ValidationMessage For="() => windowForm.Description" class="text-danger small" />
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">Cluster</label>
+                        <InputSelect class="form-select form-select-sm" @bind-Value="windowForm.ClusterId">
+                            <option value="">All clusters</option>
+                            @foreach (KubernetesCluster c in clusters)
+                            {
+                                <option value="@c.Id">@c.Name</option>
+                            }
+                        </InputSelect>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small">Start (local)</label>
+                        <InputDate Type="InputDateType.DateTimeLocal" class="form-control form-control-sm" @bind-Value="windowForm.StartsAt" />
+                        <ValidationMessage For="() => windowForm.StartsAt" class="text-danger small" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small">End (local)</label>
+                        <InputDate Type="InputDateType.DateTimeLocal" class="form-control form-control-sm" @bind-Value="windowForm.EndsAt" />
+                        <ValidationMessage For="() => windowForm.EndsAt" class="text-danger small" />
+                    </div>
                 </div>
-                <div class="col-12">
-                    <label class="form-label small">Description</label>
-                    <textarea class="form-control form-control-sm" rows="2" @bind="newDescription" placeholder="Optional details"></textarea>
+                <div class="mt-3 d-flex gap-2">
+                    <button type="submit" class="btn btn-sm btn-primary" disabled="@saving">
+                        @if (saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Save Window
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAdd = false">Cancel</button>
                 </div>
-                <div class="col-md-6">
-                    <label class="form-label small">Cluster</label>
-                    <select class="form-select form-select-sm" @bind="newClusterId">
-                        <option value="">All clusters</option>
-                        @foreach (KubernetesCluster c in clusters)
-                        {
-                            <option value="@c.Id">@c.Name</option>
-                        }
-                    </select>
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label small">Start (local)</label>
-                    <input class="form-control form-control-sm" type="datetime-local" @bind="newStartsAt" />
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label small">End (local)</label>
-                    <input class="form-control form-control-sm" type="datetime-local" @bind="newEndsAt" />
-                </div>
-            </div>
-            @if (!string.IsNullOrEmpty(formError))
-            {
-                <div class="alert alert-danger py-1 small mt-2 mb-0">@formError</div>
-            }
-            <div class="mt-3 d-flex gap-2">
-                <button class="btn btn-sm btn-primary" @onclick="Save">Save Window</button>
-                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAdd = false">Cancel</button>
-            </div>
+            </EditForm>
         </div>
     </div>
 }
@@ -144,13 +161,46 @@ else
     private List<MaintenanceWindow> activeWindows = [];
     private List<KubernetesCluster> clusters = [];
     private bool showAdd;
-    private string newTitle = "";
-    private string newDescription = "";
-    private string newClusterId = "";
-    private DateTime newStartsAt = DateTime.Now.AddMinutes(5);
-    private DateTime newEndsAt = DateTime.Now.AddHours(2);
-    private string? formError;
+    private bool saving;
+    private MaintenanceWindowForm windowForm = new();
     private string? currentUser;
+
+    private sealed class MaintenanceWindowForm : IValidatableObject
+    {
+        [Required(ErrorMessage = "Title is required.")]
+        [StringLength(200, MinimumLength = 1, ErrorMessage = "Title must be 1-200 characters.")]
+        public string Title { get; set; } = "";
+
+        [StringLength(2000, ErrorMessage = "Description must be 2000 characters or fewer.")]
+        public string? Description { get; set; }
+
+        public Guid? ClusterId { get; set; }
+
+        [Required]
+        public DateTime StartsAt { get; set; } = DateTime.Now.AddMinutes(5);
+
+        [Required]
+        public DateTime EndsAt { get; set; } = DateTime.Now.AddHours(2);
+
+        public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+        {
+            if (EndsAt <= StartsAt)
+                yield return new ValidationResult("End time must be after start time.", new[] { nameof(EndsAt) });
+        }
+    }
+
+    // A destructive action awaiting user confirmation.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -174,39 +224,49 @@ else
 
     private void ShowAdd()
     {
+        windowForm = new MaintenanceWindowForm();
         showAdd = true;
-        newTitle = "";
-        newDescription = "";
-        newClusterId = "";
-        newStartsAt = DateTime.Now.AddMinutes(5);
-        newEndsAt = DateTime.Now.AddHours(2);
-        formError = null;
     }
 
     private async Task Save()
     {
-        formError = null;
-        if (string.IsNullOrWhiteSpace(newTitle)) { formError = "Title is required."; return; }
-        if (newEndsAt <= newStartsAt) { formError = "End time must be after start time."; return; }
+        saving = true;
+        try
+        {
+            await IncidentService.CreateMaintenanceWindowAsync(
+                TenantId,
+                windowForm.Title.Trim(),
+                string.IsNullOrWhiteSpace(windowForm.Description) ? null : windowForm.Description.Trim(),
+                windowForm.ClusterId,
+                windowForm.StartsAt.ToUniversalTime(),
+                windowForm.EndsAt.ToUniversalTime(),
+                currentUser!);
 
-        Guid? clusterId = Guid.TryParse(newClusterId, out Guid cid) ? cid : null;
-
-        await IncidentService.CreateMaintenanceWindowAsync(
-            TenantId,
-            newTitle.Trim(),
-            string.IsNullOrWhiteSpace(newDescription) ? null : newDescription.Trim(),
-            clusterId,
-            newStartsAt.ToUniversalTime(),
-            newEndsAt.ToUniversalTime(),
-            currentUser!);
-
-        showAdd = false;
-        await Load();
+            showAdd = false;
+            await Load();
+            Toasts.Success($"Maintenance window \"{windowForm.Title.Trim()}\" scheduled.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to schedule maintenance window: {ex.Message}");
+        }
+        finally
+        {
+            saving = false;
+        }
     }
 
     private async Task Delete(Guid id)
     {
-        await IncidentService.DeleteMaintenanceWindowAsync(id);
-        await Load();
+        try
+        {
+            await IncidentService.DeleteMaintenanceWindowAsync(id);
+            await Load();
+            Toasts.Success("Maintenance window deleted.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete maintenance window: {ex.Message}");
+        }
     }
 }

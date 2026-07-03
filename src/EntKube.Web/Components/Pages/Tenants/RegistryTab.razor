@@ -31,14 +31,16 @@
         </div>
     </div>
 
-    <ul class="nav nav-tabs mb-3">
-        <li class="nav-item">
+    <ul class="nav nav-tabs mb-3" role="tablist" aria-label="Project sections">
+        <li class="nav-item" role="presentation">
             <button class="nav-link @(projectSubTab == "repos" ? "active" : "")"
-                    @onclick="@(() => SwitchProjectTab("repos"))">Repositories</button>
+                    @onclick="@(() => SwitchProjectTab("repos"))"
+                    role="tab" aria-selected="@(projectSubTab == "repos")" tabindex="@(projectSubTab == "repos" ? 0 : -1)">Repositories</button>
         </li>
-        <li class="nav-item">
+        <li class="nav-item" role="presentation">
             <button class="nav-link @(projectSubTab == "webhooks" ? "active" : "")"
-                    @onclick="@(() => SwitchProjectTab("webhooks"))">Webhooks</button>
+                    @onclick="@(() => SwitchProjectTab("webhooks"))"
+                    role="tab" aria-selected="@(projectSubTab == "webhooks")" tabindex="@(projectSubTab == "webhooks" ? 0 : -1)">Webhooks</button>
         </li>
     </ul>
 
@@ -272,7 +274,7 @@
                                 }
                                 else
                                 {
-                                    <button class="btn btn-sm btn-outline-danger"
+                                    <button class="btn btn-sm btn-outline-danger" aria-label="Delete webhook"
                                             @onclick="() => confirmDeleteWebhook = wh.Id">
                                         <i class="bi bi-trash"></i>
                                     </button>
@@ -334,12 +336,13 @@ else if (selectedHarbor is not null)
     }
     else
     {
-        <ul class="nav nav-tabs mb-3 flex-wrap">
+        <ul class="nav nav-tabs mb-3 flex-wrap" role="tablist" aria-label="Harbor instance sections">
             @foreach ((string id, string label) in InstanceTabs)
             {
-                <li class="nav-item">
+                <li class="nav-item" role="presentation">
                     <button class="nav-link @(instanceTab == id ? "active" : "")"
-                            @onclick="() => SwitchTab(id)">@label</button>
+                            @onclick="() => SwitchTab(id)"
+                            role="tab" aria-selected="@(instanceTab == id)" tabindex="@(instanceTab == id ? 0 : -1)">@label</button>
                 </li>
             }
         </ul>
@@ -500,7 +503,7 @@ else if (selectedHarbor is not null)
                                         }
                                         <button class="btn btn-sm btn-outline-danger"
                                                 @onclick="() => confirmDeleteProject = project.Name"
-                                                title="Delete project">
+                                                title="Delete project" aria-label="Delete project">
                                             <i class="bi bi-trash"></i>
                                         </button>
                                     }
@@ -677,7 +680,7 @@ else if (selectedHarbor is not null)
                                     </div>
                                     <div class="d-flex gap-1">
                                         <button class="btn btn-sm btn-outline-secondary" @onclick="() => PingRegistry(reg.Id)"
-                                                disabled="@isPinging" title="Test connectivity">
+                                                disabled="@isPinging" title="Test connectivity" aria-label="Test connectivity">
                                             @if (isPinging)
                                             {
                                                 <span class="spinner-border spinner-border-sm"></span>
@@ -696,7 +699,7 @@ else if (selectedHarbor is not null)
                                         }
                                         else
                                         {
-                                            <button class="btn btn-sm btn-outline-danger"
+                                            <button class="btn btn-sm btn-outline-danger" aria-label="Delete registry"
                                                     @onclick="() => confirmDeleteRegistry = reg.Id">
                                                 <i class="bi bi-trash"></i>
                                             </button>
@@ -862,7 +865,7 @@ else if (selectedHarbor is not null)
                                     <div class="d-flex gap-1">
                                         <button class="btn btn-sm btn-outline-secondary"
                                                 @onclick="() => TriggerReplication(repl.Id)"
-                                                disabled="@isTriggering" title="Run now">
+                                                disabled="@isTriggering" title="Run now" aria-label="Run now">
                                             @if (isTriggering)
                                             {
                                                 <span class="spinner-border spinner-border-sm"></span>
@@ -881,7 +884,7 @@ else if (selectedHarbor is not null)
                                         }
                                         else
                                         {
-                                            <button class="btn btn-sm btn-outline-danger"
+                                            <button class="btn btn-sm btn-outline-danger" aria-label="Delete replication policy"
                                                     @onclick="() => confirmDeleteReplication = repl.Id">
                                                 <i class="bi bi-trash"></i>
                                             </button>
@@ -1048,7 +1051,7 @@ else if (selectedHarbor is not null)
                                     {
                                         <button class="btn btn-sm btn-outline-danger"
                                                 @onclick="() => confirmDeleteRobot = robot.Id"
-                                                title="Delete robot">
+                                                title="Delete robot" aria-label="Delete robot">
                                             <i class="bi bi-trash"></i>
                                         </button>
                                     }

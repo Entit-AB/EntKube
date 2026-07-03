@@ -1,8 +1,10 @@
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject RabbitMQService RabbitMQService
 @inject StorageService StorageService
 @inject TenantService TenantService
+@inject ToastService Toasts
 
 @* ===========================================================================
    Messaging Tab — RabbitMQ cluster management and topology.
@@ -71,7 +73,7 @@
             <div class="alert @(discoverIsError ? "alert-danger" : "alert-info") py-2 small d-flex align-items-center">
                 <i class="bi @(discoverIsError ? "bi-exclamation-triangle" : "bi-info-circle") me-2"></i>
                 <span>@discoverMessage</span>
-                <button type="button" class="btn-close btn-close-sm ms-auto" @onclick="() => discoverMessage = null"></button>
+                <button type="button" class="btn-close btn-close-sm ms-auto" aria-label="Close" @onclick="() => discoverMessage = null"></button>
             </div>
         }
 
@@ -80,74 +82,83 @@
             <div class="card shadow-sm mb-3 border-secondary">
                 <div class="card-header bg-secondary bg-opacity-10 d-flex align-items-center justify-content-between">
                     <h6 class="mb-0"><i class="bi bi-plus-circle me-2"></i>New RabbitMQ Cluster</h6>
-                    <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CancelCreate"><i class="bi bi-x-lg"></i></button>
+                    <button class="btn btn-sm btn-outline-secondary border-0" aria-label="Close" @onclick="CancelCreate"><i class="bi bi-x-lg"></i></button>
                 </div>
                 <div class="card-body">
-                    <div class="row g-3">
-                        <div class="col-md-6">
-                            <label class="form-label small">Cluster Name</label>
-                            <input class="form-control form-control-sm" @bind="createName" placeholder="rabbitmq-prod" />
-                            <div class="form-text small">DNS-safe, max 63 chars.</div>
+                    <EditForm Model="createModel" OnValidSubmit="CreateCluster">
+                        <DataAnnotationsValidator />
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label class="form-label small">Cluster Name</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="createModel.Name" placeholder="rabbitmq-prod" />
+                                <div class="form-text small">DNS-safe, max 63 chars.</div>
+                                <ValidationMessage For="() => createModel.Name" class="text-danger small" />
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">Kubernetes Cluster</label>
+                                <InputSelect class="form-select form-select-sm" @bind-Value="createModel.K8sClusterId">
+                                    <option value="">Select cluster...</option>
+                                    @foreach (KubernetesCluster k in allK8sClusters)
+                                    {
+                                        <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
+                                    }
+                                </InputSelect>
+                                <ValidationMessage For="() => createModel.K8sClusterId" class="text-danger small" />
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">Namespace</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="createModel.Namespace" placeholder="rabbitmq" />
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">RabbitMQ Version</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="createModel.Version" placeholder="3.13" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Replicas</label>
+                                <InputNumber class="form-control form-control-sm" @bind-Value="createModel.Replicas" min="1" max="9" />
+                                <ValidationMessage For="() => createModel.Replicas" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Storage Size</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="createModel.StorageSize" placeholder="10Gi" />
+                                <ValidationMessage For="() => createModel.StorageSize" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Storage Class <span class="text-muted">(optional)</span></label>
+                                <InputText class="form-control form-control-sm" @bind-Value="createModel.StorageClass" placeholder="default" />
+                            </div>
+                            <div class="col-md-8">
+                                <label class="form-label small">S3 Storage Link <span class="text-muted">(optional, for backups)</span></label>
+                                <InputSelect class="form-select form-select-sm" @bind-Value="createModel.StorageLinkId">
+                                    <option value="">No backup storage</option>
+                                    @foreach (StorageLink sl in storageLinks)
+                                    {
+                                        <option value="@sl.Id">@sl.Name (@sl.BucketName)</option>
+                                    }
+                                </InputSelect>
+                            </div>
                         </div>
-                        <div class="col-md-6">
-                            <label class="form-label small">Kubernetes Cluster</label>
-                            <select class="form-select form-select-sm" @bind="createK8sClusterId">
-                                <option value="@Guid.Empty">Select cluster...</option>
-                                @foreach (KubernetesCluster k in allK8sClusters)
-                                {
-                                    <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
-                                }
-                            </select>
+                        @if (!string.IsNullOrEmpty(createError))
+                        {
+                            <div class="alert alert-danger mt-3 mb-0 py-2 small">@createError</div>
+                        }
+                        <div class="mt-3 d-flex gap-2">
+                            <button type="submit" class="btn btn-sm btn-primary" disabled="@creating">
+                                @if (creating) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelCreate">Cancel</button>
                         </div>
-                        <div class="col-md-6">
-                            <label class="form-label small">Namespace</label>
-                            <input class="form-control form-control-sm" @bind="createNamespace" placeholder="rabbitmq" />
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label small">RabbitMQ Version</label>
-                            <input class="form-control form-control-sm" @bind="createVersion" placeholder="3.13" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Replicas</label>
-                            <input type="number" class="form-control form-control-sm" @bind="createReplicas" min="1" max="9" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Storage Size</label>
-                            <input class="form-control form-control-sm" @bind="createStorageSize" placeholder="10Gi" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Storage Class <span class="text-muted">(optional)</span></label>
-                            <input class="form-control form-control-sm" @bind="createStorageClass" placeholder="default" />
-                        </div>
-                        <div class="col-md-8">
-                            <label class="form-label small">S3 Storage Link <span class="text-muted">(optional, for backups)</span></label>
-                            <select class="form-select form-select-sm" @bind="createStorageLinkId">
-                                <option value="@Guid.Empty">No backup storage</option>
-                                @foreach (StorageLink sl in storageLinks)
-                                {
-                                    <option value="@sl.Id">@sl.Name (@sl.BucketName)</option>
-                                }
-                            </select>
-                        </div>
-                    </div>
-                    @if (!string.IsNullOrEmpty(createError))
-                    {
-                        <div class="alert alert-danger mt-3 mb-0 py-2 small">@createError</div>
-                    }
-                    <div class="mt-3 d-flex gap-2">
-                        <button class="btn btn-sm btn-primary" @onclick="CreateCluster" disabled="@creating">
-                            @if (creating) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                            Create
-                        </button>
-                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelCreate">Cancel</button>
-                    </div>
+                    </EditForm>
                 </div>
             </div>
         }
 
         @if (clusters.Count == 0)
         {
-            <div class="text-muted small py-3 ps-1">No RabbitMQ clusters provisioned for this tenant.</div>
+            <EmptyState Icon="bi-collection" Title="No clusters yet"
+                        Message="No RabbitMQ clusters provisioned for this tenant."
+                        ActionLabel="Create cluster" OnAction="ShowCreateForm" />
         }
         else
         {
@@ -173,7 +184,7 @@
                                 <i class="bi bi-cloud me-1"></i>Backups
                             </span>
                         }
-                        <button class="btn btn-sm btn-link text-warning p-0 ms-auto" title="Edit cluster"
+                        <button class="btn btn-sm btn-link text-warning p-0 ms-auto" title="Edit cluster" aria-label="Edit cluster"
                                 @onclick="() => ShowClusterEdit(cluster)" @onclick:stopPropagation="true">
                             <i class="bi bi-pencil"></i>
                         </button>
@@ -190,12 +201,13 @@
                     @if (expanded)
                     {
                         <div class="card-body pt-3">
-                            <ul class="nav nav-pills mb-3 gap-1 flex-wrap">
+                            <ul class="nav nav-pills mb-3 gap-1 flex-wrap" role="tablist" aria-label="RabbitMQ cluster sections">
                                 @foreach (string tab in new[] { "vhosts", "queues", "exchanges", "routing", "users", "app-links", "backup", "credentials", "metrics" })
                                 {
-                                    <li class="nav-item">
+                                    <li class="nav-item" role="presentation">
                                         <button class="nav-link @(clusterTab == tab ? "active" : "")"
-                                                @onclick="() => SetClusterTab(tab, cluster.Id)">
+                                                @onclick="() => SetClusterTab(tab, cluster.Id)"
+                                                role="tab" aria-selected="@(clusterTab == tab)" tabindex="@(clusterTab == tab ? 0 : -1)">
                                             @TabLabel(tab)
                                         </button>
                                     </li>
@@ -206,7 +218,7 @@
                             {
                                 <div class="alert alert-danger py-2 small mb-3">
                                     <i class="bi bi-exclamation-triangle me-1"></i>@topologyError
-                                    <button type="button" class="btn-close float-end" @onclick="() => topologyError = null"></button>
+                                    <button type="button" class="btn-close float-end" aria-label="Close" @onclick="() => topologyError = null"></button>
                                 </div>
                             }
 
@@ -224,19 +236,23 @@
                                 {
                                     <div class="card border-secondary mb-3">
                                         <div class="card-body py-2">
-                                            <div class="row g-2 align-items-end">
-                                                <div class="col">
-                                                    <label class="form-label small">Vhost Path</label>
-                                                    <input class="form-control form-control-sm" @bind="newVhostName" placeholder="/my-app" />
-                                                    <div class="form-text small">Use "/" for the default vhost or "/path" for a named vhost.</div>
+                                            <EditForm Model="vhostModel" OnValidSubmit="() => CreateVhost(cluster)">
+                                                <DataAnnotationsValidator />
+                                                <div class="row g-2 align-items-end">
+                                                    <div class="col">
+                                                        <label class="form-label small">Vhost Path</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="vhostModel.Name" placeholder="/my-app" />
+                                                        <div class="form-text small">Use "/" for the default vhost or "/path" for a named vhost.</div>
+                                                        <ValidationMessage For="() => vhostModel.Name" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-auto">
+                                                        <button type="submit" class="btn btn-sm btn-primary" disabled="@submitting">
+                                                            @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
+                                                        </button>
+                                                        <button type="button" class="btn btn-sm btn-outline-secondary ms-1" @onclick="() => showVhostForm = false">Cancel</button>
+                                                    </div>
                                                 </div>
-                                                <div class="col-auto">
-                                                    <button class="btn btn-sm btn-primary" @onclick="() => CreateVhost(cluster)" disabled="@submitting">
-                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
-                                                    </button>
-                                                    <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="() => showVhostForm = false">Cancel</button>
-                                                </div>
-                                            </div>
+                                            </EditForm>
                                         </div>
                                     </div>
                                 }
@@ -247,7 +263,7 @@
                                 }
                                 else if (vhosts.Count == 0)
                                 {
-                                    <p class="text-muted small">No vhosts managed via topology operator yet.</p>
+                                    <EmptyState Icon="bi-hdd-rack" Title="No vhosts" Message="No vhosts managed via the topology operator yet." />
                                 }
                                 else
                                 {
@@ -260,7 +276,7 @@
                                                     <td class="align-middle fw-semibold">@v.VhostName</td>
                                                     <td class="align-middle text-muted font-monospace">@v.K8sName</td>
                                                     <td class="align-middle text-end">
-                                                        <button class="btn btn-sm btn-outline-danger" title="Delete"
+                                                        <button class="btn btn-sm btn-outline-danger" title="Delete" aria-label="@($"Delete vhost {v.VhostName}")"
                                                                 @onclick='() => PrepareCascadeDelete(cluster, "vhost", v.K8sName, v.VhostName, v.VhostName)'>
                                                             <i class="bi bi-trash"></i>
                                                         </button>
@@ -286,42 +302,47 @@
                                 {
                                     <div class="card border-secondary mb-3">
                                         <div class="card-body py-2">
-                                            <div class="row g-2">
-                                                <div class="col-md-5">
-                                                    <label class="form-label small">Queue Name</label>
-                                                    <input class="form-control form-control-sm" @bind="newQueueName" placeholder="orders.created" />
-                                                </div>
-                                                <div class="col-md-3">
-                                                    <label class="form-label small">Vhost</label>
-                                                    <input class="form-control form-control-sm" @bind="newQueueVhost" placeholder="/" />
-                                                </div>
-                                                <div class="col-md-2">
-                                                    <label class="form-label small">Type</label>
-                                                    <select class="form-select form-select-sm" @bind="newQueueType">
-                                                        <option value="quorum">Quorum</option>
-                                                        <option value="classic">Classic</option>
-                                                        <option value="stream">Stream</option>
-                                                    </select>
-                                                </div>
-                                                <div class="col-md-2 d-flex align-items-end gap-2">
-                                                    <div class="form-check form-check-inline">
-                                                        <input class="form-check-input" type="checkbox" @bind="newQueueDurable" />
-                                                        <label class="form-check-label small">Durable</label>
+                                            <EditForm Model="queueModel" OnValidSubmit="() => CreateQueue(cluster)">
+                                                <DataAnnotationsValidator />
+                                                <div class="row g-2">
+                                                    <div class="col-md-5">
+                                                        <label class="form-label small">Queue Name</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="queueModel.Name" placeholder="orders.created" />
+                                                        <ValidationMessage For="() => queueModel.Name" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small">Vhost</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="queueModel.Vhost" placeholder="/" />
+                                                        <ValidationMessage For="() => queueModel.Vhost" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <label class="form-label small">Type</label>
+                                                        <InputSelect class="form-select form-select-sm" @bind-Value="queueModel.QueueType">
+                                                            <option value="quorum">Quorum</option>
+                                                            <option value="classic">Classic</option>
+                                                            <option value="stream">Stream</option>
+                                                        </InputSelect>
+                                                    </div>
+                                                    <div class="col-md-2 d-flex align-items-end gap-2">
+                                                        <div class="form-check form-check-inline">
+                                                            <InputCheckbox class="form-check-input" @bind-Value="queueModel.Durable" />
+                                                            <label class="form-check-label small">Durable</label>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-12 d-flex gap-2">
+                                                        <button type="submit" class="btn btn-sm btn-primary" disabled="@submitting">
+                                                            @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
+                                                        </button>
+                                                        <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showQueueForm = false">Cancel</button>
                                                     </div>
                                                 </div>
-                                                <div class="col-12 d-flex gap-2">
-                                                    <button class="btn btn-sm btn-primary" @onclick="() => CreateQueue(cluster)" disabled="@submitting">
-                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
-                                                    </button>
-                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showQueueForm = false">Cancel</button>
-                                                </div>
-                                            </div>
+                                            </EditForm>
                                         </div>
                                     </div>
                                 }
 
                                 @if (loadingTopology) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
-                                else if (queues.Count == 0) { <p class="text-muted small">No queues yet.</p> }
+                                else if (queues.Count == 0) { <EmptyState Icon="bi-stack" Title="No queues" Message="No queues yet." /> }
                                 else
                                 {
                                     <table class="table table-sm table-hover small">
@@ -339,7 +360,7 @@
                                                                 @onclick="() => PrepareAppLink(cluster, q.QueueName, null, q.Vhost)">
                                                             <i class="bi bi-link-45deg me-1"></i>Link to App
                                                         </button>
-                                                        <button class="btn btn-sm btn-outline-danger" title="Delete"
+                                                        <button class="btn btn-sm btn-outline-danger" title="Delete" aria-label="@($"Delete queue {q.QueueName}")"
                                                                 @onclick='() => PrepareCascadeDelete(cluster, "queue", q.K8sName, q.QueueName, q.Vhost)'>
                                                             <i class="bi bi-trash"></i>
                                                         </button>
@@ -365,43 +386,48 @@
                                 {
                                     <div class="card border-secondary mb-3">
                                         <div class="card-body py-2">
-                                            <div class="row g-2">
-                                                <div class="col-md-5">
-                                                    <label class="form-label small">Exchange Name</label>
-                                                    <input class="form-control form-control-sm" @bind="newExchangeName" placeholder="orders" />
-                                                </div>
-                                                <div class="col-md-3">
-                                                    <label class="form-label small">Vhost</label>
-                                                    <input class="form-control form-control-sm" @bind="newExchangeVhost" placeholder="/" />
-                                                </div>
-                                                <div class="col-md-2">
-                                                    <label class="form-label small">Type</label>
-                                                    <select class="form-select form-select-sm" @bind="newExchangeType">
-                                                        <option value="direct">Direct</option>
-                                                        <option value="fanout">Fanout</option>
-                                                        <option value="topic">Topic</option>
-                                                        <option value="headers">Headers</option>
-                                                    </select>
-                                                </div>
-                                                <div class="col-md-2 d-flex align-items-end">
-                                                    <div class="form-check">
-                                                        <input class="form-check-input" type="checkbox" @bind="newExchangeDurable" />
-                                                        <label class="form-check-label small">Durable</label>
+                                            <EditForm Model="exchangeModel" OnValidSubmit="() => CreateExchange(cluster)">
+                                                <DataAnnotationsValidator />
+                                                <div class="row g-2">
+                                                    <div class="col-md-5">
+                                                        <label class="form-label small">Exchange Name</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="exchangeModel.Name" placeholder="orders" />
+                                                        <ValidationMessage For="() => exchangeModel.Name" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small">Vhost</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="exchangeModel.Vhost" placeholder="/" />
+                                                        <ValidationMessage For="() => exchangeModel.Vhost" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <label class="form-label small">Type</label>
+                                                        <InputSelect class="form-select form-select-sm" @bind-Value="exchangeModel.ExchangeType">
+                                                            <option value="direct">Direct</option>
+                                                            <option value="fanout">Fanout</option>
+                                                            <option value="topic">Topic</option>
+                                                            <option value="headers">Headers</option>
+                                                        </InputSelect>
+                                                    </div>
+                                                    <div class="col-md-2 d-flex align-items-end">
+                                                        <div class="form-check">
+                                                            <InputCheckbox class="form-check-input" @bind-Value="exchangeModel.Durable" />
+                                                            <label class="form-check-label small">Durable</label>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-12 d-flex gap-2">
+                                                        <button type="submit" class="btn btn-sm btn-primary" disabled="@submitting">
+                                                            @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
+                                                        </button>
+                                                        <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showExchangeForm = false">Cancel</button>
                                                     </div>
                                                 </div>
-                                                <div class="col-12 d-flex gap-2">
-                                                    <button class="btn btn-sm btn-primary" @onclick="() => CreateExchange(cluster)" disabled="@submitting">
-                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
-                                                    </button>
-                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showExchangeForm = false">Cancel</button>
-                                                </div>
-                                            </div>
+                                            </EditForm>
                                         </div>
                                     </div>
                                 }
 
                                 @if (loadingTopology) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
-                                else if (exchanges.Count == 0) { <p class="text-muted small">No exchanges yet.</p> }
+                                else if (exchanges.Count == 0) { <EmptyState Icon="bi-arrow-left-right" Title="No exchanges" Message="No exchanges yet." /> }
                                 else
                                 {
                                     <table class="table table-sm table-hover small">
@@ -419,7 +445,7 @@
                                                                 @onclick="() => PrepareAppLink(cluster, null, ex.ExchangeName, ex.Vhost)">
                                                             <i class="bi bi-link-45deg me-1"></i>Link to App
                                                         </button>
-                                                        <button class="btn btn-sm btn-outline-danger" title="Delete"
+                                                        <button class="btn btn-sm btn-outline-danger" title="Delete" aria-label="@($"Delete exchange {ex.ExchangeName}")"
                                                                 @onclick='() => PrepareCascadeDelete(cluster, "exchange", ex.K8sName, ex.ExchangeName, ex.Vhost)'>
                                                             <i class="bi bi-trash"></i>
                                                         </button>
@@ -445,43 +471,49 @@
                                 {
                                     <div class="card border-secondary mb-3">
                                         <div class="card-body py-2">
-                                            <div class="row g-2">
-                                                <div class="col-md-3">
-                                                    <label class="form-label small">Vhost</label>
-                                                    <input class="form-control form-control-sm" @bind="newBindingVhost" placeholder="/" />
+                                            <EditForm Model="bindingModel" OnValidSubmit="() => CreateRoutingBinding(cluster)">
+                                                <DataAnnotationsValidator />
+                                                <div class="row g-2">
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small">Vhost</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="bindingModel.Vhost" placeholder="/" />
+                                                        <ValidationMessage For="() => bindingModel.Vhost" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small">Source Exchange</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="bindingModel.Source" placeholder="orders" />
+                                                        <ValidationMessage For="() => bindingModel.Source" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small">Destination</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="bindingModel.Destination" placeholder="orders.created" />
+                                                        <ValidationMessage For="() => bindingModel.Destination" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-1">
+                                                        <label class="form-label small">Type</label>
+                                                        <InputSelect class="form-select form-select-sm" @bind-Value="bindingModel.DestinationType">
+                                                            <option value="queue">Queue</option>
+                                                            <option value="exchange">Exchange</option>
+                                                        </InputSelect>
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <label class="form-label small">Routing Key</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="bindingModel.RoutingKey" placeholder="created" />
+                                                    </div>
+                                                    <div class="col-12 d-flex gap-2">
+                                                        <button type="submit" class="btn btn-sm btn-primary" disabled="@submitting">
+                                                            @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
+                                                        </button>
+                                                        <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showRoutingForm = false">Cancel</button>
+                                                    </div>
                                                 </div>
-                                                <div class="col-md-3">
-                                                    <label class="form-label small">Source Exchange</label>
-                                                    <input class="form-control form-control-sm" @bind="newBindingSource" placeholder="orders" />
-                                                </div>
-                                                <div class="col-md-3">
-                                                    <label class="form-label small">Destination</label>
-                                                    <input class="form-control form-control-sm" @bind="newBindingDest" placeholder="orders.created" />
-                                                </div>
-                                                <div class="col-md-1">
-                                                    <label class="form-label small">Type</label>
-                                                    <select class="form-select form-select-sm" @bind="newBindingDestType">
-                                                        <option value="queue">Queue</option>
-                                                        <option value="exchange">Exchange</option>
-                                                    </select>
-                                                </div>
-                                                <div class="col-md-2">
-                                                    <label class="form-label small">Routing Key</label>
-                                                    <input class="form-control form-control-sm" @bind="newBindingRoutingKey" placeholder="created" />
-                                                </div>
-                                                <div class="col-12 d-flex gap-2">
-                                                    <button class="btn btn-sm btn-primary" @onclick="() => CreateRoutingBinding(cluster)" disabled="@submitting">
-                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
-                                                    </button>
-                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showRoutingForm = false">Cancel</button>
-                                                </div>
-                                            </div>
+                                            </EditForm>
                                         </div>
                                     </div>
                                 }
 
                                 @if (loadingTopology) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
-                                else if (routingBindings.Count == 0) { <p class="text-muted small">No routing bindings yet.</p> }
+                                else if (routingBindings.Count == 0) { <EmptyState Icon="bi-signpost-split" Title="No bindings" Message="No routing bindings yet." /> }
                                 else
                                 {
                                     <table class="table table-sm table-hover small">
@@ -497,7 +529,7 @@
                                                     <td class="align-middle font-monospace text-muted">@rb.RoutingKey</td>
                                                     <td class="align-middle text-muted">@rb.Vhost</td>
                                                     <td class="align-middle text-end">
-                                                        <button class="btn btn-sm btn-outline-danger" title="Delete"
+                                                        <button class="btn btn-sm btn-outline-danger" title="Delete" aria-label="Delete binding"
                                                                 @onclick='() => PrepareCascadeDelete(cluster, "binding", rb.K8sName, $"{rb.Source} → {rb.Destination}", rb.Vhost)'>
                                                             <i class="bi bi-trash"></i>
                                                         </button>
@@ -523,33 +555,38 @@
                                 {
                                     <div class="card border-secondary mb-3">
                                         <div class="card-body py-2">
-                                            <div class="row g-2">
-                                                <div class="col-md-4">
-                                                    <label class="form-label small">Username</label>
-                                                    <input class="form-control form-control-sm" @bind="newUsername" placeholder="app-user" />
+                                            <EditForm Model="userModel" OnValidSubmit="() => CreateUser(cluster)">
+                                                <DataAnnotationsValidator />
+                                                <div class="row g-2">
+                                                    <div class="col-md-4">
+                                                        <label class="form-label small">Username</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="userModel.Username" placeholder="app-user" />
+                                                        <ValidationMessage For="() => userModel.Username" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-4">
+                                                        <label class="form-label small">Password</label>
+                                                        <InputText type="password" class="form-control form-control-sm" @bind-Value="userModel.Password" />
+                                                        <ValidationMessage For="() => userModel.Password" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-4">
+                                                        <label class="form-label small">Tags (comma-separated)</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="userModel.Tags" placeholder="monitoring,management" />
+                                                        <div class="form-text small">management, monitoring, administrator, policymaker</div>
+                                                    </div>
+                                                    <div class="col-12 d-flex gap-2">
+                                                        <button type="submit" class="btn btn-sm btn-primary" disabled="@submitting">
+                                                            @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
+                                                        </button>
+                                                        <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showUserForm = false">Cancel</button>
+                                                    </div>
                                                 </div>
-                                                <div class="col-md-4">
-                                                    <label class="form-label small">Password</label>
-                                                    <input type="password" class="form-control form-control-sm" @bind="newUserPassword" />
-                                                </div>
-                                                <div class="col-md-4">
-                                                    <label class="form-label small">Tags (comma-separated)</label>
-                                                    <input class="form-control form-control-sm" @bind="newUserTags" placeholder="monitoring,management" />
-                                                    <div class="form-text small">management, monitoring, administrator, policymaker</div>
-                                                </div>
-                                                <div class="col-12 d-flex gap-2">
-                                                    <button class="btn btn-sm btn-primary" @onclick="() => CreateUser(cluster)" disabled="@submitting">
-                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Create
-                                                    </button>
-                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showUserForm = false">Cancel</button>
-                                                </div>
-                                            </div>
+                                            </EditForm>
                                         </div>
                                     </div>
                                 }
 
                                 @if (loadingTopology) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
-                                else if (users.Count == 0) { <p class="text-muted small">No topology-managed users yet.</p> }
+                                else if (users.Count == 0) { <EmptyState Icon="bi-person-badge" Title="No users" Message="No topology-managed users yet." /> }
                                 else
                                 {
                                     <table class="table table-sm table-hover small">
@@ -586,30 +623,37 @@
                                             <i class="bi bi-shield-check me-1"></i>Set Permissions — @permissionTargetUser
                                         </div>
                                         <div class="card-body py-2">
-                                            <div class="row g-2">
-                                                <div class="col-md-3">
-                                                    <label class="form-label small">Vhost</label>
-                                                    <input class="form-control form-control-sm" @bind="permVhost" placeholder="/" />
+                                            <EditForm Model="permissionModel" OnValidSubmit="() => SetPermission(cluster)">
+                                                <DataAnnotationsValidator />
+                                                <div class="row g-2">
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small">Vhost</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="permissionModel.Vhost" placeholder="/" />
+                                                        <ValidationMessage For="() => permissionModel.Vhost" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small">Configure (regex)</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="permissionModel.Configure" placeholder=".*" />
+                                                        <ValidationMessage For="() => permissionModel.Configure" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small">Write (regex)</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="permissionModel.Write" placeholder=".*" />
+                                                        <ValidationMessage For="() => permissionModel.Write" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small">Read (regex)</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="permissionModel.Read" placeholder=".*" />
+                                                        <ValidationMessage For="() => permissionModel.Read" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-12 d-flex gap-2">
+                                                        <button type="submit" class="btn btn-sm btn-warning" disabled="@submitting">
+                                                            @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Apply
+                                                        </button>
+                                                        <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => { showPermissionForm = false; }">Cancel</button>
+                                                    </div>
                                                 </div>
-                                                <div class="col-md-3">
-                                                    <label class="form-label small">Configure (regex)</label>
-                                                    <input class="form-control form-control-sm" @bind="permConfigure" placeholder=".*" />
-                                                </div>
-                                                <div class="col-md-3">
-                                                    <label class="form-label small">Write (regex)</label>
-                                                    <input class="form-control form-control-sm" @bind="permWrite" placeholder=".*" />
-                                                </div>
-                                                <div class="col-md-3">
-                                                    <label class="form-label small">Read (regex)</label>
-                                                    <input class="form-control form-control-sm" @bind="permRead" placeholder=".*" />
-                                                </div>
-                                                <div class="col-12 d-flex gap-2">
-                                                    <button class="btn btn-sm btn-warning" @onclick="() => SetPermission(cluster)" disabled="@submitting">
-                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Apply
-                                                    </button>
-                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => { showPermissionForm = false; }">Cancel</button>
-                                                </div>
-                                            </div>
+                                            </EditForm>
                                         </div>
                                     </div>
                                 }
@@ -639,46 +683,52 @@
                                                 A dedicated RabbitMQ user with full access to the chosen vhost will be automatically
                                                 created and its credentials stored in the vault, then synced into the K8s secret below.
                                             </div>
-                                            <div class="row g-2">
-                                                <div class="col-md-4">
-                                                    <label class="form-label small">App Deployment</label>
-                                                    <select class="form-select form-select-sm" @bind="linkAppDeploymentId">
-                                                        <option value="@Guid.Empty">Select deployment...</option>
-                                                        @foreach (AppDeployment dep in allDeployments)
-                                                        {
-                                                            <option value="@dep.Id">@dep.App.Customer.Name / @dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
-                                                        }
-                                                    </select>
+                                            <EditForm Model="appLinkModel" OnValidSubmit="() => CreateAppLink(cluster)">
+                                                <DataAnnotationsValidator />
+                                                <div class="row g-2">
+                                                    <div class="col-md-4">
+                                                        <label class="form-label small">App Deployment</label>
+                                                        <InputSelect class="form-select form-select-sm" @bind-Value="appLinkModel.DeploymentId">
+                                                            <option value="">Select deployment...</option>
+                                                            @foreach (AppDeployment dep in allDeployments)
+                                                            {
+                                                                <option value="@dep.Id">@dep.App.Customer.Name / @dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
+                                                            }
+                                                        </InputSelect>
+                                                        <ValidationMessage For="() => appLinkModel.DeploymentId" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <label class="form-label small">Vhost</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="appLinkModel.Vhost" placeholder="/" />
+                                                        <ValidationMessage For="() => appLinkModel.Vhost" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <label class="form-label small">Queue <span class="text-muted">(optional)</span></label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="appLinkModel.Queue" placeholder="orders.created" />
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <label class="form-label small">Exchange <span class="text-muted">(optional)</span></label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="appLinkModel.Exchange" placeholder="orders" />
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <label class="form-label small">K8s Secret Name</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="appLinkModel.SecretName" placeholder="rabbitmq" />
+                                                        <ValidationMessage For="() => appLinkModel.SecretName" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-12 d-flex gap-2">
+                                                        <button type="submit" class="btn btn-sm btn-primary" disabled="@submitting">
+                                                            @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Link &amp; Sync
+                                                        </button>
+                                                        <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAppLinkForm = false">Cancel</button>
+                                                    </div>
                                                 </div>
-                                                <div class="col-md-2">
-                                                    <label class="form-label small">Vhost</label>
-                                                    <input class="form-control form-control-sm" @bind="linkVhost" placeholder="/" />
-                                                </div>
-                                                <div class="col-md-2">
-                                                    <label class="form-label small">Queue <span class="text-muted">(optional)</span></label>
-                                                    <input class="form-control form-control-sm" @bind="linkQueue" placeholder="orders.created" />
-                                                </div>
-                                                <div class="col-md-2">
-                                                    <label class="form-label small">Exchange <span class="text-muted">(optional)</span></label>
-                                                    <input class="form-control form-control-sm" @bind="linkExchange" placeholder="orders" />
-                                                </div>
-                                                <div class="col-md-2">
-                                                    <label class="form-label small">K8s Secret Name</label>
-                                                    <input class="form-control form-control-sm" @bind="linkSecretName" placeholder="rabbitmq" />
-                                                </div>
-                                                <div class="col-12 d-flex gap-2">
-                                                    <button class="btn btn-sm btn-primary" @onclick="() => CreateAppLink(cluster)" disabled="@submitting">
-                                                        @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }Link &amp; Sync
-                                                    </button>
-                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAppLinkForm = false">Cancel</button>
-                                                </div>
-                                            </div>
+                                            </EditForm>
                                         </div>
                                     </div>
                                 }
 
                                 @if (loadingTopology) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
-                                else if (messagingBindings.Count == 0) { <p class="text-muted small">No app links yet.</p> }
+                                else if (messagingBindings.Count == 0) { <EmptyState Icon="bi-link-45deg" Title="No app links" Message="No app links yet." /> }
                                 else
                                 {
                                     <table class="table table-sm table-hover small">
@@ -708,7 +758,7 @@
                                                         }
                                                     </td>
                                                     <td class="align-middle text-end">
-                                                        <button class="btn btn-sm btn-outline-primary me-1"
+                                                        <button class="btn btn-sm btn-outline-primary me-1" aria-label="Sync app link"
                                                                 @onclick="() => SyncAppLink(mb)" disabled="@(syncingLinkId == mb.Id)">
                                                             @if (syncingLinkId == mb.Id)
                                                             {
@@ -719,7 +769,7 @@
                                                                 <i class="bi bi-arrow-clockwise"></i>
                                                             }
                                                         </button>
-                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteAppLink(cluster, mb)">
+                                                        <button class="btn btn-sm btn-outline-danger" aria-label="Delete app link" @onclick="() => DeleteAppLink(cluster, mb)">
                                                             <i class="bi bi-trash"></i>
                                                         </button>
                                                     </td>
@@ -756,29 +806,33 @@
                                     @* ── Scheduled backups ── *@
                                     <div class="card border-secondary mb-3">
                                         <div class="card-body py-2">
-                                            <div class="row g-2 align-items-end">
-                                                <div class="col-md-5">
-                                                    <label class="form-label small mb-1">Backup Schedule (cron)</label>
-                                                    <input class="form-control form-control-sm" @bind="scheduleInput"
-                                                           placeholder="0 2 * * *  (empty = disabled)" />
-                                                    <div class="form-text small">Deploys a CronJob that exports definitions to S3. 5-field cron.</div>
+                                            <EditForm Model="scheduleModel" OnValidSubmit="() => SaveSchedule(cluster)">
+                                                <DataAnnotationsValidator />
+                                                <div class="row g-2 align-items-end">
+                                                    <div class="col-md-5">
+                                                        <label class="form-label small mb-1">Backup Schedule (cron)</label>
+                                                        <InputText class="form-control form-control-sm" @bind-Value="scheduleModel.Schedule"
+                                                                   placeholder="0 2 * * *  (empty = disabled)" />
+                                                        <div class="form-text small">Deploys a CronJob that exports definitions to S3. 5-field cron.</div>
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small mb-1">Keep last</label>
+                                                        <InputNumber class="form-control form-control-sm" @bind-Value="scheduleModel.MaxBackups" min="1" />
+                                                        <ValidationMessage For="() => scheduleModel.MaxBackups" class="text-danger small" />
+                                                    </div>
+                                                    <div class="col-md-4">
+                                                        <button type="submit" class="btn btn-sm btn-secondary" disabled="@savingSchedule">
+                                                            @if (savingSchedule) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                            <i class="bi bi-clock me-1"></i>Save Schedule
+                                                        </button>
+                                                        @if (!string.IsNullOrEmpty(cluster.BackupSchedule))
+                                                        {
+                                                            <span class="badge bg-info-subtle text-info border border-info-subtle ms-2">@cluster.BackupSchedule</span>
+                                                        }
+                                                    </div>
                                                 </div>
-                                                <div class="col-md-3">
-                                                    <label class="form-label small mb-1">Keep last</label>
-                                                    <input type="number" class="form-control form-control-sm" @bind="maxBackupsInput" min="1" />
-                                                </div>
-                                                <div class="col-md-4">
-                                                    <button class="btn btn-sm btn-secondary" @onclick="() => SaveSchedule(cluster)" disabled="@savingSchedule">
-                                                        @if (savingSchedule) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                                        <i class="bi bi-clock me-1"></i>Save Schedule
-                                                    </button>
-                                                    @if (!string.IsNullOrEmpty(cluster.BackupSchedule))
-                                                    {
-                                                        <span class="badge bg-info-subtle text-info border border-info-subtle ms-2">@cluster.BackupSchedule</span>
-                                                    }
-                                                </div>
-                                            </div>
-                                            @if (!string.IsNullOrEmpty(scheduleError)) { <div class="alert alert-danger py-1 small mt-2 mb-0">@scheduleError</div> }
+                                                @if (!string.IsNullOrEmpty(scheduleError)) { <div class="alert alert-danger py-1 small mt-2 mb-0">@scheduleError</div> }
+                                            </EditForm>
                                         </div>
                                     </div>
                                 }
@@ -817,7 +871,7 @@
                                 }
 
                                 @if (loadingBackups) { <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div> }
-                                else if (clusterBackups.Count == 0) { <p class="text-muted small">No backups yet.</p> }
+                                else if (clusterBackups.Count == 0) { <EmptyState Icon="bi-clock-history" Title="No backups" Message="No backups yet." /> }
                                 else
                                 {
                                     <table class="table table-sm table-hover small">
@@ -838,7 +892,7 @@
                                                                 <i class="bi bi-cloud-arrow-down me-1"></i>Restore
                                                             </button>
                                                         }
-                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteBackup(backup)">
+                                                        <button class="btn btn-sm btn-outline-danger" aria-label="Delete backup" @onclick="() => DeleteBackup(backup)">
                                                             <i class="bi bi-trash"></i>
                                                         </button>
                                                     </td>
@@ -870,7 +924,7 @@
                                             <div class="input-group input-group-sm">
                                                 <input type="@(showPassword ? "text" : "password")"
                                                        class="form-control form-control-sm font-monospace" value="@adminPassword" readonly />
-                                                <button class="btn btn-outline-secondary" @onclick="() => showPassword = !showPassword">
+                                                <button class="btn btn-outline-secondary" aria-label="Toggle password visibility" @onclick="() => showPassword = !showPassword">
                                                     <i class="bi @(showPassword ? "bi-eye-slash" : "bi-eye")"></i>
                                                 </button>
                                             </div>
@@ -970,36 +1024,42 @@
                     <div class="modal-content">
                         <div class="modal-header">
                             <h5 class="modal-title"><i class="bi bi-pencil me-2 text-warning"></i>Edit Cluster — @editCluster.Name</h5>
-                            <button type="button" class="btn-close" @onclick="() => editClusterId = null"></button>
+                            <button type="button" class="btn-close" aria-label="Close" @onclick="() => editClusterId = null"></button>
                         </div>
-                        <div class="modal-body">
-                            <div class="row g-2">
-                                <div class="col-md-3">
-                                    <label class="form-label small mb-1">Version</label>
-                                    <input class="form-control form-control-sm" @bind="editVersion" />
+                        <EditForm Model="editModel" OnValidSubmit="() => SaveClusterEdit(editCluster)">
+                            <DataAnnotationsValidator />
+                            <div class="modal-body">
+                                <div class="row g-2">
+                                    <div class="col-md-3">
+                                        <label class="form-label small mb-1">Version</label>
+                                        <InputText class="form-control form-control-sm" @bind-Value="editModel.Version" />
+                                        <ValidationMessage For="() => editModel.Version" class="text-danger small" />
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label small mb-1">Replicas</label>
+                                        <InputNumber class="form-control form-control-sm" @bind-Value="editModel.Replicas" min="1" max="9" />
+                                        <ValidationMessage For="() => editModel.Replicas" class="text-danger small" />
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small mb-1">Storage Size</label>
+                                        <InputText class="form-control form-control-sm" @bind-Value="editModel.StorageSize" />
+                                        <ValidationMessage For="() => editModel.StorageSize" class="text-danger small" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small mb-1">Storage Class</label>
+                                        <InputText class="form-control form-control-sm" @bind-Value="editModel.StorageClass" />
+                                    </div>
                                 </div>
-                                <div class="col-md-2">
-                                    <label class="form-label small mb-1">Replicas</label>
-                                    <input type="number" class="form-control form-control-sm" @bind="editReplicas" min="1" max="9" />
-                                </div>
-                                <div class="col-md-3">
-                                    <label class="form-label small mb-1">Storage Size</label>
-                                    <input class="form-control form-control-sm" @bind="editStorageSize" />
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small mb-1">Storage Class</label>
-                                    <input class="form-control form-control-sm" @bind="editStorageClass" />
-                                </div>
+                                <div class="form-text small mt-1">Storage can only grow; the operator applies a rolling update.</div>
+                                @if (!string.IsNullOrEmpty(editError)) { <div class="alert alert-danger py-1 small mt-2 mb-0">@editError</div> }
                             </div>
-                            <div class="form-text small mt-1">Storage can only grow; the operator applies a rolling update.</div>
-                            @if (!string.IsNullOrEmpty(editError)) { <div class="alert alert-danger py-1 small mt-2 mb-0">@editError</div> }
-                        </div>
-                        <div class="modal-footer">
-                            <button class="btn btn-outline-secondary" @onclick="() => editClusterId = null">Cancel</button>
-                            <button class="btn btn-warning" @onclick="() => SaveClusterEdit(editCluster)" disabled="@savingEdit">
-                                @if (savingEdit) { <span class="spinner-border spinner-border-sm me-1"></span> }Save Changes
-                            </button>
-                        </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-outline-secondary" @onclick="() => editClusterId = null">Cancel</button>
+                                <button type="submit" class="btn btn-warning" disabled="@savingEdit">
+                                    @if (savingEdit) { <span class="spinner-border spinner-border-sm me-1"></span> }Save Changes
+                                </button>
+                            </div>
+                        </EditForm>
                     </div>
                 </div>
             </div>
@@ -1014,7 +1074,7 @@
                 <div class="modal-content">
                     <div class="modal-header">
                         <h5 class="modal-title text-danger"><i class="bi bi-trash me-2"></i>Delete @cascadeKind</h5>
-                        <button type="button" class="btn-close" @onclick="CancelCascadeDelete" disabled="@cascadeDeleting"></button>
+                        <button type="button" class="btn-close" aria-label="Close" @onclick="CancelCascadeDelete" disabled="@cascadeDeleting"></button>
                     </div>
                     <div class="modal-body">
                         <p class="mb-2">Delete <strong>@cascadeDisplay</strong>?</p>
@@ -1077,14 +1137,7 @@
     // Create cluster form
     private bool showCreateForm;
     private bool creating;
-    private string createName = "";
-    private string createNamespace = "rabbitmq";
-    private string createVersion = "3.13";
-    private int createReplicas = 3;
-    private string createStorageSize = "10Gi";
-    private string createStorageClass = "";
-    private Guid createK8sClusterId = Guid.Empty;
-    private Guid createStorageLinkId = Guid.Empty;
+    private CreateClusterModel createModel = new();
     private string? createError;
 
     // Cluster detail
@@ -1104,51 +1157,32 @@
 
     // Vhost form
     private bool showVhostForm;
-    private string newVhostName = "/";
+    private VhostModel vhostModel = new();
 
     // Queue form
     private bool showQueueForm;
-    private string newQueueName = "";
-    private string newQueueVhost = "/";
-    private string newQueueType = "quorum";
-    private bool newQueueDurable = true;
+    private QueueModel queueModel = new();
 
     // Exchange form
     private bool showExchangeForm;
-    private string newExchangeName = "";
-    private string newExchangeVhost = "/";
-    private string newExchangeType = "direct";
-    private bool newExchangeDurable = true;
+    private ExchangeModel exchangeModel = new();
 
     // Routing binding form
     private bool showRoutingForm;
-    private string newBindingVhost = "/";
-    private string newBindingSource = "";
-    private string newBindingDest = "";
-    private string newBindingDestType = "queue";
-    private string newBindingRoutingKey = "";
+    private BindingModel bindingModel = new();
 
     // User form
     private bool showUserForm;
-    private string newUsername = "";
-    private string newUserPassword = "";
-    private string newUserTags = "";
+    private UserModel userModel = new();
 
     // Permission form
     private bool showPermissionForm;
     private string? permissionTargetUser;
-    private string permVhost = "/";
-    private string permConfigure = ".*";
-    private string permWrite = ".*";
-    private string permRead = ".*";
+    private PermissionModel permissionModel = new();
 
     // App link form
     private bool showAppLinkForm;
-    private Guid linkAppDeploymentId = Guid.Empty;
-    private string linkVhost = "/";
-    private string linkQueue = "";
-    private string linkExchange = "";
-    private string linkSecretName = "rabbitmq";
+    private AppLinkModel appLinkModel = new();
     private Guid? syncingLinkId;
 
     // Backup
@@ -1186,17 +1220,13 @@
 
     // Cluster edit / status refresh
     private Guid? editClusterId;
-    private string editVersion = "";
-    private int editReplicas;
-    private string editStorageSize = "";
-    private string? editStorageClass;
+    private ClusterEditModel editModel = new();
     private bool savingEdit;
     private string? editError;
     private Guid? refreshingStatus;
 
     // Scheduled backups
-    private string scheduleInput = "";
-    private int maxBackupsInput = 10;
+    private ScheduleModel scheduleModel = new();
     private bool savingSchedule;
     private string? scheduleError;
 
@@ -1233,7 +1263,7 @@
 
     // ── Cluster create / delete ────────────────────────────────────────────────
 
-    private void ShowCreateForm() { showCreateForm = true; createError = null; }
+    private void ShowCreateForm() { showCreateForm = true; createError = null; createModel = new(); }
     private void CancelCreate() { showCreateForm = false; createError = null; }
 
     private async Task DiscoverClusters()
@@ -1263,24 +1293,21 @@
     private async Task CreateCluster()
     {
         createError = null;
-        if (string.IsNullOrWhiteSpace(createName)) { createError = "Name is required."; return; }
-        if (createK8sClusterId == Guid.Empty) { createError = "Select a Kubernetes cluster."; return; }
-        if (string.IsNullOrWhiteSpace(createStorageSize)) { createError = "Storage size is required."; return; }
-
         creating = true;
         try
         {
             await RabbitMQService.CreateClusterAsync(
-                TenantId, createK8sClusterId,
-                createName.Trim().ToLowerInvariant(),
-                string.IsNullOrWhiteSpace(createNamespace) ? "rabbitmq" : createNamespace.Trim(),
-                string.IsNullOrWhiteSpace(createVersion) ? "3.13" : createVersion.Trim(),
-                createReplicas, createStorageSize.Trim(),
-                string.IsNullOrWhiteSpace(createStorageClass) ? null : createStorageClass.Trim(),
-                createStorageLinkId == Guid.Empty ? null : createStorageLinkId);
+                TenantId, createModel.K8sClusterId!.Value,
+                createModel.Name.Trim().ToLowerInvariant(),
+                string.IsNullOrWhiteSpace(createModel.Namespace) ? "rabbitmq" : createModel.Namespace.Trim(),
+                string.IsNullOrWhiteSpace(createModel.Version) ? "3.13" : createModel.Version.Trim(),
+                createModel.Replicas, createModel.StorageSize.Trim(),
+                string.IsNullOrWhiteSpace(createModel.StorageClass) ? null : createModel.StorageClass.Trim(),
+                createModel.StorageLinkId);
             showCreateForm = false;
-            createName = "";
+            createModel = new();
             await LoadAsync();
+            Toasts.Success("RabbitMQ cluster created.");
         }
         catch (Exception ex) { createError = ex.Message; }
         finally { creating = false; }
@@ -1291,10 +1318,13 @@
     private void ShowClusterEdit(RabbitMQCluster cluster)
     {
         editClusterId = cluster.Id;
-        editVersion = cluster.RabbitMQVersion;
-        editReplicas = cluster.Replicas;
-        editStorageSize = cluster.StorageSize;
-        editStorageClass = cluster.StorageClass;
+        editModel = new ClusterEditModel
+        {
+            Version = cluster.RabbitMQVersion,
+            Replicas = cluster.Replicas,
+            StorageSize = cluster.StorageSize,
+            StorageClass = cluster.StorageClass ?? "",
+        };
         editError = null;
     }
 
@@ -1305,10 +1335,11 @@
         try
         {
             await RabbitMQService.UpdateClusterAsync(TenantId, cluster.Id,
-                editVersion.Trim(), editReplicas, editStorageSize.Trim(),
-                string.IsNullOrWhiteSpace(editStorageClass) ? null : editStorageClass!.Trim());
+                editModel.Version.Trim(), editModel.Replicas, editModel.StorageSize.Trim(),
+                string.IsNullOrWhiteSpace(editModel.StorageClass) ? null : editModel.StorageClass.Trim());
             editClusterId = null;
             await LoadAsync();
+            Toasts.Success("Cluster updated.");
         }
         catch (Exception ex) { editError = ex.Message; }
         finally { savingEdit = false; }
@@ -1322,7 +1353,7 @@
             await RabbitMQService.ReconcileStatusAsync(TenantId, cluster.Id);
             await LoadAsync();
         }
-        catch { }
+        catch (Exception ex) { Toasts.Error($"Failed to refresh cluster status: {ex.Message}"); }
         finally { refreshingStatus = null; }
     }
 
@@ -1334,9 +1365,10 @@
         {
             await RabbitMQService.UpdateBackupScheduleAsync(
                 TenantId, cluster.Id,
-                string.IsNullOrWhiteSpace(scheduleInput) ? null : scheduleInput.Trim(),
-                maxBackupsInput);
+                string.IsNullOrWhiteSpace(scheduleModel.Schedule) ? null : scheduleModel.Schedule.Trim(),
+                scheduleModel.MaxBackups);
             await LoadAsync();
+            Toasts.Success("Backup schedule saved.");
         }
         catch (Exception ex) { scheduleError = ex.Message; }
         finally { savingSchedule = false; }
@@ -1414,8 +1446,7 @@
                 break;
             case "backup":
                 RabbitMQCluster bc = clusters.First(c => c.Id == clusterId);
-                scheduleInput = bc.BackupSchedule ?? "";
-                maxBackupsInput = bc.MaxBackups;
+                scheduleModel = new ScheduleModel { Schedule = bc.BackupSchedule ?? "", MaxBackups = bc.MaxBackups };
                 scheduleError = null;
                 await LoadBackupsAsync(bc);
                 break;
@@ -1460,13 +1491,13 @@
 
     private async Task CreateVhost(RabbitMQCluster cluster)
     {
-        if (string.IsNullOrWhiteSpace(newVhostName)) return;
         submitting = true; topologyError = null;
         try
         {
-            await RabbitMQService.CreateVhostAsync(TenantId, cluster.Id, newVhostName.Trim());
-            showVhostForm = false; newVhostName = "/";
+            await RabbitMQService.CreateVhostAsync(TenantId, cluster.Id, vhostModel.Name.Trim());
+            showVhostForm = false; vhostModel = new();
             vhosts = await RabbitMQService.GetVhostsAsync(TenantId, cluster.Id);
+            Toasts.Success("Vhost created.");
         }
         catch (Exception ex) { topologyError = ex.Message; }
         finally { submitting = false; }
@@ -1476,14 +1507,14 @@
 
     private async Task CreateQueue(RabbitMQCluster cluster)
     {
-        if (string.IsNullOrWhiteSpace(newQueueName)) return;
         submitting = true; topologyError = null;
         try
         {
             await RabbitMQService.CreateQueueAsync(TenantId, cluster.Id,
-                newQueueVhost, newQueueName.Trim(), newQueueType, newQueueDurable, false);
-            showQueueForm = false; newQueueName = "";
+                queueModel.Vhost, queueModel.Name.Trim(), queueModel.QueueType, queueModel.Durable, false);
+            showQueueForm = false; queueModel = new();
             queues = await RabbitMQService.GetQueuesAsync(TenantId, cluster.Id);
+            Toasts.Success("Queue created.");
         }
         catch (Exception ex) { topologyError = ex.Message; }
         finally { submitting = false; }
@@ -1493,14 +1524,14 @@
 
     private async Task CreateExchange(RabbitMQCluster cluster)
     {
-        if (string.IsNullOrWhiteSpace(newExchangeName)) return;
         submitting = true; topologyError = null;
         try
         {
             await RabbitMQService.CreateExchangeAsync(TenantId, cluster.Id,
-                newExchangeVhost, newExchangeName.Trim(), newExchangeType, newExchangeDurable, false);
-            showExchangeForm = false; newExchangeName = "";
+                exchangeModel.Vhost, exchangeModel.Name.Trim(), exchangeModel.ExchangeType, exchangeModel.Durable, false);
+            showExchangeForm = false; exchangeModel = new();
             exchanges = await RabbitMQService.GetExchangesAsync(TenantId, cluster.Id);
+            Toasts.Success("Exchange created.");
         }
         catch (Exception ex) { topologyError = ex.Message; }
         finally { submitting = false; }
@@ -1510,14 +1541,15 @@
 
     private async Task CreateRoutingBinding(RabbitMQCluster cluster)
     {
-        if (string.IsNullOrWhiteSpace(newBindingSource) || string.IsNullOrWhiteSpace(newBindingDest)) return;
         submitting = true; topologyError = null;
         try
         {
             await RabbitMQService.CreateRoutingBindingAsync(TenantId, cluster.Id,
-                newBindingVhost, newBindingSource, newBindingDest, newBindingDestType, newBindingRoutingKey);
-            showRoutingForm = false; newBindingSource = ""; newBindingDest = ""; newBindingRoutingKey = "";
+                bindingModel.Vhost, bindingModel.Source.Trim(), bindingModel.Destination.Trim(),
+                bindingModel.DestinationType, bindingModel.RoutingKey);
+            showRoutingForm = false; bindingModel = new();
             routingBindings = await RabbitMQService.GetRoutingBindingsAsync(TenantId, cluster.Id);
+            Toasts.Success("Routing binding created.");
         }
         catch (Exception ex) { topologyError = ex.Message; }
         finally { submitting = false; }
@@ -1584,15 +1616,15 @@
 
     private async Task CreateUser(RabbitMQCluster cluster)
     {
-        if (string.IsNullOrWhiteSpace(newUsername) || string.IsNullOrWhiteSpace(newUserPassword)) return;
         submitting = true; topologyError = null;
         try
         {
-            IEnumerable<string> tags = newUserTags
+            IEnumerable<string> tags = userModel.Tags
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            await RabbitMQService.CreateUserAsync(TenantId, cluster.Id, newUsername.Trim(), newUserPassword, tags);
-            showUserForm = false; newUsername = ""; newUserPassword = ""; newUserTags = "";
+            await RabbitMQService.CreateUserAsync(TenantId, cluster.Id, userModel.Username.Trim(), userModel.Password, tags);
+            showUserForm = false; userModel = new();
             users = await RabbitMQService.GetUsersAsync(TenantId, cluster.Id);
+            Toasts.Success("User created.");
         }
         catch (Exception ex) { topologyError = ex.Message; }
         finally { submitting = false; }
@@ -1612,7 +1644,7 @@
     private async Task PreparePermission(RabbitMQCluster cluster, string username)
     {
         permissionTargetUser = username;
-        permVhost = "/"; permConfigure = ".*"; permWrite = ".*"; permRead = ".*";
+        permissionModel = new PermissionModel();
         showPermissionForm = true;
 
         // Pre-populate from an existing Permission CRD for this user, if any.
@@ -1622,10 +1654,10 @@
             RabbitMQPermissionInfo? existing = perms.FirstOrDefault(p => p.User == username);
             if (existing is not null)
             {
-                permVhost = existing.Vhost;
-                permConfigure = existing.Configure;
-                permWrite = existing.Write;
-                permRead = existing.Read;
+                permissionModel.Vhost = existing.Vhost;
+                permissionModel.Configure = existing.Configure;
+                permissionModel.Write = existing.Write;
+                permissionModel.Read = existing.Read;
             }
         }
         catch { /* fall back to defaults */ }
@@ -1638,8 +1670,9 @@
         try
         {
             await RabbitMQService.SetPermissionAsync(TenantId, cluster.Id,
-                permVhost, permissionTargetUser, permConfigure, permWrite, permRead);
+                permissionModel.Vhost, permissionTargetUser, permissionModel.Configure, permissionModel.Write, permissionModel.Read);
             showPermissionForm = false;
+            Toasts.Success($"Permissions applied for {permissionTargetUser}.");
         }
         catch (Exception ex) { topologyError = ex.Message; }
         finally { submitting = false; }
@@ -1651,10 +1684,10 @@
     {
         clusterTab = "app-links";
         showAppLinkForm = true;
-        linkVhost = vhost;
-        linkQueue = queueName ?? "";
-        linkExchange = exchangeName ?? "";
-        linkSecretName = "rabbitmq";
+        appLinkModel.Vhost = vhost;
+        appLinkModel.Queue = queueName ?? "";
+        appLinkModel.Exchange = exchangeName ?? "";
+        appLinkModel.SecretName = "rabbitmq";
         _ = LoadAppLinks(cluster.Id);
     }
 
@@ -1668,19 +1701,19 @@
 
     private async Task CreateAppLink(RabbitMQCluster cluster)
     {
-        if (linkAppDeploymentId == Guid.Empty || string.IsNullOrWhiteSpace(linkSecretName)) return;
         submitting = true; topologyError = null;
         try
         {
             await RabbitMQService.CreateMessagingBindingAsync(
-                TenantId, cluster.Id, linkAppDeploymentId,
-                linkVhost,
-                string.IsNullOrWhiteSpace(linkQueue) ? null : linkQueue.Trim(),
-                string.IsNullOrWhiteSpace(linkExchange) ? null : linkExchange.Trim(),
-                linkSecretName.Trim());
+                TenantId, cluster.Id, appLinkModel.DeploymentId!.Value,
+                appLinkModel.Vhost,
+                string.IsNullOrWhiteSpace(appLinkModel.Queue) ? null : appLinkModel.Queue.Trim(),
+                string.IsNullOrWhiteSpace(appLinkModel.Exchange) ? null : appLinkModel.Exchange.Trim(),
+                appLinkModel.SecretName.Trim());
             showAppLinkForm = false;
-            linkAppDeploymentId = Guid.Empty; linkQueue = ""; linkExchange = ""; linkSecretName = "rabbitmq";
+            appLinkModel = new();
             messagingBindings = await RabbitMQService.GetMessagingBindingsAsync(TenantId, cluster.Id);
+            Toasts.Success("App linked.");
         }
         catch (Exception ex) { topologyError = ex.Message; }
         finally { submitting = false; }
@@ -1827,5 +1860,142 @@
         if (bytes < 1024) return $"{bytes} B";
         if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
         return $"{bytes / (1024.0 * 1024):F1} MB";
+    }
+
+    // ── Form models ─────────────────────────────────────────────────────────────
+
+    private sealed class CreateClusterModel
+    {
+        [Required(ErrorMessage = "Cluster name is required.")]
+        [StringLength(63, ErrorMessage = "Max 63 characters.")]
+        [RegularExpression(@"^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$",
+            ErrorMessage = "DNS-safe: letters, digits and hyphens; cannot start or end with a hyphen.")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Select a Kubernetes cluster.")]
+        public Guid? K8sClusterId { get; set; }
+
+        public string Namespace { get; set; } = "rabbitmq";
+        public string Version { get; set; } = "3.13";
+
+        [Range(1, 9, ErrorMessage = "Between 1 and 9 replicas.")]
+        public int Replicas { get; set; } = 3;
+
+        [Required(ErrorMessage = "Storage size is required.")]
+        public string StorageSize { get; set; } = "10Gi";
+
+        public string StorageClass { get; set; } = "";
+
+        // Optional S3 backup storage link; empty selection = no backups.
+        public Guid? StorageLinkId { get; set; }
+    }
+
+    private sealed class ClusterEditModel
+    {
+        [Required(ErrorMessage = "Version is required.")]
+        public string Version { get; set; } = "";
+
+        [Range(1, 9, ErrorMessage = "Between 1 and 9 replicas.")]
+        public int Replicas { get; set; }
+
+        [Required(ErrorMessage = "Storage size is required.")]
+        public string StorageSize { get; set; } = "";
+
+        public string StorageClass { get; set; } = "";
+    }
+
+    private sealed class VhostModel
+    {
+        [Required(ErrorMessage = "Vhost path is required.")]
+        public string Name { get; set; } = "/";
+    }
+
+    private sealed class QueueModel
+    {
+        [Required(ErrorMessage = "Queue name is required.")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Vhost is required.")]
+        public string Vhost { get; set; } = "/";
+
+        public string QueueType { get; set; } = "quorum";
+        public bool Durable { get; set; } = true;
+    }
+
+    private sealed class ExchangeModel
+    {
+        [Required(ErrorMessage = "Exchange name is required.")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Vhost is required.")]
+        public string Vhost { get; set; } = "/";
+
+        public string ExchangeType { get; set; } = "direct";
+        public bool Durable { get; set; } = true;
+    }
+
+    private sealed class BindingModel
+    {
+        [Required(ErrorMessage = "Vhost is required.")]
+        public string Vhost { get; set; } = "/";
+
+        [Required(ErrorMessage = "Source exchange is required.")]
+        public string Source { get; set; } = "";
+
+        [Required(ErrorMessage = "Destination is required.")]
+        public string Destination { get; set; } = "";
+
+        public string DestinationType { get; set; } = "queue";
+        public string RoutingKey { get; set; } = "";
+    }
+
+    private sealed class UserModel
+    {
+        [Required(ErrorMessage = "Username is required.")]
+        public string Username { get; set; } = "";
+
+        [Required(ErrorMessage = "Password is required.")]
+        public string Password { get; set; } = "";
+
+        public string Tags { get; set; } = "";
+    }
+
+    private sealed class PermissionModel
+    {
+        [Required(ErrorMessage = "Vhost is required.")]
+        public string Vhost { get; set; } = "/";
+
+        [Required(ErrorMessage = "Configure pattern is required.")]
+        public string Configure { get; set; } = ".*";
+
+        [Required(ErrorMessage = "Write pattern is required.")]
+        public string Write { get; set; } = ".*";
+
+        [Required(ErrorMessage = "Read pattern is required.")]
+        public string Read { get; set; } = ".*";
+    }
+
+    private sealed class AppLinkModel
+    {
+        [Required(ErrorMessage = "Select an app deployment.")]
+        public Guid? DeploymentId { get; set; }
+
+        [Required(ErrorMessage = "Vhost is required.")]
+        public string Vhost { get; set; } = "/";
+
+        public string Queue { get; set; } = "";
+        public string Exchange { get; set; } = "";
+
+        [Required(ErrorMessage = "Secret name is required.")]
+        public string SecretName { get; set; } = "rabbitmq";
+    }
+
+    private sealed class ScheduleModel
+    {
+        // Empty = disabled, so not required.
+        public string Schedule { get; set; } = "";
+
+        [Range(1, int.MaxValue, ErrorMessage = "Keep at least 1 backup.")]
+        public int MaxBackups { get; set; } = 10;
     }
 }

@@ -62,7 +62,7 @@
                     </button>
                     <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmCopy = false">Cancel</button>
                 }
-                <button class="btn btn-sm btn-link text-muted p-0 ms-auto" @onclick="() => showCopyFrom = false">
+                <button class="btn btn-sm btn-link text-muted p-0 ms-auto" aria-label="Close" @onclick="() => showCopyFrom = false">
                     <i class="bi bi-x"></i>
                 </button>
             </div>
@@ -84,7 +84,7 @@
             <strong>@(applySuccess ? "Applied successfully" : "Apply had errors")</strong>
             <pre class="mb-0 mt-1 small" style="white-space:pre-wrap;max-height:200px;overflow-y:auto;">@applyOutput</pre>
         </div>
-        <button class="btn-close btn-close-sm ms-2 flex-shrink-0" @onclick="() => applyOutput = null"></button>
+        <button class="btn-close btn-close-sm ms-2 flex-shrink-0" aria-label="Dismiss" @onclick="() => applyOutput = null"></button>
     </div>
 }
 
@@ -280,10 +280,9 @@ else
 
             @if (networkPolicies.Count == 0 && !showAddNp)
             {
-                <div class="text-center py-3">
-                    <i class="bi bi-diagram-2 text-muted" style="font-size: 1.5rem;"></i>
-                    <p class="text-muted small mt-2 mb-0">No network policies. The namespace inherits the cluster's defaults.</p>
-                </div>
+                <EmptyState Icon="bi-diagram-2" Title="No network policies"
+                            Message="The namespace inherits the cluster's defaults."
+                            ActionLabel="Add policy" OnAction="() => showAddNp = true" />
             }
             else if (networkPolicies.Count > 0)
             {
@@ -316,6 +315,7 @@ else
                                     @if (confirmDeleteNpId != np.Id)
                                     {
                                         <button class="btn btn-sm btn-outline-danger"
+                                                aria-label="@($"Delete network policy {np.Name}")"
                                                 @onclick="() => confirmDeleteNpId = np.Id">
                                             <i class="bi bi-trash"></i>
                                         </button>
@@ -425,7 +425,7 @@ else
 
                 @if (rbacPolicy.Rules.Count == 0)
                 {
-                    <p class="text-muted small mb-0">No rules yet. Add preset rules or a custom rule above.</p>
+                    <EmptyState Icon="bi-person-badge" Title="No rules yet" Message="Add preset rules or a custom rule above." />
                 }
                 else
                 {
@@ -447,6 +447,7 @@ else
                                     <td class="small align-middle"><code>@rule.Verbs</code></td>
                                     <td class="text-end align-middle">
                                         <button class="btn btn-sm btn-outline-danger p-0 px-1"
+                                                aria-label="Delete rule"
                                                 @onclick="() => DeleteRbacRule(rule.Id)">
                                             <i class="bi bi-x" style="font-size:.8rem;"></i>
                                         </button>
@@ -517,7 +518,7 @@ else
                 }
                 @if (allowedDatabases.Count == 0 && !showAddDb)
                 {
-                    <p class="text-muted small mb-0">No restrictions — all databases are available.</p>
+                    <EmptyState Icon="bi-database" Title="No restrictions" Message="All databases are available." />
                 }
                 else if (allowedDatabases.Count > 0)
                 {
@@ -532,6 +533,7 @@ else
                                 @if (confirmDeleteDbId != entry.Id)
                                 {
                                     <button class="btn btn-sm btn-outline-danger p-0 px-1"
+                                            aria-label="Delete allowed database"
                                             @onclick="() => confirmDeleteDbId = entry.Id">
                                         <i class="bi bi-x" style="font-size:.8rem;"></i>
                                     </button>
@@ -595,7 +597,7 @@ else
                 }
                 @if (allowedCaches.Count == 0 && !showAddCache)
                 {
-                    <p class="text-muted small mb-0">No restrictions — all Redis clusters are available.</p>
+                    <EmptyState Icon="bi-lightning" Title="No restrictions" Message="All Redis clusters are available." />
                 }
                 else if (allowedCaches.Count > 0)
                 {
@@ -610,6 +612,7 @@ else
                                 @if (confirmDeleteCacheId != entry.Id)
                                 {
                                     <button class="btn btn-sm btn-outline-danger p-0 px-1"
+                                            aria-label="Delete allowed cache"
                                             @onclick="() => confirmDeleteCacheId = entry.Id">
                                         <i class="bi bi-x" style="font-size:.8rem;"></i>
                                     </button>
@@ -673,7 +676,7 @@ else
                 }
                 @if (allowedStorages.Count == 0 && !showAddStorage)
                 {
-                    <p class="text-muted small mb-0">No restrictions — all storage buckets are available.</p>
+                    <EmptyState Icon="bi-bucket" Title="No restrictions" Message="All storage buckets are available." />
                 }
                 else if (allowedStorages.Count > 0)
                 {
@@ -692,6 +695,7 @@ else
                                 @if (confirmDeleteStorageId != entry.Id)
                                 {
                                     <button class="btn btn-sm btn-outline-danger p-0 px-1"
+                                            aria-label="Delete allowed storage"
                                             @onclick="() => confirmDeleteStorageId = entry.Id">
                                         <i class="bi bi-x" style="font-size:.8rem;"></i>
                                     </button>

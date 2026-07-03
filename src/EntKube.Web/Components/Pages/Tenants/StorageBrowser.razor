@@ -4,6 +4,7 @@
 @using Microsoft.AspNetCore.Components.Forms
 @inject StorageBrowserService BrowserService
 @inject IJSRuntime JS
+@inject ToastService Toasts
 @implements IAsyncDisposable
 
 <div class="card shadow-sm mb-4 border-primary">
@@ -25,6 +26,13 @@
                 <i class="bi bi-exclamation-triangle me-1"></i>@error
             </div>
         }
+
+        <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                       Message="@(pendingConfirm?.Message ?? "")"
+                       ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+                       IsBusy="confirmBusy"
+                       OnConfirm="RunPendingConfirmAsync"
+                       OnCancel="() => pendingConfirm = null" />
 
         @* Breadcrumb + toolbar *@
         <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
@@ -142,8 +150,9 @@
                                 <td class="d-none d-lg-table-cell text-muted small">—</td>
                                 <td class="text-end">
                                     <button class="btn btn-sm btn-outline-danger border-0 py-0"
-                                            @onclick="() => DeleteFolder(folder)"
-                                            title="Delete folder and all contents">
+                                            @onclick="() => RequestDeleteFolder(folder, folderName)"
+                                            title="Delete folder and all contents"
+                                            aria-label="@($"Delete folder {folderName} and all contents")">
                                         <i class="bi bi-trash"></i>
                                     </button>
                                 </td>
@@ -195,8 +204,9 @@
                                         }
                                     </button>
                                     <button class="btn btn-sm btn-outline-danger border-0 py-0"
-                                            @onclick="() => DeleteObject(fileKey)"
-                                            title="Delete">
+                                            @onclick="() => RequestDeleteObject(fileKey, fileName)"
+                                            title="Delete"
+                                            aria-label="@($"Delete file {fileName}")">
                                         <i class="bi bi-trash"></i>
                                     </button>
                                 </td>
@@ -217,7 +227,7 @@
             {
                 <div class="mt-2">
                     <button class="btn btn-sm btn-outline-danger"
-                            @onclick="DeleteSelected"
+                            @onclick="RequestDeleteSelected"
                             disabled="@deleting">
                         @if (deleting)
                         {
@@ -482,31 +492,75 @@
         linkCopied = false;
     }
 
-private async Task DeleteObject(string key)
+    // A destructive action awaiting user confirmation via the ConfirmDialog banner.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private void RequestDeleteObject(string key, string fileName) =>
+        pendingConfirm = new PendingConfirm(
+            $"Delete file \"{fileName}\"? This cannot be undone.",
+            "Delete file",
+            () => DeleteObject(key, fileName));
+
+    private void RequestDeleteFolder(string prefix, string folderName) =>
+        pendingConfirm = new PendingConfirm(
+            $"Delete folder \"{folderName}/\" and ALL of its contents? This cannot be undone.",
+            "Delete folder",
+            () => DeleteFolder(prefix, folderName));
+
+    private void RequestDeleteSelected()
+    {
+        if (selectedKeys.Count == 0) return;
+        pendingConfirm = new PendingConfirm(
+            $"Delete {selectedKeys.Count} selected item(s)? Folders are removed with all their contents. This cannot be undone.",
+            "Delete selected",
+            DeleteSelected);
+    }
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try
+        {
+            await pendingConfirm.Action();
+        }
+        finally
+        {
+            confirmBusy = false;
+            pendingConfirm = null;
+        }
+    }
+
+    private async Task DeleteObject(string key, string fileName)
     {
         error = null;
         try
         {
             await BrowserService.DeleteAsync(TenantId, Link, key);
             await LoadListing();
+            Toasts.Success($"Deleted \"{fileName}\".");
         }
         catch (Exception ex)
         {
-            error = ex.Message;
+            Toasts.Error($"Failed to delete \"{fileName}\": {ex.Message}");
         }
     }
 
-    private async Task DeleteFolder(string prefix)
+    private async Task DeleteFolder(string prefix, string folderName)
     {
         error = null;
         try
         {
             await BrowserService.DeleteFolderAsync(TenantId, Link, prefix);
             await LoadListing();
+            Toasts.Success($"Deleted folder \"{folderName}/\" and its contents.");
         }
         catch (Exception ex)
         {
-            error = ex.Message;
+            Toasts.Error($"Failed to delete folder \"{folderName}/\": {ex.Message}");
         }
     }
 
@@ -526,12 +580,14 @@ private async Task DeleteObject(string key)
             if (files.Count > 0)
                 await BrowserService.DeleteManyAsync(TenantId, Link, files);
 
+            int total = folders.Count + files.Count;
             selectedKeys.Clear();
             await LoadListing();
+            Toasts.Success($"Deleted {total} item(s).");
         }
         catch (Exception ex)
         {
-            error = ex.Message;
+            Toasts.Error($"Delete failed: {ex.Message}");
         }
         finally
         {

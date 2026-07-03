@@ -1,8 +1,17 @@
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject AlertRoutingService AlertRoutingService
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject ToastService Toasts
+
+<ConfirmDialog Visible="@(pendingConfirm is not null)"
+               Message="@(pendingConfirm?.Message ?? "")"
+               ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+               IsBusy="confirmBusy"
+               OnConfirm="RunPendingConfirmAsync"
+               OnCancel="() => pendingConfirm = null" />
 
 <div class="mb-3">
     <p class="text-muted small mb-2">
@@ -25,102 +34,104 @@
             <strong class="small">@(editId.HasValue ? "Edit Rule" : "New Rule")</strong>
         </div>
         <div class="card-body">
-            <div class="row g-2 mb-2">
-                <div class="col-md-4">
-                    <label class="form-label small">Rule name <span class="text-danger">*</span></label>
-                    <input class="form-control form-control-sm" @bind="formName" placeholder="Suppress KubeProxy on autoscale cluster" />
-                </div>
-                <div class="col-md-2">
-                    <label class="form-label small">Priority</label>
-                    <input type="number" class="form-control form-control-sm" @bind="formPriority" min="0" max="999" />
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label small">Scope to cluster</label>
-                    <select class="form-select form-select-sm" @bind="formMatchClusterId">
-                        <option value="">Any cluster</option>
-                        @foreach (KubernetesCluster c in clusters)
-                        {
-                            <option value="@c.Id">@c.Name</option>
-                        }
-                    </select>
-                </div>
-                <div class="col-md-3 d-flex flex-column justify-content-end">
-                    <div class="form-check mb-1">
-                        <input class="form-check-input" type="checkbox" id="chkSuppress" @bind="formSuppressIncident" />
-                        <label class="form-check-label small fw-semibold" for="chkSuppress">
-                            Suppress incident
-                        </label>
-                    </div>
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" id="chkEnabled" @bind="formEnabled" />
-                        <label class="form-check-label small" for="chkEnabled">Enabled</label>
-                    </div>
-                </div>
-            </div>
-
-            @if (formSuppressIncident)
-            {
-                <div class="alert alert-warning py-2 mb-2 small">
-                    <span class="bi bi-slash-circle me-1"></span>
-                    Matching alerts will be silently dropped — no incident is created and no notification is sent.
-                    No channel needed.
-                </div>
-            }
-            else
-            {
+            <EditForm Model="ruleForm" OnValidSubmit="SaveRule">
+                <DataAnnotationsValidator />
                 <div class="row g-2 mb-2">
-                    <div class="col-md-6">
-                        <label class="form-label small">Channel <span class="text-danger">*</span></label>
-                        <select class="form-select form-select-sm" @bind="formChannelId">
-                            <option value="">— select channel —</option>
-                            @foreach (NotificationChannel ch in channels)
+                    <div class="col-md-4">
+                        <label class="form-label small">Rule name <span class="text-danger">*</span></label>
+                        <InputText class="form-control form-control-sm" @bind-Value="ruleForm.Name" placeholder="Suppress KubeProxy on autoscale cluster" />
+                        <ValidationMessage For="() => ruleForm.Name" class="text-danger small" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small">Priority</label>
+                        <InputNumber class="form-control form-control-sm" @bind-Value="ruleForm.Priority" min="0" max="999" />
+                        <ValidationMessage For="() => ruleForm.Priority" class="text-danger small" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small">Scope to cluster</label>
+                        <InputSelect class="form-select form-select-sm" @bind-Value="ruleForm.MatchClusterId">
+                            <option value="">Any cluster</option>
+                            @foreach (KubernetesCluster c in clusters)
                             {
-                                <option value="@ch.Id">@ch.Name (@ch.Type)</option>
+                                <option value="@c.Id">@c.Name</option>
                             }
-                        </select>
+                        </InputSelect>
+                    </div>
+                    <div class="col-md-3 d-flex flex-column justify-content-end">
+                        <div class="form-check mb-1">
+                            <InputCheckbox class="form-check-input" id="chkSuppress" @bind-Value="ruleForm.SuppressIncident" />
+                            <label class="form-check-label small fw-semibold" for="chkSuppress">
+                                Suppress incident
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <InputCheckbox class="form-check-input" id="chkEnabled" @bind-Value="ruleForm.Enabled" />
+                            <label class="form-check-label small" for="chkEnabled">Enabled</label>
+                        </div>
                     </div>
                 </div>
-            }
 
-            <div class="row g-2 mb-3">
-                <div class="col-md-3">
-                    <label class="form-label small text-muted">Match alert name (contains)</label>
-                    <input class="form-control form-control-sm font-monospace" @bind="formAlertName" placeholder="KubeProxy…" />
-                </div>
-                <div class="col-md-2">
-                    <label class="form-label small text-muted">Match severity</label>
-                    <select class="form-select form-select-sm" @bind="formSeverity">
-                        <option value="">Any</option>
-                        <option value="critical">critical</option>
-                        <option value="warning">warning</option>
-                        <option value="info">info</option>
-                    </select>
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label small text-muted">Match namespace</label>
-                    <input class="form-control form-control-sm font-monospace" @bind="formNamespace" placeholder="kube-system" />
-                </div>
-                <div class="col-md-2">
-                    <label class="form-label small text-muted">Label key</label>
-                    <input class="form-control form-control-sm font-monospace" @bind="formLabelKey" placeholder="team" />
-                </div>
-                <div class="col-md-2">
-                    <label class="form-label small text-muted">Label value</label>
-                    <input class="form-control form-control-sm font-monospace" @bind="formLabelValue" placeholder="backend" />
-                </div>
-            </div>
+                @if (ruleForm.SuppressIncident)
+                {
+                    <div class="alert alert-warning py-2 mb-2 small">
+                        <span class="bi bi-slash-circle me-1"></span>
+                        Matching alerts will be silently dropped — no incident is created and no notification is sent.
+                        No channel needed.
+                    </div>
+                }
+                else
+                {
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-6">
+                            <label class="form-label small">Channel <span class="text-danger">*</span></label>
+                            <InputSelect class="form-select form-select-sm" @bind-Value="ruleForm.ChannelId">
+                                <option value="">— select channel —</option>
+                                @foreach (NotificationChannel ch in channels)
+                                {
+                                    <option value="@ch.Id">@ch.Name (@ch.Type)</option>
+                                }
+                            </InputSelect>
+                            <ValidationMessage For="() => ruleForm.ChannelId" class="text-danger small" />
+                        </div>
+                    </div>
+                }
 
-            @if (!string.IsNullOrEmpty(formError))
-            {
-                <div class="alert alert-danger py-1 small mb-2">@formError</div>
-            }
-            <div class="d-flex gap-2">
-                <button class="btn btn-sm btn-primary" @onclick="SaveRule"
-                        disabled="@(string.IsNullOrWhiteSpace(formName) || (!formSuppressIncident && string.IsNullOrWhiteSpace(formChannelId)))">
-                    @(editId.HasValue ? "Save Changes" : "Create Rule")
-                </button>
-                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelForm">Cancel</button>
-            </div>
+                <div class="row g-2 mb-3">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Match alert name (contains)</label>
+                        <InputText class="form-control form-control-sm font-monospace" @bind-Value="ruleForm.AlertName" placeholder="KubeProxy…" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small text-muted">Match severity</label>
+                        <InputSelect class="form-select form-select-sm" @bind-Value="ruleForm.Severity">
+                            <option value="">Any</option>
+                            <option value="critical">critical</option>
+                            <option value="warning">warning</option>
+                            <option value="info">info</option>
+                        </InputSelect>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Match namespace</label>
+                        <InputText class="form-control form-control-sm font-monospace" @bind-Value="ruleForm.Namespace" placeholder="kube-system" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small text-muted">Label key</label>
+                        <InputText class="form-control form-control-sm font-monospace" @bind-Value="ruleForm.LabelKey" placeholder="team" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small text-muted">Label value</label>
+                        <InputText class="form-control form-control-sm font-monospace" @bind-Value="ruleForm.LabelValue" placeholder="backend" />
+                    </div>
+                </div>
+
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-sm btn-primary" disabled="@saving">
+                        @if (saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        @(editId.HasValue ? "Save Changes" : "Create Rule")
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelForm">Cancel</button>
+                </div>
+            </EditForm>
         </div>
     </div>
 }
@@ -207,11 +218,12 @@ else
                         <td>
                             <div class="d-flex gap-1">
                                 <button class="btn btn-sm btn-outline-secondary" @onclick="() => StartEdit(rule)"
-                                        title="Edit rule">
+                                        title="Edit rule" aria-label="@($"Edit routing rule {rule.Name}")">
                                     <span class="bi bi-pencil"></span>
                                 </button>
-                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteRule(rule)"
-                                        title="Delete rule">
+                                <button class="btn btn-sm btn-outline-danger"
+                                        title="Delete rule" aria-label="@($"Delete routing rule {rule.Name}")"
+                                        @onclick='() => pendingConfirm = new PendingConfirm($"Delete the routing rule \"{rule.Name}\"? Alerts will no longer be routed by it. This cannot be undone.", "Delete rule", () => DeleteRule(rule))'>
                                     <span class="bi bi-trash"></span>
                                 </button>
                             </div>
@@ -320,18 +332,55 @@ else
     private bool showForm;
     private Guid? editId;
 
-    private string formName = "";
-    private int formPriority;
-    private string formChannelId = "";
-    private string formMatchClusterId = "";
-    private bool formEnabled = true;
-    private bool formSuppressIncident;
-    private string formAlertName = "";
-    private string formSeverity = "";
-    private string formNamespace = "";
-    private string formLabelKey = "";
-    private string formLabelValue = "";
-    private string? formError;
+    // A destructive action awaiting user confirmation.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
+
+    private bool saving;
+    private RuleForm ruleForm = new();
+
+    private sealed class RuleForm : IValidatableObject
+    {
+        [Required(ErrorMessage = "Rule name is required.")]
+        [StringLength(200, MinimumLength = 1, ErrorMessage = "Rule name must be 1-200 characters.")]
+        public string Name { get; set; } = "";
+
+        [Range(0, 999, ErrorMessage = "Priority must be between 0 and 999.")]
+        public int Priority { get; set; }
+
+        public Guid? ChannelId { get; set; }
+
+        public Guid? MatchClusterId { get; set; }
+
+        public bool Enabled { get; set; } = true;
+
+        public bool SuppressIncident { get; set; }
+
+        public string AlertName { get; set; } = "";
+
+        public string Severity { get; set; } = "";
+
+        public string Namespace { get; set; } = "";
+
+        public string LabelKey { get; set; } = "";
+
+        public string LabelValue { get; set; } = "";
+
+        public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+        {
+            if (!SuppressIncident && ChannelId is null)
+                yield return new ValidationResult("Select a channel, or enable Suppress incident.", new[] { nameof(ChannelId) });
+        }
+    }
 
     // Test panel
     private bool showTest;
@@ -370,88 +419,86 @@ else
 
     private void ResetForm()
     {
-        formName = "";
-        formPriority = rules.Count > 0 ? (rules.Max(r => r.Priority) + 10) : 0;
-        formChannelId = "";
-        formMatchClusterId = "";
-        formEnabled = true;
-        formSuppressIncident = false;
-        formAlertName = "";
-        formSeverity = "";
-        formNamespace = "";
-        formLabelKey = "";
-        formLabelValue = "";
-        formError = null;
+        ruleForm = new RuleForm
+        {
+            Priority = rules.Count > 0 ? (rules.Max(r => r.Priority) + 10) : 0,
+        };
     }
 
     private void StartEdit(AlertRoutingRule rule)
     {
         editId = rule.Id;
-        formName = rule.Name;
-        formPriority = rule.Priority;
-        formChannelId = rule.ChannelId?.ToString() ?? "";
-        formMatchClusterId = rule.MatchClusterId?.ToString() ?? "";
-        formEnabled = rule.IsEnabled;
-        formSuppressIncident = rule.SuppressIncident;
-        formAlertName = rule.MatchAlertName ?? "";
-        formSeverity = rule.MatchSeverity ?? "";
-        formNamespace = rule.MatchNamespace ?? "";
-        formLabelKey = rule.MatchLabelKey ?? "";
-        formLabelValue = rule.MatchLabelValue ?? "";
-        formError = null;
+        ruleForm = new RuleForm
+        {
+            Name = rule.Name,
+            Priority = rule.Priority,
+            ChannelId = rule.ChannelId,
+            MatchClusterId = rule.MatchClusterId,
+            Enabled = rule.IsEnabled,
+            SuppressIncident = rule.SuppressIncident,
+            AlertName = rule.MatchAlertName ?? "",
+            Severity = rule.MatchSeverity ?? "",
+            Namespace = rule.MatchNamespace ?? "",
+            LabelKey = rule.MatchLabelKey ?? "",
+            LabelValue = rule.MatchLabelValue ?? "",
+        };
         showForm = true;
     }
 
     private async Task SaveRule()
     {
-        formError = null;
-        if (string.IsNullOrWhiteSpace(formName)) return;
-
-        Guid? channelGuid = null;
-        if (!formSuppressIncident)
+        saving = true;
+        try
         {
-            if (string.IsNullOrWhiteSpace(formChannelId)) return;
-            if (!Guid.TryParse(formChannelId, out Guid cg))
+            Guid? channelGuid = ruleForm.SuppressIncident ? null : ruleForm.ChannelId;
+
+            if (editId.HasValue)
             {
-                formError = "Invalid channel.";
-                return;
+                await AlertRoutingService.UpdateRuleAsync(editId.Value, ruleForm.Name.Trim(), ruleForm.Priority, channelGuid,
+                    ruleForm.AlertName, ruleForm.Namespace, ruleForm.Severity, ruleForm.LabelKey, ruleForm.LabelValue, ruleForm.Enabled,
+                    ruleForm.SuppressIncident, ruleForm.MatchClusterId);
             }
-            channelGuid = cg;
+            else
+            {
+                await AlertRoutingService.CreateRuleAsync(TenantId, ruleForm.Name.Trim(), ruleForm.Priority, channelGuid,
+                    ruleForm.AlertName, ruleForm.Namespace, ruleForm.Severity, ruleForm.LabelKey, ruleForm.LabelValue,
+                    ruleForm.SuppressIncident, ruleForm.MatchClusterId);
+            }
+
+            bool wasEdit = editId.HasValue;
+            showForm = false;
+            editId = null;
+            await Load();
+            Toasts.Success(wasEdit ? $"Routing rule \"{ruleForm.Name.Trim()}\" updated." : $"Routing rule \"{ruleForm.Name.Trim()}\" created.");
         }
-
-        Guid? matchClusterGuid = null;
-        if (!string.IsNullOrWhiteSpace(formMatchClusterId) && Guid.TryParse(formMatchClusterId, out Guid mcg))
-            matchClusterGuid = mcg;
-
-        if (editId.HasValue)
+        catch (Exception ex)
         {
-            await AlertRoutingService.UpdateRuleAsync(editId.Value, formName.Trim(), formPriority, channelGuid,
-                formAlertName, formNamespace, formSeverity, formLabelKey, formLabelValue, formEnabled,
-                formSuppressIncident, matchClusterGuid);
+            Toasts.Error($"Failed to save routing rule: {ex.Message}");
         }
-        else
+        finally
         {
-            await AlertRoutingService.CreateRuleAsync(TenantId, formName.Trim(), formPriority, channelGuid,
-                formAlertName, formNamespace, formSeverity, formLabelKey, formLabelValue,
-                formSuppressIncident, matchClusterGuid);
+            saving = false;
         }
-
-        showForm = false;
-        editId = null;
-        await Load();
     }
 
     private void CancelForm()
     {
         showForm = false;
         editId = null;
-        formError = null;
     }
 
     private async Task DeleteRule(AlertRoutingRule rule)
     {
-        await AlertRoutingService.DeleteRuleAsync(rule.Id);
-        await Load();
+        try
+        {
+            await AlertRoutingService.DeleteRuleAsync(rule.Id);
+            await Load();
+            Toasts.Success($"Deleted routing rule \"{rule.Name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete routing rule \"{rule.Name}\": {ex.Message}");
+        }
     }
 
     private async Task RunTest()
