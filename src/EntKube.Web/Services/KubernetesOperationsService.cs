@@ -1446,7 +1446,7 @@ public class KubernetesOperationsService(
         // Create a resource node, record its UID, and register its owner refs for later wiring.
         DeploymentResource MakeNode(string? uid, IList<V1OwnerReference>? owners,
             string group, string version, string kind, string name,
-            HealthStatus health, string? message)
+            HealthStatus health, string? message, DateTime? createdAt = null)
         {
             DeploymentResource r = new()
             {
@@ -1458,6 +1458,7 @@ public class KubernetesOperationsService(
                 SyncStatus = SyncStatus.Synced,
                 HealthStatus = health,
                 StatusMessage = message,
+                KubernetesCreatedAt = createdAt,
                 ChildResources = []
             };
 
@@ -1734,7 +1735,8 @@ public class KubernetesOperationsService(
                     };
                     MakeNode(pod.Metadata.Uid, pod.Metadata.OwnerReferences,
                         "", "v1", "Pod", pod.Metadata.Name, h,
-                        $"{pod.Status?.Phase}  {ready}/{total}");
+                        $"{pod.Status?.Phase}  {ready}/{total}",
+                        pod.Metadata?.CreationTimestamp);
                 }
             });
 

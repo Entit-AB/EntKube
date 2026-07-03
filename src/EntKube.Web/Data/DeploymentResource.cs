@@ -45,6 +45,14 @@ public class DeploymentResource
     public string? StatusMessage { get; set; }
 
     /// <summary>
+    /// The resource's real Kubernetes creation timestamp (metadata.creationTimestamp),
+    /// used to show how long the resource — e.g. a Pod — has been alive. Distinct from
+    /// <see cref="CreatedAt"/>, which is a platform-side tracking timestamp. Null when
+    /// the cluster did not report one.
+    /// </summary>
+    public DateTime? KubernetesCreatedAt { get; set; }
+
+    /// <summary>
     /// Parent resource for tree rendering. A Pod's parent is a ReplicaSet,
     /// a ReplicaSet's parent is a Deployment, etc. Null for root resources.
     /// </summary>
