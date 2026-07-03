@@ -28,12 +28,16 @@ public class CatalogComponentRegistrar(
     ExternalRouteService routeService)
 {
     /// <summary>
-    /// Registers the given catalog entry on a cluster using the supplied form-field
-    /// values (keyed by <see cref="ComponentFormField.Key"/>). Returns the created
-    /// component record. Optional overrides let a blueprint supply an environment
-    /// specific namespace / release name.
+    /// Registers (or, if already present, re-configures) the given catalog entry on a
+    /// cluster using the supplied form-field values (keyed by
+    /// <see cref="ComponentFormField.Key"/>). This is an <b>upsert</b>: a fresh
+    /// bootstrap creates the component, while a blueprint-update run re-applies the
+    /// latest values/version to the existing component (which is then upgraded in place
+    /// by the install orchestrator's <c>helm upgrade --install</c>). Optional overrides
+    /// let a blueprint supply an environment-specific namespace / release name.
+    /// Returns the component record.
     /// </summary>
-    public async Task<ClusterComponent> RegisterAsync(
+    public async Task<ClusterComponent> ApplyAsync(
         Guid clusterId,
         Guid tenantId,
         CatalogEntry entry,
@@ -43,7 +47,8 @@ public class CatalogComponentRegistrar(
         CancellationToken ct = default)
     {
         // Load the currently-installed components so value merging can resolve
-        // cluster-wide facts (e.g. the ingress Gateway for letsencrypt-issuer).
+        // cluster-wide facts (e.g. the ingress Gateway for letsencrypt-issuer), and
+        // so we can detect whether this component already exists (update vs create).
         List<ClusterComponent> existing;
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
@@ -52,29 +57,43 @@ public class CatalogComponentRegistrar(
                 .ToListAsync(ct);
         }
 
-        ComponentRegistration registration = ComponentCatalog.ToRegistration(entry);
-        if (!string.IsNullOrWhiteSpace(namespaceOverride))
-        {
-            registration.Namespace = namespaceOverride.Trim();
-        }
-        if (!string.IsNullOrWhiteSpace(releaseNameOverride))
-        {
-            registration.ReleaseName = releaseNameOverride.Trim();
-        }
+        // The component's stable identity on a cluster is its Name, which
+        // ToRegistration sets to the catalog key.
+        ClusterComponent? current = existing.FirstOrDefault(c => c.Name == entry.Key);
 
         string mergedValues = MergeFormValues(entry, formValues, existing);
-        registration.HelmValues = string.IsNullOrWhiteSpace(mergedValues) ? null : mergedValues;
+        string? helmValues = string.IsNullOrWhiteSpace(mergedValues) ? null : mergedValues;
 
-        ClusterComponent created = await lifecycleService.RegisterComponentAsync(clusterId, registration, ct);
+        ClusterComponent component;
+        if (current is not null)
+        {
+            // Update path — refresh values + chart version/repo to the blueprint's latest.
+            component = await lifecycleService.UpdateConfigurationAsync(
+                current.Id, helmValues, entry.HelmChartVersion, entry.HelmRepoUrl, ct: ct);
+        }
+        else
+        {
+            ComponentRegistration registration = ComponentCatalog.ToRegistration(entry);
+            if (!string.IsNullOrWhiteSpace(namespaceOverride))
+            {
+                registration.Namespace = namespaceOverride.Trim();
+            }
+            if (!string.IsNullOrWhiteSpace(releaseNameOverride))
+            {
+                registration.ReleaseName = releaseNameOverride.Trim();
+            }
+            registration.HelmValues = helmValues;
+            component = await lifecycleService.RegisterComponentAsync(clusterId, registration, ct);
+        }
 
-        await SaveSecretFieldsToVaultAsync(tenantId, created.Id, entry, formValues, created.Namespace);
-        await SaveKeycloakConfigIfNeededAsync(tenantId, created.Id, formValues, entry);
-        await SaveHarborConfigIfNeededAsync(tenantId, created.Id, formValues, entry);
-        await SaveLokiConfigIfNeededAsync(tenantId, created.Id, formValues, entry);
-        await SaveMimirConfigIfNeededAsync(tenantId, created.Id, formValues, entry);
-        await SaveTempoConfigIfNeededAsync(tenantId, created.Id, formValues, entry);
+        await SaveSecretFieldsToVaultAsync(tenantId, component.Id, entry, formValues, component.Namespace);
+        await SaveKeycloakConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
+        await SaveHarborConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
+        await SaveLokiConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
+        await SaveMimirConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
+        await SaveTempoConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
 
-        return created;
+        return component;
     }
 
     /// <summary>

@@ -76,6 +76,7 @@ public class BootstrapRunnerService(
         var cnpgService = scope.ServiceProvider.GetRequiredService<CnpgService>();
         var redisService = scope.ServiceProvider.GetRequiredService<RedisService>();
         var rabbitService = scope.ServiceProvider.GetRequiredService<RabbitMQService>();
+        var blueprintService = scope.ServiceProvider.GetRequiredService<ClusterBlueprintService>();
 
         Guid tenantId;
         List<Guid> stepIds;
@@ -148,6 +149,9 @@ public class BootstrapRunnerService(
             await db.SaveChangesAsync(ct);
         }
 
+        // If this run belongs to a staged rollout, update its target and advance.
+        await blueprintService.OnRunFinishedAsync(runId, ct);
+
         logger.LogInformation("BootstrapRunnerService: run {RunId} finished ({Status})",
             runId, failed ? "Failed" : "Succeeded");
     }
@@ -198,13 +202,13 @@ public class BootstrapRunnerService(
             {
                 (ok, output, createdComponentId) = await ExecuteComponentStepAsync(
                     registrar, orchestrator, key, name, ns, parameters,
-                    clusterId, tenantId, existingComponentId, ct);
+                    clusterId, tenantId, ct);
                 if (!ok && output is not null) error = "Install failed — see output.";
             }
             else
             {
                 output = await ExecuteServiceStepAsync(
-                    cnpgService, redisService, rabbitService, key, name, ns, parameters,
+                    dbFactory, cnpgService, redisService, rabbitService, key, name, ns, parameters,
                     clusterId, tenantId, ct);
                 ok = true;
             }
@@ -234,33 +238,28 @@ public class BootstrapRunnerService(
         CatalogComponentRegistrar registrar,
         ComponentInstallOrchestrator orchestrator,
         string key, string name, string? ns, Dictionary<string, string> parameters,
-        Guid clusterId, Guid tenantId, Guid? existingComponentId, CancellationToken ct)
+        Guid clusterId, Guid tenantId, CancellationToken ct)
     {
-        Guid componentId;
+        CatalogEntry entry = ComponentCatalog.GetByKey(key)
+            ?? throw new InvalidOperationException($"Unknown catalog component '{key}'.");
 
-        if (existingComponentId is Guid prior)
-        {
-            // Resuming after a prior install failure — the component is already registered.
-            componentId = prior;
-        }
-        else
-        {
-            CatalogEntry entry = ComponentCatalog.GetByKey(key)
-                ?? throw new InvalidOperationException($"Unknown catalog component '{key}'.");
+        // Upsert: creates the component on a fresh bootstrap, or refreshes its values/
+        // version on a blueprint-update run. Also handles resume-after-failure, since
+        // ApplyAsync matches an already-registered component by name.
+        ClusterComponent applied = await registrar.ApplyAsync(
+            clusterId, tenantId, entry, parameters,
+            namespaceOverride: ns,
+            releaseNameOverride: string.IsNullOrWhiteSpace(name) ? null : name,
+            ct: ct);
 
-            ClusterComponent created = await registrar.RegisterAsync(
-                clusterId, tenantId, entry, parameters,
-                namespaceOverride: ns,
-                releaseNameOverride: string.IsNullOrWhiteSpace(name) ? null : name,
-                ct: ct);
-            componentId = created.Id;
-        }
-
-        HelmExecutionResult result = await orchestrator.InstallAsync(tenantId, componentId, ct);
-        return (result.Success, result.Output, componentId);
+        // helm upgrade --install makes the install idempotent, so this both installs a
+        // new component and upgrades an existing one to the refreshed values/version.
+        HelmExecutionResult result = await orchestrator.InstallAsync(tenantId, applied.Id, ct);
+        return (result.Success, result.Output, applied.Id);
     }
 
     private static async Task<string> ExecuteServiceStepAsync(
+        IDbContextFactory<ApplicationDbContext> dbFactory,
         CnpgService cnpgService,
         RedisService redisService,
         RabbitMQService rabbitService,
@@ -268,8 +267,16 @@ public class BootstrapRunnerService(
         Guid clusterId, Guid tenantId, CancellationToken ct)
     {
         string @namespace = string.IsNullOrWhiteSpace(ns) ? "default" : ns;
+        string kind = key.ToLowerInvariant();
 
-        switch (key.ToLowerInvariant())
+        // Stateful service instances are not modified once they exist — a blueprint-update
+        // run leaves an already-created CNPG/Redis/RabbitMQ cluster untouched.
+        if (await ServiceInstanceExistsAsync(dbFactory, kind, clusterId, name, @namespace, ct))
+        {
+            return $"{kind} '{name}' already exists in namespace '{@namespace}' — left unchanged.";
+        }
+
+        switch (kind)
         {
             case "cnpg":
             {
@@ -312,6 +319,23 @@ public class BootstrapRunnerService(
             default:
                 throw new InvalidOperationException($"Unknown service kind '{key}'.");
         }
+    }
+
+    private static async Task<bool> ServiceInstanceExistsAsync(
+        IDbContextFactory<ApplicationDbContext> dbFactory,
+        string kind, Guid clusterId, string name, string ns, CancellationToken ct)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return kind switch
+        {
+            "cnpg" => await db.CnpgClusters.AnyAsync(
+                c => c.KubernetesClusterId == clusterId && c.Name == name && c.Namespace == ns, ct),
+            "redis" => await db.RedisClusters.AnyAsync(
+                c => c.KubernetesClusterId == clusterId && c.Name == name && c.Namespace == ns, ct),
+            "rabbitmq" => await db.RabbitMQClusters.AnyAsync(
+                c => c.KubernetesClusterId == clusterId && c.Name == name && c.Namespace == ns, ct),
+            _ => false
+        };
     }
 
     private static async Task<bool> IsRunCancelledAsync(

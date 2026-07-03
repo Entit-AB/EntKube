@@ -99,6 +99,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<BlueprintStep> BlueprintSteps => Set<BlueprintStep>();
     public DbSet<BootstrapRun> BootstrapRuns => Set<BootstrapRun>();
     public DbSet<BootstrapStepRun> BootstrapStepRuns => Set<BootstrapStepRun>();
+    public DbSet<BlueprintRollout> BlueprintRollouts => Set<BlueprintRollout>();
+    public DbSet<BlueprintRolloutTarget> BlueprintRolloutTargets => Set<BlueprintRolloutTarget>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
@@ -1916,6 +1918,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasIndex(r => r.ClusterId);
             entity.Property(r => r.BlueprintName).HasMaxLength(200).IsRequired();
             entity.Property(r => r.Status).HasConversion<string>().HasMaxLength(20);
+            entity.Property(r => r.Mode).HasConversion<string>().HasMaxLength(20);
             entity.Property(r => r.TriggeredBy).HasMaxLength(256);
 
             entity.HasOne(r => r.Cluster)
@@ -1939,6 +1942,38 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(s => s.Run)
                 .WithMany(r => r.StepRuns)
                 .HasForeignKey(s => s.BootstrapRunId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BlueprintRollout — a staged push of a blueprint to its bootstrapped clusters.
+        // Cascade from blueprint so deleting a blueprint clears its rollout history.
+
+        builder.Entity<BlueprintRollout>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => r.BlueprintId);
+            entity.Property(r => r.BlueprintName).HasMaxLength(200).IsRequired();
+            entity.Property(r => r.Status).HasConversion<string>().HasMaxLength(20);
+            entity.Property(r => r.TriggeredBy).HasMaxLength(256);
+
+            entity.HasOne(r => r.Blueprint)
+                .WithMany()
+                .HasForeignKey(r => r.BlueprintId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BlueprintRolloutTarget — one cluster within a rollout; cascade from rollout.
+
+        builder.Entity<BlueprintRolloutTarget>(entity =>
+        {
+            entity.HasKey(t => t.Id);
+            entity.HasIndex(t => new { t.RolloutId, t.Order });
+            entity.Property(t => t.ClusterName).HasMaxLength(200).IsRequired();
+            entity.Property(t => t.Status).HasConversion<string>().HasMaxLength(20);
+
+            entity.HasOne(t => t.Rollout)
+                .WithMany(r => r.Targets)
+                .HasForeignKey(t => t.RolloutId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }

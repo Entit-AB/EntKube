@@ -799,6 +799,86 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("AuditEvents");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("AutoAdvance")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("BlueprintId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("BlueprintName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("FinishedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("TriggeredBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BlueprintId");
+
+                    b.ToTable("BlueprintRollouts");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintRolloutTarget", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("BootstrapRunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ClusterName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime?>("FinishedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Order")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("RolloutId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("StartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RolloutId", "Order");
+
+                    b.ToTable("BlueprintRolloutTargets");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.BlueprintStep", b =>
                 {
                     b.Property<Guid>("Id")
@@ -868,6 +948,14 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<DateTime?>("FinishedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<Guid?>("RolloutTargetId")
+                        .HasColumnType("uuid");
 
                     b.Property<DateTime?>("StartedAt")
                         .HasColumnType("timestamp with time zone");
@@ -4548,6 +4636,28 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Deployment");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ClusterBlueprint", "Blueprint")
+                        .WithMany()
+                        .HasForeignKey("BlueprintId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Blueprint");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintRolloutTarget", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.BlueprintRollout", "Rollout")
+                        .WithMany("Targets")
+                        .HasForeignKey("RolloutId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Rollout");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.BlueprintStep", b =>
                 {
                     b.HasOne("EntKube.Web.Data.ClusterBlueprint", "Blueprint")
@@ -5970,6 +6080,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
             modelBuilder.Entity("EntKube.Web.Data.AppRoute", b =>
                 {
                     b.Navigation("DeploymentRoutes");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
+                {
+                    b.Navigation("Targets");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.BootstrapRun", b =>

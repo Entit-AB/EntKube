@@ -1,6 +1,17 @@
 namespace EntKube.Web.Data;
 
 /// <summary>
+/// Whether a run first installs a blueprint onto a cluster, or re-applies an
+/// updated blueprint to an already-bootstrapped cluster. Both drive the same
+/// idempotent runner; the mode is used for display and to tag rollout runs.
+/// </summary>
+public enum BootstrapRunMode
+{
+    Bootstrap,
+    Update
+}
+
+/// <summary>
 /// Overall status of a bootstrap run.
 /// </summary>
 public enum BootstrapRunStatus
@@ -35,6 +46,12 @@ public class BootstrapRun
     public required string BlueprintName { get; set; }
 
     public BootstrapRunStatus Status { get; set; } = BootstrapRunStatus.Queued;
+
+    /// <summary>Whether this is an initial bootstrap or an update re-apply.</summary>
+    public BootstrapRunMode Mode { get; set; } = BootstrapRunMode.Bootstrap;
+
+    /// <summary>Set when this run was created as part of a staged blueprint rollout.</summary>
+    public Guid? RolloutTargetId { get; set; }
 
     /// <summary>Order of the step currently executing (or last executed).</summary>
     public int CurrentStepOrder { get; set; }

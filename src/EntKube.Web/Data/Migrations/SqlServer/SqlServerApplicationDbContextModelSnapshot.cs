@@ -800,6 +800,86 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("AuditEvents");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<bool>("AutoAdvance")
+                        .HasColumnType("bit");
+
+                    b.Property<Guid>("BlueprintId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("BlueprintName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("FinishedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("TriggeredBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BlueprintId");
+
+                    b.ToTable("BlueprintRollouts");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintRolloutTarget", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("BootstrapRunId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ClusterName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<DateTime?>("FinishedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Order")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("RolloutId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("StartedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RolloutId", "Order");
+
+                    b.ToTable("BlueprintRolloutTargets");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.BlueprintStep", b =>
                 {
                     b.Property<Guid>("Id")
@@ -869,6 +949,14 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<DateTime?>("FinishedAt")
                         .HasColumnType("datetime2");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<Guid?>("RolloutTargetId")
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<DateTime?>("StartedAt")
                         .HasColumnType("datetime2");
@@ -4552,6 +4640,28 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Deployment");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ClusterBlueprint", "Blueprint")
+                        .WithMany()
+                        .HasForeignKey("BlueprintId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Blueprint");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintRolloutTarget", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.BlueprintRollout", "Rollout")
+                        .WithMany("Targets")
+                        .HasForeignKey("RolloutId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Rollout");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.BlueprintStep", b =>
                 {
                     b.HasOne("EntKube.Web.Data.ClusterBlueprint", "Blueprint")
@@ -5974,6 +6084,11 @@ namespace EntKube.Web.Data.Migrations.SqlServer
             modelBuilder.Entity("EntKube.Web.Data.AppRoute", b =>
                 {
                     b.Navigation("DeploymentRoutes");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
+                {
+                    b.Navigation("Targets");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.BootstrapRun", b =>
