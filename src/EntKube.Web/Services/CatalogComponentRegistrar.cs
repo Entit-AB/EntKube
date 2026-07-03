@@ -114,6 +114,12 @@ public class CatalogComponentRegistrar(
                 continue;
             }
 
+            // Fields with no YAML path are handled elsewhere (e.g. LetsEncryptSolverBuilder).
+            if (string.IsNullOrEmpty(field.YamlPath))
+            {
+                continue;
+            }
+
             if (formValues.TryGetValue(field.Key, out string? fieldVal) && !string.IsNullOrEmpty(fieldVal))
             {
                 pathValues[field.YamlPath] = fieldVal;
@@ -127,26 +133,11 @@ public class CatalogComponentRegistrar(
             result = string.Join("\n", subchartMarkers) + "\n" + result;
         }
 
-        // For letsencrypt-issuer, auto-detect the Gateway and inject parentRefs for HTTP-01,
-        // and conditionally inject the DNS-01 clientSecretSecretRef when an Azure DNS zone is configured.
-        if (entry.Key == "letsencrypt-issuer" && existingComponents.Count > 0)
+        // For letsencrypt-issuer, build the ACME solvers (HTTP-01 and/or DNS-01 across
+        // the selected provider) from the form selections.
+        if (entry.Key == LetsEncryptSolverBuilder.CatalogKey)
         {
-            (string gwName, string gwNamespace) = ExternalRouteService.ResolveGateway(existingComponents);
-            result = YamlFormMerger.MergeFormValues(result, new Dictionary<string, string>
-            {
-                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.name"] = gwName,
-                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.namespace"] = gwNamespace,
-                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.kind"] = "Gateway"
-            });
-
-            if (formValues.TryGetValue("dns-zone", out string? zone) && !string.IsNullOrWhiteSpace(zone))
-            {
-                result = YamlFormMerger.MergeFormValues(result, new Dictionary<string, string>
-                {
-                    ["spec.acme.solvers.1.dns01.azureDNS.clientSecretSecretRef.name"] = "azuredns-config",
-                    ["spec.acme.solvers.1.dns01.azureDNS.clientSecretSecretRef.key"] = "azuredns-client-secret"
-                });
-            }
+            result = LetsEncryptSolverBuilder.Apply(result, formValues, existingComponents);
         }
 
         return result;

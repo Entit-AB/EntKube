@@ -236,13 +236,27 @@ public static class YamlFormMerger
                 .OfType<YamlScalarNode>()
                 .FirstOrDefault(k => k.Value == seg);
 
-            // When the child is a sequence and the next segment is a numeric index,
-            // navigate into the sequence element and continue walking from there.
-            if (existing is not null
-                && current.Children[existing] is YamlSequenceNode seq
-                && i + 1 < segments.Length - 1
-                && int.TryParse(segments[i + 1], out int arrayIndex))
+            // When the next segment is a numeric index, this segment must hold a
+            // YAML sequence. Reuse an existing sequence, or create one — this is what
+            // lets indexed paths like "solvers.0.http01" build a real list from scratch
+            // (not a mapping with a "0" key, which would be invalid).
+            if (i + 1 < segments.Length - 1 && int.TryParse(segments[i + 1], out int arrayIndex))
             {
+                YamlSequenceNode seq;
+                if (existing is not null && current.Children[existing] is YamlSequenceNode existingSeq)
+                {
+                    seq = existingSeq;
+                }
+                else
+                {
+                    seq = new YamlSequenceNode();
+                    if (existing is not null)
+                    {
+                        current.Children.Remove(existing);
+                    }
+                    current.Children[key] = seq;
+                }
+
                 // Ensure the sequence is long enough.
                 while (seq.Children.Count <= arrayIndex)
                 {

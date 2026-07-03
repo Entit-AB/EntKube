@@ -469,7 +469,7 @@ public static class ComponentCatalog
         {
             Key = "letsencrypt-issuer",
             DisplayName = "Let's Encrypt ClusterIssuer",
-            Description = "Configures a ClusterIssuer that uses Let's Encrypt to automatically issue and renew TLS certificates. Supports HTTP-01 (ingress) and DNS-01 (Azure DNS) challenge solvers — both can be active simultaneously.",
+            Description = "Configures a ClusterIssuer that uses Let's Encrypt to automatically issue and renew TLS certificates. Supports HTTP-01 (Gateway API) and DNS-01 challenge solvers — both can be active simultaneously — with DNS-01 across Azure DNS, Cloudflare, AWS Route53, or Google Cloud DNS.",
             Icon = "bi-lock",
             Category = "Certificate Management",
             HelmRepoUrl = "https://charts.jetstack.io",
@@ -501,58 +501,150 @@ public static class ComponentCatalog
                     Options = ["https://acme-v02.api.letsencrypt.org/directory", "https://acme-staging-v02.api.letsencrypt.org/directory"],
                     HelpText = "Use staging for testing, production for real certificates"
                 },
+                // ── Challenge solver selection ──
+                // These carry an empty YamlPath: they are read by LetsEncryptSolverBuilder,
+                // which constructs the spec.acme.solvers list, rather than being merged directly.
                 new ComponentFormField
                 {
-                    Key = "dns-zone", Label = "DNS-01 Hosted Zone",
-                    YamlPath = "spec.acme.solvers.0.dns01.azureDNS.hostedZoneName",
-                    Type = FormFieldType.Text,
-                    Placeholder = "example.com",
+                    Key = "enable-http01", Label = "HTTP-01 solver (Gateway API)",
+                    YamlPath = "", Type = FormFieldType.Toggle,
+                    DefaultValue = "true",
+                    HelpText = "Solve challenges over HTTP via the cluster's ingress Gateway. Good default for standard certificates."
+                },
+                new ComponentFormField
+                {
+                    Key = "enable-dns01", Label = "DNS-01 solver",
+                    YamlPath = "", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Solve challenges via DNS. Required for wildcard (*.example.com) certificates."
+                },
+                new ComponentFormField
+                {
+                    Key = "dns-provider", Label = "DNS-01 Provider",
+                    YamlPath = "", Type = FormFieldType.Select,
+                    Options = ["azure", "cloudflare", "route53", "google"],
+                    Placeholder = "— select DNS provider —",
+                    DependsOnKey = "enable-dns01", DependsOnValue = "true",
+                    HelpText = "Which DNS provider hosts your zone."
+                },
+
+                // Azure DNS
+                new ComponentFormField
+                {
+                    Key = "dns-zone", Label = "Azure — Hosted Zone",
+                    YamlPath = "", Type = FormFieldType.Text, Placeholder = "example.com",
+                    DependsOnKey = "dns-provider", DependsOnValue = "azure",
                     HelpText = "Azure DNS zone name (e.g. example.com)"
                 },
                 new ComponentFormField
                 {
-                    Key = "dns-resource-group", Label = "DNS Resource Group",
-                    YamlPath = "spec.acme.solvers.0.dns01.azureDNS.resourceGroupName",
-                    Type = FormFieldType.Text,
-                    Placeholder = "my-dns-rg",
+                    Key = "dns-resource-group", Label = "Azure — Resource Group",
+                    YamlPath = "", Type = FormFieldType.Text, Placeholder = "my-dns-rg",
+                    DependsOnKey = "dns-provider", DependsOnValue = "azure",
                     HelpText = "Azure resource group containing the DNS zone"
                 },
                 new ComponentFormField
                 {
-                    Key = "dns-subscription-id", Label = "DNS Subscription ID",
-                    YamlPath = "spec.acme.solvers.0.dns01.azureDNS.subscriptionID",
-                    Type = FormFieldType.Text,
-                    Placeholder = "00000000-0000-0000-0000-000000000000",
+                    Key = "dns-subscription-id", Label = "Azure — Subscription ID",
+                    YamlPath = "", Type = FormFieldType.Text, Placeholder = "00000000-0000-0000-0000-000000000000",
+                    DependsOnKey = "dns-provider", DependsOnValue = "azure",
                     HelpText = "Azure subscription ID containing the DNS zone"
                 },
                 new ComponentFormField
                 {
-                    Key = "dns-tenant-id", Label = "DNS Tenant ID",
-                    YamlPath = "spec.acme.solvers.0.dns01.azureDNS.tenantID",
-                    Type = FormFieldType.Text,
-                    Placeholder = "00000000-0000-0000-0000-000000000000",
+                    Key = "dns-tenant-id", Label = "Azure — Tenant ID",
+                    YamlPath = "", Type = FormFieldType.Text, Placeholder = "00000000-0000-0000-0000-000000000000",
+                    DependsOnKey = "dns-provider", DependsOnValue = "azure",
                     HelpText = "Azure AD tenant ID for the service principal"
                 },
                 new ComponentFormField
                 {
-                    Key = "dns-client-id", Label = "DNS Client ID",
-                    YamlPath = "spec.acme.solvers.0.dns01.azureDNS.clientID",
-                    Type = FormFieldType.Text,
-                    Placeholder = "00000000-0000-0000-0000-000000000000",
+                    Key = "dns-client-id", Label = "Azure — Client ID",
+                    YamlPath = "", Type = FormFieldType.Text, Placeholder = "00000000-0000-0000-0000-000000000000",
+                    DependsOnKey = "dns-provider", DependsOnValue = "azure",
                     HelpText = "Service principal (app registration) client ID"
                 },
                 new ComponentFormField
                 {
-                    Key = "dns-client-secret", Label = "DNS Client Secret",
-                    YamlPath = "",
-                    Type = FormFieldType.Password,
+                    Key = "dns-client-secret", Label = "Azure — Client Secret",
+                    YamlPath = "", Type = FormFieldType.Password,
                     StoreAsSecret = true,
                     SecretName = "azuredns-client-secret",
                     KubernetesSecretName = "azuredns-config",
                     KubernetesSecretNamespace = "cert-manager",
+                    DependsOnKey = "dns-provider", DependsOnValue = "azure",
                     HelpText = "Service principal client secret — stored in vault and synced to K8s Secret 'azuredns-config'"
+                },
+
+                // Cloudflare
+                new ComponentFormField
+                {
+                    Key = "cloudflare-api-token", Label = "Cloudflare — API Token",
+                    YamlPath = "", Type = FormFieldType.Password,
+                    StoreAsSecret = true,
+                    SecretName = "cloudflare-api-token",
+                    KubernetesSecretName = "cloudflare-api-token-secret",
+                    KubernetesSecretNamespace = "cert-manager",
+                    DependsOnKey = "dns-provider", DependsOnValue = "cloudflare",
+                    HelpText = "Scoped API token with Zone.DNS edit rights — stored in vault, synced to K8s Secret 'cloudflare-api-token-secret'"
+                },
+
+                // AWS Route53
+                new ComponentFormField
+                {
+                    Key = "route53-region", Label = "Route53 — Region",
+                    YamlPath = "", Type = FormFieldType.Text, Placeholder = "eu-west-1",
+                    DependsOnKey = "dns-provider", DependsOnValue = "route53",
+                    HelpText = "AWS region for the Route53 API"
+                },
+                new ComponentFormField
+                {
+                    Key = "route53-hosted-zone-id", Label = "Route53 — Hosted Zone ID (optional)",
+                    YamlPath = "", Type = FormFieldType.Text, Placeholder = "Z0123456789ABC",
+                    DependsOnKey = "dns-provider", DependsOnValue = "route53",
+                    HelpText = "Restrict the issuer to a specific hosted zone (optional)"
+                },
+                new ComponentFormField
+                {
+                    Key = "route53-access-key-id", Label = "Route53 — Access Key ID",
+                    YamlPath = "", Type = FormFieldType.Text, Placeholder = "AKIA...",
+                    DependsOnKey = "dns-provider", DependsOnValue = "route53",
+                    HelpText = "IAM access key ID with Route53 change permissions"
+                },
+                new ComponentFormField
+                {
+                    Key = "route53-secret-access-key", Label = "Route53 — Secret Access Key",
+                    YamlPath = "", Type = FormFieldType.Password,
+                    StoreAsSecret = true,
+                    SecretName = "route53-secret-access-key",
+                    KubernetesSecretName = "route53-credentials",
+                    KubernetesSecretNamespace = "cert-manager",
+                    DependsOnKey = "dns-provider", DependsOnValue = "route53",
+                    HelpText = "IAM secret access key — stored in vault, synced to K8s Secret 'route53-credentials'"
+                },
+
+                // Google Cloud DNS
+                new ComponentFormField
+                {
+                    Key = "clouddns-project", Label = "Google — Project ID",
+                    YamlPath = "", Type = FormFieldType.Text, Placeholder = "my-gcp-project",
+                    DependsOnKey = "dns-provider", DependsOnValue = "google",
+                    HelpText = "GCP project ID hosting the Cloud DNS zone"
+                },
+                new ComponentFormField
+                {
+                    Key = "clouddns-service-account", Label = "Google — Service Account JSON",
+                    YamlPath = "", Type = FormFieldType.Password,
+                    StoreAsSecret = true,
+                    SecretName = "clouddns-service-account",
+                    KubernetesSecretName = "clouddns-sa",
+                    KubernetesSecretNamespace = "cert-manager",
+                    DependsOnKey = "dns-provider", DependsOnValue = "google",
+                    HelpText = "Service account key JSON with dns.admin — stored in vault, synced to K8s Secret 'clouddns-sa'"
                 }
             ],
+            // No solvers here — LetsEncryptSolverBuilder appends HTTP-01 and/or DNS-01
+            // solvers based on the form selections above.
             DefaultValues = """
                 apiVersion: cert-manager.io/v1
                 kind: ClusterIssuer
@@ -564,18 +656,6 @@ public static class ComponentCatalog
                     email: ops@example.com
                     privateKeySecretRef:
                       name: letsencrypt-prod-key
-                    solvers:
-                      - dns01:
-                          azureDNS:
-                            hostedZoneName: example.com
-                            resourceGroupName: my-dns-rg
-                            subscriptionID: 00000000-0000-0000-0000-000000000000
-                            tenantID: 00000000-0000-0000-0000-000000000000
-                            clientID: 00000000-0000-0000-0000-000000000000
-                            environment: AzurePublicCloud
-                            clientSecretSecretRef:
-                              name: azuredns-config
-                              key: azuredns-client-secret
                 """
         },
 

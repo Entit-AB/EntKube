@@ -187,7 +187,7 @@
 
                                 @if (stepType == BlueprintStepType.Component && CurrentEntry is not null)
                                 {
-                                    @foreach (ComponentFormField field in CurrentEntry.FormFields.Where(f => !f.Hidden))
+                                    @foreach (ComponentFormField field in CurrentEntry.FormFields.Where(f => !f.Hidden && IsFieldVisible(f)))
                                     {
                                         <div class="mb-2">
                                             <label class="form-label small mb-0">
@@ -419,6 +419,14 @@
     private string GetParam(string key) => stepParams.TryGetValue(key, out string? v) ? v : "";
     private void SetParam(string key, string? value) => stepParams[key] = value ?? "";
 
+    private bool IsFieldVisible(ComponentFormField field)
+    {
+        if (field.DependsOnKey is null) return true;
+        stepParams.TryGetValue(field.DependsOnKey, out string? actual);
+        if (field.DependsOnValue is null) return !string.IsNullOrWhiteSpace(actual);
+        return string.Equals(actual, field.DependsOnValue, StringComparison.Ordinal);
+    }
+
     private static bool IsClusterScopedField(ComponentFormField field) =>
         field.Type is FormFieldType.CnpgDatabase or FormFieldType.ClusterIssuer
             or FormFieldType.StorageLink or FormFieldType.GatewaySelector;
@@ -450,6 +458,13 @@
             builder.AddAttribute(3, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this,
                 e => SetParam(field.Key, e.Value?.ToString())));
             int seq = 4;
+            if (!string.IsNullOrEmpty(field.Placeholder))
+            {
+                builder.OpenElement(seq++, "option");
+                builder.AddAttribute(seq++, "value", "");
+                builder.AddContent(seq++, field.Placeholder);
+                builder.CloseElement();
+            }
             foreach (string opt in field.Options)
             {
                 builder.OpenElement(seq++, "option");
