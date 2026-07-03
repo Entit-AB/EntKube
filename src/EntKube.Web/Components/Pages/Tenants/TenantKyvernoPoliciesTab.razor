@@ -1,6 +1,7 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject KyvernoPolicyService KyvernoService
+@inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
    TenantKyvernoPoliciesTab — Kyverno admission policy management
@@ -642,8 +643,12 @@
             showAddCustom = false;
             newKpName = ""; newKpYaml = null;
             newKpMode = KyvernoValidationFailureAction.Audit;
+            Toasts.Success("Custom policy added.");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to add custom policy: {ex.Message}");
+        }
         finally { addingCustom = false; }
     }
 

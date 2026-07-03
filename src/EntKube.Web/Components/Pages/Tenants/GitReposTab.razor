@@ -1,7 +1,9 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
+@using System.ComponentModel.DataAnnotations
 @inject GitRepositoryService GitRepoService
 @inject VaultService VaultService
+@inject ToastService Toasts
 
 <div class="card shadow-sm">
     <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
@@ -29,49 +31,55 @@
                         </div>
                     }
 
-                    <div class="row g-2 mb-2">
-                        <div class="col-md-4">
-                            <label class="form-label small">Name</label>
-                            <input class="form-control form-control-sm" @bind="newName" placeholder="e.g. prod-gitops" />
-                        </div>
-                        <div class="col-md-5">
-                            <label class="form-label small">URL</label>
-                            <input class="form-control form-control-sm" @bind="newUrl"
-                                   placeholder="https://github.com/org/repo or git@github.com:org/repo.git" />
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label small">Default branch</label>
-                            <input class="form-control form-control-sm" @bind="newBranch" placeholder="main" />
-                        </div>
-                    </div>
-
-                    <div class="row g-2 mb-2">
-                        <div class="col-md-4">
-                            <label class="form-label small">Authentication</label>
-                            <select class="form-select form-select-sm" @bind="newAuthType">
-                                <option value="@GitAuthType.None">None (public)</option>
-                                <option value="@GitAuthType.HttpsPat">HTTPS — Personal Access Token</option>
-                                <option value="@GitAuthType.HttpsPassword">HTTPS — Username + Password</option>
-                                <option value="@GitAuthType.SshKey">SSH — Private Key</option>
-                            </select>
-                        </div>
-                        @if (newAuthType == GitAuthType.HttpsPassword)
-                        {
+                    <EditForm Model="addForm" OnValidSubmit="AddRepository">
+                        <DataAnnotationsValidator />
+                        <div class="row g-2 mb-2">
                             <div class="col-md-4">
-                                <label class="form-label small">Username</label>
-                                <input class="form-control form-control-sm" @bind="newUsername" placeholder="e.g. git-user" />
+                                <label class="form-label small">Name</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="addForm.Name" placeholder="e.g. prod-gitops" />
+                                <ValidationMessage For="() => addForm.Name" class="text-danger small" />
                             </div>
-                        }
-                    </div>
+                            <div class="col-md-5">
+                                <label class="form-label small">URL</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="addForm.Url"
+                                           placeholder="https://github.com/org/repo or git@github.com:org/repo.git" />
+                                <ValidationMessage For="() => addForm.Url" class="text-danger small" />
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small">Default branch</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="addForm.Branch" placeholder="main" />
+                                <ValidationMessage For="() => addForm.Branch" class="text-danger small" />
+                            </div>
+                        </div>
 
-                    <div class="d-flex gap-1">
-                        <button class="btn btn-sm btn-primary" @onclick="AddRepository"
-                                disabled="@(string.IsNullOrWhiteSpace(newName) || string.IsNullOrWhiteSpace(newUrl) || adding)">
-                            @if (adding) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                            Save
-                        </button>
-                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelAdd">Cancel</button>
-                    </div>
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-4">
+                                <label class="form-label small">Authentication</label>
+                                <InputSelect class="form-select form-select-sm" @bind-Value="addForm.AuthType">
+                                    <option value="@GitAuthType.None">None (public)</option>
+                                    <option value="@GitAuthType.HttpsPat">HTTPS — Personal Access Token</option>
+                                    <option value="@GitAuthType.HttpsPassword">HTTPS — Username + Password</option>
+                                    <option value="@GitAuthType.SshKey">SSH — Private Key</option>
+                                </InputSelect>
+                            </div>
+                            @if (addForm.AuthType == GitAuthType.HttpsPassword)
+                            {
+                                <div class="col-md-4">
+                                    <label class="form-label small">Username</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="addForm.Username" placeholder="e.g. git-user" />
+                                    <ValidationMessage For="() => addForm.Username" class="text-danger small" />
+                                </div>
+                            }
+                        </div>
+
+                        <div class="d-flex gap-1">
+                            <button type="submit" class="btn btn-sm btn-primary" disabled="@adding">
+                                @if (adding) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Save
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelAdd">Cancel</button>
+                        </div>
+                    </EditForm>
                 </div>
             </div>
         }
@@ -309,12 +317,27 @@
     // Add form
     private bool showAddForm;
     private bool adding;
-    private string newName = "";
-    private string newUrl = "";
-    private string newBranch = "main";
-    private GitAuthType newAuthType = GitAuthType.None;
-    private string newUsername = "";
+    private AddRepoForm addForm = new();
     private string? addError;
+
+    private sealed class AddRepoForm
+    {
+        [Required(ErrorMessage = "Name is required.")]
+        [StringLength(200, MinimumLength = 1)]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "URL is required.")]
+        // Accept both HTTP(S) clone URLs and scp-style SSH URLs (git@host:org/repo.git).
+        [RegularExpression(@"^(https?://[^\s]+|(ssh://)?[^\s@]+@[^\s:]+:[^\s]+)$",
+            ErrorMessage = "Enter an https:// or git@host:path URL.")]
+        public string Url { get; set; } = "";
+
+        public string Branch { get; set; } = "main";
+
+        public GitAuthType AuthType { get; set; } = GitAuthType.None;
+
+        public string Username { get; set; } = "";
+    }
 
     // Test connection
     private Guid? testingRepoId;
@@ -351,18 +374,19 @@
         try
         {
             await GitRepoService.CreateRepositoryAsync(
-                TenantId, newName, newUrl, newAuthType,
-                string.IsNullOrWhiteSpace(newUsername) ? null : newUsername,
-                string.IsNullOrWhiteSpace(newBranch) ? "main" : newBranch);
+                TenantId, addForm.Name.Trim(), addForm.Url.Trim(), addForm.AuthType,
+                string.IsNullOrWhiteSpace(addForm.Username) ? null : addForm.Username.Trim(),
+                string.IsNullOrWhiteSpace(addForm.Branch) ? "main" : addForm.Branch.Trim());
 
             showAddForm = false;
-            newName = ""; newUrl = ""; newBranch = "main";
-            newAuthType = GitAuthType.None; newUsername = "";
+            addForm = new AddRepoForm();
+            Toasts.Success("Git repository registered.");
             await LoadAsync();
         }
         catch (Exception ex)
         {
             addError = ex.Message;
+            Toasts.Error(ex.Message, "Failed to register repository");
         }
         finally { adding = false; }
     }
@@ -371,8 +395,7 @@
     {
         showAddForm = false;
         addError = null;
-        newName = ""; newUrl = ""; newBranch = "main";
-        newAuthType = GitAuthType.None; newUsername = "";
+        addForm = new AddRepoForm();
     }
 
     private async Task TestConnection(Guid repoId)

@@ -1,6 +1,7 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject ClusterBlueprintService BlueprintService
+@inject ToastService Toasts
 
 @* Tenant-scoped cluster blueprints: reusable, ordered recipes of catalog
    components and services that a registered cluster can be bootstrapped from. *@
@@ -16,6 +17,13 @@
 {
     <div class="alert alert-danger py-2">@error</div>
 }
+
+<ConfirmDialog Visible="@(pendingConfirm is not null)"
+               Message="@(pendingConfirm?.Message ?? "")"
+               ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+               IsBusy="confirmBusy"
+               OnConfirm="RunPendingConfirmAsync"
+               OnCancel="() => pendingConfirm = null" />
 
 <div class="row">
     <!-- Blueprint list -->
@@ -39,7 +47,11 @@
             <div class="list-group list-group-flush">
                 @if (blueprints.Count == 0)
                 {
-                    <div class="list-group-item text-muted small">No blueprints yet.</div>
+                    <div class="list-group-item">
+                        <EmptyState Icon="bi-diagram-3" Title="No blueprints yet"
+                                    Message="Create a reusable recipe of components and services to bootstrap clusters from."
+                                    ActionLabel="New blueprint" OnAction="() => showCreate = true" />
+                    </div>
                 }
                 @foreach (ClusterBlueprint b in blueprints)
                 {
@@ -60,7 +72,10 @@
     <div class="col-md-8">
         @if (selected is null)
         {
-            <div class="text-muted p-4 text-center border rounded">Select or create a blueprint to edit its steps.</div>
+            <div class="border rounded">
+                <EmptyState Icon="bi-diagram-3" Title="No blueprint selected"
+                            Message="Select or create a blueprint to edit its steps." />
+            </div>
         }
         else
         {
@@ -71,7 +86,10 @@
                         <button class="btn btn-sm btn-outline-primary" @onclick="StartAddStep">
                             <i class="bi bi-plus-lg me-1"></i>Add step
                         </button>
-                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteBlueprint(selected.Id)">
+                        <button class="btn btn-sm btn-outline-danger"
+                                title="Delete blueprint"
+                                aria-label="@($"Delete blueprint {selected.Name}")"
+                                @onclick='() => pendingConfirm = new PendingConfirm($"Delete blueprint \"{selected.Name}\" and all its steps? This cannot be undone.", "Delete blueprint", () => DeleteBlueprint(selected.Id))'>
                             <i class="bi bi-trash"></i>
                         </button>
                     </div>
@@ -79,7 +97,9 @@
                 <div class="card-body">
                     @if (selected.Steps.Count == 0)
                     {
-                        <p class="text-muted">No steps yet. Add components (installed via Helm) and services (CNPG, Redis, RabbitMQ) in the order they should be installed.</p>
+                        <EmptyState Icon="bi-list-ol" Title="No steps yet"
+                                    Message="Add components (installed via Helm) and services (CNPG, Redis, RabbitMQ) in the order they should be installed."
+                                    ActionLabel="Add step" OnAction="StartAddStep" />
                     }
                     else
                     {
@@ -104,16 +124,17 @@
                                         </small>
                                     </div>
                                     <div class="btn-group btn-group-sm">
-                                        <button class="btn btn-outline-secondary" title="Move up" @onclick="() => MoveStep(step.Id, -1)">
+                                        <button class="btn btn-outline-secondary" title="Move up" aria-label="@($"Move step {step.Name} up")" @onclick="() => MoveStep(step.Id, -1)">
                                             <i class="bi bi-arrow-up"></i>
                                         </button>
-                                        <button class="btn btn-outline-secondary" title="Move down" @onclick="() => MoveStep(step.Id, 1)">
+                                        <button class="btn btn-outline-secondary" title="Move down" aria-label="@($"Move step {step.Name} down")" @onclick="() => MoveStep(step.Id, 1)">
                                             <i class="bi bi-arrow-down"></i>
                                         </button>
-                                        <button class="btn btn-outline-primary" title="Edit" @onclick="() => StartEditStep(step)">
+                                        <button class="btn btn-outline-primary" title="Edit" aria-label="@($"Edit step {step.Name}")" @onclick="() => StartEditStep(step)">
                                             <i class="bi bi-pencil"></i>
                                         </button>
-                                        <button class="btn btn-outline-danger" title="Delete" @onclick="() => DeleteStep(step.Id)">
+                                        <button class="btn btn-outline-danger" title="Delete" aria-label="@($"Delete step {step.Name}")"
+                                                @onclick='() => pendingConfirm = new PendingConfirm($"Delete step \"{step.Name}\"? This cannot be undone.", "Delete step", () => DeleteStep(step.Id))'>
                                             <i class="bi bi-trash"></i>
                                         </button>
                                     </div>
@@ -303,9 +324,18 @@
 
     private async Task DeleteBlueprint(Guid id)
     {
-        await BlueprintService.DeleteBlueprintAsync(id);
-        selected = null;
-        await LoadBlueprints();
+        string? name = blueprints.FirstOrDefault(b => b.Id == id)?.Name;
+        try
+        {
+            await BlueprintService.DeleteBlueprintAsync(id);
+            selected = null;
+            await LoadBlueprints();
+            Toasts.Success($"Deleted blueprint \"{name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete blueprint \"{name}\": {ex.Message}");
+        }
     }
 
     // ── Step editing ──
@@ -412,8 +442,38 @@
 
     private async Task DeleteStep(Guid stepId)
     {
-        await BlueprintService.DeleteStepAsync(stepId);
-        selected = await BlueprintService.GetBlueprintAsync(selected!.Id);
+        string? name = selected?.Steps.FirstOrDefault(s => s.Id == stepId)?.Name;
+        try
+        {
+            await BlueprintService.DeleteStepAsync(stepId);
+            selected = await BlueprintService.GetBlueprintAsync(selected!.Id);
+            Toasts.Success($"Deleted step \"{name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete step \"{name}\": {ex.Message}");
+        }
+    }
+
+    // A destructive action awaiting user confirmation via the ConfirmDialog banner.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try
+        {
+            await pendingConfirm.Action();
+        }
+        finally
+        {
+            confirmBusy = false;
+            pendingConfirm = null;
+        }
     }
 
     // ── Param helpers ──

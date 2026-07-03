@@ -3,6 +3,14 @@
 @using EntKube.Web.Services
 @inject SecretExpiryService SecretExpiry
 @inject CustomerNotificationService CustomerNotifications
+@inject ToastService Toasts
+
+<ConfirmDialog Visible="@(pendingConfirm is not null)"
+               Message="@(pendingConfirm?.Message ?? "")"
+               ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+               IsBusy="confirmBusy"
+               OnConfirm="RunPendingConfirmAsync"
+               OnCancel="() => pendingConfirm = null" />
 
 @*
    Customer-wide notifications view: expiring secrets across all of the customer's apps,
@@ -165,7 +173,7 @@
                                 </button>
                                 <button class="btn btn-sm btn-outline-secondary" @onclick="() => ToggleAsync(ch)">@(ch.IsEnabled ? "Disable" : "Enable")</button>
                                 <button class="btn btn-sm btn-outline-secondary" @onclick="() => EditChannel(ch)">Edit</button>
-                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteAsync(ch)">Delete</button>
+                                <button class="btn btn-sm btn-outline-danger" @onclick='() => pendingConfirm = new PendingConfirm($"Delete the notification channel \"{ch.Name}\"? It will stop receiving notifications. This cannot be undone.", "Delete", () => DeleteAsync(ch))'>Delete</button>
                             </div>
                         </div>
                     }
@@ -271,6 +279,19 @@
 
     private bool IsAdmin => AccessRole >= CustomerAccessRole.Admin;
 
+    // A destructive action awaiting user confirmation.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
+
     private bool enabled;
     private string thresholdsCsv = "30,14,7,1";
     private bool savingConfig;
@@ -374,7 +395,10 @@
             if (root.TryGetProperty("token", out JsonElement t)) formBearerToken = t.GetString();
             if (root.TryGetProperty("to", out JsonElement to)) formEmail = to.GetString();
         }
-        catch { }
+        catch
+        {
+            // Best-effort parse of stored config JSON; leave fields blank if it's malformed.
+        }
         formError = null;
         channelFormOpen = true;
     }
@@ -414,8 +438,16 @@
 
     private async Task DeleteAsync(NotificationChannel ch)
     {
-        await CustomerNotifications.DeleteChannelAsync(TenantId, CustomerId, ch.Id);
-        channels = await CustomerNotifications.GetChannelsAsync(TenantId, CustomerId);
+        try
+        {
+            await CustomerNotifications.DeleteChannelAsync(TenantId, CustomerId, ch.Id);
+            channels = await CustomerNotifications.GetChannelsAsync(TenantId, CustomerId);
+            Toasts.Success($"Deleted channel \"{ch.Name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete channel \"{ch.Name}\": {ex.Message}");
+        }
     }
 
     private async Task TestChannelAsync(NotificationChannel ch)
@@ -492,7 +524,10 @@
             if (root.TryGetProperty("webhookUrl", out JsonElement w)) return w.GetString() ?? "";
             if (root.TryGetProperty("url", out JsonElement u)) return u.GetString() ?? "";
         }
-        catch { }
+        catch
+        {
+            // Best-effort parse of stored config JSON for display; fall through to empty string.
+        }
         return "";
     }
 

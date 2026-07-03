@@ -1,7 +1,9 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
+@using System.ComponentModel.DataAnnotations
 @inject RedisService RedisService
 @inject TenantService TenantService
+@inject ToastService Toasts
 
 @* ===========================================================================
    Cache Tab — Redis cluster management via OT-Container-Kit Redis Operator.
@@ -54,75 +56,84 @@
                     </button>
                 </div>
                 <div class="card-body">
-                    <div class="row g-3">
-                        <div class="col-md-6">
-                            <label class="form-label small">Cluster Name</label>
-                            <input class="form-control form-control-sm" @bind="createName"
-                                   placeholder="redis-cache" />
-                            <div class="form-text small">DNS-safe, max 63 chars.</div>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label small">Kubernetes Cluster</label>
-                            <select class="form-select form-select-sm" @bind="createK8sClusterId">
-                                <option value="@Guid.Empty">Select cluster...</option>
-                                @foreach (KubernetesCluster k in allK8sClusters)
-                                {
-                                    <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
-                                }
-                            </select>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label small">Namespace</label>
-                            <input class="form-control form-control-sm" @bind="createNamespace"
-                                   placeholder="ot-operators" />
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label small">Shards</label>
-                            <input type="number" class="form-control form-control-sm" @bind="createClusterSize"
-                                   min="3" max="9" step="1" />
-                            <div class="form-text small">Min 3 for cluster mode</div>
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label small">Redis Version</label>
-                            <input class="form-control form-control-sm" @bind="createRedisVersion"
-                                   placeholder="v7.0.15" />
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label small">Storage / Node</label>
-                            <input class="form-control form-control-sm" @bind="createStorageSize"
-                                   placeholder="1Gi" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Storage Class (optional)</label>
-                            <input class="form-control form-control-sm" @bind="createStorageClass"
-                                   placeholder="default" />
-                        </div>
-                        <div class="col-md-4 d-flex align-items-end">
-                            <div class="form-check">
-                                <input class="form-check-input" type="checkbox" @bind="createPersistenceEnabled"
-                                       id="persistenceEnabled" />
-                                <label class="form-check-label small" for="persistenceEnabled">
-                                    Persistence (PVC)
-                                </label>
+                    <EditForm Model="createForm" OnValidSubmit="CreateCluster">
+                        <DataAnnotationsValidator />
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label class="form-label small">Cluster Name</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="createForm.Name"
+                                           placeholder="redis-cache" />
+                                <ValidationMessage For="() => createForm.Name" class="text-danger small" />
+                                <div class="form-text small">DNS-safe, max 63 chars.</div>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">Kubernetes Cluster</label>
+                                <InputSelect class="form-select form-select-sm" @bind-Value="createForm.K8sClusterId">
+                                    <option value="">Select cluster...</option>
+                                    @foreach (KubernetesCluster k in allK8sClusters)
+                                    {
+                                        <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
+                                    }
+                                </InputSelect>
+                                <ValidationMessage For="() => createForm.K8sClusterId" class="text-danger small" />
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">Namespace</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="createForm.Namespace"
+                                           placeholder="ot-operators" />
+                                <ValidationMessage For="() => createForm.Namespace" class="text-danger small" />
+                            </div>
+                            <div class="col-md-2">
+                                <label class="form-label small">Shards</label>
+                                <InputNumber class="form-control form-control-sm" @bind-Value="createForm.ClusterSize"
+                                             min="3" max="9" step="1" />
+                                <ValidationMessage For="() => createForm.ClusterSize" class="text-danger small" />
+                                <div class="form-text small">Min 3 for cluster mode</div>
+                            </div>
+                            <div class="col-md-2">
+                                <label class="form-label small">Redis Version</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="createForm.RedisVersion"
+                                           placeholder="v7.0.15" />
+                                <ValidationMessage For="() => createForm.RedisVersion" class="text-danger small" />
+                            </div>
+                            <div class="col-md-2">
+                                <label class="form-label small">Storage / Node</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="createForm.StorageSize"
+                                           placeholder="1Gi" />
+                                <ValidationMessage For="() => createForm.StorageSize" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Storage Class (optional)</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="createForm.StorageClass"
+                                           placeholder="default" />
+                            </div>
+                            <div class="col-md-4 d-flex align-items-end">
+                                <div class="form-check">
+                                    <InputCheckbox class="form-check-input" @bind-Value="createForm.PersistenceEnabled"
+                                                   id="persistenceEnabled" />
+                                    <label class="form-check-label small" for="persistenceEnabled">
+                                        Persistence (PVC)
+                                    </label>
+                                </div>
                             </div>
                         </div>
-                    </div>
 
-                    @if (createError is not null)
-                    {
-                        <div class="alert alert-danger mt-3 py-2 small">@createError</div>
-                    }
+                        @if (createError is not null)
+                        {
+                            <div class="alert alert-danger mt-3 py-2 small">@createError</div>
+                        }
 
-                    <div class="mt-3 d-flex gap-2">
-                        <button class="btn btn-sm btn-primary" @onclick="CreateCluster" disabled="@creating">
-                            @if (creating)
-                            {
-                                <span class="spinner-border spinner-border-sm me-1"></span>
-                            }
-                            Create Cluster
-                        </button>
-                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelCreate">Cancel</button>
-                    </div>
+                        <div class="mt-3 d-flex gap-2">
+                            <button type="submit" class="btn btn-sm btn-primary" disabled="@creating">
+                                @if (creating)
+                                {
+                                    <span class="spinner-border spinner-border-sm me-1"></span>
+                                }
+                                Create Cluster
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelCreate">Cancel</button>
+                        </div>
+                    </EditForm>
                 </div>
             </div>
         }
@@ -230,7 +241,8 @@
                                 }
                                 else
                                 {
-                                    <p class="text-muted small">No pods found yet.</p>
+                                    <EmptyState Icon="bi-cpu" Title="No pods found yet"
+                                                Message="Pods will appear here as the operator provisions the cluster." />
                                 }
                             </div>
                         }
@@ -302,34 +314,38 @@
                             {
                                 <div class="card border-primary mb-2">
                                     <div class="card-body py-2">
-                                        <div class="row g-2">
-                                            <div class="col-md-5">
-                                                <label class="form-label small mb-1">App Deployment</label>
-                                                <select class="form-select form-select-sm" @bind="addBindingDeploymentId">
-                                                    <option value="@Guid.Empty">Select deployment...</option>
-                                                    @foreach (AppDeployment dep in allDeployments)
-                                                    {
-                                                        <option value="@dep.Id">@dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
-                                                    }
-                                                </select>
+                                        <EditForm Model="bindingForm" OnValidSubmit="() => AddBinding(cluster.Id)">
+                                            <DataAnnotationsValidator />
+                                            <div class="row g-2">
+                                                <div class="col-md-5">
+                                                    <label class="form-label small mb-1">App Deployment</label>
+                                                    <InputSelect class="form-select form-select-sm" @bind-Value="bindingForm.DeploymentId">
+                                                        <option value="">Select deployment...</option>
+                                                        @foreach (AppDeployment dep in allDeployments)
+                                                        {
+                                                            <option value="@dep.Id">@dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
+                                                        }
+                                                    </InputSelect>
+                                                    <ValidationMessage For="() => bindingForm.DeploymentId" class="text-danger small" />
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <label class="form-label small mb-1">Secret Name</label>
+                                                    <InputText class="form-control form-control-sm" @bind-Value="bindingForm.SecretName"
+                                                               placeholder="redis-cache" />
+                                                    <ValidationMessage For="() => bindingForm.SecretName" class="text-danger small" />
+                                                </div>
+                                                <div class="col-md-3 d-flex align-items-end gap-1">
+                                                    <button type="submit" class="btn btn-sm btn-primary">
+                                                        Bind
+                                                    </button>
+                                                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelAddBinding">Cancel</button>
+                                                </div>
                                             </div>
-                                            <div class="col-md-4">
-                                                <label class="form-label small mb-1">Secret Name</label>
-                                                <input class="form-control form-control-sm" @bind="addBindingSecretName"
-                                                       placeholder="redis-cache" />
-                                            </div>
-                                            <div class="col-md-3 d-flex align-items-end gap-1">
-                                                <button class="btn btn-sm btn-primary" @onclick="() => AddBinding(cluster.Id)"
-                                                        disabled="@(addBindingDeploymentId == Guid.Empty || string.IsNullOrWhiteSpace(addBindingSecretName))">
-                                                    Bind
-                                                </button>
-                                                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelAddBinding">Cancel</button>
-                                            </div>
-                                        </div>
-                                        @if (addBindingError is not null)
-                                        {
-                                            <div class="alert alert-danger py-1 small mt-2 mb-0">@addBindingError</div>
-                                        }
+                                            @if (addBindingError is not null)
+                                            {
+                                                <div class="alert alert-danger py-1 small mt-2 mb-0">@addBindingError</div>
+                                            }
+                                        </EditForm>
                                     </div>
                                 </div>
                             }
@@ -339,7 +355,9 @@
                             }
                             @if (clusterBindings.Count == 0)
                             {
-                                <p class="text-muted small mb-0">No app bindings yet.</p>
+                                <EmptyState Icon="bi-link-45deg" Title="No app bindings yet"
+                                            Message="Bind an app deployment to sync Redis connection details into its namespace."
+                                            ActionLabel="Add binding" OnAction="() => ShowAddBinding(cluster.Id)" />
                             }
                             else
                             {
@@ -402,7 +420,8 @@
 
         @if (clusters.Count == 0 && !showCreateForm)
         {
-            <p class="text-muted">No Redis clusters. Install the Redis Operator from the Components tab, then create a cluster here.</p>
+            <EmptyState Icon="bi-server" Title="No Redis clusters"
+                        Message="Install the Redis Operator from the Components tab, then create a cluster here." />
         }
     </div>
 }
@@ -419,16 +438,37 @@
 
     // ── Create form ──
     private bool showCreateForm;
-    private string createName = "";
-    private Guid createK8sClusterId;
-    private string createNamespace = "ot-operators";
-    private int createClusterSize = 3;
-    private string createRedisVersion = "v7.0.15";
-    private string createStorageSize = "1Gi";
-    private string? createStorageClass;
-    private bool createPersistenceEnabled = true;
+    private CreateClusterForm createForm = new();
     private bool creating;
     private string? createError;
+
+    private sealed class CreateClusterForm
+    {
+        [Required(ErrorMessage = "Cluster name is required.")]
+        [StringLength(63, MinimumLength = 1)]
+        [RegularExpression(@"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            ErrorMessage = "DNS-safe: lowercase letters, digits, and hyphens (not leading/trailing).")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Select a Kubernetes cluster.")]
+        public Guid? K8sClusterId { get; set; }
+
+        [Required(ErrorMessage = "Namespace is required.")]
+        public string Namespace { get; set; } = "ot-operators";
+
+        [Range(3, 9, ErrorMessage = "Shards must be between 3 and 9.")]
+        public int ClusterSize { get; set; } = 3;
+
+        [Required(ErrorMessage = "Redis version is required.")]
+        public string RedisVersion { get; set; } = "v7.0.15";
+
+        [Required(ErrorMessage = "Storage size is required.")]
+        public string StorageSize { get; set; } = "1Gi";
+
+        public string? StorageClass { get; set; }
+
+        public bool PersistenceEnabled { get; set; } = true;
+    }
 
     // ── Expand / detail ──
     private Guid? expandedId;
@@ -443,9 +483,19 @@
     private Dictionary<Guid, List<CacheBinding>> allBindings = [];
     private List<AppDeployment> allDeployments = [];
     private Guid? addBindingClusterId;
-    private Guid addBindingDeploymentId;
-    private string addBindingSecretName = "";
+    private AddBindingForm bindingForm = new();
     private string? addBindingError;
+
+    private sealed class AddBindingForm
+    {
+        [Required(ErrorMessage = "Select a deployment.")]
+        public Guid? DeploymentId { get; set; }
+
+        [Required(ErrorMessage = "Secret name is required.")]
+        [RegularExpression(@"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            ErrorMessage = "DNS-safe: lowercase letters, digits, and hyphens.")]
+        public string SecretName { get; set; } = "redis-cache";
+    }
 
     // ── Credentials ──
     private Guid? credClusterId;
@@ -488,17 +538,11 @@
 
     // ── Create ──
 
-    private void ShowCreateForm() { showCreateForm = true; createError = null; }
+    private void ShowCreateForm() { showCreateForm = true; createForm = new CreateClusterForm(); createError = null; }
     private void CancelCreate() { showCreateForm = false; createError = null; }
 
     private async Task CreateCluster()
     {
-        if (string.IsNullOrWhiteSpace(createName) || createK8sClusterId == Guid.Empty)
-        {
-            createError = "Cluster name and Kubernetes cluster are required.";
-            return;
-        }
-
         creating = true;
         createError = null;
 
@@ -506,28 +550,25 @@
         {
             await RedisService.CreateClusterAsync(
                 TenantId,
-                createK8sClusterId,
-                createName.Trim(),
-                createNamespace.Trim(),
-                createClusterSize,
-                createRedisVersion.Trim(),
-                createStorageSize.Trim(),
-                string.IsNullOrWhiteSpace(createStorageClass) ? null : createStorageClass.Trim(),
-                createPersistenceEnabled);
+                createForm.K8sClusterId!.Value,
+                createForm.Name.Trim(),
+                createForm.Namespace.Trim(),
+                createForm.ClusterSize,
+                createForm.RedisVersion.Trim(),
+                createForm.StorageSize.Trim(),
+                string.IsNullOrWhiteSpace(createForm.StorageClass) ? null : createForm.StorageClass.Trim(),
+                createForm.PersistenceEnabled);
 
             showCreateForm = false;
-            createName = "";
-            createNamespace = "ot-operators";
-            createClusterSize = 3;
-            createRedisVersion = "v7";
-            createStorageSize = "1Gi";
-            createStorageClass = null;
+            createForm = new CreateClusterForm();
+            Toasts.Success("Redis cluster creation started.");
 
             await LoadAsync();
         }
         catch (Exception ex)
         {
             createError = ex.Message;
+            Toasts.Error(ex.Message, "Failed to create cluster");
         }
         finally
         {
@@ -591,8 +632,7 @@
     private void ShowAddBinding(Guid clusterId)
     {
         addBindingClusterId = clusterId;
-        addBindingDeploymentId = Guid.Empty;
-        addBindingSecretName = "redis-cache";
+        bindingForm = new AddBindingForm();
         addBindingError = null;
     }
 
@@ -609,15 +649,17 @@
         try
         {
             await RedisService.CreateCacheBindingAsync(
-                TenantId, clusterId, addBindingDeploymentId, addBindingSecretName.Trim());
+                TenantId, clusterId, bindingForm.DeploymentId!.Value, bindingForm.SecretName.Trim());
 
             addBindingClusterId = null;
-            addBindingSecretName = "";
+            bindingForm = new AddBindingForm();
             allBindings[clusterId] = await RedisService.GetCacheBindingsAsync(TenantId, clusterId);
+            Toasts.Success("App binding created.");
         }
         catch (Exception ex)
         {
             addBindingError = ex.Message;
+            Toasts.Error(ex.Message, "Failed to add binding");
         }
     }
 
@@ -628,7 +670,7 @@
             await RedisService.DeleteCacheBindingAsync(TenantId, bindingId);
             allBindings[clusterId] = await RedisService.GetCacheBindingsAsync(TenantId, clusterId);
         }
-        catch { }
+        catch (Exception ex) { Toasts.Error(ex.Message, "Failed to remove binding"); }
     }
 
     // ── Credentials ──

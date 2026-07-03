@@ -1,0 +1,139 @@
+@implements IDisposable
+
+@* Reusable live-data refresh control: manual refresh button + auto-refresh toggle +
+   interval picker + "last updated" stamp. Encapsulates the PeriodicTimer/teardown so
+   pages don't each hand-roll it. Give it an OnRefresh callback that reloads the data. *@
+<div class="d-inline-flex align-items-center gap-2 small">
+    <button type="button" class="btn btn-sm btn-outline-secondary border-0 py-0"
+            @onclick="RefreshNowAsync" disabled="@_refreshing"
+            title="Refresh now" aria-label="Refresh now">
+        <span class="bi bi-arrow-clockwise @(_refreshing ? "spin" : null)" aria-hidden="true"></span>
+    </button>
+
+    <div class="form-check form-switch mb-0">
+        <input class="form-check-input" type="checkbox" role="switch" id="@_id"
+               checked="@_enabled" @onchange="OnToggle" />
+        <label class="form-check-label text-muted" for="@_id">Auto</label>
+    </div>
+
+    @if (_enabled)
+    {
+        <select class="form-select form-select-sm py-0 w-auto" @onchange="OnIntervalChange"
+                aria-label="Auto-refresh interval">
+            @foreach (int s in Intervals)
+            {
+                <option value="@s" selected="@(s == _intervalSeconds)">@s s</option>
+            }
+        </select>
+    }
+
+    @{ DateTime? shown = LastRefreshed ?? _lastRefreshed; }
+    @if (shown is not null)
+    {
+        <span class="text-muted" title="Last updated">
+            <i class="bi bi-clock-history me-1" aria-hidden="true"></i>@shown.Value.ToLocalTime().ToString("HH:mm:ss")
+        </span>
+    }
+</div>
+
+@code {
+    /// <summary>Called to reload the data — on manual click and on each auto tick.</summary>
+    [Parameter] public EventCallback OnRefresh { get; set; }
+
+    /// <summary>Initial auto-refresh interval in seconds.</summary>
+    [Parameter] public int IntervalSeconds { get; set; } = 15;
+
+    /// <summary>Whether auto-refresh starts on.</summary>
+    [Parameter] public bool Enabled { get; set; } = true;
+
+    /// <summary>Optional externally-owned timestamp; overrides the internal one when set.</summary>
+    [Parameter] public DateTime? LastRefreshed { get; set; }
+
+    /// <summary>Selectable intervals (seconds).</summary>
+    [Parameter] public int[] Intervals { get; set; } = [5, 15, 30, 60];
+
+    private readonly string _id = "ar-" + Guid.NewGuid().ToString("N")[..8];
+    private CancellationTokenSource? _cts;
+    private bool _refreshing;
+    private bool _enabled;
+    private int _intervalSeconds;
+    private DateTime? _lastRefreshed;
+
+    protected override void OnInitialized()
+    {
+        _enabled = Enabled;
+        _intervalSeconds = IntervalSeconds;
+        if (_enabled)
+            StartTimer();
+    }
+
+    private void StartTimer()
+    {
+        StopTimer();
+        _cts = new CancellationTokenSource();
+        _ = RunAsync(_cts.Token, _intervalSeconds);
+    }
+
+    private async Task RunAsync(CancellationToken ct, int seconds)
+    {
+        using PeriodicTimer timer = new(TimeSpan.FromSeconds(seconds));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+                await InvokeAsync(DoRefreshAsync);
+        }
+        catch (OperationCanceledException)
+        {
+            // Timer cancelled on toggle-off, interval change, or dispose.
+        }
+    }
+
+    private void StopTimer()
+    {
+        _cts?.Cancel();
+        _cts?.Dispose();
+        _cts = null;
+    }
+
+    private async Task DoRefreshAsync()
+    {
+        if (_refreshing)
+            return;
+
+        _refreshing = true;
+        StateHasChanged();
+        try
+        {
+            await OnRefresh.InvokeAsync();
+            _lastRefreshed = DateTime.UtcNow;
+        }
+        finally
+        {
+            _refreshing = false;
+            StateHasChanged();
+        }
+    }
+
+    private Task RefreshNowAsync() => DoRefreshAsync();
+
+    private void OnToggle(ChangeEventArgs e)
+    {
+        _enabled = e.Value is true || (e.Value is string s && bool.TryParse(s, out bool b) && b);
+        if (_enabled)
+            StartTimer();
+        else
+            StopTimer();
+    }
+
+    private void OnIntervalChange(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out int seconds))
+        {
+            _intervalSeconds = seconds;
+            if (_enabled)
+                StartTimer();
+        }
+    }
+
+    public void Dispose() => StopTimer();
+}

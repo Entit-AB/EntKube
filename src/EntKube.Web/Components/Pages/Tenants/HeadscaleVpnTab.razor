@@ -33,15 +33,17 @@ else if (component is null)
 else
 {
     @* ── Tab navigation ── *@
-    <ul class="nav nav-pills nav-sm mb-3 gap-1">
-        <li class="nav-item">
+    <ul class="nav nav-pills nav-sm mb-3 gap-1" role="tablist" aria-label="VPN sections">
+        <li class="nav-item" role="presentation">
             <button class="nav-link py-1 px-3 @(vpnTab == "setup" ? "active" : "")"
+                    role="tab" aria-selected="@(vpnTab == "setup")" tabindex="@(vpnTab == "setup" ? 0 : -1)"
                     @onclick='() => SwitchTab("setup")'>
                 <i class="bi bi-gear me-1"></i>Setup
             </button>
         </li>
-        <li class="nav-item">
+        <li class="nav-item" role="presentation">
             <button class="nav-link py-1 px-3 @(vpnTab == "users" ? "active" : "")"
+                    role="tab" aria-selected="@(vpnTab == "users")" tabindex="@(vpnTab == "users" ? 0 : -1)"
                     @onclick='() => SwitchTab("users")'>
                 <i class="bi bi-people me-1"></i>Users
                 @if (users is not null)
@@ -50,14 +52,16 @@ else
                 }
             </button>
         </li>
-        <li class="nav-item">
+        <li class="nav-item" role="presentation">
             <button class="nav-link py-1 px-3 @(vpnTab == "keys" ? "active" : "")"
+                    role="tab" aria-selected="@(vpnTab == "keys")" tabindex="@(vpnTab == "keys" ? 0 : -1)"
                     @onclick='() => SwitchTab("keys")'>
                 <i class="bi bi-key me-1"></i>Auth Keys
             </button>
         </li>
-        <li class="nav-item">
+        <li class="nav-item" role="presentation">
             <button class="nav-link py-1 px-3 @(vpnTab == "nodes" ? "active" : "")"
+                    role="tab" aria-selected="@(vpnTab == "nodes")" tabindex="@(vpnTab == "nodes" ? 0 : -1)"
                     @onclick='() => SwitchTab("nodes")'>
                 <i class="bi bi-hdd-network me-1"></i>Nodes
                 @if (nodes is not null)
@@ -66,14 +70,16 @@ else
                 }
             </button>
         </li>
-        <li class="nav-item">
+        <li class="nav-item" role="presentation">
             <button class="nav-link py-1 px-3 @(vpnTab == "routes" ? "active" : "")"
+                    role="tab" aria-selected="@(vpnTab == "routes")" tabindex="@(vpnTab == "routes" ? 0 : -1)"
                     @onclick='() => SwitchTab("routes")'>
                 <i class="bi bi-diagram-3 me-1"></i>Routes
             </button>
         </li>
-        <li class="nav-item">
+        <li class="nav-item" role="presentation">
             <button class="nav-link py-1 px-3 @(vpnTab == "acl" ? "active" : "")"
+                    role="tab" aria-selected="@(vpnTab == "acl")" tabindex="@(vpnTab == "acl" ? 0 : -1)"
                     @onclick='() => SwitchTab("acl")'>
                 <i class="bi bi-shield-check me-1"></i>ACL Policy
             </button>
@@ -84,7 +90,7 @@ else
     {
         <div class="alert alert-danger alert-dismissible small py-2 px-3 mb-3">
             <i class="bi bi-exclamation-triangle me-1"></i>@tabError
-            <button type="button" class="btn-close btn-close-sm" @onclick="() => tabError = null"></button>
+            <button type="button" class="btn-close btn-close-sm" aria-label="Dismiss" @onclick="() => tabError = null"></button>
         </div>
     }
 
@@ -281,7 +287,8 @@ else
                                 <code class="small user-select-all">@(revealedKeys.Contains("__apikey__") ? apiKey : MaskKey(apiKey))</code>
                                 <button class="btn btn-sm btn-outline-secondary py-0 px-2"
                                         @onclick='() => ToggleReveal("__apikey__")'
-                                        title="@(revealedKeys.Contains("__apikey__") ? "Hide" : "Reveal value")">
+                                        title="@(revealedKeys.Contains("__apikey__") ? "Hide" : "Reveal value")"
+                                        aria-label="@(revealedKeys.Contains("__apikey__") ? "Hide" : "Reveal value")">
                                     <i class="bi @(revealedKeys.Contains("__apikey__") ? "bi-eye-slash" : "bi-eye")"></i>
                                 </button>
                                 <button class="btn btn-sm btn-outline-danger py-0 px-2"
@@ -457,7 +464,8 @@ else
                                         {
                                             <button class="btn btn-sm btn-link text-danger p-0"
                                                     @onclick="() => StartDeleteUser(u)"
-                                                    title="Delete user">
+                                                    title="Delete user"
+                                                    aria-label="Delete user">
                                                 <i class="bi bi-trash"></i>
                                             </button>
                                         }
@@ -562,7 +570,8 @@ else
                                         <code class="small user-select-all">@(revealedKeys.Contains(k.Id) ? k.Key : MaskKey(k.Key))</code>
                                         <button class="btn btn-link btn-sm p-0 ms-1 align-baseline"
                                                 @onclick="() => ToggleReveal(k.Id)"
-                                                title="@(revealedKeys.Contains(k.Id) ? "Hide" : "Reveal value")">
+                                                title="@(revealedKeys.Contains(k.Id) ? "Hide" : "Reveal value")"
+                                                aria-label="@(revealedKeys.Contains(k.Id) ? "Hide" : "Reveal value")">
                                             <i class="bi @(revealedKeys.Contains(k.Id) ? "bi-eye-slash" : "bi-eye") small"></i>
                                         </button>
                                     </td>
@@ -582,7 +591,8 @@ else
                                         {
                                             <button class="btn btn-sm btn-link text-warning p-0"
                                                     @onclick="() => StartExpireKey(k)"
-                                                    title="Expire key">
+                                                    title="Expire key"
+                                                    aria-label="Expire key">
                                                 <i class="bi bi-x-circle"></i>
                                             </button>
                                         }
@@ -684,7 +694,8 @@ else
                                         {
                                             <button class="btn btn-sm btn-link text-danger p-0"
                                                     @onclick="() => StartDeleteNode(n)"
-                                                    title="Remove node">
+                                                    title="Remove node"
+                                                    aria-label="Remove node">
                                                 <i class="bi bi-trash"></i>
                                             </button>
                                         }
@@ -766,7 +777,8 @@ else
                                         {
                                             <button class="btn btn-sm btn-link text-muted p-0"
                                                     @onclick="() => ToggleRouteAsync(r, false)"
-                                                    title="Disable route">
+                                                    title="Disable route"
+                                                    aria-label="Disable route">
                                                 <i class="bi bi-toggle-on"></i>
                                             </button>
                                         }
@@ -774,7 +786,8 @@ else
                                         {
                                             <button class="btn btn-sm btn-link text-success p-0"
                                                     @onclick="() => ToggleRouteAsync(r, true)"
-                                                    title="Enable route">
+                                                    title="Enable route"
+                                                    aria-label="Enable route">
                                                 <i class="bi bi-toggle-off"></i>
                                             </button>
                                         }

@@ -1,3 +1,4 @@
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject DatabaseService DatabaseService
@@ -6,6 +7,7 @@
 @inject StorageService StorageService
 @inject RegisteredPostgresService RegisteredPostgresService
 @inject ILogger<DatabaseTab> Logger
+@inject ToastService Toasts
 
 @* ===========================================================================
    Databases Tab — shows CNPG PostgreSQL clusters and MongoDB clusters
@@ -17,6 +19,13 @@
 <LoadingPanel Loading="@loading" LoadingText="Discovering database clusters…">
 @if (!loading)
 {
+    <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                   Message="@(pendingConfirm?.Message ?? "")"
+                   ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+                   IsBusy="confirmBusy"
+                   OnConfirm="RunPendingConfirmAsync"
+                   OnCancel="() => pendingConfirm = null" />
+
     @* ── Operator availability badges ── *@
     <div class="d-flex gap-2 mb-4">
         @if (operatorStatus!.CnpgAvailable)
@@ -51,17 +60,23 @@
     @* ── Environment Tabs ── *@
     @if (AllEnvironments.Count > 0)
     {
-        <ul class="nav nav-pills mb-4 gap-1 flex-wrap">
-            <li class="nav-item">
+        <ul class="nav nav-pills mb-4 gap-1 flex-wrap" role="tablist" aria-label="Environments">
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(selectedEnvironment is null ? "active" : "")"
+                        role="tab"
+                        aria-selected="@(selectedEnvironment is null)"
+                        tabindex="@(selectedEnvironment is null ? 0 : -1)"
                         @onclick="() => selectedEnvironment = null">
                     <i class="bi bi-layers me-1"></i>All
                 </button>
             </li>
             @foreach (string env in AllEnvironments)
             {
-                <li class="nav-item">
+                <li class="nav-item" role="presentation">
                     <button class="nav-link @(selectedEnvironment == env ? "active" : "")"
+                            role="tab"
+                            aria-selected="@(selectedEnvironment == env)"
+                            tabindex="@(selectedEnvironment == env ? 0 : -1)"
                             @onclick="() => selectedEnvironment = env">
                         @env
                     </button>
@@ -92,76 +107,87 @@
                     <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CancelRegisterPgForm"><i class="bi bi-x-lg"></i></button>
                 </div>
                 <div class="card-body">
-                    <div class="row g-3">
-                        <div class="col-md-6">
-                            <label class="form-label small">Display Name</label>
-                            <input class="form-control form-control-sm" @bind="regPgName" placeholder="Keycloak DB – Old cluster" />
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label small">Kubernetes Cluster</label>
-                            <select class="form-select form-select-sm" @bind="regPgClusterId">
-                                <option value="@Guid.Empty">Select cluster...</option>
-                                @if (allClusters is not null)
-                                {
-                                    @foreach (KubernetesCluster k in allClusters)
+                    <EditForm Model="regPgModel" OnValidSubmit="RegisterPgInstance">
+                        <DataAnnotationsValidator />
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label class="form-label small">Display Name</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="regPgModel.Name" placeholder="Keycloak DB – Old cluster" />
+                                <ValidationMessage For="() => regPgModel.Name" class="text-danger small" />
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">Kubernetes Cluster</label>
+                                <InputSelect class="form-select form-select-sm" @bind-Value="regPgModel.ClusterId">
+                                    <option value="">Select cluster...</option>
+                                    @if (allClusters is not null)
                                     {
-                                        <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
+                                        @foreach (KubernetesCluster k in allClusters)
+                                        {
+                                            <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
+                                        }
                                     }
+                                </InputSelect>
+                                <ValidationMessage For="() => regPgModel.ClusterId" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Namespace</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="regPgModel.Namespace" placeholder="keycloak" />
+                                <ValidationMessage For="() => regPgModel.Namespace" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">K8s Service Name</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="regPgModel.ServiceName" placeholder="postgres" />
+                                <div class="form-text small">Used as HOST in credentials (resolves as service.ns.svc.cluster.local)</div>
+                                <ValidationMessage For="() => regPgModel.ServiceName" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Port</label>
+                                <InputNumber class="form-control form-control-sm" @bind-Value="regPgModel.Port" min="1" max="65535" />
+                                <ValidationMessage For="() => regPgModel.Port" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Admin Pod Name</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="regPgModel.AdminPodName" placeholder="postgres-0" />
+                                <div class="form-text small">Pod to kubectl exec into for admin SQL</div>
+                                <ValidationMessage For="() => regPgModel.AdminPodName" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Admin Username</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="regPgModel.AdminUsername" placeholder="postgres" />
+                                <ValidationMessage For="() => regPgModel.AdminUsername" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Admin Password</label>
+                                <InputText type="password" class="form-control form-control-sm" @bind-Value="regPgModel.AdminPassword" />
+                                <ValidationMessage For="() => regPgModel.AdminPassword" class="text-danger small" />
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label small">Notes (optional)</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="regPgModel.Notes" placeholder="e.g. Provisioned by Helm in 2023, holds keycloak database" />
+                            </div>
+                        </div>
+                        <div class="mt-3 d-flex align-items-center gap-2">
+                            <button type="submit" class="btn btn-sm btn-secondary" disabled="@registeringPg">
+                                @if (registeringPg)
+                                {
+                                    <span class="spinner-border spinner-border-sm me-1"></span>
+                                    <text>Registering...</text>
                                 }
-                            </select>
+                                else
+                                {
+                                    <i class="bi bi-plus-lg me-1"></i>
+                                    <text>Register Instance</text>
+                                }
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelRegisterPgForm">Cancel</button>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Namespace</label>
-                            <input class="form-control form-control-sm" @bind="regPgNamespace" placeholder="keycloak" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">K8s Service Name</label>
-                            <input class="form-control form-control-sm" @bind="regPgServiceName" placeholder="postgres" />
-                            <div class="form-text small">Used as HOST in credentials (resolves as service.ns.svc.cluster.local)</div>
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Port</label>
-                            <input type="number" class="form-control form-control-sm" @bind="regPgPort" min="1" max="65535" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Admin Pod Name</label>
-                            <input class="form-control form-control-sm" @bind="regPgAdminPodName" placeholder="postgres-0" />
-                            <div class="form-text small">Pod to kubectl exec into for admin SQL</div>
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Admin Username</label>
-                            <input class="form-control form-control-sm" @bind="regPgAdminUsername" placeholder="postgres" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Admin Password</label>
-                            <input type="password" class="form-control form-control-sm" @bind="regPgAdminPassword" />
-                        </div>
-                        <div class="col-12">
-                            <label class="form-label small">Notes (optional)</label>
-                            <input class="form-control form-control-sm" @bind="regPgNotes" placeholder="e.g. Provisioned by Helm in 2023, holds keycloak database" />
-                        </div>
-                    </div>
-                    <div class="mt-3 d-flex align-items-center gap-2">
-                        <button class="btn btn-sm btn-secondary" @onclick="RegisterPgInstance" disabled="@registeringPg">
-                            @if (registeringPg)
-                            {
-                                <span class="spinner-border spinner-border-sm me-1"></span>
-                                <text>Registering...</text>
-                            }
-                            else
-                            {
-                                <i class="bi bi-plus-lg me-1"></i>
-                                <text>Register Instance</text>
-                            }
-                        </button>
-                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelRegisterPgForm">Cancel</button>
-                    </div>
-                    @if (!string.IsNullOrEmpty(registerPgError))
-                    {
-                        <div class="alert alert-danger small mt-2 mb-0 py-2">
-                            <i class="bi bi-exclamation-triangle me-1"></i>@registerPgError
-                        </div>
-                    }
+                        @if (!string.IsNullOrEmpty(registerPgError))
+                        {
+                            <div class="alert alert-danger small mt-2 mb-0 py-2">
+                                <i class="bi bi-exclamation-triangle me-1"></i>@registerPgError
+                            </div>
+                        }
+                    </EditForm>
                 </div>
             </div>
         }
@@ -175,10 +201,9 @@
         }
         else if (FilteredRegisteredPgInstances!.Count == 0 && !showRegisterPgForm)
         {
-            <div class="alert alert-light border">
-                <i class="bi bi-inbox me-2"></i>
-                No registered PostgreSQL instances yet. Click "Register Instance" to add a non-CNPG Postgres server.
-            </div>
+            <EmptyState Icon="bi-database" Title="No registered instances"
+                        Message="Register a non-CNPG PostgreSQL server to manage it here."
+                        ActionLabel="Register instance" OnAction="ShowRegisterPgForm" />
         }
         else
         {
@@ -201,6 +226,7 @@
                         </div>
                         <div class="d-flex gap-1">
                             <button class="btn btn-sm btn-outline-secondary border-0" title="Test Connection"
+                                    aria-label="@($"Test connection to instance {rpi.Name}")"
                                     @onclick="() => TestRegPgConnection(rpi.Id)" disabled="@(testingRegPgId == rpi.Id)">
                                 @if (testingRegPgId == rpi.Id)
                                 {
@@ -212,7 +238,8 @@
                                 }
                             </button>
                             <button class="btn btn-sm btn-outline-danger border-0" title="Delete Instance"
-                                    @onclick="() => DeleteRegPgInstance(rpi.Id)" disabled="@(deletingRegPgId == rpi.Id)">
+                                    aria-label="@($"Delete registered instance {rpi.Name}")"
+                                    @onclick='() => pendingConfirm = new PendingConfirm($"Delete the registered PostgreSQL instance \"{rpi.Name}\"? This removes it from EntKube (the external database itself is not affected). This cannot be undone.", "Delete", () => DeleteRegPgInstance(rpi.Id))' disabled="@(deletingRegPgId == rpi.Id)">
                                 @if (deletingRegPgId == rpi.Id)
                                 {
                                     <span class="spinner-border spinner-border-sm"></span>
@@ -339,23 +366,27 @@
                             @if (addDbRegPgInstance?.Id == rpi.Id)
                             {
                                 <div class="border rounded p-3 mb-3 bg-light">
-                                    <div class="row g-2">
-                                        <div class="col-md-6">
-                                            <label class="form-label small">Database Name</label>
-                                            <input class="form-control form-control-sm" @bind="newRegPgDbName" placeholder="myapp" />
+                                    <EditForm Model="regPgDbModel" OnValidSubmit="CreateRegPgDatabase">
+                                        <DataAnnotationsValidator />
+                                        <div class="row g-2">
+                                            <div class="col-md-6">
+                                                <label class="form-label small">Database Name</label>
+                                                <InputText class="form-control form-control-sm" @bind-Value="regPgDbModel.Name" placeholder="myapp" />
+                                                <ValidationMessage For="() => regPgDbModel.Name" class="text-danger small" />
+                                            </div>
                                         </div>
-                                    </div>
-                                    <div class="mt-2 d-flex gap-2">
-                                        <button class="btn btn-sm btn-secondary" @onclick="CreateRegPgDatabase" disabled="@addingRegPgDb">
-                                            @if (addingRegPgDb) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                            Create Database
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => addDbRegPgInstance = null">Cancel</button>
-                                    </div>
-                                    @if (!string.IsNullOrEmpty(addRegPgDbError))
-                                    {
-                                        <div class="alert alert-danger small mt-2 mb-0 py-1">@addRegPgDbError</div>
-                                    }
+                                        <div class="mt-2 d-flex gap-2">
+                                            <button type="submit" class="btn btn-sm btn-secondary" disabled="@addingRegPgDb">
+                                                @if (addingRegPgDb) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Create Database
+                                            </button>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => addDbRegPgInstance = null">Cancel</button>
+                                        </div>
+                                        @if (!string.IsNullOrEmpty(addRegPgDbError))
+                                        {
+                                            <div class="alert alert-danger small mt-2 mb-0 py-1">@addRegPgDbError</div>
+                                        }
+                                    </EditForm>
                                 </div>
                             }
 
@@ -364,38 +395,44 @@
                             {
                                 <div class="border rounded p-3 mb-3 bg-light">
                                     <p class="small text-muted mb-2">Register an existing database without creating it on the server. Stores the provided credentials in the vault.</p>
-                                    <div class="row g-2">
-                                        <div class="col-md-4">
-                                            <label class="form-label small">Database Name</label>
-                                            <input class="form-control form-control-sm" @bind="importRegPgDbName" placeholder="keycloak" />
+                                    <EditForm Model="importRegPgModel" OnValidSubmit="ImportRegPgDatabase">
+                                        <DataAnnotationsValidator />
+                                        <div class="row g-2">
+                                            <div class="col-md-4">
+                                                <label class="form-label small">Database Name</label>
+                                                <InputText class="form-control form-control-sm" @bind-Value="importRegPgModel.Name" placeholder="keycloak" />
+                                                <ValidationMessage For="() => importRegPgModel.Name" class="text-danger small" />
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small">Owner Role</label>
+                                                <InputText class="form-control form-control-sm" @bind-Value="importRegPgModel.Owner" placeholder="keycloak" />
+                                                <ValidationMessage For="() => importRegPgModel.Owner" class="text-danger small" />
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small">Owner Password</label>
+                                                <InputText type="password" class="form-control form-control-sm" @bind-Value="importRegPgModel.Password" />
+                                                <ValidationMessage For="() => importRegPgModel.Password" class="text-danger small" />
+                                            </div>
                                         </div>
-                                        <div class="col-md-4">
-                                            <label class="form-label small">Owner Role</label>
-                                            <input class="form-control form-control-sm" @bind="importRegPgOwner" placeholder="keycloak" />
+                                        <div class="mt-2 d-flex gap-2">
+                                            <button type="submit" class="btn btn-sm btn-secondary" disabled="@importingRegPgDb">
+                                                @if (importingRegPgDb) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Import
+                                            </button>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => importRegPgInstance = null">Cancel</button>
                                         </div>
-                                        <div class="col-md-4">
-                                            <label class="form-label small">Owner Password</label>
-                                            <input type="password" class="form-control form-control-sm" @bind="importRegPgPassword" />
-                                        </div>
-                                    </div>
-                                    <div class="mt-2 d-flex gap-2">
-                                        <button class="btn btn-sm btn-secondary" @onclick="ImportRegPgDatabase" disabled="@importingRegPgDb">
-                                            @if (importingRegPgDb) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                            Import
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => importRegPgInstance = null">Cancel</button>
-                                    </div>
-                                    @if (!string.IsNullOrEmpty(importRegPgError))
-                                    {
-                                        <div class="alert alert-danger small mt-2 mb-0 py-1">@importRegPgError</div>
-                                    }
+                                        @if (!string.IsNullOrEmpty(importRegPgError))
+                                        {
+                                            <div class="alert alert-danger small mt-2 mb-0 py-1">@importRegPgError</div>
+                                        }
+                                    </EditForm>
                                 </div>
                             }
 
                             @* ── Databases Table ── *@
                             @if (rpi.Databases.Count == 0)
                             {
-                                <p class="text-muted small mb-0"><i class="bi bi-inbox me-1"></i>No databases managed yet.</p>
+                                <EmptyState Icon="bi-database" Title="No databases yet" Message="No databases are managed on this instance yet." />
                             }
                             else
                             {
@@ -435,10 +472,12 @@
                                                     <td class="small align-middle text-end">
                                                         <div class="d-flex gap-1 justify-content-end">
                                                             <button class="btn btn-xs btn-outline-secondary border-0" title="View Credentials"
+                                                                    aria-label="@($"View credentials for database {db.Name}")"
                                                                     @onclick="() => ViewRegPgCredentials(rpi, db.Id)">
                                                                 <i class="bi bi-key"></i>
                                                             </button>
                                                             <button class="btn btn-xs btn-outline-info border-0" title="Sync to Kubernetes"
+                                                                    aria-label="@($"Sync credentials for database {db.Name} to Kubernetes")"
                                                                     @onclick="() => SyncRegPgCredentials(rpi.Id, db.Id)"
                                                                     disabled="@(syncingRegPgDbId == db.Id)">
                                                                 @if (syncingRegPgDbId == db.Id)
@@ -451,6 +490,7 @@
                                                                 }
                                                             </button>
                                                             <button class="btn btn-xs btn-outline-warning border-0" title="Rotate Password"
+                                                                    aria-label="@($"Rotate password for database {db.Name}")"
                                                                     @onclick="() => RotateRegPgPassword(rpi.Id, db.Id)"
                                                                     disabled="@(rotatingRegPgDbId == db.Id)">
                                                                 @if (rotatingRegPgDbId == db.Id)
@@ -463,14 +503,17 @@
                                                                 }
                                                             </button>
                                                             <button class="btn btn-xs btn-outline-secondary border-0" title="Dump to S3"
+                                                                    aria-label="@($"Dump database {db.Name} to S3")"
                                                                     @onclick="() => ShowRegPgDumpForm(rpi, db)">
                                                                 <i class="bi bi-cloud-arrow-up"></i>
                                                             </button>
                                                             <button class="btn btn-xs btn-outline-primary border-0" title="Migrate to CNPG"
+                                                                    aria-label="@($"Migrate database {db.Name} to CNPG")"
                                                                     @onclick="() => ShowRegPgMigrateForm(rpi, db)">
                                                                 <i class="bi bi-arrow-right-circle"></i>
                                                             </button>
                                                             <button class="btn btn-xs btn-outline-danger border-0" title="Drop Database"
+                                                                    aria-label="@($"Drop database {db.Name}")"
                                                                     @onclick="() => regPgDbDeleteConfirmId = db.Id"
                                                                     disabled="@(droppingRegPgDbId == db.Id)">
                                                                 @if (droppingRegPgDbId == db.Id)
@@ -677,11 +720,13 @@
                                                                 <td class="small align-middle text-end">
                                                                     <div class="d-flex gap-1 justify-content-end">
                                                                         <button class="btn btn-xs btn-outline-primary border-0" title="Restore to CNPG"
+                                                                                aria-label="Restore dump to CNPG"
                                                                                 @onclick="() => ShowDumpRestoreForm(dump)">
                                                                             <i class="bi bi-arrow-right-circle"></i>
                                                                         </button>
                                                                         <button class="btn btn-xs btn-outline-danger border-0" title="Delete dump"
-                                                                                @onclick="() => DeleteRegPgDump(dump, rpi.Id)"
+                                                                                aria-label="Delete dump"
+                                                                                @onclick='() => pendingConfirm = new PendingConfirm($"Delete the dump created {dump.CreatedAt:yyyy-MM-dd HH:mm} ({FormatBytes(dump.SizeBytes)}) from bucket \"{dump.StorageLink.Name}\"? The backup object is permanently removed from S3. This cannot be undone.", "Delete dump", () => DeleteRegPgDump(dump, rpi.Id))'
                                                                                 disabled="@(deletingDumpId == dump.Id)">
                                                                             @if (deletingDumpId == dump.Id)
                                                                             {
@@ -787,97 +832,106 @@
                         <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CancelCreate"><i class="bi bi-x-lg"></i></button>
                     </div>
                     <div class="card-body">
-                        <div class="row g-3">
-                            <div class="col-md-6">
-                                <label class="form-label small">Cluster Name</label>
-                                <input class="form-control form-control-sm" @bind="createName" placeholder="my-postgres" />
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label small">Namespace</label>
-                                <input class="form-control form-control-sm" @bind="createNamespace" placeholder="databases" />
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Target Cluster</label>
-                                <select class="form-select form-select-sm" @bind="createClusterId">
-                                    <option value="@Guid.Empty">Select cluster...</option>
-                                    @if (availableClusters is not null)
-                                    {
-                                        @foreach (KubernetesCluster k in availableClusters)
+                        <EditForm Model="createModel" OnValidSubmit="CreateCluster">
+                            <DataAnnotationsValidator />
+                            <div class="row g-3">
+                                <div class="col-md-6">
+                                    <label class="form-label small">Cluster Name</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="createModel.Name" placeholder="my-postgres" />
+                                    <ValidationMessage For="() => createModel.Name" class="text-danger small" />
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small">Namespace</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="createModel.Namespace" placeholder="databases" />
+                                    <ValidationMessage For="() => createModel.Namespace" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Target Cluster</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="createModel.ClusterId">
+                                        <option value="">Select cluster...</option>
+                                        @if (availableClusters is not null)
                                         {
-                                            <option value="@k.Id">@k.Name</option>
+                                            @foreach (KubernetesCluster k in availableClusters)
+                                            {
+                                                <option value="@k.Id">@k.Name</option>
+                                            }
                                         }
-                                    }
-                                </select>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">PostgreSQL Version</label>
-                                <select class="form-select form-select-sm" @bind="createPostgresVersion">
-                                    <option value="18">PostgreSQL 18</option>
-                                    <option value="17">PostgreSQL 17</option>
-                                    <option value="16">PostgreSQL 16</option>
-                                    <option value="15">PostgreSQL 15</option>
-                                    <option value="14">PostgreSQL 14</option>
-                                </select>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Instances (HA)</label>
-                                <select class="form-select form-select-sm" @bind="createInstances">
-                                    <option value="1">1 (Standalone)</option>
-                                    <option value="2">2 (Primary + Replica)</option>
-                                    <option value="3">3 (HA)</option>
-                                </select>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Storage Size</label>
-                                <input class="form-control form-control-sm" @bind="createStorageSize" placeholder="10Gi" />
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label small">Backup S3 Bucket (optional)</label>
-                                <select class="form-select form-select-sm" @bind="createStorageLinkId">
-                                    <option value="@Guid.Empty">No backup</option>
-                                    @if (storageLinks is not null)
-                                    {
-                                        @foreach (StorageLink sl in storageLinks)
+                                    </InputSelect>
+                                    <ValidationMessage For="() => createModel.ClusterId" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">PostgreSQL Version</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="createModel.PostgresVersion">
+                                        <option value="18">PostgreSQL 18</option>
+                                        <option value="17">PostgreSQL 17</option>
+                                        <option value="16">PostgreSQL 16</option>
+                                        <option value="15">PostgreSQL 15</option>
+                                        <option value="14">PostgreSQL 14</option>
+                                    </InputSelect>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Instances (HA)</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="createModel.Instances">
+                                        <option value="1">1 (Standalone)</option>
+                                        <option value="2">2 (Primary + Replica)</option>
+                                        <option value="3">3 (HA)</option>
+                                    </InputSelect>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Storage Size</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="createModel.StorageSize" placeholder="10Gi" />
+                                    <ValidationMessage For="() => createModel.StorageSize" class="text-danger small" />
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small">Backup S3 Bucket (optional)</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="createModel.StorageLinkId">
+                                        <option value="">No backup</option>
+                                        @if (storageLinks is not null)
                                         {
-                                            <option value="@sl.Id">@sl.Name (@sl.BucketName)</option>
+                                            @foreach (StorageLink sl in storageLinks)
+                                            {
+                                                <option value="@sl.Id">@sl.Name (@sl.BucketName)</option>
+                                            }
                                         }
+                                    </InputSelect>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Backup Schedule (cron, optional)</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="createModel.Schedule" placeholder="0 0 2 * * *" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Backup Retention (days)</label>
+                                    <InputNumber class="form-control form-control-sm" @bind-Value="createModel.RetentionDays" min="1" max="365" />
+                                    <ValidationMessage For="() => createModel.RetentionDays" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Max backups</label>
+                                    <InputNumber class="form-control form-control-sm" @bind-Value="createModel.MaxBackups" min="1" max="200" />
+                                    <ValidationMessage For="() => createModel.MaxBackups" class="text-danger small" />
+                                </div>
+                            </div>
+                            <div class="mt-3 d-flex align-items-center gap-2">
+                                <button type="submit" class="btn btn-sm btn-primary" disabled="@creating">
+                                    @if (creating)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                        <text>Creating...</text>
                                     }
-                                </select>
+                                    else
+                                    {
+                                        <i class="bi bi-plus-lg me-1"></i>
+                                        <text>Create PostgreSQL @createModel.PostgresVersion Cluster</text>
+                                    }
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelCreate">Cancel</button>
                             </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Backup Schedule (cron, optional)</label>
-                                <input class="form-control form-control-sm" @bind="createSchedule" placeholder="0 0 2 * * *" />
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Backup Retention (days)</label>
-                                <input type="number" class="form-control form-control-sm" @bind="createRetentionDays" min="1" max="365" />
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Max backups</label>
-                                <input type="number" class="form-control form-control-sm" @bind="createMaxBackups" min="1" max="200" />
-                            </div>
-                        </div>
-                        <div class="mt-3 d-flex align-items-center gap-2">
-                            <button class="btn btn-sm btn-primary" @onclick="CreateCluster" disabled="@creating">
-                                @if (creating)
-                                {
-                                    <span class="spinner-border spinner-border-sm me-1"></span>
-                                    <text>Creating...</text>
-                                }
-                                else
-                                {
-                                    <i class="bi bi-plus-lg me-1"></i>
-                                    <text>Create PostgreSQL @createPostgresVersion Cluster</text>
-                                }
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="CancelCreate">Cancel</button>
-                        </div>
-                        @if (!string.IsNullOrEmpty(createError))
-                        {
-                            <div class="alert alert-danger small mt-2 mb-0 py-2">
-                                <i class="bi bi-exclamation-triangle me-1"></i>@createError
-                            </div>
-                        }
+                            @if (!string.IsNullOrEmpty(createError))
+                            {
+                                <div class="alert alert-danger small mt-2 mb-0 py-2">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>@createError
+                                </div>
+                            }
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -892,51 +946,57 @@
                     </div>
                     <div class="card-body">
                         <p class="text-muted small mb-3">Register a CloudNativePG cluster that is already running in Kubernetes. EntKube will read its configuration from the Cluster CRD and store the superuser credentials in vault. No Kubernetes resources are created or modified.</p>
-                        <div class="row g-3">
-                            <div class="col-md-4">
-                                <label class="form-label small">Kubernetes Cluster</label>
-                                <select class="form-select form-select-sm" @bind="importCnpgK8sClusterId">
-                                    <option value="@Guid.Empty">Select cluster...</option>
-                                    @if (availableClusters is not null)
-                                    {
-                                        @foreach (KubernetesCluster k in availableClusters)
+                        <EditForm Model="importCnpgModel" OnValidSubmit="ImportCnpgCluster">
+                            <DataAnnotationsValidator />
+                            <div class="row g-3">
+                                <div class="col-md-4">
+                                    <label class="form-label small">Kubernetes Cluster</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="importCnpgModel.K8sClusterId">
+                                        <option value="">Select cluster...</option>
+                                        @if (availableClusters is not null)
                                         {
-                                            <option value="@k.Id">@k.Name</option>
+                                            @foreach (KubernetesCluster k in availableClusters)
+                                            {
+                                                <option value="@k.Id">@k.Name</option>
+                                            }
                                         }
+                                    </InputSelect>
+                                    <ValidationMessage For="() => importCnpgModel.K8sClusterId" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">CNPG Cluster Name</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="importCnpgModel.Name" placeholder="my-postgres" />
+                                    <div class="form-text small">Kubernetes resource name (metadata.name)</div>
+                                    <ValidationMessage For="() => importCnpgModel.Name" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Namespace</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="importCnpgModel.Namespace" placeholder="databases" />
+                                    <ValidationMessage For="() => importCnpgModel.Namespace" class="text-danger small" />
+                                </div>
+                            </div>
+                            <div class="mt-3 d-flex align-items-center gap-2">
+                                <button type="submit" class="btn btn-sm btn-primary" disabled="@importingCnpg">
+                                    @if (importingCnpg)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                        <text>Importing...</text>
                                     }
-                                </select>
+                                    else
+                                    {
+                                        <i class="bi bi-box-arrow-in-down me-1"></i>
+                                        <text>Import</text>
+                                    }
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelImportCnpg">Cancel</button>
                             </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">CNPG Cluster Name</label>
-                                <input class="form-control form-control-sm" @bind="importCnpgName" placeholder="my-postgres" />
-                                <div class="form-text small">Kubernetes resource name (metadata.name)</div>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Namespace</label>
-                                <input class="form-control form-control-sm" @bind="importCnpgNamespace" placeholder="databases" />
-                            </div>
-                        </div>
-                        <div class="mt-3 d-flex align-items-center gap-2">
-                            <button class="btn btn-sm btn-primary" @onclick="ImportCnpgCluster" disabled="@importingCnpg">
-                                @if (importingCnpg)
-                                {
-                                    <span class="spinner-border spinner-border-sm me-1"></span>
-                                    <text>Importing...</text>
-                                }
-                                else
-                                {
-                                    <i class="bi bi-box-arrow-in-down me-1"></i>
-                                    <text>Import</text>
-                                }
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="CancelImportCnpg">Cancel</button>
-                        </div>
-                        @if (!string.IsNullOrEmpty(importCnpgError))
-                        {
-                            <div class="alert alert-danger small mt-2 mb-0 py-2">
-                                <i class="bi bi-exclamation-triangle me-1"></i>@importCnpgError
-                            </div>
-                        }
+                            @if (!string.IsNullOrEmpty(importCnpgError))
+                            {
+                                <div class="alert alert-danger small mt-2 mb-0 py-2">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>@importCnpgError
+                                </div>
+                            }
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -950,10 +1010,9 @@
             }
             else if (FilteredManagedClusters.Count == 0 && !showCreate && !showImportCnpg)
             {
-                <div class="alert alert-light border">
-                    <i class="bi bi-inbox me-2"></i>
-                    No managed clusters yet. Click "Create Cluster" to provision a new PostgreSQL 18 cluster.
-                </div>
+                <EmptyState Icon="bi-hdd-stack" Title="No managed clusters"
+                            Message="Provision a new PostgreSQL 18 cluster to get started."
+                            ActionLabel="Create cluster" OnAction="ShowCreateForm" />
             }
             else
             {
@@ -987,12 +1046,14 @@
                                     <i class="bi bi-plus-circle"></i>
                                 </button>
                                 <button class="btn btn-sm btn-outline-secondary border-0" title="Import Existing Database"
+                                        aria-label="@($"Import existing database into {mc.Name}")"
                                         @onclick="() => ShowImportDatabase(mc)">
                                     <i class="bi bi-box-arrow-in-down"></i>
                                 </button>
                                 @if (mc.StorageLinkId.HasValue)
                                 {
                                     <button class="btn btn-sm btn-outline-info border-0" title="Backup Now"
+                                            aria-label="@($"Back up cluster {mc.Name} now")"
                                             @onclick="() => TriggerBackup(mc.Id)" disabled="@(backingUpId == mc.Id)">
                                         @if (backingUpId == mc.Id)
                                         {
@@ -1016,17 +1077,20 @@
                                         }
                                     </button>
                                     <button class="btn btn-sm btn-outline-warning border-0" title="Point-in-Time Restore"
+                                            aria-label="@($"Point-in-time restore cluster {mc.Name}")"
                                             @onclick="() => ShowRestore(mc)">
                                         <i class="bi bi-clock-history"></i>
                                     </button>
                                 }
                                 <button class="btn btn-sm btn-outline-secondary border-0" title="Upgrade"
+                                        aria-label="@($"Upgrade cluster {mc.Name}")"
                                         @onclick="() => ShowUpgrade(mc)">
                                     <i class="bi bi-arrow-up-circle"></i>
                                 </button>
                                 <button class="btn btn-sm btn-outline-secondary border-0"
                                         title="Rolling restart — re-rolls the instances (replicas first, then switchover) so pods are re-placed according to anti-affinity"
                                         disabled="@(cnpgRestartingId == mc.Id)"
+                                        aria-label="@($"Rolling restart cluster {mc.Name}")"
                                         @onclick="() => RestartCnpgCluster(mc.Id)">
                                     @if (cnpgRestartingId == mc.Id)
                                     {
@@ -1040,6 +1104,7 @@
                                 <button class="btn btn-sm btn-outline-secondary border-0"
                                         title="Fetch the PostgreSQL superuser credentials from the CNPG Kubernetes secret and store them in vault"
                                         disabled="@(clusterSuperuserFetchingId == mc.Id)"
+                                        aria-label="@($"Fetch superuser password for cluster {mc.Name}")"
                                         @onclick="() => FetchClusterSuperuserPassword(mc)">
                                     @if (clusterSuperuserFetchingId == mc.Id)
                                     {
@@ -1051,6 +1116,7 @@
                                     }
                                 </button>
                                 <button class="btn btn-sm btn-outline-danger border-0" title="Delete Cluster"
+                                        aria-label="@($"Delete cluster {mc.Name}")"
                                         @onclick="() => cnpgDeleteConfirmId = mc.Id" disabled="@(deletingId == mc.Id)">
                                     @if (deletingId == mc.Id)
                                     {
@@ -1294,14 +1360,17 @@
                                                             <td class="text-muted">@cdb.CreatedAt.ToString("yyyy-MM-dd HH:mm")</td>
                                                             <td>
                                                                 <button class="btn btn-link btn-sm text-info p-0 me-2" title="View credentials"
+                                                                        aria-label="@($"View credentials for database {cdb.Name}")"
                                                                         @onclick="() => ToggleDatabaseCredentials(mc.Id, cdb.Id)">
                                                                     <i class="bi bi-key" style="font-size:0.8rem;"></i>
                                                                 </button>
                                                                 <button class="btn btn-link btn-sm text-primary p-0 me-2" title="Sync credentials to K8s Secret"
+                                                                        aria-label="@($"Sync credentials for database {cdb.Name} to Kubernetes secret")"
                                                                         @onclick="() => SyncDatabaseCredentialsToK8s(mc.Id, cdb.Id)">
                                                                     <i class="bi bi-cloud-arrow-up" style="font-size:0.8rem;"></i>
                                                                 </button>
                                                                 <button class="btn btn-link btn-sm text-warning p-0 me-2" title="Rotate password"
+                                                                        aria-label="@($"Rotate password for database {cdb.Name}")"
                                                                         disabled="@(rotatingDatabaseId == cdb.Id)"
                                                                         @onclick="() => RotateDatabasePassword(mc.Id, cdb.Id)">
                                                                     @if (rotatingDatabaseId == cdb.Id)
@@ -1314,6 +1383,7 @@
                                                                     }
                                                                 </button>
                                                                 <button class="btn btn-link btn-sm text-danger p-0 me-2" title="Drop database"
+                                                                        aria-label="@($"Drop database {cdb.Name}")"
                                                                         @onclick="() => cnpgDbDeleteConfirmId = cdb.Id">
                                                                     <i class="bi bi-trash" style="font-size:0.8rem;"></i>
                                                                 </button>
@@ -1325,6 +1395,7 @@
                                                                 {
                                                                     <button class="btn btn-link btn-sm text-warning p-0 me-2"
                                                                             title="Grant all schema privileges and transfer ownership to the database owner (fixes 'permission denied' after a pg_restore)"
+                                                                            aria-label="@($"Fix owner permissions for database {cdb.Name}")"
                                                                             disabled="@(dbFixBusyId == cdb.Id)"
                                                                             @onclick="() => FixDatabaseOwnerPermissions(mc, cdb)">
                                                                         @if (dbFixBusyId == cdb.Id)
@@ -1339,6 +1410,7 @@
                                                                 }
                                                                 <button class="btn btn-link btn-sm text-danger p-0"
                                                                         title="Release a stuck Liquibase changelog lock (fixes Keycloak hanging at startup with empty 500 responses)"
+                                                                        aria-label="@($"Release Liquibase lock for database {cdb.Name}")"
                                                                         disabled="@(dbFixBusyId == cdb.Id)"
                                                                         @onclick="() => ReleaseLiquibaseLock(mc, cdb)">
                                                                     <i class="bi bi-unlock" style="font-size:0.8rem;"></i>
@@ -1400,7 +1472,7 @@
                                     }
                                     else
                                     {
-                                        <p class="small text-muted mb-3">No databases created yet. Use the <i class="bi bi-plus-circle"></i> button to add one.</p>
+                                        <EmptyState Icon="bi-database" Title="No databases yet" Message="No databases created yet. Use the + button to add one." />
                                     }
 
                                     @* ── Backups ── *@
@@ -1418,7 +1490,8 @@
                                                 <span><i class="bi bi-stack me-1"></i>max @mc.MaxBackups</span>
                                             </span>
                                             <button class="btn btn-xs btn-outline-danger border-0 ms-auto" title="Remove oldest Backup CRs from Kubernetes beyond the max limit. Does NOT delete backup data from S3 — Barman handles that via the retention policy."
-                                                    @onclick="() => CleanupBackups(mc)" disabled="@(cleaningUpBackupsId == mc.Id)">
+                                                    aria-label="@($"Clean up old backup resources for cluster {mc.Name}")"
+                                                    @onclick='() => pendingConfirm = new PendingConfirm($"Remove the oldest Backup resources for \"{mc.Name}\" that exceed the max of {mc.MaxBackups}? This deletes the Backup CRs from Kubernetes (backup data in S3 is retained per the Barman retention policy).", "Clean up", () => CleanupBackups(mc))' disabled="@(cleaningUpBackupsId == mc.Id)">
                                                 @if (cleaningUpBackupsId == mc.Id)
                                                 {
                                                     <span class="spinner-border spinner-border-sm"></span>
@@ -1486,7 +1559,7 @@
                                     }
                                     else if (mc.StorageLinkId.HasValue)
                                     {
-                                        <p class="small text-muted mb-2">No backups yet. Click <i class="bi bi-cloud-arrow-up"></i> to create one.</p>
+                                        <EmptyState Icon="bi-cloud-arrow-up" Title="No backups yet" Message="Use the upload button to create one." />
                                     }
                                     else
                                     {
@@ -1684,23 +1757,27 @@
                         <h6 class="mb-0"><i class="bi bi-plus-circle me-2"></i>Add Database to <strong>@addDbCluster.Name</strong></h6>
                     </div>
                     <div class="card-body">
-                        <div class="row g-3 align-items-end">
-                            <div class="col-md-6">
-                                <label class="form-label small">Database Name</label>
-                                <input class="form-control form-control-sm" @bind="newDbName" placeholder="myapp" />
+                        <EditForm Model="addDbModel" OnValidSubmit="AddDatabase">
+                            <DataAnnotationsValidator />
+                            <div class="row g-3 align-items-end">
+                                <div class="col-md-6">
+                                    <label class="form-label small">Database Name</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="addDbModel.Name" placeholder="myapp" />
+                                    <ValidationMessage For="() => addDbModel.Name" class="text-danger small" />
+                                </div>
+                                <div class="col-md-6 d-flex gap-2">
+                                    <button type="submit" class="btn btn-sm btn-success" disabled="@addingDb">
+                                        @if (addingDb) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        Create
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => addDbCluster = null">Cancel</button>
+                                </div>
                             </div>
-                            <div class="col-md-6 d-flex gap-2">
-                                <button class="btn btn-sm btn-success" @onclick="AddDatabase" disabled="@addingDb">
-                                    @if (addingDb) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                    Create
-                                </button>
-                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => addDbCluster = null">Cancel</button>
-                            </div>
-                        </div>
-                        @if (!string.IsNullOrEmpty(dbError))
-                        {
-                            <div class="alert alert-danger small py-1 mt-2 mb-0">@dbError</div>
-                        }
+                            @if (!string.IsNullOrEmpty(dbError))
+                            {
+                                <div class="alert alert-danger small py-1 mt-2 mb-0">@dbError</div>
+                            }
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -1716,7 +1793,7 @@
                     <div class="card-body">
                         <p class="text-muted small mb-3">Register a database that already exists in this CNPG cluster. Click Discover to load the list of databases, or fill in the fields manually. Credentials are stored in vault — no SQL is executed.</p>
                         <div class="d-flex align-items-center gap-2 mb-3">
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="DiscoverCnpgDatabases" disabled="@discoveringDbs">
+                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="DiscoverCnpgDatabases" disabled="@discoveringDbs">
                                 @if (discoveringDbs)
                                 {
                                     <span class="spinner-border spinner-border-sm me-1"></span>
@@ -1737,54 +1814,60 @@
                                 <span class="text-danger small"><i class="bi bi-exclamation-triangle me-1"></i>@discoverDbError</span>
                             }
                         </div>
-                        <div class="row g-3">
-                            <div class="col-md-4">
-                                <label class="form-label small">Database Name</label>
-                                @if (discoveredDbs is { Count: > 0 })
-                                {
-                                    <select class="form-select form-select-sm" @bind="importDbName" @bind:after="OnImportDbNameChanged">
-                                        <option value="">Select database...</option>
-                                        @foreach ((string name, string owner) in discoveredDbs)
-                                        {
-                                            <option value="@name">@name</option>
-                                        }
-                                    </select>
-                                }
-                                else
-                                {
-                                    <input class="form-control form-control-sm" @bind="importDbName" placeholder="myapp" />
-                                }
+                        <EditForm Model="importDbModel" OnValidSubmit="ImportCnpgDatabase">
+                            <DataAnnotationsValidator />
+                            <div class="row g-3">
+                                <div class="col-md-4">
+                                    <label class="form-label small">Database Name</label>
+                                    @if (discoveredDbs is { Count: > 0 })
+                                    {
+                                        <InputSelect class="form-select form-select-sm" @bind-Value="importDbModel.Name" @bind-Value:after="OnImportDbNameChanged">
+                                            <option value="">Select database...</option>
+                                            @foreach ((string name, string owner) in discoveredDbs)
+                                            {
+                                                <option value="@name">@name</option>
+                                            }
+                                        </InputSelect>
+                                    }
+                                    else
+                                    {
+                                        <InputText class="form-control form-control-sm" @bind-Value="importDbModel.Name" placeholder="myapp" />
+                                    }
+                                    <ValidationMessage For="() => importDbModel.Name" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Owner Role</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="importDbModel.Owner" placeholder="myapp_owner" />
+                                    <ValidationMessage For="() => importDbModel.Owner" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Password</label>
+                                    <InputText type="password" class="form-control form-control-sm" @bind-Value="importDbModel.Password" />
+                                    <ValidationMessage For="() => importDbModel.Password" class="text-danger small" />
+                                </div>
                             </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Owner Role</label>
-                                <input class="form-control form-control-sm" @bind="importDbOwner" placeholder="myapp_owner" />
+                            <div class="mt-3 d-flex gap-2">
+                                <button type="submit" class="btn btn-sm btn-secondary" disabled="@importingDb">
+                                    @if (importingDb)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                        <text>Importing...</text>
+                                    }
+                                    else
+                                    {
+                                        <i class="bi bi-box-arrow-in-down me-1"></i>
+                                        <text>Import</text>
+                                    }
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => importDbCluster = null">Cancel</button>
                             </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Password</label>
-                                <input type="password" class="form-control form-control-sm" @bind="importDbPassword" />
-                            </div>
-                        </div>
-                        <div class="mt-3 d-flex gap-2">
-                            <button class="btn btn-sm btn-secondary" @onclick="ImportCnpgDatabase" disabled="@importingDb">
-                                @if (importingDb)
-                                {
-                                    <span class="spinner-border spinner-border-sm me-1"></span>
-                                    <text>Importing...</text>
-                                }
-                                else
-                                {
-                                    <i class="bi bi-box-arrow-in-down me-1"></i>
-                                    <text>Import</text>
-                                }
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => importDbCluster = null">Cancel</button>
-                        </div>
-                        @if (!string.IsNullOrEmpty(importDbError))
-                        {
-                            <div class="alert alert-danger small mt-2 mb-0 py-2">
-                                <i class="bi bi-exclamation-triangle me-1"></i>@importDbError
-                            </div>
-                        }
+                            @if (!string.IsNullOrEmpty(importDbError))
+                            {
+                                <div class="alert alert-danger small mt-2 mb-0 py-2">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>@importDbError
+                                </div>
+                            }
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -1904,58 +1987,64 @@
                     </div>
                     <div class="card-body">
                         <p class="text-muted small mb-3">Register a MongoDB cluster that was deployed outside EntKube. This creates a tracking record without modifying the live cluster.</p>
-                        <div class="row g-3">
-                            <div class="col-md-4">
-                                <label class="form-label small">MongoDB Resource Name</label>
-                                <input class="form-control form-control-sm" @bind="mongoRegName" placeholder="my-mongodb" />
-                                <div class="form-text small">Must match the MongoDBCommunity CR name in Kubernetes (if using community operator)</div>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Namespace</label>
-                                <input class="form-control form-control-sm" @bind="mongoRegNamespace" placeholder="database" />
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Kubernetes Cluster</label>
-                                <select class="form-select form-select-sm" @bind="mongoRegClusterId">
-                                    <option value="@Guid.Empty">Select cluster...</option>
-                                    @if (mongoAvailableClusters is not null)
-                                    {
-                                        @foreach (KubernetesCluster k in mongoAvailableClusters)
+                        <EditForm Model="mongoRegModel" OnValidSubmit="RegisterMongoCluster">
+                            <DataAnnotationsValidator />
+                            <div class="row g-3">
+                                <div class="col-md-4">
+                                    <label class="form-label small">MongoDB Resource Name</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="mongoRegModel.Name" placeholder="my-mongodb" />
+                                    <div class="form-text small">Must match the MongoDBCommunity CR name in Kubernetes (if using community operator)</div>
+                                    <ValidationMessage For="() => mongoRegModel.Name" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Namespace</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="mongoRegModel.Namespace" placeholder="database" />
+                                    <ValidationMessage For="() => mongoRegModel.Namespace" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Kubernetes Cluster</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="mongoRegModel.ClusterId">
+                                        <option value="">Select cluster...</option>
+                                        @if (mongoAvailableClusters is not null)
                                         {
-                                            <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
+                                            @foreach (KubernetesCluster k in mongoAvailableClusters)
+                                            {
+                                                <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
+                                            }
                                         }
-                                    }
-                                </select>
-                            </div>
-                            <div class="col-12">
-                                <div class="alert alert-info py-2 mb-0 small">
-                                    <i class="bi bi-info-circle me-1"></i>
-                                    After registering, use the <i class="bi bi-gear"></i> settings button to store the admin password as a K8s Secret — this enables S3 backup and migration.
-                                    Version and databases are discovered automatically for community-operator clusters.
+                                    </InputSelect>
+                                    <ValidationMessage For="() => mongoRegModel.ClusterId" class="text-danger small" />
+                                </div>
+                                <div class="col-12">
+                                    <div class="alert alert-info py-2 mb-0 small">
+                                        <i class="bi bi-info-circle me-1"></i>
+                                        After registering, use the <i class="bi bi-gear"></i> settings button to store the admin password as a K8s Secret — this enables S3 backup and migration.
+                                        Version and databases are discovered automatically for community-operator clusters.
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                        <div class="mt-3 d-flex align-items-center gap-2">
-                            <button class="btn btn-sm btn-success" @onclick="RegisterMongoCluster" disabled="@mongoRegistering">
-                                @if (mongoRegistering)
-                                {
-                                    <span class="spinner-border spinner-border-sm me-1"></span>
-                                    <text>Registering...</text>
-                                }
-                                else
-                                {
-                                    <i class="bi bi-box-arrow-in-down me-1"></i>
-                                    <text>Register</text>
-                                }
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="CancelMongoRegister">Cancel</button>
-                        </div>
-                        @if (!string.IsNullOrEmpty(mongoRegisterError))
-                        {
-                            <div class="alert alert-danger small mt-2 mb-0 py-2">
-                                <i class="bi bi-exclamation-triangle me-1"></i>@mongoRegisterError
+                            <div class="mt-3 d-flex align-items-center gap-2">
+                                <button type="submit" class="btn btn-sm btn-success" disabled="@mongoRegistering">
+                                    @if (mongoRegistering)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                        <text>Registering...</text>
+                                    }
+                                    else
+                                    {
+                                        <i class="bi bi-box-arrow-in-down me-1"></i>
+                                        <text>Register</text>
+                                    }
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelMongoRegister">Cancel</button>
                             </div>
-                        }
+                            @if (!string.IsNullOrEmpty(mongoRegisterError))
+                            {
+                                <div class="alert alert-danger small mt-2 mb-0 py-2">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>@mongoRegisterError
+                                </div>
+                            }
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -1969,102 +2058,112 @@
                         <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CancelMongoCreate"><i class="bi bi-x-lg"></i></button>
                     </div>
                     <div class="card-body">
-                        <div class="row g-3">
-                            <div class="col-md-6">
-                                <label class="form-label small">Cluster Name</label>
-                                <input class="form-control form-control-sm" @bind="mongoCreateName" placeholder="my-mongo" />
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label small">Namespace</label>
-                                <input class="form-control form-control-sm" @bind="mongoCreateNamespace" placeholder="databases" />
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Target Cluster</label>
-                                <select class="form-select form-select-sm" @bind="mongoCreateClusterId">
-                                    <option value="@Guid.Empty">Select cluster...</option>
-                                    @if (mongoAvailableClusters is not null)
-                                    {
-                                        @foreach (KubernetesCluster k in mongoAvailableClusters)
+                        <EditForm Model="mongoCreateModel" OnValidSubmit="CreateMongoCluster">
+                            <DataAnnotationsValidator />
+                            <div class="row g-3">
+                                <div class="col-md-6">
+                                    <label class="form-label small">Cluster Name</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="mongoCreateModel.Name" placeholder="my-mongo" />
+                                    <ValidationMessage For="() => mongoCreateModel.Name" class="text-danger small" />
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small">Namespace</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="mongoCreateModel.Namespace" placeholder="databases" />
+                                    <ValidationMessage For="() => mongoCreateModel.Namespace" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Target Cluster</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="mongoCreateModel.ClusterId">
+                                        <option value="">Select cluster...</option>
+                                        @if (mongoAvailableClusters is not null)
                                         {
-                                            <option value="@k.Id">@k.Name</option>
+                                            @foreach (KubernetesCluster k in mongoAvailableClusters)
+                                            {
+                                                <option value="@k.Id">@k.Name</option>
+                                            }
                                         }
-                                    }
-                                </select>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">MongoDB Version</label>
-                                <input class="form-control form-control-sm font-monospace" list="mongo-create-versions"
-                                       @bind="mongoCreateVersion" placeholder="8.3.2" />
-                                <datalist id="mongo-create-versions">
-                                    <option value="8.3.2" />
-                                    <option value="8.2.9" />
-                                    <option value="8.0.11" />
-                                    <option value="8.0.4" />
-                                    <option value="7.0.21" />
-                                    <option value="7.0.9" />
-                                    <option value="6.0.21" />
-                                    <option value="6.0.9" />
-                                </datalist>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Members (Replica Set)</label>
-                                <select class="form-select form-select-sm" @bind="mongoCreateMembers">
-                                    <option value="1">1 (Standalone)</option>
-                                    <option value="3">3 (HA)</option>
-                                    <option value="5">5 (Large HA)</option>
-                                </select>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Storage Size</label>
-                                <input class="form-control form-control-sm" @bind="mongoCreateStorageSize" placeholder="10Gi" />
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label small">Backup S3 Bucket (optional)</label>
-                                <select class="form-select form-select-sm" @bind="mongoCreateStorageLinkId">
-                                    <option value="@Guid.Empty">No backup</option>
-                                    @if (storageLinks is not null)
-                                    {
-                                        @foreach (StorageLink sl in storageLinks)
+                                    </InputSelect>
+                                    <ValidationMessage For="() => mongoCreateModel.ClusterId" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">MongoDB Version</label>
+                                    <InputText class="form-control form-control-sm font-monospace" list="mongo-create-versions"
+                                               @bind-Value="mongoCreateModel.Version" placeholder="8.3.2" />
+                                    <datalist id="mongo-create-versions">
+                                        <option value="8.3.2" />
+                                        <option value="8.2.9" />
+                                        <option value="8.0.11" />
+                                        <option value="8.0.4" />
+                                        <option value="7.0.21" />
+                                        <option value="7.0.9" />
+                                        <option value="6.0.21" />
+                                        <option value="6.0.9" />
+                                    </datalist>
+                                    <ValidationMessage For="() => mongoCreateModel.Version" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Members (Replica Set)</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="mongoCreateModel.Members">
+                                        <option value="1">1 (Standalone)</option>
+                                        <option value="3">3 (HA)</option>
+                                        <option value="5">5 (Large HA)</option>
+                                    </InputSelect>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Storage Size</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="mongoCreateModel.StorageSize" placeholder="10Gi" />
+                                    <ValidationMessage For="() => mongoCreateModel.StorageSize" class="text-danger small" />
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small">Backup S3 Bucket (optional)</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="mongoCreateModel.StorageLinkId">
+                                        <option value="">No backup</option>
+                                        @if (storageLinks is not null)
                                         {
-                                            <option value="@sl.Id">@sl.Name (@sl.BucketName)</option>
+                                            @foreach (StorageLink sl in storageLinks)
+                                            {
+                                                <option value="@sl.Id">@sl.Name (@sl.BucketName)</option>
+                                            }
                                         }
+                                    </InputSelect>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Backup Schedule (cron, optional)</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="mongoCreateModel.Schedule" placeholder="0 2 * * *" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Backup Retention (days)</label>
+                                    <InputNumber class="form-control form-control-sm" @bind-Value="mongoCreateModel.RetentionDays" min="1" max="365" />
+                                    <ValidationMessage For="() => mongoCreateModel.RetentionDays" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Max backups</label>
+                                    <InputNumber class="form-control form-control-sm" @bind-Value="mongoCreateModel.MaxBackups" min="1" max="200" />
+                                    <ValidationMessage For="() => mongoCreateModel.MaxBackups" class="text-danger small" />
+                                </div>
+                            </div>
+                            <div class="mt-3 d-flex align-items-center gap-2">
+                                <button type="submit" class="btn btn-sm btn-success" disabled="@mongoCreating">
+                                    @if (mongoCreating)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                        <text>Creating...</text>
                                     }
-                                </select>
+                                    else
+                                    {
+                                        <i class="bi bi-plus-lg me-1"></i>
+                                        <text>Create MongoDB Cluster</text>
+                                    }
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelMongoCreate">Cancel</button>
                             </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Backup Schedule (cron, optional)</label>
-                                <input class="form-control form-control-sm" @bind="mongoCreateSchedule" placeholder="0 2 * * *" />
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Backup Retention (days)</label>
-                                <input type="number" class="form-control form-control-sm" @bind="mongoCreateRetentionDays" min="1" max="365" />
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Max backups</label>
-                                <input type="number" class="form-control form-control-sm" @bind="mongoCreateMaxBackups" min="1" max="200" />
-                            </div>
-                        </div>
-                        <div class="mt-3 d-flex align-items-center gap-2">
-                            <button class="btn btn-sm btn-success" @onclick="CreateMongoCluster" disabled="@mongoCreating">
-                                @if (mongoCreating)
-                                {
-                                    <span class="spinner-border spinner-border-sm me-1"></span>
-                                    <text>Creating...</text>
-                                }
-                                else
-                                {
-                                    <i class="bi bi-plus-lg me-1"></i>
-                                    <text>Create MongoDB Cluster</text>
-                                }
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="CancelMongoCreate">Cancel</button>
-                        </div>
-                        @if (!string.IsNullOrEmpty(mongoCreateError))
-                        {
-                            <div class="alert alert-danger small mt-2 mb-0 py-2">
-                                <i class="bi bi-exclamation-triangle me-1"></i>@mongoCreateError
-                            </div>
-                        }
+                            @if (!string.IsNullOrEmpty(mongoCreateError))
+                            {
+                                <div class="alert alert-danger small mt-2 mb-0 py-2">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>@mongoCreateError
+                                </div>
+                            }
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -2078,10 +2177,9 @@
             }
             else if (FilteredManagedMongoClusters.Count == 0 && !showMongoCreate && !showMongoRegister)
             {
-                <div class="alert alert-light border">
-                    <i class="bi bi-inbox me-2"></i>
-                    No managed MongoDB clusters yet. Click "Create Cluster" to provision a new one, or "Register Existing" to track a cluster deployed outside EntKube.
-                </div>
+                <EmptyState Icon="bi-hdd-stack" Title="No managed clusters"
+                            Message="Provision a new MongoDB cluster, or register one deployed outside EntKube."
+                            ActionLabel="Create cluster" OnAction="ShowMongoCreateForm" />
             }
             else
             {
@@ -2226,6 +2324,7 @@
                                     </button>
                                 }
                                 <button class="btn btn-sm btn-outline-danger border-0" title="Delete Cluster"
+                                        aria-label="@($"Delete MongoDB cluster {mc.Name}")"
                                         @onclick="() => InitiateDeleteMongoCluster(mc)" disabled="@(mongoDeletingId == mc.Id)">
                                     @if (mongoDeletingId == mc.Id)
                                     {
@@ -2346,27 +2445,31 @@
                             <div class="card-body border-top py-3">
                                 <h6 class="small fw-semibold mb-3"><i class="bi bi-plus-circle me-2"></i>Track Existing Database</h6>
                                 <p class="small text-muted mb-3">Register a database that already exists in this external cluster. No MongoDB commands are run — this only creates a tracking record.</p>
-                                <div class="row g-3 align-items-end">
-                                    <div class="col-md-4">
-                                        <label class="form-label small">Database Name</label>
-                                        <input class="form-control form-control-sm" @bind="mongoTrackDbName" placeholder="myapp" />
+                                <EditForm Model="mongoTrackDbModel" OnValidSubmit="TrackExternalDatabase">
+                                    <DataAnnotationsValidator />
+                                    <div class="row g-3 align-items-end">
+                                        <div class="col-md-4">
+                                            <label class="form-label small">Database Name</label>
+                                            <InputText class="form-control form-control-sm" @bind-Value="mongoTrackDbModel.Name" placeholder="myapp" />
+                                            <ValidationMessage For="() => mongoTrackDbModel.Name" class="text-danger small" />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small">Owner / Username <span class="text-muted fw-normal">(optional)</span></label>
+                                            <InputText class="form-control form-control-sm" @bind-Value="mongoTrackDbModel.Owner" placeholder="defaults to db name" />
+                                        </div>
+                                        <div class="col-md-4 d-flex gap-2">
+                                            <button type="submit" class="btn btn-sm btn-success" disabled="@mongoTrackingDb">
+                                                @if (mongoTrackingDb) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Track
+                                            </button>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => mongoTrackDbClusterId = null">Cancel</button>
+                                        </div>
                                     </div>
-                                    <div class="col-md-4">
-                                        <label class="form-label small">Owner / Username <span class="text-muted fw-normal">(optional)</span></label>
-                                        <input class="form-control form-control-sm" @bind="mongoTrackDbOwner" placeholder="defaults to db name" />
-                                    </div>
-                                    <div class="col-md-4 d-flex gap-2">
-                                        <button class="btn btn-sm btn-success" @onclick="TrackExternalDatabase" disabled="@mongoTrackingDb">
-                                            @if (mongoTrackingDb) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                            Track
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => mongoTrackDbClusterId = null">Cancel</button>
-                                    </div>
-                                </div>
-                                @if (!string.IsNullOrEmpty(mongoTrackDbError) && mongoTrackDbClusterId == mc.Id)
-                                {
-                                    <div class="alert alert-danger small py-1 mt-2 mb-0">@mongoTrackDbError</div>
-                                }
+                                    @if (!string.IsNullOrEmpty(mongoTrackDbError) && mongoTrackDbClusterId == mc.Id)
+                                    {
+                                        <div class="alert alert-danger small py-1 mt-2 mb-0">@mongoTrackDbError</div>
+                                    }
+                                </EditForm>
                             </div>
                         }
 
@@ -2653,10 +2756,12 @@
                                                                 @if (!mc.IsExternal)
                                                                 {
                                                                     <button class="btn btn-link btn-sm text-info p-0 me-2" title="View credentials"
+                                                                            aria-label="@($"View credentials for database {mdb.Name}")"
                                                                             @onclick="() => ToggleMongoDatabaseCredentials(mc.Id, mdb.Id)">
                                                                         <i class="bi bi-key" style="font-size:0.8rem;"></i>
                                                                     </button>
                                                                     <button class="btn btn-link btn-sm text-primary p-0 me-2" title="Sync credentials to K8s Secret"
+                                                                            aria-label="@($"Sync credentials for database {mdb.Name} to Kubernetes secret")"
                                                                             disabled="@(mongoSyncingDbId == mdb.Id)"
                                                                             @onclick="() => SyncMongoDatabaseCredentials(mc.Id, mdb.Id)">
                                                                         @if (mongoSyncingDbId == mdb.Id)
@@ -2669,6 +2774,7 @@
                                                                         }
                                                                     </button>
                                                                     <button class="btn btn-link btn-sm text-warning p-0 me-2" title="Rotate password"
+                                                                            aria-label="@($"Rotate password for database {mdb.Name}")"
                                                                             disabled="@(mongoRotatingDbId == mdb.Id)"
                                                                             @onclick="() => RotateMongoDatabasePassword(mc.Id, mdb.Id)">
                                                                         @if (mongoRotatingDbId == mdb.Id)
@@ -2682,10 +2788,12 @@
                                                                     </button>
                                                                 }
                                                                 <button class="btn btn-link btn-sm text-primary p-0 me-2" title="Migrate to another cluster"
+                                                                        aria-label="@($"Migrate database {mdb.Name} to another cluster")"
                                                                         @onclick="() => ShowMongoDatabaseMigrate(mc, mdb)">
                                                                     <i class="bi bi-arrow-right-circle" style="font-size:0.8rem;"></i>
                                                                 </button>
                                                                 <button class="btn btn-link btn-sm text-danger p-0" title="@(mc.IsExternal ? "Unregister / Drop database" : "Drop database")"
+                                                                        aria-label="@($"Drop database {mdb.Name}")"
                                                                         @onclick="() => InitiateDeleteMongoDatabase(mc, mdb.Id)">
                                                                     <i class="bi bi-trash" style="font-size:0.8rem;"></i>
                                                                 </button>
@@ -2807,11 +2915,11 @@
                                     }
                                     else if (mc.IsExternal)
                                     {
-                                        <p class="small text-muted mb-3">No databases tracked yet. Use the <i class="bi bi-plus-circle"></i> button to track an existing database, or databases are discovered automatically if this cluster uses the MongoDB Community Operator.</p>
+                                        <EmptyState Icon="bi-database" Title="No databases tracked" Message="Use the + button to track an existing database, or databases are discovered automatically if this cluster uses the MongoDB Community Operator." />
                                     }
                                     else
                                     {
-                                        <p class="small text-muted mb-3">No databases created yet. Use the <i class="bi bi-plus-circle"></i> button to add one.</p>
+                                        <EmptyState Icon="bi-database" Title="No databases yet" Message="No databases created yet. Use the + button to add one." />
                                     }
 
                                     @* ── Backups ── *@
@@ -2827,8 +2935,9 @@
                                             </span>
                                             <button class="btn btn-sm btn-outline-secondary border-0 p-0 px-1 ms-auto"
                                                     title="Remove oldest backup Jobs from Kubernetes beyond the max limit. Does NOT delete backup data from S3."
+                                                    aria-label="@($"Clean up old backup jobs for cluster {mc.Name}")"
                                                     disabled="@(mongoCleaningUpBackupsId == mc.Id)"
-                                                    @onclick="() => CleanupMongoBackups(mc)">
+                                                    @onclick='() => pendingConfirm = new PendingConfirm($"Remove the oldest backup Jobs for \"{mc.Name}\" that exceed the max of {mc.MaxBackups}? This deletes the backup Jobs from Kubernetes (backup data in S3 is not deleted).", "Clean up", () => CleanupMongoBackups(mc))'>
                                                 @if (mongoCleaningUpBackupsId == mc.Id)
                                                 {
                                                     <span class="spinner-border spinner-border-sm"></span>
@@ -2894,7 +3003,7 @@
                                     }
                                     else if (mc.StorageLinkId.HasValue)
                                     {
-                                        <p class="small text-muted">No backups yet. Click <i class="bi bi-cloud-arrow-up"></i> to create one.</p>
+                                        <EmptyState Icon="bi-cloud-arrow-up" Title="No backups yet" Message="Use the upload button to create one." />
                                     }
                                     else if (mc.IsExternal)
                                     {
@@ -3107,23 +3216,27 @@
                         <h6 class="mb-0"><i class="bi bi-plus-circle me-2"></i>Add Database to <strong>@mongoAddDbCluster.Name</strong></h6>
                     </div>
                     <div class="card-body">
-                        <div class="row g-3 align-items-end">
-                            <div class="col-md-6">
-                                <label class="form-label small">Database Name</label>
-                                <input class="form-control form-control-sm" @bind="mongoNewDbName" placeholder="myapp" />
+                        <EditForm Model="mongoAddDbModel" OnValidSubmit="AddMongoDatabase">
+                            <DataAnnotationsValidator />
+                            <div class="row g-3 align-items-end">
+                                <div class="col-md-6">
+                                    <label class="form-label small">Database Name</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="mongoAddDbModel.Name" placeholder="myapp" />
+                                    <ValidationMessage For="() => mongoAddDbModel.Name" class="text-danger small" />
+                                </div>
+                                <div class="col-md-6 d-flex gap-2">
+                                    <button type="submit" class="btn btn-sm btn-success" disabled="@mongoAddingDb">
+                                        @if (mongoAddingDb) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        Create
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => mongoAddDbCluster = null">Cancel</button>
+                                </div>
                             </div>
-                            <div class="col-md-6 d-flex gap-2">
-                                <button class="btn btn-sm btn-success" @onclick="AddMongoDatabase" disabled="@mongoAddingDb">
-                                    @if (mongoAddingDb) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                    Create
-                                </button>
-                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => mongoAddDbCluster = null">Cancel</button>
-                            </div>
-                        </div>
-                        @if (!string.IsNullOrEmpty(mongoDbError))
-                        {
-                            <div class="alert alert-danger small py-1 mt-2 mb-0">@mongoDbError</div>
-                        }
+                            @if (!string.IsNullOrEmpty(mongoDbError))
+                            {
+                                <div class="alert alert-danger small py-1 mt-2 mb-0">@mongoDbError</div>
+                            }
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -3308,6 +3421,27 @@
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    // A destructive action awaiting user confirmation via the ConfirmDialog banner.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try
+        {
+            await pendingConfirm.Action();
+        }
+        finally
+        {
+            confirmBusy = false;
+            pendingConfirm = null;
+        }
+    }
+
     private bool loading = true;
     private bool refreshing;
     private DatabaseOperatorStatus? operatorStatus;
@@ -3353,19 +3487,47 @@
     private bool showImportCnpg;
     private bool importingCnpg;
     private string? importCnpgError;
-    private Guid importCnpgK8sClusterId;
-    private string importCnpgName = "";
-    private string importCnpgNamespace = "";
-    private string createName = "";
-    private string createNamespace = "databases";
-    private Guid createClusterId;
-    private string createPostgresVersion = "18";
-    private int createInstances = 3;
-    private string createStorageSize = "10Gi";
-    private Guid createStorageLinkId;
-    private string createSchedule = "";
-    private int createRetentionDays = 30;
-    private int createMaxBackups = 20;
+    private ImportCnpgModel importCnpgModel = new();
+
+    private sealed class ImportCnpgModel
+    {
+        [Required(ErrorMessage = "Select a Kubernetes cluster.")]
+        public Guid? K8sClusterId { get; set; }
+
+        [Required(ErrorMessage = "Cluster name is required.")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Namespace is required.")]
+        public string Namespace { get; set; } = "";
+    }
+    private CreateClusterModel createModel = new();
+
+    private sealed class CreateClusterModel
+    {
+        [Required(ErrorMessage = "Cluster name is required.")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Namespace is required.")]
+        public string Namespace { get; set; } = "databases";
+
+        [Required(ErrorMessage = "Select a target cluster.")]
+        public Guid? ClusterId { get; set; }
+
+        public string PostgresVersion { get; set; } = "18";
+        public int Instances { get; set; } = 3;
+
+        [Required(ErrorMessage = "Storage size is required.")]
+        public string StorageSize { get; set; } = "10Gi";
+
+        public Guid? StorageLinkId { get; set; }
+        public string Schedule { get; set; } = "";
+
+        [Range(1, 365, ErrorMessage = "Retention must be 1–365 days.")]
+        public int RetentionDays { get; set; } = 30;
+
+        [Range(1, 200, ErrorMessage = "Max backups must be 1–200.")]
+        public int MaxBackups { get; set; } = 20;
+    }
 
     // Cluster detail panel
     private Guid? expandedClusterId;
@@ -3404,20 +3566,36 @@
 
     // Add database form
     private CnpgCluster? addDbCluster;
-    private string newDbName = "";
+    private AddDbModel addDbModel = new();
     private bool addingDb;
     private string? dbError;
 
+    private sealed class AddDbModel
+    {
+        [Required(ErrorMessage = "Database name is required.")]
+        public string Name { get; set; } = "";
+    }
+
     // Import existing database form
     private CnpgCluster? importDbCluster;
-    private string importDbName = "";
-    private string importDbOwner = "";
-    private string importDbPassword = "";
+    private ImportDbModel importDbModel = new();
     private bool importingDb;
     private string? importDbError;
     private bool discoveringDbs;
     private string? discoverDbError;
     private List<(string Name, string Owner)>? discoveredDbs;
+
+    private sealed class ImportDbModel
+    {
+        [Required(ErrorMessage = "Database name is required.")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Owner role is required.")]
+        public string Owner { get; set; } = "";
+
+        [Required(ErrorMessage = "Password is required.")]
+        public string Password { get; set; } = "";
+    }
 
     // Database credentials
     private Guid? credentialsDatabaseId;
@@ -3448,10 +3626,21 @@
     private bool showMongoRegister;
     private bool mongoRegistering;
     private string? mongoRegisterError;
-    private string mongoRegName = "";
-    private string mongoRegNamespace = "database";
-    private Guid mongoRegClusterId;
-    private string mongoRegExternalUri = "";
+    private MongoRegModel mongoRegModel = new();
+
+    private sealed class MongoRegModel
+    {
+        [Required(ErrorMessage = "Resource name is required.")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Namespace is required.")]
+        public string Namespace { get; set; } = "database";
+
+        [Required(ErrorMessage = "Select a Kubernetes cluster.")]
+        public Guid? ClusterId { get; set; }
+
+        public string ExternalUri { get; set; } = "";
+    }
 
     // External cluster settings panel
     private Guid? mongoExtSettingsClusterId;
@@ -3466,8 +3655,15 @@
 
     // Track external database form
     private Guid? mongoTrackDbClusterId;
-    private string mongoTrackDbName = "";
-    private string mongoTrackDbOwner = "";
+    private MongoTrackDbModel mongoTrackDbModel = new();
+
+    private sealed class MongoTrackDbModel
+    {
+        [Required(ErrorMessage = "Database name is required.")]
+        public string Name { get; set; } = "";
+
+        public string Owner { get; set; } = "";
+    }
     private bool mongoTrackingDb;
     private string? mongoTrackDbError;
 
@@ -3482,16 +3678,36 @@
     private bool showMongoCreate;
     private bool mongoCreating;
     private string? mongoCreateError;
-    private string mongoCreateName = "";
-    private string mongoCreateNamespace = "databases";
-    private Guid mongoCreateClusterId;
-    private string mongoCreateVersion = "8.3.2";
-    private int mongoCreateMembers = 3;
-    private string mongoCreateStorageSize = "10Gi";
-    private Guid mongoCreateStorageLinkId;
-    private string mongoCreateSchedule = "";
-    private int mongoCreateRetentionDays = 30;
-    private int mongoCreateMaxBackups = 20;
+    private MongoCreateModel mongoCreateModel = new();
+
+    private sealed class MongoCreateModel
+    {
+        [Required(ErrorMessage = "Cluster name is required.")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Namespace is required.")]
+        public string Namespace { get; set; } = "databases";
+
+        [Required(ErrorMessage = "Select a target cluster.")]
+        public Guid? ClusterId { get; set; }
+
+        [Required(ErrorMessage = "Version is required.")]
+        public string Version { get; set; } = "8.3.2";
+
+        public int Members { get; set; } = 3;
+
+        [Required(ErrorMessage = "Storage size is required.")]
+        public string StorageSize { get; set; } = "10Gi";
+
+        public Guid? StorageLinkId { get; set; }
+        public string Schedule { get; set; } = "";
+
+        [Range(1, 365, ErrorMessage = "Retention must be 1–365 days.")]
+        public int RetentionDays { get; set; } = 30;
+
+        [Range(1, 200, ErrorMessage = "Max backups must be 1–200.")]
+        public int MaxBackups { get; set; } = 20;
+    }
 
     // Mongo backup settings
     private Guid? mongoConfiguringScheduleId;
@@ -3561,7 +3777,13 @@
 
     // Mongo add database form
     private MongoCluster? mongoAddDbCluster;
-    private string mongoNewDbName = "";
+    private MongoAddDbModel mongoAddDbModel = new();
+
+    private sealed class MongoAddDbModel
+    {
+        [Required(ErrorMessage = "Database name is required.")]
+        public string Name { get; set; } = "";
+    }
     private bool mongoAddingDb;
     private string? mongoDbError;
 
@@ -3575,17 +3797,38 @@
 
     // Register form
     private bool showRegisterPgForm;
-    private string regPgName = "";
-    private Guid regPgClusterId = Guid.Empty;
-    private string regPgNamespace = "";
-    private string regPgServiceName = "";
-    private int regPgPort = 5432;
-    private string regPgAdminPodName = "";
-    private string regPgAdminUsername = "postgres";
-    private string regPgAdminPassword = "";
-    private string regPgNotes = "";
+    private RegPgModel regPgModel = new();
     private bool registeringPg;
     private string? registerPgError;
+
+    private sealed class RegPgModel
+    {
+        [Required(ErrorMessage = "Display name is required.")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Select a Kubernetes cluster.")]
+        public Guid? ClusterId { get; set; }
+
+        [Required(ErrorMessage = "Namespace is required.")]
+        public string Namespace { get; set; } = "";
+
+        [Required(ErrorMessage = "Service name is required.")]
+        public string ServiceName { get; set; } = "";
+
+        [Range(1, 65535, ErrorMessage = "Port must be 1–65535.")]
+        public int Port { get; set; } = 5432;
+
+        [Required(ErrorMessage = "Admin pod name is required.")]
+        public string AdminPodName { get; set; } = "";
+
+        [Required(ErrorMessage = "Admin username is required.")]
+        public string AdminUsername { get; set; } = "postgres";
+
+        [Required(ErrorMessage = "Admin password is required.")]
+        public string AdminPassword { get; set; } = "";
+
+        public string Notes { get; set; } = "";
+    }
 
     // Per-instance UI
     private Guid? expandedRegPgId;
@@ -3599,17 +3842,33 @@
 
     // Create database form
     private RegisteredPostgresInstance? addDbRegPgInstance;
-    private string newRegPgDbName = "";
+    private RegPgDbModel regPgDbModel = new();
     private bool addingRegPgDb;
     private string? addRegPgDbError;
 
+    private sealed class RegPgDbModel
+    {
+        [Required(ErrorMessage = "Database name is required.")]
+        public string Name { get; set; } = "";
+    }
+
     // Import database form
     private RegisteredPostgresInstance? importRegPgInstance;
-    private string importRegPgDbName = "";
-    private string importRegPgOwner = "";
-    private string importRegPgPassword = "";
+    private ImportRegPgDbModel importRegPgModel = new();
     private bool importingRegPgDb;
     private string? importRegPgError;
+
+    private sealed class ImportRegPgDbModel
+    {
+        [Required(ErrorMessage = "Database name is required.")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Owner is required.")]
+        public string Owner { get; set; } = "";
+
+        [Required(ErrorMessage = "Password is required.")]
+        public string Password { get; set; } = "";
+    }
 
     // Database actions
     private Guid? regPgCredDbId;
@@ -3696,7 +3955,10 @@
             {
                 clusterDetail = await CnpgService.GetClusterDetailAsync(TenantId, expandedClusterId.Value);
             }
-            catch { }
+            catch
+            {
+                // Best-effort refresh of an already-open panel; keep the existing detail on transient failure.
+            }
         }
 
         if (expandedMongoClusterId.HasValue)
@@ -3705,7 +3967,10 @@
             {
                 mongoClusterDetail = await MongoService.GetClusterDetailAsync(TenantId, expandedMongoClusterId.Value);
             }
-            catch { }
+            catch
+            {
+                // Best-effort refresh of an already-open panel; keep the existing detail on transient failure.
+            }
         }
     }
 
@@ -3824,46 +4089,33 @@
     {
         showCreate = false;
         createError = null;
-        createName = "";
-        createNamespace = "databases";
-        createClusterId = Guid.Empty;
-        createPostgresVersion = "18";
-        createInstances = 3;
-        createStorageSize = "10Gi";
-        createStorageLinkId = Guid.Empty;
-        createSchedule = "";
-        createRetentionDays = 30;
-        createMaxBackups = 20;
+        createModel = new CreateClusterModel();
     }
 
     private async Task CreateCluster()
     {
-        if (string.IsNullOrWhiteSpace(createName) || createClusterId == Guid.Empty)
-        {
-            createError = "Name and target cluster are required.";
-            return;
-        }
-
         creating = true;
         createError = null;
         StateHasChanged();
 
         try
         {
-            Guid? storageLinkId = createStorageLinkId != Guid.Empty ? createStorageLinkId : null;
-            string? schedule = !string.IsNullOrWhiteSpace(createSchedule) ? createSchedule : null;
+            Guid? storageLinkId = createModel.StorageLinkId;
+            string? schedule = !string.IsNullOrWhiteSpace(createModel.Schedule) ? createModel.Schedule : null;
 
             await CnpgService.CreateClusterAsync(
-                TenantId, createClusterId, createName.Trim(), createNamespace.Trim(),
-                createInstances, createStorageSize.Trim(), storageLinkId, schedule,
-                createRetentionDays, createMaxBackups, createPostgresVersion.Trim());
+                TenantId, createModel.ClusterId!.Value, createModel.Name.Trim(), createModel.Namespace.Trim(),
+                createModel.Instances, createModel.StorageSize.Trim(), storageLinkId, schedule,
+                createModel.RetentionDays, createModel.MaxBackups, createModel.PostgresVersion.Trim());
 
             CancelCreate();
             managedClusters = await CnpgService.GetClustersAsync(TenantId);
+            Toasts.Success("PostgreSQL cluster created.");
         }
         catch (Exception ex)
         {
             createError = ex.Message;
+            Toasts.Error($"Failed to create cluster: {ex.Message}");
         }
         finally
         {
@@ -3884,19 +4136,11 @@
     {
         showImportCnpg = false;
         importCnpgError = null;
-        importCnpgK8sClusterId = Guid.Empty;
-        importCnpgName = "";
-        importCnpgNamespace = "";
+        importCnpgModel = new ImportCnpgModel();
     }
 
     private async Task ImportCnpgCluster()
     {
-        if (string.IsNullOrWhiteSpace(importCnpgName) || importCnpgK8sClusterId == Guid.Empty || string.IsNullOrWhiteSpace(importCnpgNamespace))
-        {
-            importCnpgError = "Kubernetes cluster, cluster name, and namespace are required.";
-            return;
-        }
-
         importingCnpg = true;
         importCnpgError = null;
         StateHasChanged();
@@ -3904,14 +4148,16 @@
         try
         {
             await CnpgService.ImportClusterAsync(
-                TenantId, importCnpgK8sClusterId, importCnpgName.Trim(), importCnpgNamespace.Trim());
+                TenantId, importCnpgModel.K8sClusterId!.Value, importCnpgModel.Name.Trim(), importCnpgModel.Namespace.Trim());
 
             CancelImportCnpg();
             managedClusters = await CnpgService.GetClustersAsync(TenantId);
+            Toasts.Success("CNPG cluster imported.");
         }
         catch (Exception ex)
         {
             importCnpgError = ex.Message;
+            Toasts.Error($"Failed to import cluster: {ex.Message}");
         }
         finally
         {
@@ -3931,10 +4177,12 @@
             await CnpgService.DeleteClusterAsync(TenantId, cnpgClusterId);
             managedClusters = await CnpgService.GetClustersAsync(TenantId);
             cnpgDeleteConfirmId = null;
+            Toasts.Success("PostgreSQL cluster deleted.");
         }
         catch (Exception ex)
         {
             createError = $"Delete failed: {ex.Message}";
+            Toasts.Error($"Failed to delete cluster: {ex.Message}");
         }
         finally
         {
@@ -3952,10 +4200,12 @@
             await CnpgService.UnregisterClusterAsync(TenantId, cnpgClusterId);
             managedClusters = await CnpgService.GetClustersAsync(TenantId);
             cnpgDeleteConfirmId = null;
+            Toasts.Success("Cluster unregistered from EntKube.");
         }
         catch (Exception ex)
         {
             createError = $"Unregister failed: {ex.Message}";
+            Toasts.Error($"Failed to unregister cluster: {ex.Message}");
         }
         finally
         {
@@ -4073,6 +4323,7 @@
                 ? $"No cleanup needed — {cluster.MaxBackups} or fewer completed backups."
                 : $"Removed {deleted} Backup CR(s) from Kubernetes. Keeping the {cluster.MaxBackups} most recent. Note: backup data in S3 is managed separately by Barman via the retention policy.";
             clusterMessages[cluster.Id] = msg;
+            Toasts.Success(deleted == 0 ? "No backup cleanup needed." : $"Removed {deleted} old backup resource(s).");
 
             // Reload detail so the backup list reflects the deletions.
             if (expandedClusterId == cluster.Id)
@@ -4081,6 +4332,7 @@
         catch (Exception ex)
         {
             clusterMessages[cluster.Id] = $"Error: {ex.Message}";
+            Toasts.Error($"Backup cleanup failed: {ex.Message}");
         }
         finally
         {
@@ -4199,31 +4451,27 @@
     private void ShowAddDatabase(CnpgCluster cluster)
     {
         addDbCluster = cluster;
-        newDbName = "";
+        addDbModel = new AddDbModel();
         dbError = null;
     }
 
     private async Task AddDatabase()
     {
-        if (string.IsNullOrWhiteSpace(newDbName))
-        {
-            dbError = "Database name is required.";
-            return;
-        }
-
         addingDb = true;
         dbError = null;
         StateHasChanged();
 
         try
         {
-            await CnpgService.CreateDatabaseAsync(TenantId, addDbCluster!.Id, newDbName.Trim());
+            await CnpgService.CreateDatabaseAsync(TenantId, addDbCluster!.Id, addDbModel.Name.Trim());
             addDbCluster = null;
             managedClusters = await CnpgService.GetClustersAsync(TenantId);
+            Toasts.Success("Database created.");
         }
         catch (Exception ex)
         {
             dbError = ex.Message;
+            Toasts.Error($"Failed to create database: {ex.Message}");
         }
         finally
         {
@@ -4234,9 +4482,7 @@
     private void ShowImportDatabase(CnpgCluster cluster)
     {
         importDbCluster = cluster;
-        importDbName = "";
-        importDbOwner = "";
-        importDbPassword = "";
+        importDbModel = new ImportDbModel();
         importDbError = null;
         discoverDbError = null;
         discoveredDbs = null;
@@ -4265,19 +4511,13 @@
     private void OnImportDbNameChanged()
     {
         if (discoveredDbs is null) return;
-        (string Name, string Owner) match = discoveredDbs.FirstOrDefault(d => d.Name == importDbName);
+        (string Name, string Owner) match = discoveredDbs.FirstOrDefault(d => d.Name == importDbModel.Name);
         if (match != default && !string.IsNullOrEmpty(match.Owner))
-            importDbOwner = match.Owner;
+            importDbModel.Owner = match.Owner;
     }
 
     private async Task ImportCnpgDatabase()
     {
-        if (string.IsNullOrWhiteSpace(importDbName) || string.IsNullOrWhiteSpace(importDbOwner) || string.IsNullOrWhiteSpace(importDbPassword))
-        {
-            importDbError = "Database name, owner role, and password are required.";
-            return;
-        }
-
         importingDb = true;
         importDbError = null;
         StateHasChanged();
@@ -4286,14 +4526,16 @@
         {
             await CnpgService.ImportDatabaseAsync(
                 TenantId, importDbCluster!.Id,
-                importDbName.Trim(), importDbOwner.Trim(), importDbPassword);
+                importDbModel.Name.Trim(), importDbModel.Owner.Trim(), importDbModel.Password);
 
             importDbCluster = null;
             managedClusters = await CnpgService.GetClustersAsync(TenantId);
+            Toasts.Success("Database imported.");
         }
         catch (Exception ex)
         {
             importDbError = ex.Message;
+            Toasts.Error($"Failed to import database: {ex.Message}");
         }
         finally
         {
@@ -4308,10 +4550,12 @@
             await CnpgService.DeleteDatabaseAsync(TenantId, cnpgClusterId, databaseId);
             managedClusters = await CnpgService.GetClustersAsync(TenantId);
             cnpgDbDeleteConfirmId = null;
+            Toasts.Success("Database dropped.");
         }
         catch (Exception ex)
         {
             dbError = $"Failed to delete database: {ex.Message}";
+            Toasts.Error($"Failed to drop database: {ex.Message}");
         }
     }
 
@@ -4526,35 +4770,27 @@
     {
         showMongoRegister = false;
         mongoRegisterError = null;
-        mongoRegName = "";
-        mongoRegNamespace = "database";
-        mongoRegClusterId = Guid.Empty;
-        mongoRegExternalUri = "";
+        mongoRegModel = new MongoRegModel();
     }
 
     private async Task RegisterMongoCluster()
     {
-        if (string.IsNullOrWhiteSpace(mongoRegName) || mongoRegClusterId == Guid.Empty
-            || string.IsNullOrWhiteSpace(mongoRegNamespace))
-        {
-            mongoRegisterError = "Name, namespace, and target cluster are required.";
-            return;
-        }
-
         mongoRegistering = true;
         mongoRegisterError = null;
 
         try
         {
             await MongoService.RegisterExistingClusterAsync(
-                TenantId, mongoRegClusterId, mongoRegName.Trim(), mongoRegNamespace.Trim(),
-                string.IsNullOrWhiteSpace(mongoRegExternalUri) ? null : mongoRegExternalUri.Trim());
+                TenantId, mongoRegModel.ClusterId!.Value, mongoRegModel.Name.Trim(), mongoRegModel.Namespace.Trim(),
+                string.IsNullOrWhiteSpace(mongoRegModel.ExternalUri) ? null : mongoRegModel.ExternalUri.Trim());
             managedMongoClusters = await MongoService.GetClustersAsync(TenantId);
             CancelMongoRegister();
+            Toasts.Success("MongoDB cluster registered.");
         }
         catch (Exception ex)
         {
             mongoRegisterError = ex.Message;
+            Toasts.Error($"Failed to register cluster: {ex.Message}");
         }
         finally
         {
@@ -4574,46 +4810,33 @@
     {
         showMongoCreate = false;
         mongoCreateError = null;
-        mongoCreateName = "";
-        mongoCreateNamespace = "databases";
-        mongoCreateClusterId = Guid.Empty;
-        mongoCreateVersion = "8.3.2";
-        mongoCreateMembers = 3;
-        mongoCreateStorageSize = "10Gi";
-        mongoCreateStorageLinkId = Guid.Empty;
-        mongoCreateSchedule = "";
-        mongoCreateRetentionDays = 30;
-        mongoCreateMaxBackups = 20;
+        mongoCreateModel = new MongoCreateModel();
     }
 
     private async Task CreateMongoCluster()
     {
-        if (string.IsNullOrWhiteSpace(mongoCreateName) || mongoCreateClusterId == Guid.Empty)
-        {
-            mongoCreateError = "Name and target cluster are required.";
-            return;
-        }
-
         mongoCreating = true;
         mongoCreateError = null;
         StateHasChanged();
 
         try
         {
-            Guid? storageLinkId = mongoCreateStorageLinkId != Guid.Empty ? mongoCreateStorageLinkId : null;
-            string? schedule = !string.IsNullOrWhiteSpace(mongoCreateSchedule) ? mongoCreateSchedule : null;
+            Guid? storageLinkId = mongoCreateModel.StorageLinkId;
+            string? schedule = !string.IsNullOrWhiteSpace(mongoCreateModel.Schedule) ? mongoCreateModel.Schedule : null;
 
             await MongoService.CreateClusterAsync(
-                TenantId, mongoCreateClusterId, mongoCreateName.Trim(), mongoCreateNamespace.Trim(),
-                mongoCreateMembers, mongoCreateStorageSize.Trim(), storageLinkId, schedule,
-                mongoCreateRetentionDays, mongoCreateMaxBackups, mongoCreateVersion.Trim());
+                TenantId, mongoCreateModel.ClusterId!.Value, mongoCreateModel.Name.Trim(), mongoCreateModel.Namespace.Trim(),
+                mongoCreateModel.Members, mongoCreateModel.StorageSize.Trim(), storageLinkId, schedule,
+                mongoCreateModel.RetentionDays, mongoCreateModel.MaxBackups, mongoCreateModel.Version.Trim());
 
             CancelMongoCreate();
             managedMongoClusters = await MongoService.GetClustersAsync(TenantId);
+            Toasts.Success("MongoDB cluster created.");
         }
         catch (Exception ex)
         {
             mongoCreateError = ex.Message;
+            Toasts.Error($"Failed to create cluster: {ex.Message}");
         }
         finally
         {
@@ -4636,10 +4859,12 @@
             await MongoService.DeleteClusterAsync(TenantId, mongoClusterId);
             managedMongoClusters = await MongoService.GetClustersAsync(TenantId);
             mongoDeleteConfirmId = null;
+            Toasts.Success("MongoDB cluster deleted.");
         }
         catch (Exception ex)
         {
             mongoCreateError = $"Delete failed: {ex.Message}";
+            Toasts.Error($"Failed to delete MongoDB cluster: {ex.Message}");
         }
         finally
         {
@@ -4657,10 +4882,12 @@
             await MongoService.UnregisterClusterAsync(TenantId, mongoClusterId);
             managedMongoClusters = await MongoService.GetClustersAsync(TenantId);
             mongoDeleteConfirmId = null;
+            Toasts.Success("MongoDB cluster unregistered from EntKube.");
         }
         catch (Exception ex)
         {
             mongoCreateError = $"Unregister failed: {ex.Message}";
+            Toasts.Error($"Failed to unregister MongoDB cluster: {ex.Message}");
         }
         finally
         {
@@ -4713,10 +4940,15 @@
                 ? $"No cleanup needed — {cluster.MaxBackups} or fewer completed backups."
                 : $"Removed {deleted} backup Job(s) from Kubernetes. Keeping the {cluster.MaxBackups} most recent. Note: backup data in S3 is managed separately via S3 lifecycle rules.";
             mongoClusterMessages[cluster.Id] = msg;
+            Toasts.Success(deleted == 0 ? "No backup cleanup needed." : $"Removed {deleted} old backup job(s).");
             if (expandedMongoClusterId == cluster.Id)
                 mongoClusterDetail = await MongoService.GetClusterDetailAsync(TenantId, cluster.Id);
         }
-        catch (Exception ex) { mongoClusterMessages[cluster.Id] = $"Error: {ex.Message}"; }
+        catch (Exception ex)
+        {
+            mongoClusterMessages[cluster.Id] = $"Error: {ex.Message}";
+            Toasts.Error($"Backup cleanup failed: {ex.Message}");
+        }
         finally { mongoCleaningUpBackupsId = null; }
     }
 
@@ -5011,31 +5243,27 @@
     private void ShowMongoAddDatabase(MongoCluster cluster)
     {
         mongoAddDbCluster = cluster;
-        mongoNewDbName = "";
+        mongoAddDbModel = new MongoAddDbModel();
         mongoDbError = null;
     }
 
     private async Task AddMongoDatabase()
     {
-        if (string.IsNullOrWhiteSpace(mongoNewDbName))
-        {
-            mongoDbError = "Database name is required.";
-            return;
-        }
-
         mongoAddingDb = true;
         mongoDbError = null;
         StateHasChanged();
 
         try
         {
-            await MongoService.CreateDatabaseAsync(TenantId, mongoAddDbCluster!.Id, mongoNewDbName.Trim());
+            await MongoService.CreateDatabaseAsync(TenantId, mongoAddDbCluster!.Id, mongoAddDbModel.Name.Trim());
             mongoAddDbCluster = null;
             managedMongoClusters = await MongoService.GetClustersAsync(TenantId);
+            Toasts.Success("Database created.");
         }
         catch (Exception ex)
         {
             mongoDbError = ex.Message;
+            Toasts.Error($"Failed to create database: {ex.Message}");
         }
         finally
         {
@@ -5058,10 +5286,12 @@
             await MongoService.DeleteDatabaseAsync(TenantId, mongoClusterId, databaseId);
             managedMongoClusters = await MongoService.GetClustersAsync(TenantId);
             mongoDbDeleteConfirmId = null;
+            Toasts.Success("Database dropped.");
         }
         catch (Exception ex)
         {
             mongoDbError = $"Failed to delete database: {ex.Message}";
+            Toasts.Error($"Failed to drop database: {ex.Message}");
         }
         finally
         {
@@ -5079,10 +5309,12 @@
             await MongoService.UnregisterDatabaseAsync(TenantId, mongoClusterId, databaseId);
             managedMongoClusters = await MongoService.GetClustersAsync(TenantId);
             mongoDbDeleteConfirmId = null;
+            Toasts.Success("Database unregistered from EntKube.");
         }
         catch (Exception ex)
         {
             mongoDbError = $"Failed to unregister database: {ex.Message}";
+            Toasts.Error($"Failed to unregister database: {ex.Message}");
         }
         finally
         {
@@ -5263,19 +5495,12 @@
     private void ShowMongoTrackDb(MongoCluster cluster)
     {
         mongoTrackDbClusterId = cluster.Id;
-        mongoTrackDbName = "";
-        mongoTrackDbOwner = "";
+        mongoTrackDbModel = new MongoTrackDbModel();
         mongoTrackDbError = null;
     }
 
     private async Task TrackExternalDatabase()
     {
-        if (string.IsNullOrWhiteSpace(mongoTrackDbName))
-        {
-            mongoTrackDbError = "Database name is required.";
-            return;
-        }
-
         mongoTrackingDb = true;
         mongoTrackDbError = null;
         StateHasChanged();
@@ -5284,15 +5509,17 @@
         {
             await MongoService.RegisterExternalDatabaseAsync(
                 TenantId, mongoTrackDbClusterId!.Value,
-                mongoTrackDbName.Trim(),
-                string.IsNullOrWhiteSpace(mongoTrackDbOwner) ? mongoTrackDbName.Trim() : mongoTrackDbOwner.Trim());
+                mongoTrackDbModel.Name.Trim(),
+                string.IsNullOrWhiteSpace(mongoTrackDbModel.Owner) ? mongoTrackDbModel.Name.Trim() : mongoTrackDbModel.Owner.Trim());
 
             mongoTrackDbClusterId = null;
             managedMongoClusters = await MongoService.GetClustersAsync(TenantId);
+            Toasts.Success("Database tracked.");
         }
         catch (Exception ex)
         {
             mongoTrackDbError = ex.Message;
+            Toasts.Error($"Failed to track database: {ex.Message}");
         }
         finally
         {
@@ -5441,48 +5668,32 @@
     private void CancelRegisterPgForm()
     {
         showRegisterPgForm = false;
-        regPgName = "";
-        regPgClusterId = Guid.Empty;
-        regPgNamespace = "";
-        regPgServiceName = "";
-        regPgPort = 5432;
-        regPgAdminPodName = "";
-        regPgAdminUsername = "postgres";
-        regPgAdminPassword = "";
-        regPgNotes = "";
+        regPgModel = new RegPgModel();
         registerPgError = null;
     }
 
     private async Task RegisterPgInstance()
     {
         registerPgError = null;
-
-        if (string.IsNullOrWhiteSpace(regPgName) || regPgClusterId == Guid.Empty
-            || string.IsNullOrWhiteSpace(regPgNamespace) || string.IsNullOrWhiteSpace(regPgServiceName)
-            || string.IsNullOrWhiteSpace(regPgAdminPodName) || string.IsNullOrWhiteSpace(regPgAdminUsername)
-            || string.IsNullOrWhiteSpace(regPgAdminPassword))
-        {
-            registerPgError = "Please fill in all required fields.";
-            return;
-        }
-
         registeringPg = true;
 
         try
         {
             await RegisteredPostgresService.RegisterInstanceAsync(
-                TenantId, regPgClusterId, regPgName.Trim(), regPgNamespace.Trim(),
-                regPgServiceName.Trim(), regPgPort, regPgAdminPodName.Trim(),
-                regPgAdminUsername.Trim(), regPgAdminPassword,
-                string.IsNullOrWhiteSpace(regPgNotes) ? null : regPgNotes.Trim(),
+                TenantId, regPgModel.ClusterId!.Value, regPgModel.Name.Trim(), regPgModel.Namespace.Trim(),
+                regPgModel.ServiceName.Trim(), regPgModel.Port, regPgModel.AdminPodName.Trim(),
+                regPgModel.AdminUsername.Trim(), regPgModel.AdminPassword,
+                string.IsNullOrWhiteSpace(regPgModel.Notes) ? null : regPgModel.Notes.Trim(),
                 testConnection: true);
 
             registeredPgInstances = await RegisteredPostgresService.GetInstancesAsync(TenantId);
             CancelRegisterPgForm();
+            Toasts.Success("PostgreSQL instance registered.");
         }
         catch (Exception ex)
         {
             registerPgError = ex.Message;
+            Toasts.Error($"Failed to register instance: {ex.Message}");
         }
         finally
         {
@@ -5549,10 +5760,12 @@
             await RegisteredPostgresService.DeleteInstanceAsync(TenantId, instanceId);
             registeredPgInstances = await RegisteredPostgresService.GetInstancesAsync(TenantId);
             if (expandedRegPgId == instanceId) expandedRegPgId = null;
+            Toasts.Success("Registered PostgreSQL instance deleted.");
         }
         catch (Exception ex)
         {
             deleteRegPgError = ex.Message;
+            Toasts.Error($"Failed to delete instance: {ex.Message}");
         }
         finally
         {
@@ -5564,7 +5777,7 @@
     {
         addDbRegPgInstance = instance;
         importRegPgInstance = null;
-        newRegPgDbName = "";
+        regPgDbModel = new RegPgDbModel();
         addRegPgDbError = null;
     }
 
@@ -5572,9 +5785,7 @@
     {
         importRegPgInstance = instance;
         addDbRegPgInstance = null;
-        importRegPgDbName = "";
-        importRegPgOwner = "";
-        importRegPgPassword = "";
+        importRegPgModel = new ImportRegPgDbModel();
         importRegPgError = null;
     }
 
@@ -5582,7 +5793,7 @@
     {
         addRegPgDbError = null;
 
-        if (addDbRegPgInstance is null || string.IsNullOrWhiteSpace(newRegPgDbName))
+        if (addDbRegPgInstance is null)
         {
             addRegPgDbError = "Database name is required.";
             return;
@@ -5592,14 +5803,16 @@
 
         try
         {
-            await RegisteredPostgresService.CreateDatabaseAsync(TenantId, addDbRegPgInstance.Id, newRegPgDbName.Trim());
+            await RegisteredPostgresService.CreateDatabaseAsync(TenantId, addDbRegPgInstance.Id, regPgDbModel.Name.Trim());
             registeredPgInstances = await RegisteredPostgresService.GetInstancesAsync(TenantId);
             addDbRegPgInstance = null;
-            newRegPgDbName = "";
+            regPgDbModel = new RegPgDbModel();
+            Toasts.Success("Database created.");
         }
         catch (Exception ex)
         {
             addRegPgDbError = ex.Message;
+            Toasts.Error($"Failed to create database: {ex.Message}");
         }
         finally
         {
@@ -5611,8 +5824,7 @@
     {
         importRegPgError = null;
 
-        if (importRegPgInstance is null || string.IsNullOrWhiteSpace(importRegPgDbName)
-            || string.IsNullOrWhiteSpace(importRegPgOwner) || string.IsNullOrWhiteSpace(importRegPgPassword))
+        if (importRegPgInstance is null)
         {
             importRegPgError = "All fields are required.";
             return;
@@ -5624,14 +5836,16 @@
         {
             await RegisteredPostgresService.ImportDatabaseAsync(
                 TenantId, importRegPgInstance.Id,
-                importRegPgDbName.Trim(), importRegPgOwner.Trim(), importRegPgPassword);
+                importRegPgModel.Name.Trim(), importRegPgModel.Owner.Trim(), importRegPgModel.Password);
 
             registeredPgInstances = await RegisteredPostgresService.GetInstancesAsync(TenantId);
             importRegPgInstance = null;
+            Toasts.Success("Database imported.");
         }
         catch (Exception ex)
         {
             importRegPgError = ex.Message;
+            Toasts.Error($"Failed to import database: {ex.Message}");
         }
         finally
         {
@@ -5709,11 +5923,13 @@
             await RegisteredPostgresService.DropDatabaseAsync(TenantId, instanceId, databaseId);
             registeredPgInstances = await RegisteredPostgresService.GetInstancesAsync(TenantId);
             regPgDbDeleteConfirmId = null;
+            Toasts.Success("Database and role dropped from the server.");
         }
         catch (Exception ex)
         {
             regPgDbActionError = ex.Message;
             regPgDbActionErrorId = databaseId;
+            Toasts.Error($"Failed to drop database: {ex.Message}");
         }
         finally
         {
@@ -5732,11 +5948,13 @@
             await RegisteredPostgresService.UnregisterDatabaseAsync(TenantId, instanceId, databaseId);
             registeredPgInstances = await RegisteredPostgresService.GetInstancesAsync(TenantId);
             regPgDbDeleteConfirmId = null;
+            Toasts.Success("Database unregistered from EntKube.");
         }
         catch (Exception ex)
         {
             regPgDbActionError = ex.Message;
             regPgDbActionErrorId = databaseId;
+            Toasts.Error($"Failed to unregister database: {ex.Message}");
         }
         finally
         {
@@ -5898,8 +6116,12 @@
         {
             await RegisteredPostgresService.DeleteDumpAsync(dump.Id);
             await LoadDumpsForInstance(instanceId);
+            Toasts.Success("Dump deleted.");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete dump: {ex.Message}");
+        }
         finally
         {
             deletingDumpId = null;

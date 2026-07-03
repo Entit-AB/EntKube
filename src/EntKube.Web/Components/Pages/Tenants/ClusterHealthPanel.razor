@@ -11,9 +11,8 @@
                 <span class="spinner-border spinner-border-sm text-light me-2"></span>
             }
 
-            <button class="btn btn-sm btn-outline-light" @onclick="RefreshHealth" disabled="@loading">
-                <i class="bi bi-arrow-clockwise"></i> Refresh
-            </button>
+            <AutoRefresh OnRefresh="RefreshQuietlyAsync" IntervalSeconds="15" Enabled="true"
+                         LastRefreshed="_lastRefreshed" />
             <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="OnClose">
                 <i class="bi bi-x-lg"></i>
             </button>
@@ -164,6 +163,7 @@
     [Parameter] public EventCallback OnClose { get; set; }
 
     private ClusterHealthSummary? health;
+    private DateTime? _lastRefreshed;
     private bool loading;
     private string? errorMessage;
 
@@ -177,20 +177,29 @@
         loading = true;
         errorMessage = null;
         StateHasChanged();
+        await FetchAsync();
+        loading = false;
+    }
 
+    // Reload in place without flipping the full-panel spinner — used by the auto-refresh control.
+    private async Task RefreshQuietlyAsync() => await FetchAsync();
+
+    private async Task FetchAsync()
+    {
         KubernetesOperationResult<ClusterHealthSummary> result =
             await PrometheusService.GetClusterHealthAsync(ClusterId);
 
         if (result.IsSuccess)
         {
             health = result.Data;
+            errorMessage = null;
         }
         else
         {
             errorMessage = result.Error;
         }
 
-        loading = false;
+        _lastRefreshed = DateTime.UtcNow;
     }
 
     private static string GetUsageBorderClass(double percent) => percent switch

@@ -1,9 +1,18 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
+@using System.ComponentModel.DataAnnotations
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject NotificationService NotificationService
 @inject NotificationProviderConfigService ProviderConfigService
+@inject ToastService Toasts
+
+<ConfirmDialog Visible="@(pendingConfirm is not null)"
+               Message="@(pendingConfirm?.Message ?? "")"
+               ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+               IsBusy="confirmBusy"
+               OnConfirm="RunPendingConfirmAsync"
+               OnCancel="() => pendingConfirm = null" />
 
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h6 class="mb-0">Notification Channels</h6>
@@ -65,7 +74,8 @@ else
                                 }
                                 Test
                             </button>
-                            <button class="btn btn-sm btn-outline-danger ms-auto" @onclick="() => DeleteChannel(channel)">
+                            <button class="btn btn-sm btn-outline-danger ms-auto"
+                                    @onclick='() => pendingConfirm = new PendingConfirm($"Delete the notification channel \"{channel.Name}\"? It will stop receiving alerts. This cannot be undone.", "Delete", () => DeleteChannel(channel))'>
                                 Delete
                             </button>
                         </div>
@@ -91,6 +101,8 @@ else
                     <h5 class="modal-title">Add Notification Channel</h5>
                     <button type="button" class="btn-close" @onclick="CloseModal"></button>
                 </div>
+                <EditForm Model="addForm" OnValidSubmit="SaveChannel">
+                <DataAnnotationsValidator />
                 <div class="modal-body">
                     @if (modalStep == 1)
                     {
@@ -98,7 +110,7 @@ else
                         <div class="d-grid gap-2">
                             @foreach (NotificationChannelType t in Enum.GetValues<NotificationChannelType>())
                             {
-                                <button class="btn btn-outline-secondary text-start" @onclick="() => SelectType(t)">
+                                <button type="button" class="btn btn-outline-secondary text-start" @onclick="() => SelectType(t)">
                                     <span class="@TypeIcon(t) me-2"></span> @t
                                 </button>
                             }
@@ -108,14 +120,16 @@ else
                     {
                         <div class="mb-3">
                             <label class="form-label">Channel Name</label>
-                            <input class="form-control" @bind="newName" placeholder="e.g. Ops Slack" />
+                            <InputText class="form-control" @bind-Value="addForm.Name" placeholder="e.g. Ops Slack" />
+                            <ValidationMessage For="() => addForm.Name" class="text-danger small" />
                         </div>
 
                         @if (newType == NotificationChannelType.Slack)
                         {
                             <div class="mb-3">
                                 <label class="form-label">Webhook URL</label>
-                                <input class="form-control" @bind="newWebhookUrl" placeholder="https://hooks.slack.com/services/…" />
+                                <InputText class="form-control" @bind-Value="addForm.WebhookUrl" placeholder="https://hooks.slack.com/services/…" />
+                                <ValidationMessage For="() => addForm.WebhookUrl" class="text-danger small" />
                             </div>
                         }
                         else if (newType == NotificationChannelType.Teams)
@@ -128,12 +142,14 @@ else
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label">Team ID</label>
-                                    <input class="form-control font-monospace" @bind="newTeamId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+                                    <InputText class="form-control font-monospace" @bind-Value="addForm.TeamId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+                                    <ValidationMessage For="() => addForm.TeamId" class="text-danger small" />
                                     <div class="form-text">Found in Teams → right-click team → Get link to team</div>
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label">Channel ID</label>
-                                    <input class="form-control font-monospace" @bind="newChannelId" placeholder="19:xxxxxxxxxxxxxxxx@thread.tacv2" />
+                                    <InputText class="form-control font-monospace" @bind-Value="addForm.ChannelId" placeholder="19:xxxxxxxxxxxxxxxx@thread.tacv2" />
+                                    <ValidationMessage For="() => addForm.ChannelId" class="text-danger small" />
                                     <div class="form-text">Found in Teams → right-click channel → Get link to channel</div>
                                 </div>
                             }
@@ -146,7 +162,8 @@ else
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label">Webhook URL</label>
-                                    <input class="form-control" @bind="newWebhookUrl" placeholder="https://…webhook.office.com/…" />
+                                    <InputText class="form-control" @bind-Value="addForm.WebhookUrl" placeholder="https://…webhook.office.com/…" />
+                                    <ValidationMessage For="() => addForm.WebhookUrl" class="text-danger small" />
                                 </div>
                             }
                         }
@@ -154,44 +171,46 @@ else
                         {
                             <div class="mb-3">
                                 <label class="form-label">Recipient Email</label>
-                                <input class="form-control" type="email" @bind="newEmail" placeholder="ops@example.com" />
+                                <InputText class="form-control" type="email" @bind-Value="addForm.Email" placeholder="ops@example.com" />
+                                <ValidationMessage For="() => addForm.Email" class="text-danger small" />
                             </div>
                         }
                         else if (newType == NotificationChannelType.Webhook)
                         {
                             <div class="mb-3">
                                 <label class="form-label">URL</label>
-                                <input class="form-control" @bind="newWebhookUrl" placeholder="https://…" />
+                                <InputText class="form-control" @bind-Value="addForm.WebhookUrl" placeholder="https://…" />
+                                <ValidationMessage For="() => addForm.WebhookUrl" class="text-danger small" />
                             </div>
                             <div class="mb-3">
                                 <label class="form-label">Bearer Token (optional)</label>
-                                <input class="form-control" type="password" @bind="newBearerToken" />
+                                <InputText class="form-control" type="password" @bind-Value="addForm.BearerToken" />
                             </div>
                         }
 
                         <div class="mb-3">
                             <label class="form-label">Severity</label>
-                            <select class="form-select" @bind="newSeverityFilter">
+                            <InputSelect class="form-select" @bind-Value="addForm.SeverityFilter">
                                 <option value="@AlertSeverityFilter.All">All severities</option>
                                 <option value="@AlertSeverityFilter.WarningAndAbove">Warning and above</option>
                                 <option value="@AlertSeverityFilter.CriticalOnly">Critical only</option>
-                            </select>
+                            </InputSelect>
                         </div>
                         <div class="mb-3">
                             <label class="form-label">Alert state</label>
-                            <select class="form-select" @bind="newFiringFilter">
+                            <InputSelect class="form-select" @bind-Value="addForm.FiringFilter">
                                 <option value="@AlertFiringFilter.All">Firing and resolved</option>
                                 <option value="@AlertFiringFilter.FiringOnly">Firing only</option>
                                 <option value="@AlertFiringFilter.ResolvedOnly">Resolved only</option>
-                            </select>
+                            </InputSelect>
                         </div>
                         <div class="mb-3">
                             <label class="form-label">Acknowledgement</label>
-                            <select class="form-select" @bind="newAcknowledgeFilter">
+                            <InputSelect class="form-select" @bind-Value="addForm.AcknowledgeFilter">
                                 <option value="@AlertAcknowledgeFilter.All">Acknowledged and unacknowledged</option>
                                 <option value="@AlertAcknowledgeFilter.UnacknowledgedOnly">Unacknowledged only</option>
                                 <option value="@AlertAcknowledgeFilter.AcknowledgedOnly">Acknowledged only</option>
-                            </select>
+                            </InputSelect>
                         </div>
 
                         @if (!string.IsNullOrEmpty(modalError))
@@ -203,14 +222,15 @@ else
                 <div class="modal-footer">
                     @if (modalStep == 2)
                     {
-                        <button class="btn btn-secondary" @onclick="() => modalStep = 1">Back</button>
-                        <button class="btn btn-primary" @onclick="SaveChannel">Save Channel</button>
+                        <button type="button" class="btn btn-secondary" @onclick="() => modalStep = 1">Back</button>
+                        <button type="submit" class="btn btn-primary">Save Channel</button>
                     }
                     else
                     {
-                        <button class="btn btn-secondary" @onclick="CloseModal">Cancel</button>
+                        <button type="button" class="btn btn-secondary" @onclick="CloseModal">Cancel</button>
                     }
                 </div>
+                </EditForm>
             </div>
         </div>
     </div>
@@ -224,19 +244,78 @@ else
     private bool showModal;
     private int modalStep = 1;
     private NotificationChannelType newType;
-    private string newName = "";
-    private string newWebhookUrl = "";
-    private string newEmail = "";
-    private string newBearerToken = "";
-    private string newTeamId = "";
-    private string newChannelId = "";
-    private AlertSeverityFilter newSeverityFilter = AlertSeverityFilter.All;
-    private AlertFiringFilter newFiringFilter = AlertFiringFilter.All;
-    private AlertAcknowledgeFilter newAcknowledgeFilter = AlertAcknowledgeFilter.All;
+    private AddChannelForm addForm = new();
     private string? modalError;
     private Guid? testingId;
     private Dictionary<Guid, string> testResults = new();
     private bool teamsGraphConfigured;
+
+    private sealed class AddChannelForm : IValidatableObject
+    {
+        // Context that drives conditional validation (set by the caller).
+        public NotificationChannelType Type { get; set; }
+        public bool TeamsGraphConfigured { get; set; }
+
+        [Required(ErrorMessage = "Channel name is required.")]
+        [StringLength(100, MinimumLength = 1)]
+        public string Name { get; set; } = "";
+
+        [Url(ErrorMessage = "Enter a valid URL (https://…).")]
+        public string WebhookUrl { get; set; } = "";
+
+        [EmailAddress(ErrorMessage = "Enter a valid email address.")]
+        public string Email { get; set; } = "";
+
+        public string BearerToken { get; set; } = "";
+        public string TeamId { get; set; } = "";
+        public string ChannelId { get; set; } = "";
+
+        public AlertSeverityFilter SeverityFilter { get; set; } = AlertSeverityFilter.All;
+        public AlertFiringFilter FiringFilter { get; set; } = AlertFiringFilter.All;
+        public AlertAcknowledgeFilter AcknowledgeFilter { get; set; } = AlertAcknowledgeFilter.All;
+
+        public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+        {
+            switch (Type)
+            {
+                case NotificationChannelType.Slack:
+                    if (string.IsNullOrWhiteSpace(WebhookUrl))
+                        yield return new ValidationResult("Webhook URL is required.", new[] { nameof(WebhookUrl) });
+                    break;
+                case NotificationChannelType.Teams when TeamsGraphConfigured:
+                    if (string.IsNullOrWhiteSpace(TeamId))
+                        yield return new ValidationResult("Team ID is required.", new[] { nameof(TeamId) });
+                    if (string.IsNullOrWhiteSpace(ChannelId))
+                        yield return new ValidationResult("Channel ID is required.", new[] { nameof(ChannelId) });
+                    break;
+                case NotificationChannelType.Teams:
+                    if (string.IsNullOrWhiteSpace(WebhookUrl))
+                        yield return new ValidationResult("Webhook URL is required.", new[] { nameof(WebhookUrl) });
+                    break;
+                case NotificationChannelType.Email:
+                    if (string.IsNullOrWhiteSpace(Email))
+                        yield return new ValidationResult("Email address is required.", new[] { nameof(Email) });
+                    break;
+                case NotificationChannelType.Webhook:
+                    if (string.IsNullOrWhiteSpace(WebhookUrl))
+                        yield return new ValidationResult("URL is required.", new[] { nameof(WebhookUrl) });
+                    break;
+            }
+        }
+    }
+
+    // A destructive action awaiting user confirmation.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -268,15 +347,7 @@ else
     {
         showModal = true;
         modalStep = 1;
-        newName = "";
-        newWebhookUrl = "";
-        newEmail = "";
-        newBearerToken = "";
-        newTeamId = "";
-        newChannelId = "";
-        newSeverityFilter = AlertSeverityFilter.All;
-        newFiringFilter = AlertFiringFilter.All;
-        newAcknowledgeFilter = AlertAcknowledgeFilter.All;
+        addForm = new AddChannelForm { TeamsGraphConfigured = teamsGraphConfigured };
         modalError = null;
     }
 
@@ -285,17 +356,13 @@ else
     private void SelectType(NotificationChannelType type)
     {
         newType = type;
+        addForm.Type = type;
         modalStep = 2;
     }
 
     private async Task SaveChannel()
     {
         modalError = null;
-        if (string.IsNullOrWhiteSpace(newName))
-        {
-            modalError = "Channel name is required.";
-            return;
-        }
 
         string configJson;
         try
@@ -308,20 +375,29 @@ else
             return;
         }
 
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
-        db.NotificationChannels.Add(new NotificationChannel
+        try
         {
-            TenantId = TenantId,
-            Name = newName.Trim(),
-            Type = newType,
-            ConfigurationJson = configJson,
-            SeverityFilter = newSeverityFilter,
-            FiringFilter = newFiringFilter,
-            AcknowledgeFilter = newAcknowledgeFilter
-        });
-        await db.SaveChangesAsync();
-        CloseModal();
-        await LoadChannels();
+            using ApplicationDbContext db = DbFactory.CreateDbContext();
+            db.NotificationChannels.Add(new NotificationChannel
+            {
+                TenantId = TenantId,
+                Name = addForm.Name.Trim(),
+                Type = newType,
+                ConfigurationJson = configJson,
+                SeverityFilter = addForm.SeverityFilter,
+                FiringFilter = addForm.FiringFilter,
+                AcknowledgeFilter = addForm.AcknowledgeFilter
+            });
+            await db.SaveChangesAsync();
+            CloseModal();
+            await LoadChannels();
+            Toasts.Success($"Added channel \"{addForm.Name.Trim()}\".");
+        }
+        catch (Exception ex)
+        {
+            modalError = ex.Message;
+            Toasts.Error($"Failed to add channel: {ex.Message}");
+        }
     }
 
     private string BuildConfigJson()
@@ -329,33 +405,23 @@ else
         return newType switch
         {
             NotificationChannelType.Slack =>
-                !string.IsNullOrWhiteSpace(newWebhookUrl)
-                    ? System.Text.Json.JsonSerializer.Serialize(new { webhookUrl = newWebhookUrl.Trim() })
-                    : throw new InvalidOperationException("Webhook URL is required."),
+                System.Text.Json.JsonSerializer.Serialize(new { webhookUrl = addForm.WebhookUrl.Trim() }),
 
             NotificationChannelType.Teams when teamsGraphConfigured =>
-                !string.IsNullOrWhiteSpace(newTeamId) && !string.IsNullOrWhiteSpace(newChannelId)
-                    ? System.Text.Json.JsonSerializer.Serialize(new { teamId = newTeamId.Trim(), channelId = newChannelId.Trim() })
-                    : throw new InvalidOperationException("Team ID and Channel ID are required."),
+                System.Text.Json.JsonSerializer.Serialize(new { teamId = addForm.TeamId.Trim(), channelId = addForm.ChannelId.Trim() }),
 
             NotificationChannelType.Teams =>
-                !string.IsNullOrWhiteSpace(newWebhookUrl)
-                    ? System.Text.Json.JsonSerializer.Serialize(new { webhookUrl = newWebhookUrl.Trim() })
-                    : throw new InvalidOperationException("Webhook URL is required."),
+                System.Text.Json.JsonSerializer.Serialize(new { webhookUrl = addForm.WebhookUrl.Trim() }),
 
             NotificationChannelType.Email =>
-                !string.IsNullOrWhiteSpace(newEmail)
-                    ? System.Text.Json.JsonSerializer.Serialize(new { to = newEmail.Trim() })
-                    : throw new InvalidOperationException("Email address is required."),
+                System.Text.Json.JsonSerializer.Serialize(new { to = addForm.Email.Trim() }),
 
             NotificationChannelType.Webhook =>
-                !string.IsNullOrWhiteSpace(newWebhookUrl)
-                    ? System.Text.Json.JsonSerializer.Serialize(new
-                    {
-                        url = newWebhookUrl.Trim(),
-                        token = string.IsNullOrWhiteSpace(newBearerToken) ? null : newBearerToken.Trim()
-                    })
-                    : throw new InvalidOperationException("URL is required."),
+                System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    url = addForm.WebhookUrl.Trim(),
+                    token = string.IsNullOrWhiteSpace(addForm.BearerToken) ? null : addForm.BearerToken.Trim()
+                }),
 
             _ => "{}"
         };
@@ -373,11 +439,19 @@ else
 
     private async Task DeleteChannel(NotificationChannel channel)
     {
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
-        NotificationChannel? ch = await db.NotificationChannels.FindAsync(channel.Id);
-        if (ch is not null) db.NotificationChannels.Remove(ch);
-        await db.SaveChangesAsync();
-        await LoadChannels();
+        try
+        {
+            using ApplicationDbContext db = DbFactory.CreateDbContext();
+            NotificationChannel? ch = await db.NotificationChannels.FindAsync(channel.Id);
+            if (ch is not null) db.NotificationChannels.Remove(ch);
+            await db.SaveChangesAsync();
+            await LoadChannels();
+            Toasts.Success($"Deleted channel \"{channel.Name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete channel \"{channel.Name}\": {ex.Message}");
+        }
     }
 
     private async Task TestChannel(NotificationChannel channel)

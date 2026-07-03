@@ -71,34 +71,34 @@
 </div>
 
 @* --- Cluster sub-sections (tabs for future expansion) --- *@
-<ul class="nav nav-pills mb-3 gap-1">
-    <li class="nav-item">
-        <button class="nav-link @(section == "monitoring" ? "active" : "")" @onclick='() => section = "monitoring"'>
+<ul class="nav nav-pills mb-3 gap-1" role="tablist" aria-label="Cluster sections">
+    <li class="nav-item" role="presentation">
+        <button class="nav-link @(section == "monitoring" ? "active" : "")" @onclick='() => section = "monitoring"' role="tab" aria-selected="@(section == "monitoring")" tabindex="@(section == "monitoring" ? 0 : -1)">
             <i class="bi bi-heart-pulse me-1"></i>Monitoring
         </button>
     </li>
-    <li class="nav-item">
-        <button class="nav-link @(section == "nodes" ? "active" : "")" @onclick='() => section = "nodes"'>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link @(section == "nodes" ? "active" : "")" @onclick='() => section = "nodes"' role="tab" aria-selected="@(section == "nodes")" tabindex="@(section == "nodes" ? 0 : -1)">
             <i class="bi bi-hdd-stack me-1"></i>Nodes
         </button>
     </li>
-    <li class="nav-item">
-        <button class="nav-link @(section == "components" ? "active" : "")" @onclick='() => section = "components"'>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link @(section == "components" ? "active" : "")" @onclick='() => section = "components"' role="tab" aria-selected="@(section == "components")" tabindex="@(section == "components" ? 0 : -1)">
             <i class="bi bi-puzzle me-1"></i>Components
         </button>
     </li>
-    <li class="nav-item">
-        <button class="nav-link @(section == "bootstrap" ? "active" : "")" @onclick='() => section = "bootstrap"'>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link @(section == "bootstrap" ? "active" : "")" @onclick='() => section = "bootstrap"' role="tab" aria-selected="@(section == "bootstrap")" tabindex="@(section == "bootstrap" ? 0 : -1)">
             <i class="bi bi-diagram-3 me-1"></i>Bootstrap
         </button>
     </li>
-    <li class="nav-item">
-        <button class="nav-link @(section == "logs" ? "active" : "")" @onclick='() => section = "logs"'>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link @(section == "logs" ? "active" : "")" @onclick='() => section = "logs"' role="tab" aria-selected="@(section == "logs")" tabindex="@(section == "logs" ? 0 : -1)">
             <i class="bi bi-journal-text me-1"></i>Logs
         </button>
     </li>
-    <li class="nav-item">
-        <button class="nav-link @(section == "vpn" ? "active" : "")" @onclick='() => section = "vpn"'>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link @(section == "vpn" ? "active" : "")" @onclick='() => section = "vpn"' role="tab" aria-selected="@(section == "vpn")" tabindex="@(section == "vpn" ? 0 : -1)">
             <i class="bi bi-shield-lock-fill me-1"></i>VPN
         </button>
     </li>
@@ -132,7 +132,7 @@ else if (section == "components")
         <div class="card shadow-sm mb-3">
             <div class="card-header bg-white d-flex align-items-center justify-content-between py-2">
                 <span><i class="bi bi-plus-circle me-2 text-success"></i><strong>Add Component</strong></span>
-                <button class="btn btn-sm btn-outline-secondary" @onclick="() => { showRegisterForm = false; ResetRegisterForm(); }">
+                <button class="btn btn-sm btn-outline-secondary" aria-label="Close" @onclick="() => { showRegisterForm = false; ResetRegisterForm(); }">
                     <i class="bi bi-x-lg"></i>
                 </button>
             </div>
@@ -543,7 +543,7 @@ else if (section == "components")
                             <i class="bi bi-download me-1"></i>Import All New (@newCount)
                         </button>
                     }
-                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => discoveredReleases = null">
+                    <button class="btn btn-sm btn-outline-secondary" aria-label="Close" @onclick="() => discoveredReleases = null">
                         <i class="bi bi-x-lg"></i>
                     </button>
                 </div>
@@ -638,7 +638,7 @@ else if (section == "components")
                             <i class="bi bi-download me-1"></i>Track All New (@newManifestCount)
                         </button>
                     }
-                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => discoveredManifests = null">
+                    <button class="btn btn-sm btn-outline-secondary" aria-label="Close" @onclick="() => discoveredManifests = null">
                         <i class="bi bi-x-lg"></i>
                     </button>
                 </div>
@@ -818,7 +818,7 @@ else if (section == "components")
                                             <i class="bi bi-stop-fill me-1"></i>Uninstall
                                         </button>
                                     }
-                                    <button class="btn btn-sm btn-link text-muted p-1" @onclick="() => confirmDeleteComponentId = comp.Id" title="Remove from cluster">
+                                    <button class="btn btn-sm btn-link text-muted p-1" @onclick="() => confirmDeleteComponentId = comp.Id" title="Remove from cluster" aria-label="Remove from cluster">
                                         <i class="bi bi-x-lg"></i>
                                     </button>
                                 </div>
@@ -835,7 +835,7 @@ else if (section == "components")
                                         <small class="fw-semibold text-danger">Last operation failed</small>
                                         <pre class="text-danger small mb-0 mt-1" style="white-space: pre-wrap; max-height: 100px; overflow-y: auto;">@comp.LastError</pre>
                                     </div>
-                                    <button class="btn btn-sm btn-link text-danger ms-auto p-0" @onclick="() => ClearError(comp.Id)" title="Dismiss">
+                                    <button class="btn btn-sm btn-link text-danger ms-auto p-0" @onclick="() => ClearError(comp.Id)" title="Dismiss" aria-label="Dismiss">
                                         <i class="bi bi-x-lg"></i>
                                     </button>
                                 </div>
@@ -884,7 +884,7 @@ else if (section == "components")
                                     <small class="fw-bold text-muted">
                                         <i class="bi bi-terminal me-1"></i>Helm Output
                                     </small>
-                                    <button class="btn btn-sm btn-link text-muted p-0" @onclick="() => { operationOutput = null; operationComponentId = null; }">
+                                    <button class="btn btn-sm btn-link text-muted p-0" aria-label="Close" @onclick="() => { operationOutput = null; operationComponentId = null; }">
                                         <i class="bi bi-x-lg"></i>
                                     </button>
                                 </div>
@@ -897,14 +897,14 @@ else if (section == "components")
                         {
                             <div class="card-body border-top pt-2">
                                 @* Sub-tabs *@
-                                <ul class="nav nav-pills nav-fill mb-3 gap-1">
-                                    <li class="nav-item">
-                                        <button class="nav-link py-1 px-2 @(compDetailTab == "config" ? "active" : "")" @onclick='() => compDetailTab = "config"'>
+                                <ul class="nav nav-pills nav-fill mb-3 gap-1" role="tablist" aria-label="Component detail sections">
+                                    <li class="nav-item" role="presentation">
+                                        <button class="nav-link py-1 px-2 @(compDetailTab == "config" ? "active" : "")" @onclick='() => compDetailTab = "config"' role="tab" aria-selected="@(compDetailTab == "config")" tabindex="@(compDetailTab == "config" ? 0 : -1)">
                                             <i class="bi bi-sliders me-1"></i>Configure
                                         </button>
                                     </li>
-                                    <li class="nav-item">
-                                        <button class="nav-link py-1 px-2 @(compDetailTab == "values" ? "active" : "")" @onclick='() => compDetailTab = "values"'>
+                                    <li class="nav-item" role="presentation">
+                                        <button class="nav-link py-1 px-2 @(compDetailTab == "values" ? "active" : "")" @onclick='() => compDetailTab = "values"' role="tab" aria-selected="@(compDetailTab == "values")" tabindex="@(compDetailTab == "values" ? 0 : -1)">
                                             <i class="bi bi-code-slash me-1"></i>Values
                                             @if (!string.IsNullOrWhiteSpace(editValues))
                                             {
@@ -912,13 +912,13 @@ else if (section == "components")
                                             }
                                         </button>
                                     </li>
-                                    <li class="nav-item">
-                                        <button class="nav-link py-1 px-2 @(compDetailTab == "secrets" ? "active" : "")" @onclick="() => ShowSecrets(comp.Id)">
+                                    <li class="nav-item" role="presentation">
+                                        <button class="nav-link py-1 px-2 @(compDetailTab == "secrets" ? "active" : "")" @onclick="() => ShowSecrets(comp.Id)" role="tab" aria-selected="@(compDetailTab == "secrets")" tabindex="@(compDetailTab == "secrets" ? 0 : -1)">
                                             <i class="bi bi-key me-1"></i>Secrets
                                         </button>
                                     </li>
-                                    <li class="nav-item">
-                                        <button class="nav-link py-1 px-2 @(compDetailTab == "expose" ? "active" : "")" @onclick="() => ShowRoutes(comp.Id)">
+                                    <li class="nav-item" role="presentation">
+                                        <button class="nav-link py-1 px-2 @(compDetailTab == "expose" ? "active" : "")" @onclick="() => ShowRoutes(comp.Id)" role="tab" aria-selected="@(compDetailTab == "expose")" tabindex="@(compDetailTab == "expose" ? 0 : -1)">
                                             <i class="bi bi-globe me-1"></i>Expose
                                             @if (componentRoutes is not null && componentRoutes.Count > 0 && selectedComponentId == comp.Id && compDetailTab == "expose")
                                             {
@@ -1181,12 +1181,12 @@ else if (section == "components")
                                                             <td><small class="text-muted">@(secret.KubernetesNamespace ?? "—")</small></td>
                                                             <td class="text-end">
                                                                 <button class="btn btn-sm btn-outline-info me-1"
-                                                                        @onclick="() => ToggleSecretSync(secret)"
+                                                                        @onclick="() => ToggleSecretSync(secret)" aria-label="Toggle Kubernetes sync"
                                                                         title="@(secret.SyncToKubernetes ? "Disable sync" : "Enable sync")">
                                                                     <i class="bi @(secret.SyncToKubernetes ? "bi-cloud-slash" : "bi-cloud-arrow-up")"></i>
                                                                 </button>
                                                                 <button class="btn btn-sm btn-outline-danger"
-                                                                        @onclick="() => DeleteSecret(secret.Id, comp.Id)" title="Delete">
+                                                                        @onclick="() => DeleteSecret(secret.Id, comp.Id)" title="Delete" aria-label="@($"Delete secret {secret.Name}")">
                                                                     <i class="bi bi-trash"></i>
                                                                 </button>
                                                             </td>
@@ -1402,12 +1402,12 @@ else if (section == "components")
                                                                 <td class="text-end">
                                                                     <button class="btn btn-sm btn-outline-secondary me-1"
                                                                             @onclick="() => ShowRouteYaml(route.Id)"
-                                                                            title="View HTTPRoute YAML">
+                                                                            title="View HTTPRoute YAML" aria-label="View HTTPRoute YAML">
                                                                         <i class="bi bi-code-slash"></i>
                                                                     </button>
                                                                     <button class="btn btn-sm btn-outline-danger"
                                                                             @onclick="() => DeleteRoute(route.Id, comp.Id)"
-                                                                            title="Remove route">
+                                                                            title="Remove route" aria-label="Remove route">
                                                                         <i class="bi bi-trash"></i>
                                                                     </button>
                                                                 </td>
@@ -1424,7 +1424,7 @@ else if (section == "components")
                                             <div class="mt-3">
                                                 <div class="d-flex justify-content-between align-items-center mb-1">
                                                     <small class="fw-bold">HTTPRoute YAML</small>
-                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => routeYamlPreview = null">
+                                                    <button class="btn btn-sm btn-outline-secondary" aria-label="Close" @onclick="() => routeYamlPreview = null">
                                                         <i class="bi bi-x-lg"></i>
                                                     </button>
                                                 </div>

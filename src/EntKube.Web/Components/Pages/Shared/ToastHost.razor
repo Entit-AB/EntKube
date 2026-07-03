@@ -1,0 +1,45 @@
+@implements IDisposable
+@inject EntKube.Web.Services.ToastService Toasts
+
+<div class="toast-host" aria-live="polite" aria-atomic="true">
+    @foreach (ToastMessage toast in Toasts.Toasts)
+    {
+        <div class="toast-item alert alert-@Variant(toast.Level) shadow-sm d-flex align-items-start gap-2 mb-2 m0-fade-in"
+             role="@(toast.Level == ToastLevel.Error ? "alert" : "status")" @key="toast.Id">
+            <i class="bi @Icon(toast.Level) fs-6 mt-1" aria-hidden="true"></i>
+            <div class="flex-grow-1 small">
+                @if (!string.IsNullOrEmpty(toast.Title))
+                {
+                    <div class="fw-semibold">@toast.Title</div>
+                }
+                <div>@toast.Message</div>
+            </div>
+            <button type="button" class="btn-close btn-close-sm ms-1" aria-label="Dismiss notification"
+                    @onclick="() => Toasts.Dismiss(toast.Id)"></button>
+        </div>
+    }
+</div>
+
+@code {
+    protected override void OnInitialized() => Toasts.OnChange += HandleChange;
+
+    private void HandleChange() => InvokeAsync(StateHasChanged);
+
+    private static string Variant(ToastLevel level) => level switch
+    {
+        ToastLevel.Success => "success",
+        ToastLevel.Warning => "warning",
+        ToastLevel.Error => "danger",
+        _ => "info",
+    };
+
+    private static string Icon(ToastLevel level) => level switch
+    {
+        ToastLevel.Success => "bi-check-circle-fill",
+        ToastLevel.Warning => "bi-exclamation-triangle-fill",
+        ToastLevel.Error => "bi-x-circle-fill",
+        _ => "bi-info-circle-fill",
+    };
+
+    public void Dispose() => Toasts.OnChange -= HandleChange;
+}

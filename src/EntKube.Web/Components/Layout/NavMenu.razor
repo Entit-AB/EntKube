@@ -11,9 +11,10 @@
     </div>
 </div>
 
-<input type="checkbox" title="Navigation menu" class="navbar-toggler" />
+<button type="button" class="navbar-toggler" @onclick="ToggleNav"
+        aria-expanded="@navOpen" aria-controls="nav-scrollable" aria-label="Toggle navigation menu"></button>
 
-<div class="nav-scrollable" onclick="document.querySelector('.navbar-toggler').click()">
+<div class="nav-scrollable @(navOpen ? "show" : null)" id="nav-scrollable" @onclick="CloseNav">
     <nav class="nav flex-column">
         <div class="nav-item px-3">
             <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
@@ -101,6 +102,10 @@
     private string? currentUrl;
     private bool showTenantsLink;
     private bool allowRegistration = true;
+    private bool navOpen;
+
+    private void ToggleNav() => navOpen = !navOpen;
+    private void CloseNav() => navOpen = false;
 
     protected override async Task OnInitializedAsync()
     {
@@ -123,6 +128,7 @@
     private void OnLocationChanged(object? sender, LocationChangedEventArgs e)
     {
         currentUrl = NavigationManager.ToBaseRelativePath(e.Location);
+        navOpen = false;
         StateHasChanged();
     }
 

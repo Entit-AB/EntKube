@@ -2,6 +2,7 @@
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject VaultService VaultService
+@inject ToastService Toasts
 
 <div class="card mt-2 mb-2">
     <div class="card-header d-flex justify-content-between align-items-center">
@@ -35,6 +36,13 @@
             <div class="text-danger mb-2">@errorMessage</div>
         }
 
+        <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                       Message="@(pendingConfirm?.Message ?? "")"
+                       ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+                       IsBusy="confirmBusy"
+                       OnConfirm="RunPendingConfirmAsync"
+                       OnCancel="() => pendingConfirm = null" />
+
         @if (components is null)
         {
             <p><em>Loading...</em></p>
@@ -63,7 +71,8 @@
                                 <button class="btn btn-sm btn-outline-warning me-1" @onclick="() => ToggleSecrets(component.Id)">
                                     Secrets
                                 </button>
-                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteComponent(component.Id)">
+                                <button class="btn btn-sm btn-outline-danger"
+                                        @onclick='() => pendingConfirm = new PendingConfirm($"Delete component \"{component.Name}\"? This cannot be undone.", "Delete", () => DeleteComponent(component.Id))'>
                                     Delete
                                 </button>
                             </td>
@@ -124,7 +133,7 @@
                                                                     @(secret.SyncToKubernetes ? "Unsync" : "Sync")
                                                                 </button>
                                                                 <button class="btn btn-sm btn-outline-danger"
-                                                                        @onclick="() => DeleteSecret(secret.Id, component.Id)">
+                                                                        @onclick='() => pendingConfirm = new PendingConfirm($"Delete secret \"{secret.Name}\"? This cannot be undone.", "Delete", () => DeleteSecret(secret.Id, component.Id))'>
                                                                     Del
                                                                 </button>
                                                             </td>
@@ -215,14 +224,23 @@
 
     private async Task DeleteComponent(Guid componentId)
     {
-        await VaultService.DeleteComponentAsync(componentId);
-
-        if (expandedComponentId == componentId)
+        string? name = components?.FirstOrDefault(c => c.Id == componentId)?.Name;
+        try
         {
-            expandedComponentId = null;
-        }
+            await VaultService.DeleteComponentAsync(componentId);
 
-        await LoadComponents();
+            if (expandedComponentId == componentId)
+            {
+                expandedComponentId = null;
+            }
+
+            await LoadComponents();
+            Toasts.Success($"Deleted component \"{name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete component \"{name}\": {ex.Message}");
+        }
     }
 
     private async Task ToggleSecrets(Guid componentId)
@@ -253,8 +271,37 @@
 
     private async Task DeleteSecret(Guid secretId, Guid componentId)
     {
-        await VaultService.DeleteSecretAsync(secretId);
-        componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, componentId);
+        try
+        {
+            await VaultService.DeleteSecretAsync(secretId);
+            componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, componentId);
+            Toasts.Success("Deleted secret.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete secret: {ex.Message}");
+        }
+    }
+
+    // A destructive action awaiting user confirmation via the ConfirmDialog banner.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try
+        {
+            await pendingConfirm.Action();
+        }
+        finally
+        {
+            confirmBusy = false;
+            pendingConfirm = null;
+        }
     }
 
     private void ToggleSecretSync(VaultSecret secret)

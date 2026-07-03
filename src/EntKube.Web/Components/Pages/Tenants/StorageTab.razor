@@ -2,6 +2,7 @@
 @using EntKube.Web.Services
 @inject StorageService StorageService
 @inject StorageBrowserService BrowserService
+@inject ToastService Toasts
 
 @* ===========================================================================
    Storage Tab — shows MinIO instances discovered on clusters, plus external
@@ -13,6 +14,13 @@
 <LoadingPanel Loading="@loading" LoadingText="Discovering storage resources…">
 @if (!loading)
 {
+    <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                   Message="@(pendingConfirm?.Message ?? "")"
+                   ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+                   IsBusy="confirmBusy"
+                   OnConfirm="RunPendingConfirmAsync"
+                   OnCancel="() => pendingConfirm = null" />
+
     @* ── MinIO Section ── *@
     <div class="mb-5">
         <h5 class="d-flex align-items-center gap-2 mb-3">
@@ -41,10 +49,8 @@
         }
         else if (minioInstances.Count == 0)
         {
-            <div class="alert alert-light border">
-                <i class="bi bi-inbox me-2"></i>
-                MinIO is installed but no Tenant resources were found. Create a MinIO Tenant CR in your cluster.
-            </div>
+            <EmptyState Icon="bi-bucket" Title="No MinIO tenants found"
+                        Message="MinIO is installed but no Tenant resources were found. Create a MinIO Tenant CR in your cluster." />
         }
         else
         {
@@ -218,10 +224,9 @@
 
         @if (storageLinks.Count == 0 && !showForm)
         {
-            <div class="alert alert-light border">
-                <i class="bi bi-inbox me-2"></i>
-                No external storage links configured. Add an AWS S3 bucket, Azure Storage Account, or Cleura S3 bucket.
-            </div>
+            <EmptyState Icon="bi-cloud" Title="No external storage links"
+                        Message="Add an AWS S3 bucket, Azure Storage Account, or Cleura S3 bucket."
+                        ActionLabel="Add Storage Link" OnAction="ShowAddForm" />
         }
         else
         {
@@ -245,9 +250,10 @@
                                         @if (link.Provider == StorageProvider.CleuraS3)
                                         {
                                             <button class="btn btn-sm btn-outline-warning border-0 py-0"
-                                                    @onclick="() => RotateCredentials(link.Id)"
+                                                    @onclick='() => pendingConfirm = new PendingConfirm($"Rotate EC2 credentials for \"{link.Name}\"? The current access/secret keys will be permanently invalidated and any consumer still using them will break.", "Rotate", () => RotateCredentials(link.Id))'
                                                     disabled="@rotatingLinkId.HasValue"
-                                                    title="Rotate EC2 credentials">
+                                                    title="Rotate EC2 credentials"
+                                                    aria-label="@($"Rotate EC2 credentials for {link.Name}")">
                                                 @if (rotatingLinkId == link.Id)
                                                 {
                                                     <span class="spinner-border spinner-border-sm"></span>
@@ -259,13 +265,15 @@
                                             </button>
                                             <button class="btn btn-sm btn-outline-secondary border-0 py-0"
                                                     @onclick="() => ShowManageBucket(link)"
-                                                    title="Manage bucket (CORS, Policy)">
+                                                    title="Manage bucket (CORS, Policy)"
+                                                    aria-label="@($"Manage bucket {link.Name}")">
                                                 <i class="bi bi-gear"></i>
                                             </button>
                                             <button class="btn btn-sm btn-outline-info border-0 py-0"
                                                     @onclick="() => BrowseBuckets(link)"
                                                     disabled="@(browsingLinkId.HasValue)"
-                                                    title="Browse all buckets accessible with these credentials">
+                                                    title="Browse all buckets accessible with these credentials"
+                                                    aria-label="@($"Browse buckets accessible via {link.Name}")">
                                                 @if (browsingLinkId == link.Id)
                                                 {
                                                     <span class="spinner-border spinner-border-sm"></span>
@@ -279,14 +287,16 @@
                                             {
                                                 <button class="btn btn-sm btn-outline-primary border-0 py-0"
                                                         @onclick="() => OpenFileBrowser(link)"
-                                                        title="Browse files in bucket">
+                                                        title="Browse files in bucket"
+                                                        aria-label="@($"Browse files in bucket {link.Name}")">
                                                     <i class="bi bi-folder2-open"></i>
                                                 </button>
                                             }
                                             <button class="btn btn-sm btn-outline-danger border-0 py-0"
-                                                    @onclick="() => DeleteCleuraS3Bucket(link.Id)"
+                                                    @onclick='() => pendingConfirm = new PendingConfirm($"Delete the Cleura S3 bucket and storage link \"{link.Name}\"? This permanently deletes the bucket \"{link.BucketName}\" and ALL objects it contains. This cannot be undone.", "Delete bucket", () => DeleteCleuraS3Bucket(link.Id))'
                                                     disabled="@deletingLinkId.HasValue"
-                                                    title="Delete bucket and storage link">
+                                                    title="Delete bucket and storage link"
+                                                    aria-label="@($"Delete Cleura S3 bucket and storage link {link.Name}")">
                                                 @if (deletingLinkId == link.Id)
                                                 {
                                                     <span class="spinner-border spinner-border-sm"></span>
@@ -302,13 +312,15 @@
                                             <button class="btn btn-sm btn-outline-secondary border-0 py-0"
                                                     @onclick="() => ShowManageBucket(link)"
                                                     title="Manage bucket (CORS, Policy)"
-                                                    disabled="@(link.BucketName is null)">
+                                                    disabled="@(link.BucketName is null)"
+                                                    aria-label="@($"Manage bucket {link.Name}")">
                                                 <i class="bi bi-gear"></i>
                                             </button>
                                             <button class="btn btn-sm btn-outline-info border-0 py-0"
                                                     @onclick="() => BrowseBuckets(link)"
                                                     disabled="@(browsingLinkId.HasValue)"
-                                                    title="Browse all buckets">
+                                                    title="Browse all buckets"
+                                                    aria-label="@($"Browse buckets accessible via {link.Name}")">
                                                 @if (browsingLinkId == link.Id)
                                                 {
                                                     <span class="spinner-border spinner-border-sm"></span>
@@ -322,11 +334,15 @@
                                             {
                                                 <button class="btn btn-sm btn-outline-primary border-0 py-0"
                                                         @onclick="() => OpenFileBrowser(link)"
-                                                        title="Browse files in bucket">
+                                                        title="Browse files in bucket"
+                                                        aria-label="@($"Browse files in bucket {link.Name}")">
                                                     <i class="bi bi-folder2-open"></i>
                                                 </button>
                                             }
-                                            <button class="btn btn-sm btn-outline-danger border-0 py-0" @onclick="() => DeleteLink(link.Id)" title="Remove registration">
+                                            <button class="btn btn-sm btn-outline-danger border-0 py-0"
+                                                    @onclick='() => pendingConfirm = new PendingConfirm($"Remove the MinIO storage link \"{link.Name}\"? This unregisters it from EntKube (the bucket itself is not deleted).", "Remove", () => DeleteLink(link.Id))'
+                                                    title="Remove registration"
+                                                    aria-label="@($"Remove MinIO registration {link.Name}")">
                                                 <i class="bi bi-trash"></i>
                                             </button>
                                         }
@@ -336,11 +352,15 @@
                                             {
                                                 <button class="btn btn-sm btn-outline-primary border-0 py-0"
                                                         @onclick="() => OpenFileBrowser(link)"
-                                                        title="Browse files in bucket">
+                                                        title="Browse files in bucket"
+                                                        aria-label="@($"Browse files in bucket {link.Name}")">
                                                     <i class="bi bi-folder2-open"></i>
                                                 </button>
                                             }
-                                            <button class="btn btn-sm btn-outline-danger border-0 py-0" @onclick="() => DeleteLink(link.Id)" title="Delete">
+                                            <button class="btn btn-sm btn-outline-danger border-0 py-0"
+                                                    @onclick='() => pendingConfirm = new PendingConfirm($"Delete the storage link \"{link.Name}\"? This unregisters it from EntKube (the underlying bucket/container is not deleted).", "Delete", () => DeleteLink(link.Id))'
+                                                    title="Delete"
+                                                    aria-label="@($"Delete storage link {link.Name}")">
                                                 <i class="bi bi-trash"></i>
                                             </button>
                                         }
@@ -396,7 +416,7 @@
                 <h6 class="mb-0">
                     <i class="bi bi-gear me-2"></i>Manage Bucket: <strong>@managedLink.BucketName</strong>
                 </h6>
-                <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CloseManageBucket">
+                <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CloseManageBucket" aria-label="Close bucket management panel">
                     <i class="bi bi-x-lg"></i>
                 </button>
             </div>
@@ -446,7 +466,9 @@
                         <button class="btn btn-sm btn-outline-secondary" @onclick="LoadCors" disabled="@manageSaving">
                             Reload
                         </button>
-                        <button class="btn btn-sm btn-outline-danger" @onclick="RemoveCors" disabled="@manageSaving">
+                        <button class="btn btn-sm btn-outline-danger"
+                                @onclick='() => pendingConfirm = new PendingConfirm($"Remove the CORS configuration from bucket \"{managedLink?.BucketName}\"? Browsers will no longer be allowed cross-origin access until it is re-added.", "Remove CORS", RemoveCors)'
+                                disabled="@manageSaving">
                             Remove CORS
                         </button>
                     </div>
@@ -469,7 +491,9 @@
                         <button class="btn btn-sm btn-outline-secondary" @onclick="LoadPolicy" disabled="@manageSaving">
                             Reload
                         </button>
-                        <button class="btn btn-sm btn-outline-danger" @onclick="RemovePolicy" disabled="@manageSaving">
+                        <button class="btn btn-sm btn-outline-danger"
+                                @onclick='() => pendingConfirm = new PendingConfirm($"Remove the bucket policy from \"{managedLink?.BucketName}\"? Access will fall back to default permissions until a new policy is set.", "Remove Policy", RemovePolicy)'
+                                disabled="@manageSaving">
                             Remove Policy
                         </button>
                     </div>
@@ -486,7 +510,7 @@
                 <h6 class="mb-0">
                     <i class="bi bi-list-ul me-2"></i>Buckets accessible via <strong>@browsedLink.Name</strong>
                 </h6>
-                <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CloseBrowseBuckets">
+                <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CloseBrowseBuckets" aria-label="Close browse buckets panel">
                     <i class="bi bi-x-lg"></i>
                 </button>
             </div>
@@ -506,7 +530,8 @@
                 }
                 else if (browsedBuckets.Count == 0)
                 {
-                    <p class="text-muted small mb-0">No buckets found under this project.</p>
+                    <EmptyState Icon="bi-archive" Title="No buckets found"
+                                Message="No buckets are accessible under this project." />
                 }
                 else
                 {
@@ -697,10 +722,9 @@
 
         @if (openStackConnections.Count == 0 && !showOsForm)
         {
-            <div class="alert alert-light border">
-                <i class="bi bi-inbox me-2"></i>
-                No OpenStack connections configured. Add one to enable Cleura S3 storage management.
-            </div>
+            <EmptyState Icon="bi-cloud-haze2" Title="No OpenStack connections"
+                        Message="Add one to enable Cleura S3 storage management."
+                        ActionLabel="Add Connection" OnAction="ShowOpenStackForm" />
         }
         else
         {
@@ -714,7 +738,10 @@
                                     <i class="bi bi-cloud-haze2 text-info"></i>
                                     <strong class="small">@conn.Name</strong>
                                 </div>
-                                <button class="btn btn-sm btn-outline-danger border-0 py-0" @onclick="() => DeleteOpenStackConnection(conn.Id)" title="Delete">
+                                <button class="btn btn-sm btn-outline-danger border-0 py-0"
+                                        @onclick='() => pendingConfirm = new PendingConfirm($"Delete the OpenStack connection \"{conn.Name}\"? Cleura S3 buckets and credentials that rely on it can no longer be managed. This cannot be undone.", "Delete", () => DeleteOpenStackConnection(conn.Id))'
+                                        title="Delete"
+                                        aria-label="@($"Delete OpenStack connection {conn.Name}")">
                                     <i class="bi bi-trash"></i>
                                 </button>
                             </div>
@@ -906,6 +933,27 @@
     private List<S3BucketInfo>? browsedBuckets;
     private string? browseError;
 
+    // A destructive action awaiting user confirmation via the ConfirmDialog banner.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try
+        {
+            await pendingConfirm.Action();
+        }
+        finally
+        {
+            confirmBusy = false;
+            pendingConfirm = null;
+        }
+    }
+
     protected override async Task OnInitializedAsync()
     {
         await LoadData();
@@ -1027,8 +1075,16 @@
 
     private async Task DeleteLink(Guid linkId)
     {
-        await StorageService.DeleteStorageLinkAsync(TenantId, linkId);
-        storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+        try
+        {
+            await StorageService.DeleteStorageLinkAsync(TenantId, linkId);
+            storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+            Toasts.Success("Storage link removed.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to remove storage link: {ex.Message}");
+        }
     }
 
     // ── Cleura S3 Bucket Management ──
@@ -1043,11 +1099,13 @@
             await StorageService.RotateCleuraS3CredentialsAsync(TenantId, linkId);
             manageSuccess = "EC2 credentials rotated successfully.";
             manageError = null;
+            Toasts.Success("EC2 credentials rotated.");
         }
         catch (Exception ex)
         {
             manageError = $"Credential rotation failed: {ex.Message}";
             manageSuccess = null;
+            Toasts.Error($"Credential rotation failed: {ex.Message}");
         }
         finally
         {
@@ -1066,10 +1124,12 @@
             await StorageService.DeleteCleuraS3BucketAsync(TenantId, linkId);
             storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
             CloseManageBucket();
+            Toasts.Success("Bucket and storage link deleted.");
         }
         catch (Exception ex)
         {
             deleteError = $"Bucket deletion failed: {ex.Message}";
+            Toasts.Error($"Bucket deletion failed: {ex.Message}");
         }
         finally
         {
@@ -1246,10 +1306,12 @@
             corsHeaders = "*";
             corsMaxAge = 3600;
             manageSuccess = "CORS configuration removed.";
+            Toasts.Success("CORS configuration removed.");
         }
         catch (Exception ex)
         {
             manageError = $"Failed to remove CORS: {ex.Message}";
+            Toasts.Error($"Failed to remove CORS: {ex.Message}");
         }
         finally
         {
@@ -1320,10 +1382,12 @@
             await StorageService.SetBucketPolicyAsync(TenantId, managedLink.Id, null);
             bucketPolicyJson = "";
             manageSuccess = "Bucket policy removed.";
+            Toasts.Success("Bucket policy removed.");
         }
         catch (Exception ex)
         {
             manageError = $"Failed to remove policy: {ex.Message}";
+            Toasts.Error($"Failed to remove policy: {ex.Message}");
         }
         finally
         {
@@ -1380,11 +1444,23 @@
 
     private async Task DeleteOpenStackConnection(Guid connectionId)
     {
-        bool deleted = await StorageService.DeleteOpenStackConnectionAsync(TenantId, connectionId);
-
-        if (deleted)
+        try
         {
-            openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+            bool deleted = await StorageService.DeleteOpenStackConnectionAsync(TenantId, connectionId);
+
+            if (deleted)
+            {
+                openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+                Toasts.Success("OpenStack connection deleted.");
+            }
+            else
+            {
+                Toasts.Warning("OpenStack connection could not be deleted.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete OpenStack connection: {ex.Message}");
         }
     }
 

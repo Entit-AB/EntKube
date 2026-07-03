@@ -2,6 +2,7 @@
 @using EntKube.Web.Services
 @inject KubernetesOperationsService K8sOps
 @inject IJSRuntime JS
+@inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
    ResourceTreePanel — proper ArgoCD-style graph.
@@ -238,11 +239,13 @@
     }
     <button class="btn btn-sm @(_hideCompleted ? "btn-outline-secondary" : "btn-secondary")"
             title="@(_hideCompleted ? "Showing condensed view — click to show completed jobs & old ReplicaSets" : "Click to hide completed jobs & old ReplicaSets")"
+            aria-label="@(_hideCompleted ? "Show completed jobs and old ReplicaSets" : "Hide completed jobs and old ReplicaSets")"
             @onclick="ToggleHideCompleted">
         <i class="bi @(_hideCompleted ? "bi-funnel-fill" : "bi-funnel")"></i>
     </button>
     <button class="btn btn-sm btn-outline-secondary @(!LastRefreshed.HasValue && !OnRefresh.HasDelegate ? "ms-auto" : "")"
             title="@(_fullscreen ? "Exit fullscreen" : "Fullscreen")"
+            aria-label="@(_fullscreen ? "Exit fullscreen" : "Enter fullscreen")"
             @onclick="ToggleFullscreen">
         <i class="bi @(_fullscreen ? "bi-fullscreen-exit" : "bi-arrows-fullscreen")"></i>
     </button>
@@ -330,7 +333,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                         @if (CanEvents)
                         {
                             <button class="rg-btn @(IsPanel(nd.Node.Id, "yaml") ? "active" : "")"
-                                    title="YAML" @onclick="() => PanelYaml(nd.Node)">
+                                    title="YAML" aria-label="@($"View YAML for {nd.Node.Name}")" @onclick="() => PanelYaml(nd.Node)">
                                 <i class="bi bi-file-code"></i>
                             </button>
                         }
@@ -338,11 +341,12 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                         {
                             bool cronSuspended = nd.Node.HealthStatus == HealthStatus.Suspended;
                             <button class="rg-btn @(IsPanel(nd.Node.Id, "trigger") ? "active-warn" : "")"
-                                    title="Trigger manual run" @onclick="() => PanelTrigger(nd.Node)">
+                                    title="Trigger manual run" aria-label="@($"Trigger manual run of {nd.Node.Name}")" @onclick="() => PanelTrigger(nd.Node)">
                                 <i class="bi bi-lightning"></i>
                             </button>
                             <button class="rg-btn" disabled="@_opBusy"
                                     title="@(cronSuspended ? "Resume schedule" : "Suspend schedule")"
+                                    aria-label="@($"{(cronSuspended ? "Resume" : "Suspend")} schedule for {nd.Node.Name}")"
                                     @onclick="() => _ = ToggleSuspendCronJobAsync(nd.Node)">
                                 <i class="bi @(cronSuspended ? "bi-play-fill" : "bi-pause-fill")"></i>
                             </button>
@@ -350,28 +354,28 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                         @if ((nd.Node.Kind is "Deployment" or "StatefulSet" or "DaemonSet") && CanRestart)
                         {
                             <button class="rg-btn @(IsPanel(nd.Node.Id, "restart") ? "active-warn" : "")"
-                                    title="Restart" @onclick="() => PanelRestart(nd.Node)">
+                                    title="Restart" aria-label="@($"Restart {nd.Node.Name}")" @onclick="() => PanelRestart(nd.Node)">
                                 <i class="bi bi-arrow-repeat"></i>
                             </button>
                         }
                         @if ((nd.Node.Kind is "Deployment" or "StatefulSet" or "ReplicaSet") && CanScale)
                         {
                             <button class="rg-btn @(IsPanel(nd.Node.Id, "scale") ? "active" : "")"
-                                    title="Scale" @onclick="() => PanelScale(nd.Node)">
+                                    title="Scale" aria-label="@($"Scale {nd.Node.Name}")" @onclick="() => PanelScale(nd.Node)">
                                 <i class="bi bi-sliders"></i>
                             </button>
                         }
                         @if (nd.Node.Kind == "ReplicaSet" && ParseDesiredReplicas(nd.Node.StatusMessage) == 0 && CanDelete)
                         {
                             <button class="rg-btn @(IsPanel(nd.Node.Id, "delete") ? "active-danger" : "")"
-                                    title="Delete old ReplicaSet" @onclick="() => PanelDelete(nd.Node)">
+                                    title="Delete old ReplicaSet" aria-label="@($"Delete old ReplicaSet {nd.Node.Name}")" @onclick="() => PanelDelete(nd.Node)">
                                 <i class="bi bi-trash"></i>
                             </button>
                         }
                         @if ((nd.Node.Kind == "Pod" || nd.Node.Kind == "Job") && CanDelete)
                         {
                             <button class="rg-btn @(IsPanel(nd.Node.Id, "delete") ? "active-danger" : "")"
-                                    title="Delete" @onclick="() => PanelDelete(nd.Node)">
+                                    title="Delete" aria-label="@($"Delete {nd.Node.Kind} {nd.Node.Name}")" @onclick="() => PanelDelete(nd.Node)">
                                 <i class="bi bi-trash"></i>
                             </button>
                         }
@@ -757,6 +761,10 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
         SetFeedback(r.IsSuccess, r.IsSuccess
             ? $"{node.Kind} {node.Name} deleted."
             : r.Error ?? "Delete failed.");
+        if (r.IsSuccess)
+            Toasts.Success($"Deleted {node.Kind} {node.Name}.");
+        else
+            Toasts.Error($"Failed to delete {node.Kind} {node.Name}: {r.Error}");
         if (r.IsSuccess && OnRefresh.HasDelegate)
             await OnRefresh.InvokeAsync();
     }
@@ -847,12 +855,13 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                     @if (_panelMode is "logs" or "events" or "yaml")
                     {
                         <button class="btn btn-sm btn-link text-white py-0 px-1" title="Refresh"
+                                aria-label="Refresh panel"
                                 disabled="@_panelLoading"
                                 @onclick="() => _ = RefreshPanel(node)">
                             <i class="bi bi-arrow-clockwise" style="font-size:.75rem;"></i>
                         </button>
                     }
-                    <button class="btn btn-sm btn-link text-white py-0 px-1" @onclick="ClosePanel">
+                    <button class="btn btn-sm btn-link text-white py-0 px-1" aria-label="Close panel" @onclick="ClosePanel">
                         <i class="bi bi-x-lg" style="font-size:.75rem;"></i>
                     </button>
                 </div>
