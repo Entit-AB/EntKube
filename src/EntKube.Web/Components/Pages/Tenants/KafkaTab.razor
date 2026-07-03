@@ -61,7 +61,7 @@
                             <label class="form-label small">Kubernetes Cluster</label>
                             <select class="form-select form-select-sm" @bind="createK8sClusterId">
                                 <option value="@Guid.Empty">Select cluster...</option>
-                                @foreach (KubernetesCluster k in allK8sClusters)
+                                @foreach (KubernetesCluster k in formK8sClusters)
                                 {
                                     <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
                                 }
@@ -504,9 +504,24 @@
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    /// <summary>
+    /// When set, scopes the tab to a single environment: only Kafka clusters whose
+    /// Kubernetes cluster belongs to this environment are shown, and the create form's
+    /// Kubernetes-cluster picker is restricted to (and preselected from) that environment.
+    /// When null, behaviour is unchanged (all of the tenant's clusters are shown/offered).
+    /// </summary>
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
     private bool loading = true;
     private List<KafkaCluster> clusters = [];
     private List<KubernetesCluster> allK8sClusters = [];
+
+    // Kubernetes clusters offered by the create form. Equals allK8sClusters when
+    // EnvironmentId is null; otherwise restricted to the environment's clusters.
+    private List<KubernetesCluster> formK8sClusters = [];
+
+    // Ids of the environment's Kubernetes clusters (only populated when EnvironmentId is set).
+    private HashSet<Guid>? envClusterIds;
     private List<AppDeployment> allDeployments = [];
     private KafkaOperatorStatus? operatorStatus;
 
@@ -594,6 +609,23 @@
         operatorStatus = operatorTask.Result;
         allDeployments = depTask.Result;
 
+        // Environment scoping: when EnvironmentId is set, restrict both the displayed
+        // Kafka clusters and the create-form picker to that environment's clusters.
+        if (EnvironmentId.HasValue)
+        {
+            envClusterIds = allK8sClusters
+                .Where(c => c.EnvironmentId == EnvironmentId.Value)
+                .Select(c => c.Id)
+                .ToHashSet();
+            formK8sClusters = allK8sClusters.Where(c => envClusterIds.Contains(c.Id)).ToList();
+            clusters = clusters.Where(c => envClusterIds.Contains(c.KubernetesClusterId)).ToList();
+        }
+        else
+        {
+            envClusterIds = null;
+            formK8sClusters = allK8sClusters;
+        }
+
         allTopics.Clear();
         allUsers.Clear();
         allBindings.Clear();
@@ -608,7 +640,15 @@
     }
 
     // Create
-    private void ShowCreateForm() { showCreateForm = true; createError = null; }
+    private void ShowCreateForm()
+    {
+        showCreateForm = true;
+        createError = null;
+        // When scoped to an environment with a single Kubernetes cluster, preselect it.
+        createK8sClusterId = EnvironmentId.HasValue && formK8sClusters.Count == 1
+            ? formK8sClusters[0].Id
+            : Guid.Empty;
+    }
     private void CancelCreate() { showCreateForm = false; createError = null; }
 
     private async Task CreateCluster()

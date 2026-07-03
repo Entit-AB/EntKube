@@ -103,7 +103,7 @@
                                 <option value="@Guid.Empty">Select cluster...</option>
                                 @if (allClusters is not null)
                                 {
-                                    @foreach (KubernetesCluster k in allClusters)
+                                    @foreach (KubernetesCluster k in allClusters.Where(k => EnvironmentId is null || k.EnvironmentId == EnvironmentId.Value))
                                     {
                                         <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
                                     }
@@ -802,7 +802,7 @@
                                     <option value="@Guid.Empty">Select cluster...</option>
                                     @if (availableClusters is not null)
                                     {
-                                        @foreach (KubernetesCluster k in availableClusters)
+                                        @foreach (KubernetesCluster k in availableClusters.Where(k => EnvironmentId is null || k.EnvironmentId == EnvironmentId.Value))
                                         {
                                             <option value="@k.Id">@k.Name</option>
                                         }
@@ -899,7 +899,7 @@
                                     <option value="@Guid.Empty">Select cluster...</option>
                                     @if (availableClusters is not null)
                                     {
-                                        @foreach (KubernetesCluster k in availableClusters)
+                                        @foreach (KubernetesCluster k in availableClusters.Where(k => EnvironmentId is null || k.EnvironmentId == EnvironmentId.Value))
                                         {
                                             <option value="@k.Id">@k.Name</option>
                                         }
@@ -1920,7 +1920,7 @@
                                     <option value="@Guid.Empty">Select cluster...</option>
                                     @if (mongoAvailableClusters is not null)
                                     {
-                                        @foreach (KubernetesCluster k in mongoAvailableClusters)
+                                        @foreach (KubernetesCluster k in mongoAvailableClusters.Where(k => EnvironmentId is null || k.EnvironmentId == EnvironmentId.Value))
                                         {
                                             <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
                                         }
@@ -1984,7 +1984,7 @@
                                     <option value="@Guid.Empty">Select cluster...</option>
                                     @if (mongoAvailableClusters is not null)
                                     {
-                                        @foreach (KubernetesCluster k in mongoAvailableClusters)
+                                        @foreach (KubernetesCluster k in mongoAvailableClusters.Where(k => EnvironmentId is null || k.EnvironmentId == EnvironmentId.Value))
                                         {
                                             <option value="@k.Id">@k.Name</option>
                                         }
@@ -3308,6 +3308,29 @@
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    // When set, this tab is scoped to a single environment: only databases whose Kubernetes
+    // cluster belongs to that environment are shown, and create/register forms only offer that
+    // environment's clusters. When null, behaviour is unchanged (tenant-wide view).
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
+    // K8s cluster ids belonging to the scoped environment (empty when not scoped / not yet loaded).
+    private HashSet<Guid> EnvClusterIds =>
+        EnvironmentId is null || allClusters is null
+            ? new HashSet<Guid>()
+            : allClusters.Where(c => c.EnvironmentId == EnvironmentId.Value).Select(c => c.Id).ToHashSet();
+
+    // True when the resource's Kubernetes cluster is in scope (always true when not env-scoped).
+    private bool InScope(Guid kubernetesClusterId) =>
+        EnvironmentId is null || EnvClusterIds.Contains(kubernetesClusterId);
+
+    // Returns the sole env cluster's id for preselection, or Guid.Empty otherwise.
+    private Guid PreselectEnvCluster(IEnumerable<KubernetesCluster>? clusters)
+    {
+        if (EnvironmentId is null || clusters is null) return Guid.Empty;
+        var envList = clusters.Where(c => c.EnvironmentId == EnvironmentId.Value).ToList();
+        return envList.Count == 1 ? envList[0].Id : Guid.Empty;
+    }
+
     private bool loading = true;
     private bool refreshing;
     private DatabaseOperatorStatus? operatorStatus;
@@ -3320,20 +3343,22 @@
         {
             var names = new HashSet<string>(StringComparer.Ordinal);
             if (managedClusters is not null)
-                foreach (var c in managedClusters) names.Add(c.KubernetesCluster.Environment.Name);
+                foreach (var c in managedClusters.Where(c => InScope(c.KubernetesClusterId))) names.Add(c.KubernetesCluster.Environment.Name);
             if (managedMongoClusters is not null)
-                foreach (var c in managedMongoClusters) names.Add(c.KubernetesCluster.Environment.Name);
+                foreach (var c in managedMongoClusters.Where(c => InScope(c.KubernetesClusterId))) names.Add(c.KubernetesCluster.Environment.Name);
             if (registeredPgInstances is not null)
-                foreach (var i in registeredPgInstances) names.Add(i.KubernetesCluster.Environment.Name);
+                foreach (var i in registeredPgInstances.Where(i => InScope(i.KubernetesClusterId))) names.Add(i.KubernetesCluster.Environment.Name);
             return names.OrderBy(n => n).ToList();
         }
     }
 
     private List<CnpgCluster>? FilteredManagedClusters =>
-        managedClusters?.Where(c => selectedEnvironment is null || c.KubernetesCluster.Environment.Name == selectedEnvironment).ToList();
+        managedClusters?.Where(c => InScope(c.KubernetesClusterId)
+            && (selectedEnvironment is null || c.KubernetesCluster.Environment.Name == selectedEnvironment)).ToList();
 
     private List<MongoCluster>? FilteredManagedMongoClusters =>
-        managedMongoClusters?.Where(c => selectedEnvironment is null || c.KubernetesCluster.Environment.Name == selectedEnvironment).ToList();
+        managedMongoClusters?.Where(c => InScope(c.KubernetesClusterId)
+            && (selectedEnvironment is null || c.KubernetesCluster.Environment.Name == selectedEnvironment)).ToList();
 
     // Managed CNPG cluster state
     private List<CnpgCluster>? managedClusters;
@@ -3570,8 +3595,8 @@
     private List<KubernetesCluster>? allClusters;
 
     private List<RegisteredPostgresInstance>? FilteredRegisteredPgInstances =>
-        registeredPgInstances?.Where(i => selectedEnvironment is null ||
-            i.KubernetesCluster.Environment.Name == selectedEnvironment).ToList();
+        registeredPgInstances?.Where(i => InScope(i.KubernetesClusterId)
+            && (selectedEnvironment is null || i.KubernetesCluster.Environment.Name == selectedEnvironment)).ToList();
 
     // Register form
     private bool showRegisterPgForm;
@@ -3818,6 +3843,7 @@
 
         availableClusters = await DatabaseService.GetCnpgEnabledClustersAsync(TenantId);
         storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+        createClusterId = PreselectEnvCluster(availableClusters);
     }
 
     private void CancelCreate()
@@ -3878,6 +3904,7 @@
         showImportCnpg = true;
         importCnpgError = null;
         availableClusters = await DatabaseService.GetCnpgEnabledClustersAsync(TenantId);
+        importCnpgK8sClusterId = PreselectEnvCluster(availableClusters);
     }
 
     private void CancelImportCnpg()
@@ -4520,6 +4547,7 @@
         showMongoRegister = true;
         mongoRegisterError = null;
         mongoAvailableClusters = await DatabaseService.GetMongoEnabledClustersAsync(TenantId);
+        mongoRegClusterId = PreselectEnvCluster(mongoAvailableClusters);
     }
 
     private void CancelMongoRegister()
@@ -4568,6 +4596,7 @@
         mongoCreateError = null;
         mongoAvailableClusters = await DatabaseService.GetMongoEnabledClustersAsync(TenantId);
         storageLinks ??= await StorageService.GetStorageLinksAsync(TenantId);
+        mongoCreateClusterId = PreselectEnvCluster(mongoAvailableClusters);
     }
 
     private void CancelMongoCreate()
@@ -5436,6 +5465,7 @@
     {
         showRegisterPgForm = true;
         registerPgError = null;
+        regPgClusterId = PreselectEnvCluster(allClusters);
     }
 
     private void CancelRegisterPgForm()

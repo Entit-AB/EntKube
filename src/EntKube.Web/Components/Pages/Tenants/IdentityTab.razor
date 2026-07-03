@@ -2248,6 +2248,9 @@ else if (selectedKeycloak is not null)
 else
 {
     @* ── Level 1: Keycloak instance list ── *@
+    @* External Keycloaks have no cluster/environment, so registration is hidden in an env-scoped view. *@
+    @if (EnvironmentId is null)
+    {
     <div class="d-flex justify-content-end mb-3">
         <button class="btn btn-sm btn-outline-primary" @onclick="() => showRegisterExternal = !showRegisterExternal">
             <i class="bi bi-plus-circle me-1"></i>Register External Keycloak
@@ -2299,6 +2302,7 @@ else
             </div>
         </div>
     }
+    } @* end EnvironmentId is null (register-external) *@
 
     @if (detectedKeycloaks is null || detectedKeycloaks.Count == 0)
     {
@@ -2396,6 +2400,28 @@ else
 
 @code {
     [Parameter] public Guid TenantId { get; set; }
+
+    /// <summary>
+    /// When set, this tab is scoped to a single environment: only Keycloak instances
+    /// whose backing cluster belongs to this environment are shown/selectable, and the
+    /// "Register External Keycloak" flow (which has no cluster/environment) is hidden.
+    /// When null, behaviour is unchanged — every detected instance is shown.
+    /// </summary>
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
+    /// <summary>
+    /// Loads the tenant's detected Keycloak instances and, when <see cref="EnvironmentId"/>
+    /// is set, restricts them to instances whose managed ClusterComponent's cluster is in
+    /// that environment (linkage: Component.Cluster.EnvironmentId). External instances
+    /// (Component null) have no cluster and are excluded from an env-scoped view.
+    /// </summary>
+    private async Task<List<DetectedKeycloak>> LoadDetectedKeycloaksAsync()
+    {
+        List<DetectedKeycloak> all = await KeycloakService.GetDetectedKeycloaksAsync(TenantId);
+        if (EnvironmentId is Guid envId)
+            all = all.Where(k => k.Component?.Cluster.EnvironmentId == envId).ToList();
+        return all;
+    }
 
     // ── Load state ────────────────────────────────────────────────────────────
     private bool loading = true;
@@ -2617,7 +2643,7 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        detectedKeycloaks = await KeycloakService.GetDetectedKeycloaksAsync(TenantId);
+        detectedKeycloaks = await LoadDetectedKeycloaksAsync();
         loading = false;
     }
 
@@ -2870,7 +2896,7 @@ else
 
             await KeycloakService.SyncRealmsFromKeycloakAsync(TenantId, config.Id);
 
-            detectedKeycloaks = await KeycloakService.GetDetectedKeycloaksAsync(TenantId);
+            detectedKeycloaks = await LoadDetectedKeycloaksAsync();
             showRegisterExternal = false;
             registerExternalDisplayName = "";
             registerExternalAdminUrl = "";
@@ -3138,7 +3164,7 @@ else
             await KeycloakService.SyncRealmsFromKeycloakAsync(TenantId, config.Id);
 
             // Refresh detection list and re-select the now-configured keycloak.
-            detectedKeycloaks = await KeycloakService.GetDetectedKeycloaksAsync(TenantId);
+            detectedKeycloaks = await LoadDetectedKeycloaksAsync();
             Guid originalId = selectedKeycloak.ComponentId;
             DetectedKeycloak? updated = detectedKeycloaks.FirstOrDefault(
                 k => k.ComponentId == originalId);
@@ -3173,7 +3199,7 @@ else
                 string.IsNullOrWhiteSpace(editAdminPassword) ? null : editAdminPassword);
 
             showEditConfig = false;
-            detectedKeycloaks = await KeycloakService.GetDetectedKeycloaksAsync(TenantId);
+            detectedKeycloaks = await LoadDetectedKeycloaksAsync();
             Guid originalId = selectedKeycloak.ComponentId;
             DetectedKeycloak? updated = detectedKeycloaks.FirstOrDefault(k => k.ComponentId == originalId);
             if (updated is not null) selectedKeycloak = updated;
