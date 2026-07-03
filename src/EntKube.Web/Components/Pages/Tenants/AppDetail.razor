@@ -167,6 +167,10 @@ else
     [Parameter] public EventCallback OnBack { get; set; }
     [Parameter] public EventCallback OnDeleted { get; set; }
 
+    /// <summary>When set (e.g. opened from the resource tree under an environment),
+    /// jump straight into that environment's detail instead of the env-cards list.</summary>
+    [Parameter] public Guid? InitialEnvironmentId { get; set; }
+
     private bool confirmDelete;
     private bool deleting;
     private bool showLinkPanel;
@@ -201,6 +205,9 @@ else
         linkedEnvIds = freshApp?.AppEnvironments.Select(ae => ae.EnvironmentId).ToHashSet() ?? new();
 
         linkedEnvironments = allEnvironments.Where(e => linkedEnvIds.Contains(e.Id)).ToList();
+
+        if (InitialEnvironmentId is Guid envId && selectedEnvironment is null)
+            selectedEnvironment = linkedEnvironments.FirstOrDefault(e => e.Id == envId);
 
         deployCountByEnv = (freshApp?.Deployments ?? [])
             .GroupBy(d => d.EnvironmentId)

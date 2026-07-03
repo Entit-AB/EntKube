@@ -110,6 +110,33 @@
     padding: .5rem .6rem;
 }
 
+.tree-section-label {
+    font-size: .68rem;
+    font-weight: 700;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: #97a3b4;
+    padding: .55rem .5rem .25rem;
+}
+
+.tree-sub {
+    font-size: .68rem;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: #a6b0be;
+    padding: .3rem .4rem .1rem;
+}
+.tree-sub.indent-1 { padding-left: .4rem; }
+.tree-sub.indent-2 { padding-left: 1.35rem; }
+
+.node .label .sub {
+    color: #97a3b4;
+    font-size: .72rem;
+    margin-left: .25rem;
+}
+.node.selected .label .sub { color: #4d7bb0; }
+
 .tree-foot {
     border-top: 1px solid rgba(0,0,0,.06);
     padding: .5rem .6rem;
