@@ -128,11 +128,25 @@
         margin-bottom: 2px;
     }
     .rg-card-status {
+        display: flex;
+        align-items: center;
+        gap: 6px;
         font-size: .71rem;
         color: #6c757d;
+    }
+    .rg-status-msg {
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+    }
+    .rg-age {
+        margin-left: auto;
+        flex-shrink: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        color: #868e96;
+        font-variant-numeric: tabular-nums;
     }
 
     /* ── Card action bar ── */
@@ -283,9 +297,17 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
 
                         <div class="rg-card-name" title="@nd.Node.Name">@nd.Node.Name</div>
 
-                        @if (!string.IsNullOrEmpty(nd.Node.StatusMessage))
+                        @if (!string.IsNullOrEmpty(nd.Node.StatusMessage) || nd.Node.KubernetesCreatedAt is not null)
                         {
-                            <div class="rg-card-status">@nd.Node.StatusMessage</div>
+                            <div class="rg-card-status">
+                                <span class="rg-status-msg">@nd.Node.StatusMessage</span>
+                                @if (nd.Node.KubernetesCreatedAt is not null)
+                                {
+                                    <span class="rg-age" title="Alive since @nd.Node.KubernetesCreatedAt.Value.ToLocalTime().ToString("g")">
+                                        <i class="bi bi-clock-history"></i> @FormatAge(nd.Node.KubernetesCreatedAt.Value)
+                                    </span>
+                                }
+                            </div>
                         }
                     </div>
 
@@ -1057,5 +1079,16 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
         int slash = s.IndexOf('/');
         if (slash < 0) return null;
         return int.TryParse(s[(slash + 1)..].Split(' ')[0], out int n) ? n : null;
+    }
+
+    // Compact "how long has it lived" age, matching kubectl's AGE column style.
+    private static string FormatAge(DateTime dt)
+    {
+        TimeSpan age = DateTime.UtcNow - dt.ToUniversalTime();
+        if (age < TimeSpan.Zero) age = TimeSpan.Zero;
+        if (age.TotalDays  >= 1) return $"{(int)age.TotalDays}d";
+        if (age.TotalHours >= 1) return $"{(int)age.TotalHours}h";
+        if (age.TotalMinutes >= 1) return $"{(int)age.TotalMinutes}m";
+        return $"{(int)age.TotalSeconds}s";
     }
 }
