@@ -107,10 +107,68 @@ else
                     }
                 }
 
-                @* ── tenant-scoped sections ── *@
-                @RenderSection("Services", "bi-hdd-stack", ServiceItems, servicesOpen, () => servicesOpen = !servicesOpen)
-                @RenderSection("Operations", "bi-speedometer2", OpsItems, opsOpen, () => opsOpen = !opsOpen)
-                @RenderSection("Manage", "bi-sliders", ManageItems, manageOpen, () => manageOpen = !manageOpen)
+                @* ── Services (grouped like environments) ── *@
+                <div class="tree-section-label">Services</div>
+                @foreach (TreeGroup g in ServiceGroups)
+                {
+                    List<SectionItem> gi = VisibleGroupItems(g);
+                    if (HasFilter && gi.Count == 0) { continue; }
+                    bool gopen = GroupOpen(g.Name);
+                    <button type="button" class="node group indent-1" @onclick="() => ToggleGroup(g.Name)" aria-expanded="@gopen">
+                        <span class="caret">@(gopen ? "▾" : "▸")</span>
+                        <i class="ico bi @g.Icon" aria-hidden="true"></i>
+                        <span class="label">@g.Name</span>
+                        <span class="badge-count">@g.Items.Length</span>
+                    </button>
+                    @if (gopen)
+                    {
+                        @foreach (SectionItem item in gi)
+                        {
+                            <button type="button" class="node leaf indent-2 @(selectedSection == item.Key ? "selected" : "")" @onclick="() => SelectSection(item.Key)">
+                                <span class="caret"></span>
+                                <i class="ico bi @item.Icon" aria-hidden="true"></i>
+                                <span class="label">@item.Label</span>
+                            </button>
+                        }
+                    }
+                }
+
+                @* ── Operations (grouped like environments) ── *@
+                <div class="tree-section-label">Operations</div>
+                @foreach (TreeGroup g in OpsGroups)
+                {
+                    List<SectionItem> gi = VisibleGroupItems(g);
+                    if (HasFilter && gi.Count == 0) { continue; }
+                    bool gopen = GroupOpen(g.Name);
+                    <button type="button" class="node group indent-1" @onclick="() => ToggleGroup(g.Name)" aria-expanded="@gopen">
+                        <span class="caret">@(gopen ? "▾" : "▸")</span>
+                        <i class="ico bi @g.Icon" aria-hidden="true"></i>
+                        <span class="label">@g.Name</span>
+                        <span class="badge-count">@g.Items.Length</span>
+                    </button>
+                    @if (gopen)
+                    {
+                        @foreach (SectionItem item in gi)
+                        {
+                            <button type="button" class="node leaf indent-2 @(selectedSection == item.Key ? "selected" : "")" @onclick="() => SelectSection(item.Key)">
+                                <span class="caret"></span>
+                                <i class="ico bi @item.Icon" aria-hidden="true"></i>
+                                <span class="label">@item.Label</span>
+                            </button>
+                        }
+                    }
+                }
+
+                @* ── Manage ── *@
+                <div class="tree-section-label">Manage</div>
+                @foreach (SectionItem item in VisibleManage())
+                {
+                    <button type="button" class="node leaf indent-1 @(selectedSection == item.Key ? "selected" : "")" @onclick="() => SelectSection(item.Key)">
+                        <span class="caret"></span>
+                        <i class="ico bi @item.Icon" aria-hidden="true"></i>
+                        <span class="label">@item.Label</span>
+                    </button>
+                }
             </div>
 
             <div class="tree-foot">
@@ -163,32 +221,56 @@ else
     [SupplyParameterFromQuery(Name = "section")] private string? SectionParam { get; set; }
 
     private sealed record SectionItem(string Key, string Label, string Icon);
+    private sealed record TreeGroup(string Name, string Icon, SectionItem[] Items);
 
-    private static readonly SectionItem[] ServiceItems =
+    // Services / Operations mirror the Environment → (Apps/Clusters) shape:
+    // a section, expandable group nodes, and leaves.
+    private static readonly TreeGroup[] ServiceGroups =
     [
-        new("databases", "Databases", "bi-hdd-stack"),
-        new("cache", "Cache", "bi-lightning-charge"),
-        new("messaging", "RabbitMQ", "bi-collection"),
-        new("kafka", "Kafka", "bi-diagram-3"),
-        new("storage", "Storage", "bi-bucket"),
-        new("identity", "Identity", "bi-person-badge"),
-        new("registry", "Registry", "bi-box-seam"),
-        new("vault", "Vault", "bi-safe2"),
+        new("Data", "bi-hdd-stack",
+        [
+            new("databases", "Databases", "bi-hdd-stack"),
+            new("cache", "Cache", "bi-lightning-charge"),
+            new("storage", "Storage", "bi-bucket"),
+        ]),
+        new("Messaging", "bi-collection",
+        [
+            new("messaging", "RabbitMQ", "bi-collection"),
+            new("kafka", "Kafka", "bi-diagram-3"),
+        ]),
+        new("Platform", "bi-shield-lock",
+        [
+            new("identity", "Identity", "bi-person-badge"),
+            new("registry", "Registry", "bi-box-seam"),
+            new("vault", "Vault", "bi-safe2"),
+        ]),
     ];
-    private static readonly SectionItem[] OpsItems =
+    private static readonly TreeGroup[] OpsGroups =
     [
-        new("overview", "Monitoring", "bi-speedometer2"),
-        new("alerts", "Alerts", "bi-bell"),
-        new("alert-rules", "Alert rules", "bi-sliders"),
-        new("alert-routing", "Alert routing", "bi-signpost-split"),
-        new("notifications", "Notifications", "bi-broadcast"),
-        new("on-call", "On-call", "bi-person-workspace"),
-        new("incidents", "Incidents", "bi-exclamation-octagon"),
-        new("logs", "Logs", "bi-journal-text"),
-        new("analytics", "Analytics", "bi-graph-up"),
-        new("sla", "SLA", "bi-check2-square"),
-        new("maintenance", "Maintenance", "bi-tools"),
-        new("secret-expiry", "Secret expiry", "bi-clock-history"),
+        new("Monitoring", "bi-speedometer2",
+        [
+            new("overview", "Overview", "bi-speedometer2"),
+            new("logs", "Logs", "bi-journal-text"),
+            new("analytics", "Analytics", "bi-graph-up"),
+        ]),
+        new("Alerting", "bi-bell",
+        [
+            new("alerts", "Alerts", "bi-bell"),
+            new("alert-rules", "Alert rules", "bi-sliders"),
+            new("alert-routing", "Alert routing", "bi-signpost-split"),
+            new("notifications", "Notifications", "bi-broadcast"),
+        ]),
+        new("Incidents", "bi-exclamation-octagon",
+        [
+            new("on-call", "On-call", "bi-person-workspace"),
+            new("incidents", "Incidents", "bi-exclamation-octagon"),
+        ]),
+        new("Reliability", "bi-check2-square",
+        [
+            new("sla", "SLA", "bi-check2-square"),
+            new("maintenance", "Maintenance", "bi-tools"),
+            new("secret-expiry", "Secret expiry", "bi-clock-history"),
+        ]),
     ];
     private static readonly SectionItem[] ManageItems =
     [
@@ -207,9 +289,7 @@ else
     private List<KubernetesCluster> clusters = [];
 
     private readonly HashSet<Guid> collapsedEnvs = [];
-    private bool servicesOpen = true;
-    private bool opsOpen;
-    private bool manageOpen;
+    private readonly HashSet<string> collapsedGroups = [];
     private string filter = "";
 
     private Data.App? selectedApp;
@@ -316,6 +396,13 @@ else
     private void ToggleEnv(Guid id) { if (!collapsedEnvs.Remove(id)) collapsedEnvs.Add(id); }
     private void OnFilterInput(ChangeEventArgs e) => filter = e.Value?.ToString() ?? "";
 
+    private bool GroupOpen(string name) => HasFilter || !collapsedGroups.Contains(name);
+    private void ToggleGroup(string name) { if (!collapsedGroups.Remove(name)) collapsedGroups.Add(name); }
+    private List<SectionItem> VisibleGroupItems(TreeGroup g) =>
+        HasFilter ? g.Items.Where(i => Match(i.Label) || Match(g.Name)).ToList() : g.Items.ToList();
+    private List<SectionItem> VisibleManage() =>
+        HasFilter ? ManageItems.Where(i => Match(i.Label)).ToList() : ManageItems.ToList();
+
     private bool IsAppSelected(Guid appId, Guid? envId) =>
         selectedApp?.Id == appId && selectedAppEnvId == envId;
 
@@ -382,44 +469,6 @@ else
             clusters = await TenantService.GetClustersAsync(tenant.Id);
         ClearSelection();
     }
-
-    // ── Tenant-scoped section rendering (reuses the existing tab components) ──
-    private RenderFragment RenderSection(string title, string icon, SectionItem[] items, bool open, Action toggle) => builder =>
-    {
-        List<SectionItem> vis = HasFilter ? items.Where(i => Match(i.Label)).ToList() : items.ToList();
-        if (HasFilter && vis.Count == 0) return;
-
-        int seq = 0;
-        builder.OpenElement(seq++, "button");
-        builder.AddAttribute(seq++, "type", "button");
-        builder.AddAttribute(seq++, "class", "node group indent-1 mt-1");
-        builder.AddAttribute(seq++, "aria-expanded", (open || HasFilter) ? "true" : "false");
-        builder.AddAttribute(seq++, "onclick", EventCallback.Factory.Create(this, toggle));
-        builder.AddMarkupContent(seq++, $"<span class=\"caret\">{((open || HasFilter) ? "▾" : "▸")}</span><i class=\"ico bi {icon}\" aria-hidden=\"true\"></i>");
-        builder.OpenElement(seq++, "span");
-        builder.AddAttribute(seq++, "class", "label");
-        builder.AddContent(seq++, title);
-        builder.CloseElement();
-        builder.CloseElement();
-
-        if (open || HasFilter)
-        {
-            foreach (SectionItem item in vis)
-            {
-                builder.OpenElement(seq++, "button");
-                builder.AddAttribute(seq++, "type", "button");
-                builder.AddAttribute(seq++, "class", $"node leaf indent-2 {(selectedSection == item.Key ? "selected" : "")}");
-                builder.SetKey(item.Key);
-                builder.AddAttribute(seq++, "onclick", EventCallback.Factory.Create(this, () => SelectSection(item.Key)));
-                builder.AddMarkupContent(seq++, $"<span class=\"caret\"></span><i class=\"ico bi {item.Icon}\" aria-hidden=\"true\"></i>");
-                builder.OpenElement(seq++, "span");
-                builder.AddAttribute(seq++, "class", "label");
-                builder.AddContent(seq++, item.Label);
-                builder.CloseElement();
-                builder.CloseElement();
-            }
-        }
-    };
 
     private void NavigateToSection(string key) => SelectSection(key);
 
