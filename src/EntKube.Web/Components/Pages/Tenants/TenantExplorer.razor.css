@@ -110,6 +110,13 @@
     padding: .5rem .6rem;
 }
 
+.tree-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .55rem .5rem .2rem;
+}
+
 .tree-section-label {
     font-size: .68rem;
     font-weight: 700;
@@ -118,6 +125,62 @@
     color: #97a3b4;
     padding: .55rem .5rem .25rem;
 }
+.tree-section-head .tree-section-label { padding: 0; }
+
+/* Rows that carry an inline add "+" become flex containers */
+.node-row {
+    display: flex;
+    align-items: center;
+    border-radius: 6px;
+}
+.node-row:hover { background: rgba(27,110,194,.06); }
+.node-row > .node { flex: 1 1 auto; min-width: 0; background: none; }
+.node-row > .node:hover { background: none; }
+
+.tree-add {
+    border: none;
+    background: none;
+    color: #9aa6b5;
+    padding: .15rem .35rem;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: .78rem;
+    line-height: 1;
+    flex: none;
+}
+.tree-add:hover { background: rgba(27,110,194,.14); color: #1b6ec2; }
+
+.tree-add-row {
+    display: flex;
+    align-items: center;
+    gap: .3rem;
+    padding: .25rem .4rem .3rem;
+}
+.tree-add-row.indent-1 { padding-left: .55rem; }
+.tree-add-row.indent-2 { padding-left: 1.5rem; }
+.tree-add-row input {
+    flex: 1;
+    min-width: 0;
+    font-size: .8rem;
+    border: 1px solid rgba(27,110,194,.4);
+    border-radius: 6px;
+    padding: .22rem .45rem;
+    outline: none;
+    color: #1b2a3d;
+}
+.tree-add-row input:focus { border-color: #1b6ec2; }
+.tree-add-ok {
+    flex: none;
+    border: none;
+    background: #1b6ec2;
+    color: #fff;
+    border-radius: 6px;
+    padding: .22rem .45rem;
+    cursor: pointer;
+    line-height: 1;
+    font-size: .78rem;
+}
+.tree-add-ok:hover { background: #155a9e; }
 
 .tree-sub {
     font-size: .68rem;

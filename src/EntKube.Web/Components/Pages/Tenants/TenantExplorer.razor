@@ -9,15 +9,15 @@
 @inject NavigationManager Nav
 
 @* ═══════════════════════════════════════════════════════════════════
-   TenantExplorer — resource-tree navigation (Phase 2).
-   Environment-first tree: each Environment (auto-expanded) groups its
-   Apps and Clusters. Tenant-scoped Services / Operations / Manage
-   sections sit below. The existing detail + tab components are reused
-   verbatim as the right-hand pane. Selection deep-links via the URL.
-   Non-destructive: the classic /tenants/{slug} page is unchanged.
+   TenantExplorer — resource-tree navigation.
+   Parallel sections: Environments (→ clusters), Customers (→ apps,
+   collapsed by default), Services, Operations, Manage. Each level has
+   an add "+". Existing detail/tab components are reused as the pane.
+   Selection deep-links via the URL. Default tenant view; the classic
+   tab page lives at /tenants/{slug}/classic.
    ═══════════════════════════════════════════════════════════════════ *@
 
-<PageTitle>@(tenant?.Name ?? "Tenant") — Explore</PageTitle>
+<PageTitle>@(tenant?.Name ?? "Tenant")</PageTitle>
 
 @if (tenant is null)
 {
@@ -41,49 +41,51 @@ else
 
             <div class="tree-scroll" role="tree" aria-label="Tenant resources">
 
-                @* ── Environments → Apps + Clusters ── *@
-                <div class="tree-section-label">Environments</div>
-                @if (VisibleEnvironments().Count == 0 && UnlinkedApps().Count == 0)
+                @* ── Environments → Clusters ── *@
+                <div class="tree-section-head">
+                    <span class="tree-section-label">Environments</span>
+                    <button type="button" class="tree-add" title="Add environment"
+                            aria-label="Add environment" @onclick="() => addingEnv = !addingEnv">
+                        <i class="bi bi-plus-lg"></i>
+                    </button>
+                </div>
+                @if (addingEnv)
+                {
+                    <div class="tree-add-row indent-1">
+                        <input placeholder="New environment name" @bind="newEnvName" @bind:event="oninput"
+                               @onkeydown="e => OnAddKey(e, AddEnvironment)" />
+                        <button type="button" class="tree-add-ok" @onclick="AddEnvironment" aria-label="Create"><i class="bi bi-check-lg"></i></button>
+                    </div>
+                }
+                @if (VisibleEnvironments().Count == 0 && !addingEnv)
                 {
                     <div class="tree-empty">@(HasFilter ? "No matches" : "No environments yet")</div>
                 }
                 @foreach (Data.Environment env in VisibleEnvironments())
                 {
                     bool open = EnvOpen(env);
-                    List<Data.App> envApps = VisibleAppsInEnv(env);
                     List<KubernetesCluster> envClusters = VisibleClustersInEnv(env);
-                    <button type="button" class="node group indent-1" @onclick="() => ToggleEnv(env.Id)" aria-expanded="@open">
-                        <span class="caret">@(open ? "▾" : "▸")</span>
-                        <i class="ico bi bi-diagram-3-fill" aria-hidden="true"></i>
-                        <span class="label">@env.Name</span>
-                        <span class="badge-count">@(AppsInEnv(env).Count + ClustersInEnv(env).Count)</span>
-                    </button>
+                    <div class="node-row indent-1">
+                        <button type="button" class="node group" @onclick="() => ToggleEnv(env.Id)" aria-expanded="@open">
+                            <span class="caret">@(open ? "▾" : "▸")</span>
+                            <i class="ico bi bi-diagram-3-fill" aria-hidden="true"></i>
+                            <span class="label">@env.Name</span>
+                            <span class="badge-count">@ClustersInEnv(env).Count</span>
+                        </button>
+                        <button type="button" class="tree-add" title="Register cluster in @env.Name"
+                                aria-label="Register cluster" @onclick='() => SelectSection("environments")'>
+                            <i class="bi bi-plus-lg"></i>
+                        </button>
+                    </div>
                     @if (open)
                     {
-                        <div class="tree-sub indent-2">Apps</div>
-                        @if (envApps.Count == 0)
-                        {
-                            <div class="tree-empty" style="padding-left:2.3rem">@(HasFilter ? "—" : "No apps")</div>
-                        }
-                        @foreach (Data.App app in envApps)
-                        {
-                            <button type="button"
-                                    class="node leaf indent-3 @(IsAppSelected(app.Id, env.Id) ? "selected" : "")"
-                                    @onclick="() => SelectApp(env, app)">
-                                <span class="caret"></span>
-                                <i class="ico bi bi-box-seam" aria-hidden="true"></i>
-                                <span class="label">@app.Name <span class="sub">@CustomerNameOf(app)</span></span>
-                            </button>
-                        }
-                        <div class="tree-sub indent-2">Clusters</div>
                         @if (envClusters.Count == 0)
                         {
                             <div class="tree-empty" style="padding-left:2.3rem">@(HasFilter ? "—" : "No clusters")</div>
                         }
                         @foreach (KubernetesCluster cl in envClusters)
                         {
-                            <button type="button"
-                                    class="node leaf indent-3 @(selectedCluster?.Id == cl.Id ? "selected" : "")"
+                            <button type="button" class="node leaf indent-2 @(selectedCluster?.Id == cl.Id ? "selected" : "")"
                                     @onclick="() => SelectCluster(cl)">
                                 <span class="caret"></span>
                                 <i class="ico bi bi-hexagon-fill" aria-hidden="true"></i>
@@ -92,76 +94,79 @@ else
                         }
                     }
                 }
-                @{ List<Data.App> unlinked = VisibleUnlinkedApps(); }
-                @if (unlinked.Count > 0)
+
+                @* ── Customers → Apps (collapsed by default) ── *@
+                <div class="tree-section-head">
+                    <span class="tree-section-label">Customers</span>
+                    <button type="button" class="tree-add" title="Add customer"
+                            aria-label="Add customer" @onclick="() => addingCustomer = !addingCustomer">
+                        <i class="bi bi-plus-lg"></i>
+                    </button>
+                </div>
+                @if (addingCustomer)
                 {
-                    <div class="tree-sub indent-1">No environment</div>
-                    @foreach (Data.App app in unlinked)
-                    {
-                        <button type="button"
-                                class="node leaf indent-2 @(IsAppSelected(app.Id, null) ? "selected" : "")"
-                                @onclick="() => SelectApp(null, app)">
-                            <span class="caret"></span>
-                            <i class="ico bi bi-box-seam" aria-hidden="true"></i>
-                            <span class="label">@app.Name <span class="sub">@CustomerNameOf(app)</span></span>
+                    <div class="tree-add-row indent-1">
+                        <input placeholder="New customer name" @bind="newCustomerName" @bind:event="oninput"
+                               @onkeydown="e => OnAddKey(e, AddCustomer)" />
+                        <button type="button" class="tree-add-ok" @onclick="AddCustomer" aria-label="Create"><i class="bi bi-check-lg"></i></button>
+                    </div>
+                }
+                @if (VisibleCustomers().Count == 0 && !addingCustomer)
+                {
+                    <div class="tree-empty">@(HasFilter ? "No matches" : "No customers yet")</div>
+                }
+                @foreach (Customer c in VisibleCustomers())
+                {
+                    bool copen = CustomerOpen(c);
+                    List<Data.App> capps = VisibleAppsOf(c);
+                    <div class="node-row indent-1">
+                        <button type="button" class="node group" @onclick="() => ToggleCustomer(c.Id)" aria-expanded="@copen">
+                            <span class="caret">@(copen ? "▾" : "▸")</span>
+                            <i class="ico bi bi-person-badge" aria-hidden="true"></i>
+                            <span class="label">@c.Name</span>
+                            <span class="badge-count">@AppsOf(c).Count</span>
                         </button>
+                        <button type="button" class="tree-add" title="Add app to @c.Name"
+                                aria-label="Add app" @onclick="() => StartAddApp(c.Id)">
+                            <i class="bi bi-plus-lg"></i>
+                        </button>
+                    </div>
+                    @if (copen)
+                    {
+                        @if (addingAppForCustomer == c.Id)
+                        {
+                            <div class="tree-add-row indent-2">
+                                <input placeholder="New app name" @bind="newAppName" @bind:event="oninput"
+                                       @onkeydown="e => OnAddKey(e, () => AddApp(c.Id))" />
+                                <button type="button" class="tree-add-ok" @onclick="() => AddApp(c.Id)" aria-label="Create"><i class="bi bi-check-lg"></i></button>
+                            </div>
+                        }
+                        @if (capps.Count == 0 && addingAppForCustomer != c.Id)
+                        {
+                            <div class="tree-empty" style="padding-left:2.3rem">@(HasFilter ? "—" : "No apps")</div>
+                        }
+                        @foreach (Data.App app in capps)
+                        {
+                            <button type="button" class="node leaf indent-2 @(selectedApp?.Id == app.Id ? "selected" : "")"
+                                    @onclick="() => SelectApp(c, app)">
+                                <span class="caret"></span>
+                                <i class="ico bi bi-box-seam" aria-hidden="true"></i>
+                                <span class="label">@app.Name</span>
+                            </button>
+                        }
                     }
                 }
 
                 @* ── Services (grouped like environments) ── *@
-                <div class="tree-section-label">Services</div>
-                @foreach (TreeGroup g in ServiceGroups)
-                {
-                    List<SectionItem> gi = VisibleGroupItems(g);
-                    if (HasFilter && gi.Count == 0) { continue; }
-                    bool gopen = GroupOpen(g.Name);
-                    <button type="button" class="node group indent-1" @onclick="() => ToggleGroup(g.Name)" aria-expanded="@gopen">
-                        <span class="caret">@(gopen ? "▾" : "▸")</span>
-                        <i class="ico bi @g.Icon" aria-hidden="true"></i>
-                        <span class="label">@g.Name</span>
-                        <span class="badge-count">@g.Items.Length</span>
-                    </button>
-                    @if (gopen)
-                    {
-                        @foreach (SectionItem item in gi)
-                        {
-                            <button type="button" class="node leaf indent-2 @(selectedSection == item.Key ? "selected" : "")" @onclick="() => SelectSection(item.Key)">
-                                <span class="caret"></span>
-                                <i class="ico bi @item.Icon" aria-hidden="true"></i>
-                                <span class="label">@item.Label</span>
-                            </button>
-                        }
-                    }
-                }
+                <div class="tree-section-head"><span class="tree-section-label">Services</span></div>
+                @RenderGroupNodes(ServiceGroups)
 
-                @* ── Operations (grouped like environments) ── *@
-                <div class="tree-section-label">Operations</div>
-                @foreach (TreeGroup g in OpsGroups)
-                {
-                    List<SectionItem> gi = VisibleGroupItems(g);
-                    if (HasFilter && gi.Count == 0) { continue; }
-                    bool gopen = GroupOpen(g.Name);
-                    <button type="button" class="node group indent-1" @onclick="() => ToggleGroup(g.Name)" aria-expanded="@gopen">
-                        <span class="caret">@(gopen ? "▾" : "▸")</span>
-                        <i class="ico bi @g.Icon" aria-hidden="true"></i>
-                        <span class="label">@g.Name</span>
-                        <span class="badge-count">@g.Items.Length</span>
-                    </button>
-                    @if (gopen)
-                    {
-                        @foreach (SectionItem item in gi)
-                        {
-                            <button type="button" class="node leaf indent-2 @(selectedSection == item.Key ? "selected" : "")" @onclick="() => SelectSection(item.Key)">
-                                <span class="caret"></span>
-                                <i class="ico bi @item.Icon" aria-hidden="true"></i>
-                                <span class="label">@item.Label</span>
-                            </button>
-                        }
-                    }
-                }
+                @* ── Operations ── *@
+                <div class="tree-section-head"><span class="tree-section-label">Operations</span></div>
+                @RenderGroupNodes(OpsGroups)
 
                 @* ── Manage ── *@
-                <div class="tree-section-label">Manage</div>
+                <div class="tree-section-head"><span class="tree-section-label">Manage</span></div>
                 @foreach (SectionItem item in VisibleManage())
                 {
                     <button type="button" class="node leaf indent-1 @(selectedSection == item.Key ? "selected" : "")" @onclick="() => SelectSection(item.Key)">
@@ -185,10 +190,9 @@ else
                 <AppDetail App="selectedApp"
                            TenantId="tenant.Id"
                            CustomerName="@selectedAppCustomer.Name"
-                           InitialEnvironmentId="selectedAppEnvId"
                            OnBack="ClearSelection"
                            OnDeleted="OnAppDeleted"
-                           @key="@($"{selectedApp.Id}:{selectedAppEnvId}")" />
+                           @key="selectedApp.Id" />
             }
             else if (selectedCluster is not null)
             {
@@ -207,7 +211,7 @@ else
                 <div class="pane-placeholder">
                     <i class="bi bi-diagram-3" aria-hidden="true"></i>
                     <div class="fw-semibold">Select a resource</div>
-                    <div class="small">Pick an app or cluster under an environment, open a service, or type to filter.</div>
+                    <div class="small">Pick an app or cluster, open a service, or use “+” to add one.</div>
                 </div>
             }
         </section>
@@ -217,65 +221,34 @@ else
 @code {
     [Parameter] public string Slug { get; set; } = "";
     [SupplyParameterFromQuery(Name = "app")] private Guid? AppParam { get; set; }
-    [SupplyParameterFromQuery(Name = "env")] private Guid? EnvParam { get; set; }
     [SupplyParameterFromQuery(Name = "cluster")] private Guid? ClusterParam { get; set; }
     [SupplyParameterFromQuery(Name = "section")] private string? SectionParam { get; set; }
 
     private sealed record SectionItem(string Key, string Label, string Icon);
     private sealed record TreeGroup(string Name, string Icon, SectionItem[] Items);
 
-    // Services / Operations mirror the Environment → (Apps/Clusters) shape:
-    // a section, expandable group nodes, and leaves.
     private static readonly TreeGroup[] ServiceGroups =
     [
         new("Data", "bi-hdd-stack",
-        [
-            new("databases", "Databases", "bi-hdd-stack"),
-            new("cache", "Cache", "bi-lightning-charge"),
-            new("storage", "Storage", "bi-bucket"),
-        ]),
+        [ new("databases", "Databases", "bi-hdd-stack"), new("cache", "Cache", "bi-lightning-charge"), new("storage", "Storage", "bi-bucket") ]),
         new("Messaging", "bi-collection",
-        [
-            new("messaging", "RabbitMQ", "bi-collection"),
-            new("kafka", "Kafka", "bi-diagram-3"),
-        ]),
+        [ new("messaging", "RabbitMQ", "bi-collection"), new("kafka", "Kafka", "bi-diagram-3") ]),
         new("Platform", "bi-shield-lock",
-        [
-            new("identity", "Identity", "bi-person-badge"),
-            new("registry", "Registry", "bi-box-seam"),
-            new("vault", "Vault", "bi-safe2"),
-        ]),
+        [ new("identity", "Identity", "bi-person-badge"), new("registry", "Registry", "bi-box-seam"), new("vault", "Vault", "bi-safe2") ]),
     ];
     private static readonly TreeGroup[] OpsGroups =
     [
         new("Monitoring", "bi-speedometer2",
-        [
-            new("overview", "Overview", "bi-speedometer2"),
-            new("logs", "Logs", "bi-journal-text"),
-            new("analytics", "Analytics", "bi-graph-up"),
-        ]),
+        [ new("overview", "Overview", "bi-speedometer2"), new("logs", "Logs", "bi-journal-text"), new("analytics", "Analytics", "bi-graph-up") ]),
         new("Alerting", "bi-bell",
-        [
-            new("alerts", "Alerts", "bi-bell"),
-            new("alert-rules", "Alert rules", "bi-sliders"),
-            new("alert-routing", "Alert routing", "bi-signpost-split"),
-            new("notifications", "Notifications", "bi-broadcast"),
-        ]),
+        [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
-        [
-            new("on-call", "On-call", "bi-person-workspace"),
-            new("incidents", "Incidents", "bi-exclamation-octagon"),
-        ]),
+        [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon") ]),
         new("Reliability", "bi-check2-square",
-        [
-            new("sla", "SLA", "bi-check2-square"),
-            new("maintenance", "Maintenance", "bi-tools"),
-            new("secret-expiry", "Secret expiry", "bi-clock-history"),
-        ]),
+        [ new("sla", "SLA", "bi-check2-square"), new("maintenance", "Maintenance", "bi-tools"), new("secret-expiry", "Secret expiry", "bi-clock-history") ]),
     ];
     private static readonly SectionItem[] ManageItems =
     [
-        new("customers", "Customers", "bi-people"),
         new("groups", "Groups", "bi-diagram-2"),
         new("networking", "Networking", "bi-hdd-network"),
         new("blueprints", "Blueprints", "bi-diagram-2-fill"),
@@ -289,13 +262,20 @@ else
     private List<Data.App> allApps = [];
     private List<KubernetesCluster> clusters = [];
 
-    private readonly HashSet<Guid> collapsedEnvs = [];
-    private readonly HashSet<string> collapsedGroups = [];
+    private readonly HashSet<Guid> collapsedEnvs = [];        // environments expanded by default
+    private readonly HashSet<Guid> expandedCustomers = [];    // customers collapsed by default
+    private readonly HashSet<string> collapsedGroups = [];    // service/ops groups expanded by default
     private string filter = "";
+
+    private bool addingEnv;
+    private string newEnvName = "";
+    private bool addingCustomer;
+    private string newCustomerName = "";
+    private Guid? addingAppForCustomer;
+    private string newAppName = "";
 
     private Data.App? selectedApp;
     private Customer? selectedAppCustomer;
-    private Guid? selectedAppEnvId;
     private KubernetesCluster? selectedCluster;
     private string? selectedSection;
 
@@ -317,17 +297,21 @@ else
         environments = await TenantService.GetEnvironmentsAsync(t.Id);
         customers = await TenantService.GetCustomersAsync(t.Id);
         foreach (Customer c in customers)
-        {
-            List<Data.App> apps = await TenantService.GetAppsAsync(c.Id);
-            appsByCustomer[c.Id] = apps;
-            foreach (Data.App a in apps)
-                customerByAppId[a.Id] = c;
-        }
-        allApps = appsByCustomer.Values.SelectMany(x => x).ToList();
+            appsByCustomer[c.Id] = await TenantService.GetAppsAsync(c.Id);
         clusters = await TenantService.GetClustersAsync(t.Id);
+        RebuildAppIndex();
 
         tenant = t;
         RestoreSelectionFromQuery();
+    }
+
+    private void RebuildAppIndex()
+    {
+        customerByAppId.Clear();
+        foreach (Customer c in customers)
+            foreach (Data.App a in appsByCustomer.GetValueOrDefault(c.Id, []))
+                customerByAppId[a.Id] = c;
+        allApps = appsByCustomer.Values.SelectMany(x => x).ToList();
     }
 
     private void RestoreSelectionFromQuery()
@@ -338,8 +322,7 @@ else
             if (selectedApp is not null)
             {
                 selectedAppCustomer = customerByAppId.GetValueOrDefault(selectedApp.Id);
-                selectedAppEnvId = EnvParam;
-                if (EnvParam is Guid e) collapsedEnvs.Remove(e);
+                if (selectedAppCustomer is not null) expandedCustomers.Add(selectedAppCustomer.Id);
             }
         }
         else if (ClusterParam is Guid clusterId)
@@ -353,102 +336,101 @@ else
     }
 
     // ── Tree data helpers ──
-    private Customer? CustomerObjOf(Data.App a) => customerByAppId.GetValueOrDefault(a.Id);
-    private string CustomerNameOf(Data.App a) => CustomerObjOf(a)?.Name ?? "";
-
-    private List<Data.App> AppsInEnv(Data.Environment env) =>
-        allApps.Where(a => a.AppEnvironments.Any(ae => ae.EnvironmentId == env.Id)).ToList();
-    private List<KubernetesCluster> ClustersInEnv(Data.Environment env) =>
-        clusters.Where(c => c.EnvironmentId == env.Id).ToList();
-    private List<Data.App> UnlinkedApps() =>
-        allApps.Where(a => a.AppEnvironments.Count == 0).ToList();
-
-    private bool Match(string? s) =>
-        s is not null && s.Contains(filter.Trim(), StringComparison.OrdinalIgnoreCase);
-
-    private bool EnvHasMatch(Data.Environment env) =>
-        Match(env.Name)
-        || AppsInEnv(env).Any(a => Match(a.Name) || Match(CustomerNameOf(a)))
-        || ClustersInEnv(env).Any(c => Match(c.Name));
+    private List<Data.App> AppsOf(Customer c) => appsByCustomer.GetValueOrDefault(c.Id, []);
+    private List<KubernetesCluster> ClustersInEnv(Data.Environment env) => clusters.Where(c => c.EnvironmentId == env.Id).ToList();
+    private bool Match(string? s) => s is not null && s.Contains(filter.Trim(), StringComparison.OrdinalIgnoreCase);
 
     private List<Data.Environment> VisibleEnvironments() =>
-        HasFilter ? environments.Where(EnvHasMatch).ToList() : environments;
-
-    private List<Data.App> VisibleAppsInEnv(Data.Environment env)
-    {
-        List<Data.App> apps = AppsInEnv(env);
-        if (!HasFilter || Match(env.Name)) return apps;
-        return apps.Where(a => Match(a.Name) || Match(CustomerNameOf(a))).ToList();
-    }
+        HasFilter ? environments.Where(e => Match(e.Name) || ClustersInEnv(e).Any(c => Match(c.Name))).ToList() : environments;
     private List<KubernetesCluster> VisibleClustersInEnv(Data.Environment env)
     {
         List<KubernetesCluster> cl = ClustersInEnv(env);
         if (!HasFilter || Match(env.Name)) return cl;
         return cl.Where(c => Match(c.Name)).ToList();
     }
-    private List<Data.App> VisibleUnlinkedApps()
+    private List<Customer> VisibleCustomers() =>
+        HasFilter ? customers.Where(c => Match(c.Name) || AppsOf(c).Any(a => Match(a.Name))).ToList() : customers;
+    private List<Data.App> VisibleAppsOf(Customer c)
     {
-        List<Data.App> apps = UnlinkedApps();
-        if (!HasFilter) return apps;
-        return apps.Where(a => Match(a.Name) || Match(CustomerNameOf(a))).ToList();
+        List<Data.App> apps = AppsOf(c);
+        if (!HasFilter || Match(c.Name)) return apps;
+        return apps.Where(a => Match(a.Name)).ToList();
     }
-
-    private bool EnvOpen(Data.Environment env) => HasFilter || !collapsedEnvs.Contains(env.Id);
-    private void ToggleEnv(Guid id) { if (!collapsedEnvs.Remove(id)) collapsedEnvs.Add(id); }
-    private void OnFilterInput(ChangeEventArgs e) => filter = e.Value?.ToString() ?? "";
-
-    private bool GroupOpen(string name) => HasFilter || !collapsedGroups.Contains(name);
-    private void ToggleGroup(string name) { if (!collapsedGroups.Remove(name)) collapsedGroups.Add(name); }
     private List<SectionItem> VisibleGroupItems(TreeGroup g) =>
         HasFilter ? g.Items.Where(i => Match(i.Label) || Match(g.Name)).ToList() : g.Items.ToList();
     private List<SectionItem> VisibleManage() =>
         HasFilter ? ManageItems.Where(i => Match(i.Label)).ToList() : ManageItems.ToList();
 
-    private bool IsAppSelected(Guid appId, Guid? envId) =>
-        selectedApp?.Id == appId && selectedAppEnvId == envId;
+    private bool EnvOpen(Data.Environment env) => HasFilter || !collapsedEnvs.Contains(env.Id);
+    private void ToggleEnv(Guid id) { if (!collapsedEnvs.Remove(id)) collapsedEnvs.Add(id); }
+    private bool CustomerOpen(Customer c) => HasFilter || expandedCustomers.Contains(c.Id);
+    private void ToggleCustomer(Guid id) { if (!expandedCustomers.Remove(id)) expandedCustomers.Add(id); }
+    private bool GroupOpen(string name) => HasFilter || !collapsedGroups.Contains(name);
+    private void ToggleGroup(string name) { if (!collapsedGroups.Remove(name)) collapsedGroups.Add(name); }
+    private void OnFilterInput(ChangeEventArgs e) => filter = e.Value?.ToString() ?? "";
+
+    // ── Inline add ──
+    private void StartAddApp(Guid customerId) { addingAppForCustomer = addingAppForCustomer == customerId ? null : customerId; expandedCustomers.Add(customerId); newAppName = ""; }
+    private async Task OnAddKey(KeyboardEventArgs e, Func<Task> submit) { if (e.Key == "Enter") await submit(); }
+
+    private async Task AddEnvironment()
+    {
+        string name = newEnvName.Trim();
+        if (name.Length == 0 || tenant is null) return;
+        await TenantService.CreateEnvironmentAsync(tenant.Id, name);
+        environments = await TenantService.GetEnvironmentsAsync(tenant.Id);
+        newEnvName = ""; addingEnv = false;
+    }
+
+    private async Task AddCustomer()
+    {
+        string name = newCustomerName.Trim();
+        if (name.Length == 0 || tenant is null) return;
+        Customer c = await TenantService.CreateCustomerAsync(tenant.Id, name);
+        customers = await TenantService.GetCustomersAsync(tenant.Id);
+        appsByCustomer[c.Id] = await TenantService.GetAppsAsync(c.Id);
+        RebuildAppIndex();
+        expandedCustomers.Add(c.Id);
+        newCustomerName = ""; addingCustomer = false;
+    }
+
+    private async Task AddApp(Guid customerId)
+    {
+        string name = newAppName.Trim();
+        if (name.Length == 0) return;
+        await TenantService.CreateAppAsync(customerId, name);
+        appsByCustomer[customerId] = await TenantService.GetAppsAsync(customerId);
+        RebuildAppIndex();
+        newAppName = ""; addingAppForCustomer = null;
+    }
 
     // ── Selection + deep-linking ──
-    private void SelectApp(Data.Environment? env, Data.App app)
+    private void SelectApp(Customer c, Data.App app)
     {
-        selectedApp = app;
-        selectedAppCustomer = CustomerObjOf(app);
-        selectedAppEnvId = env?.Id;
-        selectedCluster = null;
-        selectedSection = null;
-        UpdateUrl(app: app.Id, env: env?.Id, cluster: null, section: null);
+        selectedApp = app; selectedAppCustomer = c;
+        selectedCluster = null; selectedSection = null;
+        UpdateUrl(app: app.Id, cluster: null, section: null);
     }
-
     private void SelectCluster(KubernetesCluster cl)
     {
-        selectedCluster = cl;
-        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null;
-        selectedSection = null;
-        UpdateUrl(app: null, env: null, cluster: cl.Id, section: null);
+        selectedCluster = cl; selectedApp = null; selectedAppCustomer = null; selectedSection = null;
+        UpdateUrl(app: null, cluster: cl.Id, section: null);
     }
-
     private void SelectSection(string key)
     {
-        selectedSection = key;
-        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null;
-        selectedCluster = null;
-        UpdateUrl(app: null, env: null, cluster: null, section: key);
+        selectedSection = key; selectedApp = null; selectedAppCustomer = null; selectedCluster = null;
+        UpdateUrl(app: null, cluster: null, section: key);
     }
-
     private void ClearSelection()
     {
-        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null;
-        selectedCluster = null; selectedSection = null;
-        UpdateUrl(null, null, null, null);
+        selectedApp = null; selectedAppCustomer = null; selectedCluster = null; selectedSection = null;
+        UpdateUrl(null, null, null);
     }
-
-    private void UpdateUrl(Guid? app, Guid? env, Guid? cluster, string? section)
+    private void UpdateUrl(Guid? app, Guid? cluster, string? section)
     {
         string uri = Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
         {
-            ["app"] = app,
-            ["env"] = env,
-            ["cluster"] = cluster,
-            ["section"] = section,
+            ["app"] = app, ["cluster"] = cluster, ["section"] = section,
         });
         Nav.NavigateTo(uri, forceLoad: false, replace: true);
     }
@@ -457,28 +439,61 @@ else
     {
         if (selectedAppCustomer is not null)
         {
-            List<Data.App> apps = await TenantService.GetAppsAsync(selectedAppCustomer.Id);
-            appsByCustomer[selectedAppCustomer.Id] = apps;
-            allApps = appsByCustomer.Values.SelectMany(x => x).ToList();
+            appsByCustomer[selectedAppCustomer.Id] = await TenantService.GetAppsAsync(selectedAppCustomer.Id);
+            RebuildAppIndex();
         }
         ClearSelection();
     }
-
     private async Task OnClusterDeleted()
     {
-        if (tenant is not null)
-            clusters = await TenantService.GetClustersAsync(tenant.Id);
+        if (tenant is not null) clusters = await TenantService.GetClustersAsync(tenant.Id);
         ClearSelection();
     }
 
     private void NavigateToSection(string key) => SelectSection(key);
 
+    // ── Service/Operations grouped nodes (mirror the Environment shape) ──
+    private RenderFragment RenderGroupNodes(TreeGroup[] groups) => builder =>
+    {
+        int seq = 0;
+        foreach (TreeGroup g in groups)
+        {
+            List<SectionItem> gi = VisibleGroupItems(g);
+            if (HasFilter && gi.Count == 0) continue;
+            bool gopen = GroupOpen(g.Name);
+
+            builder.OpenElement(seq++, "button");
+            builder.AddAttribute(seq++, "type", "button");
+            builder.AddAttribute(seq++, "class", "node group indent-1");
+            builder.SetKey(g.Name);
+            builder.AddAttribute(seq++, "onclick", EventCallback.Factory.Create(this, () => ToggleGroup(g.Name)));
+            builder.AddMarkupContent(seq++, $"<span class=\"caret\">{(gopen ? "▾" : "▸")}</span><i class=\"ico bi {g.Icon}\" aria-hidden=\"true\"></i>");
+            builder.AddMarkupContent(seq++, $"<span class=\"label\">{g.Name}</span><span class=\"badge-count\">{g.Items.Length}</span>");
+            builder.CloseElement();
+
+            if (gopen)
+            {
+                foreach (SectionItem item in gi)
+                {
+                    builder.OpenElement(seq++, "button");
+                    builder.AddAttribute(seq++, "type", "button");
+                    builder.AddAttribute(seq++, "class", $"node leaf indent-2 {(selectedSection == item.Key ? "selected" : "")}");
+                    builder.SetKey(item.Key);
+                    builder.AddAttribute(seq++, "onclick", EventCallback.Factory.Create(this, () => SelectSection(item.Key)));
+                    builder.AddMarkupContent(seq++, $"<span class=\"caret\"></span><i class=\"ico bi {item.Icon}\" aria-hidden=\"true\"></i><span class=\"label\">{item.Label}</span>");
+                    builder.CloseElement();
+                }
+            }
+        }
+    };
+
+    // ── Detail pane: reuse the existing tab components ──
     private RenderFragment RenderTenantSection(string key) => builder =>
     {
         Guid tid = tenant!.Id;
         switch (key)
         {
-            case "customers": builder.OpenComponent<CustomerTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "environments": builder.OpenComponent<EnvironmentTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "groups": builder.OpenComponent<GroupTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "networking": builder.OpenComponent<NetworkingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "blueprints": builder.OpenComponent<BlueprintsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
