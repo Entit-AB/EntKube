@@ -73,7 +73,7 @@ else
                             <span class="badge-count">@ClustersInEnv(env).Count</span>
                         </button>
                         <button type="button" class="tree-add" title="Register cluster in @env.Name"
-                                aria-label="Register cluster" @onclick='() => SelectSection("environments")'>
+                                aria-label="Register cluster" @onclick="() => RegisterClusterInEnv(env.Id)">
                             <i class="bi bi-plus-lg"></i>
                         </button>
                     </div>
@@ -278,6 +278,7 @@ else
     private Customer? selectedAppCustomer;
     private KubernetesCluster? selectedCluster;
     private string? selectedSection;
+    private Guid? registerEnvId;   // environment to open the cluster-registration on
 
     private bool HasFilter => !string.IsNullOrWhiteSpace(filter);
 
@@ -408,22 +409,29 @@ else
     private void SelectApp(Customer c, Data.App app)
     {
         selectedApp = app; selectedAppCustomer = c;
-        selectedCluster = null; selectedSection = null;
+        selectedCluster = null; selectedSection = null; registerEnvId = null;
         UpdateUrl(app: app.Id, cluster: null, section: null);
     }
     private void SelectCluster(KubernetesCluster cl)
     {
-        selectedCluster = cl; selectedApp = null; selectedAppCustomer = null; selectedSection = null;
+        selectedCluster = cl; selectedApp = null; selectedAppCustomer = null; selectedSection = null; registerEnvId = null;
         UpdateUrl(app: null, cluster: cl.Id, section: null);
     }
     private void SelectSection(string key)
     {
-        selectedSection = key; selectedApp = null; selectedAppCustomer = null; selectedCluster = null;
+        selectedSection = key; selectedApp = null; selectedAppCustomer = null; selectedCluster = null; registerEnvId = null;
         UpdateUrl(app: null, cluster: null, section: key);
+    }
+    private void RegisterClusterInEnv(Guid envId)
+    {
+        registerEnvId = envId;
+        selectedApp = null; selectedAppCustomer = null; selectedCluster = null;
+        selectedSection = "environments";
+        UpdateUrl(app: null, cluster: null, section: "environments");
     }
     private void ClearSelection()
     {
-        selectedApp = null; selectedAppCustomer = null; selectedCluster = null; selectedSection = null;
+        selectedApp = null; selectedAppCustomer = null; selectedCluster = null; selectedSection = null; registerEnvId = null;
         UpdateUrl(null, null, null);
     }
     private void UpdateUrl(Guid? app, Guid? cluster, string? section)
@@ -493,7 +501,13 @@ else
         Guid tid = tenant!.Id;
         switch (key)
         {
-            case "environments": builder.OpenComponent<EnvironmentTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "environments":
+                builder.OpenComponent<EnvironmentTab>(0);
+                builder.SetKey(registerEnvId);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.AddComponentParameter(2, "InitialEnvironmentId", registerEnvId);
+                builder.CloseComponent();
+                break;
             case "groups": builder.OpenComponent<GroupTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "networking": builder.OpenComponent<NetworkingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "blueprints": builder.OpenComponent<BlueprintsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
