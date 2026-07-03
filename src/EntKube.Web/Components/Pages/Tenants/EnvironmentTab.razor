@@ -259,6 +259,10 @@ else
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    /// <summary>When set (e.g. from the resource tree's "register cluster" +),
+    /// open straight onto this environment with the add-cluster form showing.</summary>
+    [Parameter] public Guid? InitialEnvironmentId { get; set; }
+
     // --- Level 1: Environment list ---
     private List<Data.Environment>? environments;
     private Dictionary<Guid, int> clusterCounts = new();
@@ -286,6 +290,16 @@ else
     protected override async Task OnInitializedAsync()
     {
         await LoadEnvironments();
+
+        if (InitialEnvironmentId is Guid envId)
+        {
+            Data.Environment? env = environments?.FirstOrDefault(e => e.Id == envId);
+            if (env is not null)
+            {
+                await OpenEnvironment(env);
+                showAddCluster = true;
+            }
+        }
     }
 
     // ──────────────── Level 1 ────────────────
