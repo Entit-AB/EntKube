@@ -182,6 +182,9 @@ public class Program
         builder.Services.AddScoped<SecretExpiryService>();
         builder.Services.AddScoped<CustomerNotificationService>();
 
+        builder.Services.AddScoped<ComponentInstallOrchestrator>();
+        builder.Services.AddScoped<CatalogComponentRegistrar>();
+        builder.Services.AddScoped<ClusterBlueprintService>();
         builder.Services.AddScoped<AppGovernanceService>();
         builder.Services.AddScoped<GitOperationsService>();
         builder.Services.AddScoped<GitRepositoryService>();
@@ -198,6 +201,7 @@ public class Program
         builder.Services.AddHostedService<SecretExpiryNotificationService>();
         builder.Services.AddHostedService<ObservedSecretRefreshService>();
         builder.Services.AddHostedService<MessagingStatusPollingService>();
+        builder.Services.AddHostedService<BootstrapRunnerService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<GitSyncService>());
 
         builder.Services.AddHttpClient("Notifications", client =>

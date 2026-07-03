@@ -1,0 +1,526 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject ClusterBlueprintService BlueprintService
+
+@* Tenant-scoped cluster blueprints: reusable, ordered recipes of catalog
+   components and services that a registered cluster can be bootstrapped from. *@
+
+<div class="d-flex align-items-center mb-3">
+    <div>
+        <h5 class="mb-0"><i class="bi bi-diagram-3 me-2"></i>Cluster Blueprints</h5>
+        <small class="text-muted">Define an ordered set of components and services, then bootstrap a registered cluster from it.</small>
+    </div>
+</div>
+
+@if (error is not null)
+{
+    <div class="alert alert-danger py-2">@error</div>
+}
+
+<div class="row">
+    <!-- Blueprint list -->
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span class="fw-semibold">Blueprints</span>
+                <button class="btn btn-sm btn-primary" @onclick="() => showCreate = !showCreate">
+                    <i class="bi bi-plus-lg"></i>
+                </button>
+            </div>
+            @if (showCreate)
+            {
+                <div class="card-body border-bottom">
+                    <input class="form-control form-control-sm mb-2" placeholder="Blueprint name" @bind="newName" />
+                    <input class="form-control form-control-sm mb-2" placeholder="Description (optional)" @bind="newDescription" />
+                    <button class="btn btn-sm btn-success" @onclick="CreateBlueprint" disabled="@string.IsNullOrWhiteSpace(newName)">Create</button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showCreate = false">Cancel</button>
+                </div>
+            }
+            <div class="list-group list-group-flush">
+                @if (blueprints.Count == 0)
+                {
+                    <div class="list-group-item text-muted small">No blueprints yet.</div>
+                }
+                @foreach (ClusterBlueprint b in blueprints)
+                {
+                    <button class="list-group-item list-group-item-action @(selected?.Id == b.Id ? "active" : "")"
+                            @onclick="() => SelectBlueprint(b.Id)">
+                        <div class="fw-semibold">@b.Name</div>
+                        @if (!string.IsNullOrWhiteSpace(b.Description))
+                        {
+                            <small class="@(selected?.Id == b.Id ? "" : "text-muted")">@b.Description</small>
+                        }
+                    </button>
+                }
+            </div>
+        </div>
+    </div>
+
+    <!-- Selected blueprint editor -->
+    <div class="col-md-8">
+        @if (selected is null)
+        {
+            <div class="text-muted p-4 text-center border rounded">Select or create a blueprint to edit its steps.</div>
+        }
+        else
+        {
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span class="fw-semibold">@selected.Name</span>
+                    <div>
+                        <button class="btn btn-sm btn-outline-primary" @onclick="StartAddStep">
+                            <i class="bi bi-plus-lg me-1"></i>Add step
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteBlueprint(selected.Id)">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    @if (selected.Steps.Count == 0)
+                    {
+                        <p class="text-muted">No steps yet. Add components (installed via Helm) and services (CNPG, Redis, RabbitMQ) in the order they should be installed.</p>
+                    }
+                    else
+                    {
+                        <ol class="list-group list-group-numbered mb-3">
+                            @foreach (BlueprintStep step in selected.Steps.OrderBy(s => s.Order))
+                            {
+                                <li class="list-group-item d-flex justify-content-between align-items-start">
+                                    <div class="ms-2 me-auto">
+                                        <div class="fw-semibold">
+                                            @step.Name
+                                            <span class="badge @(step.StepType == BlueprintStepType.Service ? "bg-info text-dark" : "bg-secondary")">
+                                                @(step.StepType == BlueprintStepType.Service ? "service" : "component")
+                                            </span>
+                                            <span class="badge bg-light text-dark">@step.Key</span>
+                                        </div>
+                                        <small class="text-muted">
+                                            namespace: @(step.Namespace ?? "—")
+                                            @{
+                                                var pc = ClusterBlueprintService.DeserializeParams(step.ParametersJson).Count;
+                                            }
+                                            @if (pc > 0) { <span> · @pc parameter@(pc == 1 ? "" : "s")</span> }
+                                        </small>
+                                    </div>
+                                    <div class="btn-group btn-group-sm">
+                                        <button class="btn btn-outline-secondary" title="Move up" @onclick="() => MoveStep(step.Id, -1)">
+                                            <i class="bi bi-arrow-up"></i>
+                                        </button>
+                                        <button class="btn btn-outline-secondary" title="Move down" @onclick="() => MoveStep(step.Id, 1)">
+                                            <i class="bi bi-arrow-down"></i>
+                                        </button>
+                                        <button class="btn btn-outline-primary" title="Edit" @onclick="() => StartEditStep(step)">
+                                            <i class="bi bi-pencil"></i>
+                                        </button>
+                                        <button class="btn btn-outline-danger" title="Delete" @onclick="() => DeleteStep(step.Id)">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    </div>
+                                </li>
+                            }
+                        </ol>
+                    }
+
+                    @if (showStepForm)
+                    {
+                        <div class="border rounded p-3 bg-light">
+                            <h6>@(editingStepId is null ? "Add step" : "Edit step")</h6>
+
+                            @if (editingStepId is null)
+                            {
+                                <div class="mb-2">
+                                    <div class="btn-group btn-group-sm" role="group">
+                                        <button class="btn @(stepType == BlueprintStepType.Component ? "btn-primary" : "btn-outline-primary")"
+                                                @onclick="() => SetStepType(BlueprintStepType.Component)">Component</button>
+                                        <button class="btn @(stepType == BlueprintStepType.Service ? "btn-primary" : "btn-outline-primary")"
+                                                @onclick="() => SetStepType(BlueprintStepType.Service)">Service</button>
+                                    </div>
+                                </div>
+
+                                @if (stepType == BlueprintStepType.Component)
+                                {
+                                    <div class="mb-2">
+                                        <label class="form-label small mb-0">Catalog component</label>
+                                        <select class="form-select form-select-sm" value="@selectedCatalogKey"
+                                                @onchange="e => OnPickCatalog(e.Value?.ToString())">
+                                            <option value="">— select a component —</option>
+                                            @foreach (IGrouping<string, CatalogEntry> group in ComponentCatalog.GetByCategory())
+                                            {
+                                                <optgroup label="@group.Key">
+                                                    @foreach (CatalogEntry entry in group)
+                                                    {
+                                                        <option value="@entry.Key">@entry.DisplayName</option>
+                                                    }
+                                                </optgroup>
+                                            }
+                                        </select>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="mb-2">
+                                        <label class="form-label small mb-0">Service kind</label>
+                                        <select class="form-select form-select-sm" value="@selectedServiceKind"
+                                                @onchange="e => OnPickService(e.Value?.ToString())">
+                                            <option value="">— select a service —</option>
+                                            <option value="cnpg">CloudNativePG (Postgres cluster)</option>
+                                            <option value="redis">Redis cluster</option>
+                                            <option value="rabbitmq">RabbitMQ cluster</option>
+                                        </select>
+                                    </div>
+                                }
+                            }
+
+                            @if (CanShowStepFields)
+                            {
+                                <div class="row g-2 mb-2">
+                                    <div class="col">
+                                        <label class="form-label small mb-0">Name / release</label>
+                                        <input class="form-control form-control-sm" @bind="stepName" />
+                                    </div>
+                                    <div class="col">
+                                        <label class="form-label small mb-0">Namespace</label>
+                                        <input class="form-control form-control-sm" @bind="stepNamespace" />
+                                    </div>
+                                </div>
+
+                                @if (stepType == BlueprintStepType.Component && CurrentEntry is not null)
+                                {
+                                    @foreach (ComponentFormField field in CurrentEntry.FormFields.Where(f => !f.Hidden && IsFieldVisible(f)))
+                                    {
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-0">
+                                                @field.Label
+                                                @if (IsClusterScopedField(field))
+                                                {
+                                                    <span class="badge bg-warning text-dark">set at bootstrap</span>
+                                                }
+                                            </label>
+                                            @RenderField(field)
+                                            @if (!string.IsNullOrWhiteSpace(field.HelpText))
+                                            {
+                                                <div class="form-text small">@field.HelpText</div>
+                                            }
+                                        </div>
+                                    }
+                                }
+                                else if (stepType == BlueprintStepType.Service && selectedServiceKind is not null)
+                                {
+                                    @foreach (ServiceParam sp in ServiceParamsFor(selectedServiceKind))
+                                    {
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-0">@sp.Label</label>
+                                            @if (sp.IsToggle)
+                                            {
+                                                <div class="form-check">
+                                                    <input type="checkbox" class="form-check-input"
+                                                           checked="@(GetParam(sp.Key) == "true")"
+                                                           @onchange="e => SetParam(sp.Key, (e.Value as bool? ?? false).ToString().ToLowerInvariant())" />
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <input class="form-control form-control-sm" placeholder="@sp.Placeholder"
+                                                       value="@GetParam(sp.Key)" @onchange="e => SetParam(sp.Key, e.Value?.ToString())" />
+                                            }
+                                        </div>
+                                    }
+                                }
+
+                                <div class="mt-2">
+                                    <button class="btn btn-sm btn-success" @onclick="SaveStep" disabled="@(!CanSaveStep)">Save step</button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="CancelStepForm">Cancel</button>
+                                </div>
+                            }
+                        </div>
+                    }
+
+                    <BlueprintRolloutPanel BlueprintId="selected.Id" @key="selected.Id" />
+                </div>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private List<ClusterBlueprint> blueprints = [];
+    private ClusterBlueprint? selected;
+    private string? error;
+
+    private bool showCreate;
+    private string newName = "";
+    private string? newDescription;
+
+    // Step form state
+    private bool showStepForm;
+    private Guid? editingStepId;
+    private BlueprintStepType stepType = BlueprintStepType.Component;
+    private string? selectedCatalogKey;
+    private string? selectedServiceKind;
+    private string stepName = "";
+    private string? stepNamespace;
+    private Dictionary<string, string> stepParams = new();
+
+    private CatalogEntry? CurrentEntry =>
+        selectedCatalogKey is null ? null : ComponentCatalog.GetByKey(selectedCatalogKey);
+
+    private bool CanShowStepFields =>
+        (stepType == BlueprintStepType.Component && CurrentEntry is not null)
+        || (stepType == BlueprintStepType.Service && selectedServiceKind is not null);
+
+    private bool CanSaveStep => CanShowStepFields && !string.IsNullOrWhiteSpace(stepName);
+
+    protected override async Task OnInitializedAsync() => await LoadBlueprints();
+
+    private async Task LoadBlueprints()
+    {
+        blueprints = await BlueprintService.GetBlueprintsAsync(TenantId);
+    }
+
+    private async Task SelectBlueprint(Guid id)
+    {
+        CancelStepForm();
+        selected = await BlueprintService.GetBlueprintAsync(id);
+    }
+
+    private async Task CreateBlueprint()
+    {
+        error = null;
+        try
+        {
+            ClusterBlueprint created = await BlueprintService.CreateBlueprintAsync(TenantId, newName, newDescription);
+            newName = "";
+            newDescription = null;
+            showCreate = false;
+            await LoadBlueprints();
+            await SelectBlueprint(created.Id);
+        }
+        catch (InvalidOperationException ex) { error = ex.Message; }
+    }
+
+    private async Task DeleteBlueprint(Guid id)
+    {
+        await BlueprintService.DeleteBlueprintAsync(id);
+        selected = null;
+        await LoadBlueprints();
+    }
+
+    // ── Step editing ──
+
+    private void StartAddStep()
+    {
+        editingStepId = null;
+        stepType = BlueprintStepType.Component;
+        selectedCatalogKey = null;
+        selectedServiceKind = null;
+        stepName = "";
+        stepNamespace = null;
+        stepParams = new();
+        showStepForm = true;
+    }
+
+    private void StartEditStep(BlueprintStep step)
+    {
+        editingStepId = step.Id;
+        stepType = step.StepType;
+        stepName = step.Name;
+        stepNamespace = step.Namespace;
+        stepParams = ClusterBlueprintService.DeserializeParams(step.ParametersJson);
+        selectedCatalogKey = step.StepType == BlueprintStepType.Component ? step.Key : null;
+        selectedServiceKind = step.StepType == BlueprintStepType.Service ? step.Key : null;
+        showStepForm = true;
+    }
+
+    private void CancelStepForm()
+    {
+        showStepForm = false;
+        editingStepId = null;
+    }
+
+    private void SetStepType(BlueprintStepType type)
+    {
+        stepType = type;
+        selectedCatalogKey = null;
+        selectedServiceKind = null;
+        stepParams = new();
+        stepName = "";
+        stepNamespace = null;
+    }
+
+    private void OnPickCatalog(string? key)
+    {
+        selectedCatalogKey = string.IsNullOrWhiteSpace(key) ? null : key;
+        stepParams = new();
+        if (CurrentEntry is CatalogEntry entry)
+        {
+            stepName = entry.DefaultReleaseName ?? entry.Key;
+            stepNamespace = entry.DefaultNamespace;
+            foreach (ComponentFormField field in entry.FormFields)
+            {
+                if (field.DefaultValue is not null)
+                {
+                    stepParams[field.Key] = field.DefaultValue;
+                }
+            }
+        }
+    }
+
+    private void OnPickService(string? kind)
+    {
+        selectedServiceKind = string.IsNullOrWhiteSpace(kind) ? null : kind;
+        stepParams = new();
+        stepNamespace = "default";
+        stepName = kind ?? "";
+        if (selectedServiceKind is not null)
+        {
+            foreach (ServiceParam sp in ServiceParamsFor(selectedServiceKind))
+            {
+                if (sp.Default is not null) stepParams[sp.Key] = sp.Default;
+            }
+        }
+    }
+
+    private async Task SaveStep()
+    {
+        error = null;
+        try
+        {
+            string key = stepType == BlueprintStepType.Component ? selectedCatalogKey! : selectedServiceKind!;
+            if (editingStepId is Guid id)
+            {
+                await BlueprintService.UpdateStepAsync(id, stepName, stepNamespace, stepParams);
+            }
+            else
+            {
+                await BlueprintService.AddStepAsync(selected!.Id, stepType, key, stepName, stepNamespace, stepParams);
+            }
+            showStepForm = false;
+            editingStepId = null;
+            selected = await BlueprintService.GetBlueprintAsync(selected!.Id);
+        }
+        catch (InvalidOperationException ex) { error = ex.Message; }
+    }
+
+    private async Task MoveStep(Guid stepId, int direction)
+    {
+        await BlueprintService.MoveStepAsync(stepId, direction);
+        selected = await BlueprintService.GetBlueprintAsync(selected!.Id);
+    }
+
+    private async Task DeleteStep(Guid stepId)
+    {
+        await BlueprintService.DeleteStepAsync(stepId);
+        selected = await BlueprintService.GetBlueprintAsync(selected!.Id);
+    }
+
+    // ── Param helpers ──
+
+    private string GetParam(string key) => stepParams.TryGetValue(key, out string? v) ? v : "";
+    private void SetParam(string key, string? value) => stepParams[key] = value ?? "";
+
+    private bool IsFieldVisible(ComponentFormField field)
+    {
+        if (field.DependsOnKey is null) return true;
+        stepParams.TryGetValue(field.DependsOnKey, out string? actual);
+        if (field.DependsOnValue is null) return !string.IsNullOrWhiteSpace(actual);
+        return string.Equals(actual, field.DependsOnValue, StringComparison.Ordinal);
+    }
+
+    private static bool IsClusterScopedField(ComponentFormField field) =>
+        field.Type is FormFieldType.CnpgDatabase or FormFieldType.ClusterIssuer
+            or FormFieldType.StorageLink or FormFieldType.GatewaySelector;
+
+    private RenderFragment RenderField(ComponentFormField field) => builder =>
+    {
+        // Cluster-scoped selector types can't be resolved without a target cluster,
+        // so they render as free text here and are typically filled in at bootstrap.
+        if (field.Type == FormFieldType.Toggle)
+        {
+            builder.OpenElement(0, "div");
+            builder.AddAttribute(1, "class", "form-check");
+            builder.OpenElement(2, "input");
+            builder.AddAttribute(3, "type", "checkbox");
+            builder.AddAttribute(4, "class", "form-check-input");
+            builder.AddAttribute(5, "checked", GetParam(field.Key) == "true");
+            builder.AddAttribute(6, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this,
+                e => SetParam(field.Key, (e.Value as bool? ?? false).ToString().ToLowerInvariant())));
+            builder.CloseElement();
+            builder.CloseElement();
+            return;
+        }
+
+        if (field.Type == FormFieldType.Select && field.Options is { Count: > 0 })
+        {
+            builder.OpenElement(0, "select");
+            builder.AddAttribute(1, "class", "form-select form-select-sm");
+            builder.AddAttribute(2, "value", GetParam(field.Key));
+            builder.AddAttribute(3, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this,
+                e => SetParam(field.Key, e.Value?.ToString())));
+            int seq = 4;
+            if (!string.IsNullOrEmpty(field.Placeholder))
+            {
+                builder.OpenElement(seq++, "option");
+                builder.AddAttribute(seq++, "value", "");
+                builder.AddContent(seq++, field.Placeholder);
+                builder.CloseElement();
+            }
+            foreach (string opt in field.Options)
+            {
+                builder.OpenElement(seq++, "option");
+                builder.AddAttribute(seq++, "value", opt);
+                builder.AddContent(seq++, opt);
+                builder.CloseElement();
+            }
+            builder.CloseElement();
+            return;
+        }
+
+        builder.OpenElement(0, "input");
+        builder.AddAttribute(1, "class", "form-control form-control-sm");
+        builder.AddAttribute(2, "type", field.Type == FormFieldType.Password ? "password"
+            : field.Type == FormFieldType.Number ? "number" : "text");
+        builder.AddAttribute(3, "placeholder", field.Placeholder ?? "");
+        builder.AddAttribute(4, "value", GetParam(field.Key));
+        builder.AddAttribute(5, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this,
+            e => SetParam(field.Key, e.Value?.ToString())));
+        builder.CloseElement();
+    };
+
+    // ── Service parameter definitions (keys must match BootstrapRunnerService) ──
+
+    private record ServiceParam(string Key, string Label, string? Default, string? Placeholder = null, bool IsToggle = false);
+
+    private static IReadOnlyList<ServiceParam> ServiceParamsFor(string kind) => kind switch
+    {
+        "cnpg" =>
+        [
+            new("instances", "Instances", "1"),
+            new("storageSize", "Storage size", "10Gi"),
+            new("postgresVersion", "Postgres version", "18"),
+            new("backupSchedule", "Backup schedule (cron, optional)", null, "0 0 */6 * * *"),
+            new("retentionDays", "Backup retention (days)", "30"),
+            new("maxBackups", "Max backups", "20"),
+            new("storageLinkId", "Backup storage link ID (optional)", null, "GUID of a StorageLink"),
+        ],
+        "redis" =>
+        [
+            new("clusterSize", "Cluster size", "3"),
+            new("redisVersion", "Redis version", "7.4.1"),
+            new("storageSize", "Storage size", "5Gi"),
+            new("storageClass", "Storage class (optional)", null),
+            new("persistenceEnabled", "Persistence enabled", "true", IsToggle: true),
+        ],
+        "rabbitmq" =>
+        [
+            new("version", "RabbitMQ version", "4.0.5"),
+            new("replicas", "Replicas", "3"),
+            new("storageSize", "Storage size", "10Gi"),
+            new("storageClass", "Storage class (optional)", null),
+            new("storageLinkId", "Backup storage link ID (optional)", null, "GUID of a StorageLink"),
+        ],
+        _ => []
+    };
+}

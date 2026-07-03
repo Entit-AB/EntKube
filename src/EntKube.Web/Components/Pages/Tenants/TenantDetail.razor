@@ -85,6 +85,11 @@ else
                     <i class="bi bi-diagram-2 me-1"></i>Networking
                 </button>
             </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "blueprints" ? "active" : "")" @onclick='() => SetTab("blueprints")'>
+                    <i class="bi bi-diagram-3 me-1"></i>Blueprints
+                </button>
+            </li>
         }
         else if (activeCategory == "services")
         {
@@ -218,6 +223,9 @@ else
                 break;
             case "identity":
                 <IdentityTab TenantId="tenant.Id" />
+                break;
+            case "blueprints":
+                <BlueprintsTab TenantId="tenant.Id" />
                 break;
             case "registry":
                 <RegistryTab TenantId="tenant.Id" />

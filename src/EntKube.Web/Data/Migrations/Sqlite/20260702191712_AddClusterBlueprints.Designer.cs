@@ -3,6 +3,7 @@ using System;
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.Sqlite
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260702191712_AddClusterBlueprints")]
+    partial class AddClusterBlueprints
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.8");
@@ -794,86 +797,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("AuditEvents");
                 });
 
-            modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("AutoAdvance")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<Guid>("BlueprintId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("BlueprintName")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime?>("FinishedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("TriggeredBy")
-                        .HasMaxLength(256)
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BlueprintId");
-
-                    b.ToTable("BlueprintRollouts");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.BlueprintRolloutTarget", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid?>("BootstrapRunId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid>("ClusterId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ClusterName")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime?>("FinishedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("Order")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<Guid>("RolloutId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime?>("StartedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("RolloutId", "Order");
-
-                    b.ToTable("BlueprintRolloutTargets");
-                });
-
             modelBuilder.Entity("EntKube.Web.Data.BlueprintStep", b =>
                 {
                     b.Property<Guid>("Id")
@@ -942,14 +865,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("INTEGER");
 
                     b.Property<DateTime?>("FinishedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Mode")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid?>("RolloutTargetId")
                         .HasColumnType("TEXT");
 
                     b.Property<DateTime?>("StartedAt")
@@ -4627,28 +4542,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Deployment");
                 });
 
-            modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
-                {
-                    b.HasOne("EntKube.Web.Data.ClusterBlueprint", "Blueprint")
-                        .WithMany()
-                        .HasForeignKey("BlueprintId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Blueprint");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.BlueprintRolloutTarget", b =>
-                {
-                    b.HasOne("EntKube.Web.Data.BlueprintRollout", "Rollout")
-                        .WithMany("Targets")
-                        .HasForeignKey("RolloutId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Rollout");
-                });
-
             modelBuilder.Entity("EntKube.Web.Data.BlueprintStep", b =>
                 {
                     b.HasOne("EntKube.Web.Data.ClusterBlueprint", "Blueprint")
@@ -6071,11 +5964,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
             modelBuilder.Entity("EntKube.Web.Data.AppRoute", b =>
                 {
                     b.Navigation("DeploymentRoutes");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
-                {
-                    b.Navigation("Targets");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.BootstrapRun", b =>

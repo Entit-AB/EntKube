@@ -1,0 +1,196 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@implements IDisposable
+@inject ClusterBlueprintService BlueprintService
+
+@* Staged rollout of a blueprint's current state to the clusters that were
+   bootstrapped from it — one cluster at a time, with a promotion gate between
+   each (CI/CD style). Halts on failure. *@
+
+<div class="border-top mt-3 pt-3">
+    <h6><i class="bi bi-rocket-takeoff me-2"></i>Push update to clusters</h6>
+    <p class="small text-muted mb-2">
+        Re-apply this blueprint to clusters already bootstrapped from it. Components are upgraded in place;
+        existing CNPG/Redis/RabbitMQ instances are left unchanged. Clusters are updated one at a time.
+    </p>
+
+    @if (error is not null)
+    {
+        <div class="alert alert-danger py-2">@error</div>
+    }
+
+    @if (clusters.Count == 0)
+    {
+        <div class="text-muted small">No clusters have been bootstrapped from this blueprint yet.</div>
+    }
+    else
+    {
+        bool activeRollout = rollouts.Any(r => r.Status == RolloutStatus.InProgress);
+
+        @if (!activeRollout)
+        {
+            <div class="mb-2">
+                @foreach ((Guid id, string name) in clusters)
+                {
+                    <div class="form-check">
+                        <input type="checkbox" class="form-check-input" id="cl-@id"
+                               checked="@selected.Contains(id)"
+                               @onchange="e => ToggleCluster(id, (bool)(e.Value ?? false))" />
+                        <label class="form-check-label" for="cl-@id">@name</label>
+                    </div>
+                }
+                <div class="form-check form-switch mt-2">
+                    <input type="checkbox" class="form-check-input" id="auto-advance"
+                           checked="@autoAdvance" @onchange="e => autoAdvance = (bool)(e.Value ?? false)" />
+                    <label class="form-check-label small" for="auto-advance">
+                        Auto-advance (promote the next cluster automatically after each success)
+                    </label>
+                </div>
+                <button class="btn btn-sm btn-primary mt-2" @onclick="StartRollout" disabled="@(selected.Count == 0)">
+                    <i class="bi bi-play-fill me-1"></i>Start rollout (@selected.Count cluster@(selected.Count == 1 ? "" : "s"))
+                </button>
+            </div>
+        }
+    }
+
+    @if (rollouts.Count > 0)
+    {
+        <div class="mt-3">
+            @foreach (BlueprintRollout r in rollouts)
+            {
+                <div class="border rounded p-2 mb-2">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <span class="badge @RolloutStatusClass(r.Status)">@r.Status</span>
+                            <small class="text-muted ms-2">@r.CreatedAt.ToString("yyyy-MM-dd HH:mm")</small>
+                            @if (r.AutoAdvance) { <span class="badge bg-light text-dark ms-1">auto-advance</span> }
+                        </div>
+                        <div class="btn-group btn-group-sm">
+                            @if (r.Status == RolloutStatus.InProgress && AwaitingPromotion(r))
+                            {
+                                <button class="btn btn-outline-success" @onclick="() => PromoteNext(r.Id)">
+                                    <i class="bi bi-arrow-right-circle me-1"></i>Promote next
+                                </button>
+                            }
+                            @if (r.Status == RolloutStatus.Failed && AwaitingPromotion(r))
+                            {
+                                <button class="btn btn-outline-warning" @onclick="() => PromoteNext(r.Id)" title="Retry the next pending cluster">
+                                    <i class="bi bi-arrow-clockwise me-1"></i>Retry next
+                                </button>
+                            }
+                            @if (r.Status == RolloutStatus.InProgress)
+                            {
+                                <button class="btn btn-outline-danger" @onclick="() => Cancel(r.Id)">
+                                    <i class="bi bi-x-lg me-1"></i>Cancel
+                                </button>
+                            }
+                        </div>
+                    </div>
+                    <ol class="list-group list-group-numbered mt-2">
+                        @foreach (BlueprintRolloutTarget t in r.Targets.OrderBy(t => t.Order))
+                        {
+                            <li class="list-group-item d-flex justify-content-between align-items-center py-1">
+                                <span>@t.ClusterName</span>
+                                <span class="badge @TargetStatusClass(t.Status)">@t.Status</span>
+                            </li>
+                        }
+                    </ol>
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter] public Guid BlueprintId { get; set; }
+
+    private List<(Guid Id, string Name)> clusters = [];
+    private List<BlueprintRollout> rollouts = [];
+    private readonly HashSet<Guid> selected = [];
+    private bool autoAdvance;
+    private string? error;
+    private Timer? pollTimer;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        await Reload();
+        foreach ((Guid id, _) in clusters)
+        {
+            selected.Add(id);
+        }
+    }
+
+    protected override void OnInitialized()
+    {
+        pollTimer = new Timer(async _ => await InvokeAsync(async () =>
+        {
+            await Reload();
+            StateHasChanged();
+        }), null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
+    }
+
+    private async Task Reload()
+    {
+        clusters = await BlueprintService.GetBootstrappedClustersAsync(BlueprintId);
+        rollouts = await BlueprintService.GetRolloutsForBlueprintAsync(BlueprintId);
+    }
+
+    private void ToggleCluster(Guid id, bool include)
+    {
+        if (include) selected.Add(id); else selected.Remove(id);
+    }
+
+    private async Task StartRollout()
+    {
+        error = null;
+        try
+        {
+            // Preserve the display order (clusters is name-ordered).
+            List<Guid> ordered = clusters.Where(c => selected.Contains(c.Id)).Select(c => c.Id).ToList();
+            await BlueprintService.CreateRolloutAsync(BlueprintId, ordered, autoAdvance, triggeredBy: null);
+            await Reload();
+        }
+        catch (InvalidOperationException ex) { error = ex.Message; }
+    }
+
+    private async Task PromoteNext(Guid rolloutId)
+    {
+        error = null;
+        try
+        {
+            await BlueprintService.StartNextTargetAsync(rolloutId);
+            await Reload();
+        }
+        catch (InvalidOperationException ex) { error = ex.Message; }
+    }
+
+    private async Task Cancel(Guid rolloutId)
+    {
+        await BlueprintService.CancelRolloutAsync(rolloutId);
+        await Reload();
+    }
+
+    // A rollout is awaiting a manual promotion when nothing is running but work remains.
+    private static bool AwaitingPromotion(BlueprintRollout r) =>
+        r.Targets.All(t => t.Status != RolloutTargetStatus.Running)
+        && r.Targets.Any(t => t.Status == RolloutTargetStatus.Pending);
+
+    private static string RolloutStatusClass(RolloutStatus s) => s switch
+    {
+        RolloutStatus.Completed => "bg-success",
+        RolloutStatus.Failed => "bg-danger",
+        RolloutStatus.Cancelled => "bg-secondary",
+        _ => "bg-primary"
+    };
+
+    private static string TargetStatusClass(RolloutTargetStatus s) => s switch
+    {
+        RolloutTargetStatus.Succeeded => "bg-success",
+        RolloutTargetStatus.Failed => "bg-danger",
+        RolloutTargetStatus.Running => "bg-primary",
+        RolloutTargetStatus.Skipped => "bg-secondary",
+        _ => "bg-light text-dark"
+    };
+
+    public void Dispose() => pollTimer?.Dispose();
+}

@@ -29,6 +29,7 @@ public class Tenant
     public ICollection<Environment> Environments { get; set; } = [];
     public ICollection<Customer> Customers { get; set; } = [];
     public ICollection<KubernetesCluster> KubernetesClusters { get; set; } = [];
+    public ICollection<ClusterBlueprint> Blueprints { get; set; } = [];
     public ICollection<GitRepository> GitRepositories { get; set; } = [];
     public ICollection<GitKnownHost> GitKnownHosts { get; set; } = [];
     public SecretVault? Vault { get; set; }

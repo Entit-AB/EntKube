@@ -4,6 +4,7 @@
 @inject TenantService TenantService
 @inject VaultService VaultService
 @inject ComponentLifecycleService LifecycleService
+@inject ComponentInstallOrchestrator InstallOrchestrator
 @inject ExternalRouteService RouteService
 @inject ComponentScanService ScanService
 @inject KeycloakService KeycloakService
@@ -87,6 +88,11 @@
         </button>
     </li>
     <li class="nav-item">
+        <button class="nav-link @(section == "bootstrap" ? "active" : "")" @onclick='() => section = "bootstrap"'>
+            <i class="bi bi-diagram-3 me-1"></i>Bootstrap
+        </button>
+    </li>
+    <li class="nav-item">
         <button class="nav-link @(section == "logs" ? "active" : "")" @onclick='() => section = "logs"'>
             <i class="bi bi-journal-text me-1"></i>Logs
         </button>
@@ -113,6 +119,10 @@ else if (section == "logs")
 else if (section == "vpn")
 {
     <HeadscaleVpnTab ClusterId="Cluster.Id" TenantId="TenantId" />
+}
+else if (section == "bootstrap")
+{
+    <ClusterBootstrapPanel ClusterId="Cluster.Id" TenantId="TenantId" />
 }
 else if (section == "components")
 {
@@ -406,6 +416,10 @@ else if (section == "components")
                                         <select class="form-select form-select-sm"
                                                 value="@GetFormFieldValue(field.Key)"
                                                 @onchange="@(e => OnRegFieldChanged(field.Key, e))">
+                                            @if (!string.IsNullOrEmpty(field.Placeholder))
+                                            {
+                                                <option value="">@field.Placeholder</option>
+                                            }
                                             @foreach (string option in field.Options)
                                             {
                                                 <option value="@option">@option</option>
@@ -1005,6 +1019,10 @@ else if (section == "components")
                                                         <select class="form-select form-select-sm"
                                                                 value="@GetEditFormFieldValue(field.Key)"
                                                                 @onchange="@(e => OnEditFieldChanged(field.Key, e))">
+                                                            @if (!string.IsNullOrEmpty(field.Placeholder))
+                                                            {
+                                                                <option value="">@field.Placeholder</option>
+                                                            }
                                                             @foreach (string option in field.Options)
                                                             {
                                                                 <option value="@option">@option</option>
@@ -2091,101 +2109,9 @@ else if (section == "components")
 
         try
         {
-            await LifecycleService.PrepareInstallAsync(componentId);
-
-            // Refresh Keycloak DB config into HelmValues from the stored config (if any).
-            await KeycloakService.RefreshDatabaseHelmValuesIfConfiguredAsync(TenantId, componentId);
-            // Grant all schema privileges to the database owner so Liquibase can run on install.
-            await KeycloakService.GrantDatabaseOwnerPermissionsIfConfiguredAsync(TenantId, componentId);
-            // Release any stuck Liquibase lock so migrations can proceed on startup.
-            await KeycloakService.ReleaseLiquibaseLockIfConfiguredAsync(TenantId, componentId);
-            // Update realm frontendUrl to match the configured admin URL (fixes restored-database URL mismatch).
-            await KeycloakService.FixRealmUrlsIfConfiguredAsync(TenantId, componentId);
-            // Refresh Harbor CNPG + S3 credentials in Helm values before install/upgrade.
-            await HarborService.RefreshHelmValuesIfConfiguredAsync(TenantId, componentId);
-
-            HelmCommand command = await LifecycleService.GetInstallCommandAsync(componentId);
-
-            // Pre-sync component secrets so they exist in K8s before the pod starts.
-            // Components like Keycloak reference secrets via extraEnvFrom at pod startup,
-            // which happens during Helm's --wait phase, so the secret must exist first.
-            HelmExecutionResult preSyncResult = await LifecycleService.SyncComponentSecretsAsync(componentId);
-
-            HelmExecutionResult result = await LifecycleService.ExecuteHelmAsync(componentId, command);
-
-            // Prepend pre-sync output so the user can see exactly how many keys were synced.
-            if (!string.IsNullOrWhiteSpace(preSyncResult.Output))
-            {
-                result = new HelmExecutionResult
-                {
-                    Success = result.Success,
-                    ExitCode = result.ExitCode,
-                    Output = $"--- Pre-install Secret Sync ---\n{preSyncResult.Output}\n\n{result.Output}"
-                };
-            }
-
-            if (result.Success)
-            {
-                HelmExecutionResult subchartResult = await LifecycleService.InstallSubchartsAsync(componentId);
-
-                if (!string.IsNullOrWhiteSpace(subchartResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success && subchartResult.Success,
-                        Output = result.Output + "\n" + subchartResult.Output
-                    };
-                }
-            }
-
-            await LifecycleService.MarkInstallResultAsync(componentId, result.Success, result.Success ? null : result.Output);
-
-            // After successful install, sync any secrets marked for K8s sync.
-
-            if (result.Success)
-            {
-                HelmExecutionResult syncResult = await LifecycleService.SyncComponentSecretsAsync(componentId);
-
-                if (!string.IsNullOrWhiteSpace(syncResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success,
-                        Output = result.Output + "\n\n--- Secret Sync ---\n" + syncResult.Output
-                    };
-                }
-
-                // For components that self-expose (e.g. headscale): ensure the external route
-                // record exists before applying so it's included in the Gateway manifest.
-                await HeadscaleService.EnsureExternalRouteAfterInstallAsync(componentId);
-
-                // Apply HTTPRoute + Certificate manifests for any configured external routes.
-                HelmExecutionResult routeResult = await LifecycleService.ApplyExternalRoutesAsync(componentId);
-                if (!string.IsNullOrWhiteSpace(routeResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success && routeResult.Success,
-                        Output = result.Output + "\n\n--- Route Apply ---\n" + routeResult.Output
-                    };
-                }
-
-                // wg-easy: automatically re-apply its target Istio gateway so the
-                // gateway's LoadBalancer exposes the WireGuard UDP port — no manual
-                // Save & Apply on the gateway required.
-                if (components?.FirstOrDefault(c => c.Id == componentId)?.Name == "wg-easy")
-                {
-                    HelmExecutionResult? gwResult = await LifecycleService.EnsureGatewayWireGuardPortAsync(componentId);
-                    if (gwResult is not null && !string.IsNullOrWhiteSpace(gwResult.Output))
-                    {
-                        result = new HelmExecutionResult
-                        {
-                            Success = result.Success && gwResult.Success,
-                            Output = result.Output + "\n\n--- Gateway UDP Port ---\n" + gwResult.Output
-                        };
-                    }
-                }
-            }
+            // Delegate to the shared orchestrator so a manual install and a blueprint
+            // bootstrap step run through exactly the same sequence.
+            HelmExecutionResult result = await InstallOrchestrator.InstallAsync(TenantId, componentId);
 
             operationOutput = result.Output;
             operationComponentId = componentId;
@@ -2676,6 +2602,12 @@ else if (section == "components")
                 continue;
             }
 
+            // Fields with no YAML path are handled elsewhere (e.g. LetsEncryptSolverBuilder).
+            if (string.IsNullOrEmpty(field.YamlPath))
+            {
+                continue;
+            }
+
             if (regFormFieldValues.TryGetValue(field.Key, out string? fieldVal) && !string.IsNullOrEmpty(fieldVal))
             {
                 pathValues[field.YamlPath] = fieldVal;
@@ -2689,26 +2621,11 @@ else if (section == "components")
             result = string.Join("\n", subchartMarkers) + "\n" + result;
         }
 
-        // For letsencrypt-issuer, auto-detect the Gateway and inject parentRefs for HTTP-01,
-        // and conditionally inject the DNS-01 clientSecretSecretRef when an Azure DNS zone is configured.
-        if (selectedCatalogEntry.Key == "letsencrypt-issuer" && components is not null)
+        // For letsencrypt-issuer, build the ACME solvers (HTTP-01 and/or DNS-01 across
+        // the selected provider) from the form selections.
+        if (selectedCatalogEntry.Key == LetsEncryptSolverBuilder.CatalogKey)
         {
-            (string gwName, string gwNamespace) = ExternalRouteService.ResolveGateway(components);
-            result = YamlFormMerger.MergeFormValues(result, new Dictionary<string, string>
-            {
-                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.name"] = gwName,
-                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.namespace"] = gwNamespace,
-                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.kind"] = "Gateway"
-            });
-
-            if (regFormFieldValues.TryGetValue("dns-zone", out string? zone) && !string.IsNullOrWhiteSpace(zone))
-            {
-                result = YamlFormMerger.MergeFormValues(result, new Dictionary<string, string>
-                {
-                    ["spec.acme.solvers.1.dns01.azureDNS.clientSecretSecretRef.name"] = "azuredns-config",
-                    ["spec.acme.solvers.1.dns01.azureDNS.clientSecretSecretRef.key"] = "azuredns-client-secret"
-                });
-            }
+            result = LetsEncryptSolverBuilder.Apply(result, regFormFieldValues, components ?? []);
         }
 
         return result;
@@ -2753,6 +2670,12 @@ else if (section == "components")
                 continue;
             }
 
+            // Fields with no YAML path are handled elsewhere (e.g. LetsEncryptSolverBuilder).
+            if (string.IsNullOrEmpty(field.YamlPath))
+            {
+                continue;
+            }
+
             if (editFormFieldValues.TryGetValue(field.Key, out string? fieldVal) && !string.IsNullOrEmpty(fieldVal))
             {
                 pathValues[field.YamlPath] = fieldVal;
@@ -2769,26 +2692,11 @@ else if (section == "components")
             result = string.Join("\n", subchartMarkers) + "\n" + result;
         }
 
-        // For letsencrypt-issuer, auto-detect the Gateway and inject parentRefs for HTTP-01,
-        // and conditionally inject the DNS-01 clientSecretSecretRef when an Azure DNS zone is configured.
-        if (catalogMatch.Key == "letsencrypt-issuer" && components is not null)
+        // For letsencrypt-issuer, build the ACME solvers (HTTP-01 and/or DNS-01 across
+        // the selected provider) from the form selections.
+        if (catalogMatch.Key == LetsEncryptSolverBuilder.CatalogKey)
         {
-            (string gwName, string gwNamespace) = ExternalRouteService.ResolveGateway(components);
-            result = YamlFormMerger.MergeFormValues(result, new Dictionary<string, string>
-            {
-                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.name"] = gwName,
-                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.namespace"] = gwNamespace,
-                ["spec.acme.solvers.0.http01.gatewayHTTPRoute.parentRefs.0.kind"] = "Gateway"
-            });
-
-            if (editFormFieldValues.TryGetValue("dns-zone", out string? zone) && !string.IsNullOrWhiteSpace(zone))
-            {
-                result = YamlFormMerger.MergeFormValues(result, new Dictionary<string, string>
-                {
-                    ["spec.acme.solvers.1.dns01.azureDNS.clientSecretSecretRef.name"] = "azuredns-config",
-                    ["spec.acme.solvers.1.dns01.azureDNS.clientSecretSecretRef.key"] = "azuredns-client-secret"
-                });
-            }
+            result = LetsEncryptSolverBuilder.Apply(result, editFormFieldValues, components ?? []);
         }
 
         return result;
@@ -2955,6 +2863,14 @@ else if (section == "components")
                     editFormFieldValues[field.Key] = extracted;
                 }
             }
+        }
+
+        // For letsencrypt-issuer the solver config isn't captured by field YamlPaths
+        // (it's built by LetsEncryptSolverBuilder), so derive the challenge/provider
+        // toggles from the installed YAML to keep the edit form non-destructive.
+        if (catalogMatch.Key == LetsEncryptSolverBuilder.CatalogKey)
+        {
+            LetsEncryptSolverBuilder.PopulateEditValues(comp.HelmValues, editFormFieldValues);
         }
     }
 
