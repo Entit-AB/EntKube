@@ -23,7 +23,7 @@
         </div>
         @if (!showAddForm)
         {
-            <button class="btn btn-primary btn-sm" @onclick="() => showAddForm = true">
+            <button class="btn btn-primary btn-sm" @onclick="OpenAddForm">
                 <i class="bi bi-plus-lg me-1"></i>Add Tunnel
             </button>
         }
@@ -101,11 +101,21 @@
                     {
                         <div class="mb-3">
                             <label class="form-label fw-semibold">Gateway Cluster</label>
-                            <p class="text-muted small">The cluster where the StrongSwan pod will be installed.</p>
+                            <p class="text-muted small">
+                                The cluster where the StrongSwan pod will be installed.
+                                @if (ClusterId.HasValue)
+                                {
+                                    <span>Locked to this cluster while scoped to it.</span>
+                                }
+                            </p>
                             <select class="form-select" value="@selectedGatewayClusterId"
+                                    disabled="@ClusterId.HasValue"
                                     @onchange="OnGatewayClusterChanged">
-                                <option value="">— select cluster —</option>
-                                @foreach (KubernetesCluster cluster in availableClusters)
+                                @if (!ClusterId.HasValue)
+                                {
+                                    <option value="">— select cluster —</option>
+                                }
+                                @foreach (KubernetesCluster cluster in GatewayClusterOptions)
                                 {
                                     <option value="@cluster.Id">@cluster.Name</option>
                                 }
@@ -159,8 +169,13 @@
                                     <div class="d-flex align-items-center gap-2 mb-2">
                                         <input type="checkbox" class="form-check-input" id="cluster-@cluster.Id"
                                                checked="@selected"
+                                               disabled="@(ClusterId.HasValue && cluster.Id == ClusterId.Value)"
                                                @onchange="e => ToggleMeshCluster(cluster.Id, (bool)(e.Value ?? false))" />
                                         <label class="form-check-label fw-semibold" for="cluster-@cluster.Id">@cluster.Name</label>
+                                        @if (ClusterId.HasValue && cluster.Id == ClusterId.Value)
+                                        {
+                                            <span class="badge bg-secondary-subtle text-secondary border small">This cluster</span>
+                                        }
                                         @if (selected && meshBrokerClusterId == cluster.Id)
                                         {
                                             <span class="badge bg-primary-subtle text-primary border border-primary-subtle small">Broker host</span>
@@ -453,7 +468,7 @@
     }
 
     @* ── Tunnel List ── *@
-    @if (tunnels.Count == 0 && !showAddForm)
+    @if (!DisplayedTunnels.Any() && !showAddForm)
     {
         <div class="text-center py-5 text-muted">
             <i class="bi bi-shield-lock display-4 d-block mb-3 opacity-25"></i>
@@ -463,7 +478,7 @@
     }
     else
     {
-        @foreach (VpnTunnel tunnel in tunnels)
+        @foreach (VpnTunnel tunnel in DisplayedTunnels)
         {
             bool expanded = expandedTunnelId == tunnel.Id;
             <div class="card shadow-sm mb-3">
@@ -752,6 +767,31 @@
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    /// <summary>
+    /// Optional cluster scope. When set, the tab only shows/creates tunnels whose
+    /// StrongSwan gateway (local endpoint) runs on this cluster. When null, the
+    /// classic tenant-wide behaviour is used (all tunnels, free cluster choice).
+    /// </summary>
+    [Parameter] public Guid? ClusterId { get; set; }
+
+    /// <summary>
+    /// Tunnels shown in the list. When <see cref="ClusterId"/> is set, filtered to
+    /// tunnels with a local endpoint on that cluster; otherwise all tenant tunnels.
+    /// </summary>
+    private IEnumerable<VpnTunnel> DisplayedTunnels =>
+        ClusterId.HasValue
+            ? tunnels.Where(t => t.LocalEndpoints.Any(ep => ep.ClusterId == ClusterId.Value))
+            : tunnels;
+
+    /// <summary>
+    /// Cluster options offered by the gateway-cluster picker. When scoped, only the
+    /// scope cluster is selectable — the StrongSwan gateway must live there.
+    /// </summary>
+    private IEnumerable<KubernetesCluster> GatewayClusterOptions =>
+        ClusterId.HasValue
+            ? availableClusters.Where(c => c.Id == ClusterId.Value)
+            : availableClusters;
+
     private bool loading = true;
     private bool saving = false;
     private string? errorMessage;
@@ -873,9 +913,27 @@
         }
     }
 
-    private async Task OnGatewayClusterChanged(ChangeEventArgs e)
+    /// <summary>
+    /// Opens the create wizard. When cluster-scoped, preselects the scope cluster as
+    /// the site-to-site gateway (and detects its CIDRs) and ensures it participates in
+    /// any cluster mesh, so the local StrongSwan endpoint always lands on this cluster.
+    /// </summary>
+    private async Task OpenAddForm()
     {
-        selectedGatewayClusterId = e.Value?.ToString() ?? string.Empty;
+        showAddForm = true;
+        if (ClusterId.HasValue)
+        {
+            EnsureMeshLocalCluster();
+            await SelectGatewayClusterAsync(ClusterId.Value.ToString());
+        }
+    }
+
+    private async Task OnGatewayClusterChanged(ChangeEventArgs e)
+        => await SelectGatewayClusterAsync(e.Value?.ToString() ?? string.Empty);
+
+    private async Task SelectGatewayClusterAsync(string clusterIdValue)
+    {
+        selectedGatewayClusterId = clusterIdValue;
         gatewayPodCidr = "";
         gatewayServiceCidr = "";
         podCidrDetected = false;
@@ -1084,6 +1142,11 @@
 
     private void ToggleMeshCluster(Guid clusterId, bool selected)
     {
+        // When cluster-scoped, the scope cluster is a mandatory mesh participant and
+        // cannot be removed — the local IPsec endpoint must live on this cluster.
+        if (ClusterId.HasValue && clusterId == ClusterId.Value && !selected)
+            return;
+
         if (!meshClusterSelections.ContainsKey(clusterId))
             meshClusterSelections[clusterId] = new();
 
@@ -1091,6 +1154,20 @@
 
         if (!selected && meshBrokerClusterId == clusterId)
             meshBrokerClusterId = null;
+    }
+
+    /// <summary>
+    /// Ensures the scope cluster is a selected mesh participant, defaulting it as the
+    /// broker host when none is chosen yet. No-op when not cluster-scoped.
+    /// </summary>
+    private void EnsureMeshLocalCluster()
+    {
+        if (!ClusterId.HasValue) return;
+        Guid cid = ClusterId.Value;
+        if (!meshClusterSelections.ContainsKey(cid))
+            meshClusterSelections[cid] = new();
+        meshClusterSelections[cid].Selected = true;
+        meshBrokerClusterId ??= cid;
     }
 
     private void SetMeshClusterCidr(Guid clusterId, string value, bool isPod)
