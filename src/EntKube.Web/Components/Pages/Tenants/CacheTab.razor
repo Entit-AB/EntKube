@@ -307,7 +307,7 @@
                                                 <label class="form-label small mb-1">App Deployment</label>
                                                 <select class="form-select form-select-sm" @bind="addBindingDeploymentId">
                                                     <option value="@Guid.Empty">Select deployment...</option>
-                                                    @foreach (AppDeployment dep in allDeployments)
+                                                    @foreach (AppDeployment dep in BindingDeploymentOptions)
                                                     {
                                                         <option value="@dep.Id">@dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
                                                     }
@@ -446,6 +446,15 @@
     // ── Bindings ──
     private Dictionary<Guid, List<CacheBinding>> allBindings = [];
     private List<AppDeployment> allDeployments = [];
+
+    // Deployments offered by the binding form's picker. When the tab is scoped to an
+    // environment, only deployments in that environment are eligible; otherwise the full
+    // list (unchanged tenant-wide behaviour).
+    private List<AppDeployment> BindingDeploymentOptions =>
+        EnvironmentId is Guid envId
+            ? allDeployments.Where(d => d.EnvironmentId == envId).ToList()
+            : allDeployments;
+
     private Guid? addBindingClusterId;
     private Guid addBindingDeploymentId;
     private string addBindingSecretName = "";
@@ -613,7 +622,11 @@
     private void ShowAddBinding(Guid clusterId)
     {
         addBindingClusterId = clusterId;
-        addBindingDeploymentId = Guid.Empty;
+        // When scoped to an environment with exactly one eligible deployment, preselect it.
+        List<AppDeployment> options = BindingDeploymentOptions;
+        addBindingDeploymentId = EnvironmentId is not null && options.Count == 1
+            ? options[0].Id
+            : Guid.Empty;
         addBindingSecretName = "redis-cache";
         addBindingError = null;
     }

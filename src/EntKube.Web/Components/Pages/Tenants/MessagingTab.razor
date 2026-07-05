@@ -644,7 +644,7 @@
                                                     <label class="form-label small">App Deployment</label>
                                                     <select class="form-select form-select-sm" @bind="linkAppDeploymentId">
                                                         <option value="@Guid.Empty">Select deployment...</option>
-                                                        @foreach (AppDeployment dep in allDeployments)
+                                                        @foreach (AppDeployment dep in AppLinkDeploymentOptions)
                                                         {
                                                             <option value="@dep.Id">@dep.App.Customer.Name / @dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
                                                         }
@@ -1077,6 +1077,15 @@
         EnvironmentId.HasValue ? allK8sClusters.Where(k => _envClusterIds.Contains(k.Id)).ToList() : allK8sClusters;
     private List<StorageLink> storageLinks = [];
     private List<AppDeployment> allDeployments = [];
+
+    // Deployments offered by the app-link form's picker. When the tab is scoped to an
+    // environment, only deployments in that environment are eligible; otherwise the full
+    // list (unchanged tenant-wide behaviour).
+    private List<AppDeployment> AppLinkDeploymentOptions =>
+        EnvironmentId is Guid envId
+            ? allDeployments.Where(d => d.EnvironmentId == envId).ToList()
+            : allDeployments;
+
     private bool clusterOperatorAvailable;
     private bool topologyOperatorAvailable;
     private RabbitMQOperatorStatus? operatorStatus;
@@ -1688,6 +1697,11 @@
         linkQueue = queueName ?? "";
         linkExchange = exchangeName ?? "";
         linkSecretName = "rabbitmq";
+        // When scoped to an environment with exactly one eligible deployment, preselect it.
+        List<AppDeployment> options = AppLinkDeploymentOptions;
+        linkAppDeploymentId = EnvironmentId is not null && options.Count == 1
+            ? options[0].Id
+            : Guid.Empty;
         _ = LoadAppLinks(cluster.Id);
     }
 
