@@ -1,3 +1,4 @@
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject KeycloakService KeycloakService
@@ -15,7 +16,7 @@
     </div>
 </div>
 
-<ul class="nav nav-tabs mb-3 flex-wrap">
+<ul class="nav nav-tabs mb-3 flex-wrap" role="tablist" aria-label="Realm sections">
     @foreach (string tab in new[] { "users", "clients", "idp", "groups", "orgs" })
     {
         string label = tab switch
@@ -27,8 +28,9 @@
             "orgs" => "Organizations",
             _ => tab
         };
-        <li class="nav-item">
+        <li class="nav-item" role="presentation">
             <button class="nav-link @(activeTab == tab ? "active" : "")"
+                    role="tab" aria-selected="@(activeTab == tab)" tabindex="@(activeTab == tab ? 0 : -1)"
                     @onclick="() => SwitchTab(tab)">@label</button>
         </li>
     }
@@ -55,30 +57,35 @@
                     {
                         <div class="alert alert-danger py-2 small">@userError</div>
                     }
-                    <div class="row g-2">
-                        <div class="col-md-4">
-                            <input class="form-control form-control-sm" placeholder="Username" @bind="newUserUsername" />
+                    <EditForm Model="createUserModel" OnValidSubmit="AddUser">
+                        <DataAnnotationsValidator />
+                        <div class="row g-2">
+                            <div class="col-md-4">
+                                <InputText class="form-control form-control-sm" placeholder="Username" @bind-Value="createUserModel.Username" />
+                                <ValidationMessage For="() => createUserModel.Username" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <InputText class="form-control form-control-sm" placeholder="Email" @bind-Value="createUserModel.Email" />
+                                <ValidationMessage For="() => createUserModel.Email" class="text-danger small" />
+                            </div>
+                            <div class="col-md-2">
+                                <InputText class="form-control form-control-sm" placeholder="First name" @bind-Value="createUserModel.FirstName" />
+                            </div>
+                            <div class="col-md-2">
+                                <InputText class="form-control form-control-sm" placeholder="Last name" @bind-Value="createUserModel.LastName" />
+                            </div>
+                            <div class="col-md-4">
+                                <InputText type="password" class="form-control form-control-sm" placeholder="Password (optional)" @bind-Value="createUserModel.Password" />
+                            </div>
                         </div>
-                        <div class="col-md-4">
-                            <input class="form-control form-control-sm" placeholder="Email" @bind="newUserEmail" />
+                        <div class="mt-2 d-flex gap-2">
+                            <button type="submit" class="btn btn-sm btn-primary" disabled="@savingUser">
+                                @if (savingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAddUser = false">Cancel</button>
                         </div>
-                        <div class="col-md-2">
-                            <input class="form-control form-control-sm" placeholder="First name" @bind="newUserFirstName" />
-                        </div>
-                        <div class="col-md-2">
-                            <input class="form-control form-control-sm" placeholder="Last name" @bind="newUserLastName" />
-                        </div>
-                        <div class="col-md-4">
-                            <input type="password" class="form-control form-control-sm" placeholder="Password (optional)" @bind="newUserPassword" />
-                        </div>
-                    </div>
-                    <div class="mt-2 d-flex gap-2">
-                        <button class="btn btn-sm btn-primary" @onclick="AddUser" disabled="@savingUser">
-                            @if (savingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                            Create
-                        </button>
-                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddUser = false">Cancel</button>
-                    </div>
+                    </EditForm>
                 </div>
             </div>
         }
@@ -116,10 +123,12 @@
                             </div>
                             <div class="d-flex gap-1 ms-2">
                                 <button class="btn btn-sm btn-outline-secondary border-0"
+                                        aria-label="@($"Edit user {user.Username}")"
                                         @onclick="() => OpenPortalUserEdit(user)">
                                     <i class="bi bi-pencil"></i>
                                 </button>
                                 <button class="btn btn-sm btn-outline-danger border-0"
+                                        aria-label="@($"Delete user {user.Username}")"
                                         @onclick="() => confirmDeleteUserId = user.Id">
                                     <i class="bi bi-trash"></i>
                                 </button>
@@ -141,11 +150,12 @@
                                 {
                                     <div class="alert alert-danger py-2 small mb-2">@portalUserEditError</div>
                                 }
-                                <ul class="nav nav-tabs mb-3 nav-sm">
+                                <ul class="nav nav-tabs mb-3 nav-sm" role="tablist" aria-label="User settings">
                                     @foreach (string ut in new[] { "profile", "attributes", "password" })
                                     {
-                                        <li class="nav-item">
+                                        <li class="nav-item" role="presentation">
                                             <button class="nav-link py-1 px-2 small @(portalUserEditTab == ut ? "active" : "")"
+                                                    role="tab" aria-selected="@(portalUserEditTab == ut)" tabindex="@(portalUserEditTab == ut ? 0 : -1)"
                                                     @onclick="() => portalUserEditTab = ut">
                                                 @(ut switch { "profile" => "Profile", "attributes" => "Attributes", "password" => "Password", _ => ut })
                                             </button>
@@ -153,6 +163,7 @@
                                     }
                                     <li class="ms-auto">
                                         <button class="btn btn-sm btn-link text-muted py-1"
+                                                aria-label="Close"
                                                 @onclick="() => portalSelectedUserId = null">
                                             <i class="bi bi-x-lg"></i>
                                         </button>
@@ -161,37 +172,41 @@
 
                                 @if (portalUserEditTab == "profile")
                                 {
-                                    <div class="row g-2" style="max-width:520px">
-                                        <div class="col-md-6">
-                                            <label class="form-label small">First Name</label>
-                                            <input class="form-control form-control-sm" @bind="portalEditFirstName" />
-                                        </div>
-                                        <div class="col-md-6">
-                                            <label class="form-label small">Last Name</label>
-                                            <input class="form-control form-control-sm" @bind="portalEditLastName" />
-                                        </div>
-                                        <div class="col-12">
-                                            <label class="form-label small">Email</label>
-                                            <input class="form-control form-control-sm" type="email" @bind="portalEditEmail" />
-                                        </div>
-                                        <div class="col-12 d-flex gap-3">
-                                            <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="peEnabled_@user.Id" @bind="portalEditEnabled" />
-                                                <label class="form-check-label small" for="peEnabled_@user.Id">Enabled</label>
+                                    <EditForm Model="portalProfileModel" OnValidSubmit="() => SavePortalUserProfile(user.Id)">
+                                        <DataAnnotationsValidator />
+                                        <div class="row g-2" style="max-width:520px">
+                                            <div class="col-md-6">
+                                                <label class="form-label small">First Name</label>
+                                                <InputText class="form-control form-control-sm" @bind-Value="portalProfileModel.FirstName" />
                                             </div>
-                                            <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="peVerified_@user.Id" @bind="portalEditEmailVerified" />
-                                                <label class="form-check-label small" for="peVerified_@user.Id">Email Verified</label>
+                                            <div class="col-md-6">
+                                                <label class="form-label small">Last Name</label>
+                                                <InputText class="form-control form-control-sm" @bind-Value="portalProfileModel.LastName" />
+                                            </div>
+                                            <div class="col-12">
+                                                <label class="form-label small">Email</label>
+                                                <InputText class="form-control form-control-sm" type="email" @bind-Value="portalProfileModel.Email" />
+                                                <ValidationMessage For="() => portalProfileModel.Email" class="text-danger small" />
+                                            </div>
+                                            <div class="col-12 d-flex gap-3">
+                                                <div class="form-check">
+                                                    <InputCheckbox class="form-check-input" id="@($"peEnabled_{user.Id}")" @bind-Value="portalProfileModel.Enabled" />
+                                                    <label class="form-check-label small" for="peEnabled_@user.Id">Enabled</label>
+                                                </div>
+                                                <div class="form-check">
+                                                    <InputCheckbox class="form-check-input" id="@($"peVerified_{user.Id}")" @bind-Value="portalProfileModel.EmailVerified" />
+                                                    <label class="form-check-label small" for="peVerified_@user.Id">Email Verified</label>
+                                                </div>
+                                            </div>
+                                            <div class="col-12">
+                                                <button type="submit" class="btn btn-sm btn-primary"
+                                                        disabled="@portalSavingUser">
+                                                    @if (portalSavingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Save
+                                                </button>
                                             </div>
                                         </div>
-                                        <div class="col-12">
-                                            <button class="btn btn-sm btn-primary" @onclick="() => SavePortalUserProfile(user.Id)"
-                                                    disabled="@portalSavingUser">
-                                                @if (portalSavingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                                Save
-                                            </button>
-                                        </div>
-                                    </div>
+                                    </EditForm>
                                 }
 
                                 @if (portalUserEditTab == "attributes")
@@ -207,6 +222,7 @@
                                                        value="@attr.Value"
                                                        @oninput="e => portalEditAttributes[attrKey] = e.Value?.ToString() ?? string.Empty" />
                                                 <button class="btn btn-sm btn-outline-danger border-0"
+                                                        aria-label="Remove attribute"
                                                         @onclick="() => portalEditAttributes.Remove(attrKey)">
                                                     <i class="bi bi-trash"></i>
                                                 </button>
@@ -219,6 +235,7 @@
                                             <input class="form-control form-control-sm" placeholder="value"
                                                    @bind="portalNewAttrValue" />
                                             <button class="btn btn-sm btn-outline-secondary"
+                                                    aria-label="Add attribute"
                                                     @onclick="AddPortalUserAttribute"
                                                     disabled="@string.IsNullOrWhiteSpace(portalNewAttrKey)">
                                                 <i class="bi bi-plus-lg"></i>
@@ -234,25 +251,29 @@
 
                                 @if (portalUserEditTab == "password")
                                 {
-                                    <div class="row g-2" style="max-width:360px">
-                                        <div class="col-12">
-                                            <label class="form-label small">New Password</label>
-                                            <input class="form-control form-control-sm" type="password" @bind="portalEditNewPassword" />
-                                        </div>
-                                        <div class="col-12">
-                                            <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="peTemp_@user.Id" @bind="portalEditPasswordTemporary" />
-                                                <label class="form-check-label small" for="peTemp_@user.Id">Temporary (user must change on next login)</label>
+                                    <EditForm Model="portalPasswordModel" OnValidSubmit="() => ResetPortalUserPassword(user.Id)">
+                                        <DataAnnotationsValidator />
+                                        <div class="row g-2" style="max-width:360px">
+                                            <div class="col-12">
+                                                <label class="form-label small">New Password</label>
+                                                <InputText class="form-control form-control-sm" type="password" @bind-Value="portalPasswordModel.NewPassword" />
+                                                <ValidationMessage For="() => portalPasswordModel.NewPassword" class="text-danger small" />
+                                            </div>
+                                            <div class="col-12">
+                                                <div class="form-check">
+                                                    <InputCheckbox class="form-check-input" id="@($"peTemp_{user.Id}")" @bind-Value="portalPasswordModel.Temporary" />
+                                                    <label class="form-check-label small" for="peTemp_@user.Id">Temporary (user must change on next login)</label>
+                                                </div>
+                                            </div>
+                                            <div class="col-12">
+                                                <button type="submit" class="btn btn-sm btn-primary"
+                                                        disabled="@portalSavingUser">
+                                                    @if (portalSavingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Set Password
+                                                </button>
                                             </div>
                                         </div>
-                                        <div class="col-12">
-                                            <button class="btn btn-sm btn-primary" @onclick="() => ResetPortalUserPassword(user.Id)"
-                                                    disabled="@(portalSavingUser || string.IsNullOrWhiteSpace(portalEditNewPassword))">
-                                                @if (portalSavingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                                Set Password
-                                            </button>
-                                        </div>
-                                    </div>
+                                    </EditForm>
                                 }
                             </div>
                         }
@@ -285,30 +306,34 @@
                     {
                         <div class="alert alert-danger py-2 small">@pClientError</div>
                     }
-                    <div class="row g-2">
-                        <div class="col-md-4">
-                            <label class="form-label small">Client ID</label>
-                            <input class="form-control form-control-sm font-monospace" placeholder="my-app" @bind="pNewClientId" />
+                    <EditForm Model="createClientModel" OnValidSubmit="AddPortalClient">
+                        <DataAnnotationsValidator />
+                        <div class="row g-2">
+                            <div class="col-md-4">
+                                <label class="form-label small">Client ID</label>
+                                <InputText class="form-control form-control-sm font-monospace" placeholder="my-app" @bind-Value="createClientModel.ClientId" />
+                                <ValidationMessage For="() => createClientModel.ClientId" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Name (optional)</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="createClientModel.Name" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Type</label>
+                                <InputSelect class="form-select form-select-sm" @bind-Value="createClientModel.Public">
+                                    <option value="false">Confidential (server-side app)</option>
+                                    <option value="true">Public (SPA / mobile)</option>
+                                </InputSelect>
+                            </div>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Name (optional)</label>
-                            <input class="form-control form-control-sm" @bind="pNewClientName" />
+                        <div class="mt-2 d-flex gap-2">
+                            <button type="submit" class="btn btn-sm btn-primary" disabled="@pSavingClient">
+                                @if (pSavingClient) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => pShowAddClient = false">Cancel</button>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Type</label>
-                            <select class="form-select form-select-sm" @bind="pNewClientPublic">
-                                <option value="false">Confidential (server-side app)</option>
-                                <option value="true">Public (SPA / mobile)</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="mt-2 d-flex gap-2">
-                        <button class="btn btn-sm btn-primary" @onclick="AddPortalClient" disabled="@pSavingClient">
-                            @if (pSavingClient) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                            Create
-                        </button>
-                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => pShowAddClient = false">Cancel</button>
-                    </div>
+                    </EditForm>
                 </div>
             </div>
         }
@@ -342,6 +367,7 @@
                             </div>
                             <div class="d-flex gap-1" @onclick:stopPropagation>
                                 <button class="btn btn-sm btn-outline-danger border-0"
+                                        aria-label="@($"Delete client {client.ClientId}")"
                                         @onclick="() => DeletePortalClient(client.Id)">
                                     <i class="bi bi-trash"></i>
                                 </button>
@@ -355,12 +381,13 @@
                                 {
                                     <div class="alert alert-danger py-1 small mb-2">@pClientEditError</div>
                                 }
-                                <ul class="nav nav-tabs mb-3 nav-sm">
+                                <ul class="nav nav-tabs mb-3 nav-sm" role="tablist" aria-label="Client settings">
                                     @foreach (string ct in new[] { "settings", "secret", "mappers" }
                                         .Where(t => !(t == "secret" && pClientDetail!.PublicClient)))
                                     {
-                                        <li class="nav-item">
+                                        <li class="nav-item" role="presentation">
                                             <button class="nav-link py-1 px-2 small @(pClientEditTab == ct ? "active" : "")"
+                                                    role="tab" aria-selected="@(pClientEditTab == ct)" tabindex="@(pClientEditTab == ct ? 0 : -1)"
                                                     @onclick="() => SwitchPortalClientTab(ct)">
                                                 @(ct switch { "settings" => "Settings", "secret" => "Credentials", "mappers" => "Mappers", _ => ct })
                                             </button>
@@ -438,7 +465,7 @@
                                             <input class="form-control form-control-sm font-monospace"
                                                    type="@(pShowClientSecret ? "text" : "password")"
                                                    value="@pClientSecret" readonly />
-                                            <button class="btn btn-outline-secondary" @onclick="() => pShowClientSecret = !pShowClientSecret">
+                                            <button class="btn btn-outline-secondary" aria-label="@(pShowClientSecret ? "Hide secret" : "Show secret")" @onclick="() => pShowClientSecret = !pShowClientSecret">
                                                 <i class="bi bi-@(pShowClientSecret ? "eye-slash" : "eye")"></i>
                                             </button>
                                         </div>
@@ -616,10 +643,12 @@
                                                             </div>
                                                             <div class="d-flex gap-1">
                                                                 <button class="btn btn-sm btn-outline-secondary border-0"
+                                                                        aria-label="@($"Edit mapper {mapper.Name}")"
                                                                         @onclick="() => OpenPortalMapperEdit(mapper)">
                                                                     <i class="bi bi-pencil"></i>
                                                                 </button>
                                                                 <button class="btn btn-sm btn-outline-danger border-0"
+                                                                        aria-label="@($"Delete mapper {mapper.Name}")"
                                                                         @onclick="() => DeletePortalMapper(mapper.Id)">
                                                                     <i class="bi bi-trash"></i>
                                                                 </button>
@@ -770,33 +799,39 @@
                     {
                         <div class="alert alert-danger py-2 small">@idpError</div>
                     }
-                    <div class="row g-2">
-                        <div class="col-md-3">
-                            <input class="form-control form-control-sm" placeholder="Alias (e.g. google)" @bind="newIdpAlias" />
+                    <EditForm Model="createIdpModel" OnValidSubmit="AddIdp">
+                        <DataAnnotationsValidator />
+                        <div class="row g-2">
+                            <div class="col-md-3">
+                                <InputText class="form-control form-control-sm" placeholder="Alias (e.g. google)" @bind-Value="createIdpModel.Alias" />
+                                <ValidationMessage For="() => createIdpModel.Alias" class="text-danger small" />
+                            </div>
+                            <div class="col-md-3">
+                                <InputSelect class="form-select form-select-sm" @bind-Value="createIdpModel.ProviderId">
+                                    <option value="oidc">OpenID Connect</option>
+                                    <option value="saml">SAML</option>
+                                    <option value="google">Google</option>
+                                    <option value="github">GitHub</option>
+                                    <option value="microsoft">Microsoft</option>
+                                </InputSelect>
+                            </div>
+                            <div class="col-md-3">
+                                <InputText class="form-control form-control-sm" placeholder="Client ID" @bind-Value="createIdpModel.ClientId" />
+                                <ValidationMessage For="() => createIdpModel.ClientId" class="text-danger small" />
+                            </div>
+                            <div class="col-md-3">
+                                <InputText type="password" class="form-control form-control-sm" placeholder="Client Secret" @bind-Value="createIdpModel.ClientSecret" />
+                                <ValidationMessage For="() => createIdpModel.ClientSecret" class="text-danger small" />
+                            </div>
                         </div>
-                        <div class="col-md-3">
-                            <select class="form-select form-select-sm" @bind="newIdpProviderId">
-                                <option value="oidc">OpenID Connect</option>
-                                <option value="saml">SAML</option>
-                                <option value="google">Google</option>
-                                <option value="github">GitHub</option>
-                                <option value="microsoft">Microsoft</option>
-                            </select>
+                        <div class="mt-2 d-flex gap-2">
+                            <button type="submit" class="btn btn-sm btn-primary" disabled="@savingIdp">
+                                @if (savingIdp) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Add
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAddIdp = false">Cancel</button>
                         </div>
-                        <div class="col-md-3">
-                            <input class="form-control form-control-sm" placeholder="Client ID" @bind="newIdpClientId" />
-                        </div>
-                        <div class="col-md-3">
-                            <input type="password" class="form-control form-control-sm" placeholder="Client Secret" @bind="newIdpClientSecret" />
-                        </div>
-                    </div>
-                    <div class="mt-2 d-flex gap-2">
-                        <button class="btn btn-sm btn-primary" @onclick="AddIdp" disabled="@savingIdp">
-                            @if (savingIdp) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                            Add
-                        </button>
-                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddIdp = false">Cancel</button>
-                    </div>
+                    </EditForm>
                 </div>
             </div>
         }
@@ -818,6 +853,7 @@
                                 }
                             </div>
                             <button class="btn btn-sm btn-outline-danger border-0"
+                                    aria-label="@($"Delete identity provider {idp.Alias}")"
                                     @onclick="() => confirmDeleteIdpAlias = idp.Alias">
                                 <i class="bi bi-trash"></i>
                             </button>
@@ -854,14 +890,20 @@
 
         @if (showAddGroup)
         {
-            <div class="d-flex gap-2 mb-3">
-                <input class="form-control form-control-sm" placeholder="Group name" @bind="newGroupName" />
-                <button class="btn btn-sm btn-primary" @onclick="AddGroup" disabled="@savingGroup">
-                    @if (savingGroup) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                    Create
-                </button>
-                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddGroup = false">Cancel</button>
-            </div>
+            <EditForm Model="createGroupModel" OnValidSubmit="AddGroup">
+                <DataAnnotationsValidator />
+                <div class="d-flex gap-2 mb-1 align-items-start">
+                    <div class="flex-grow-1">
+                        <InputText class="form-control form-control-sm" placeholder="Group name" @bind-Value="createGroupModel.Name" />
+                        <ValidationMessage For="() => createGroupModel.Name" class="text-danger small" />
+                    </div>
+                    <button type="submit" class="btn btn-sm btn-primary" disabled="@savingGroup">
+                        @if (savingGroup) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Create
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAddGroup = false">Cancel</button>
+                </div>
+            </EditForm>
             @if (groupError is not null)
             {
                 <div class="alert alert-danger py-2 small mb-3">@groupError</div>
@@ -877,6 +919,7 @@
                         <div class="d-flex justify-content-between align-items-center">
                             <span><i class="bi bi-people me-2 text-muted"></i>@g.Name <span class="text-muted small">@g.Path</span></span>
                             <button class="btn btn-sm btn-outline-danger border-0"
+                                    aria-label="@($"Delete group {g.Name}")"
                                     @onclick="() => confirmDeleteGroupId = g.Id">
                                 <i class="bi bi-trash"></i>
                             </button>
@@ -919,21 +962,25 @@
                     {
                         <div class="alert alert-danger py-2 small">@orgError</div>
                     }
-                    <div class="row g-2">
-                        <div class="col-md-4">
-                            <input class="form-control form-control-sm" placeholder="Name" @bind="newOrgName" />
+                    <EditForm Model="createOrgModel" OnValidSubmit="AddOrg">
+                        <DataAnnotationsValidator />
+                        <div class="row g-2">
+                            <div class="col-md-4">
+                                <InputText class="form-control form-control-sm" placeholder="Name" @bind-Value="createOrgModel.Name" />
+                                <ValidationMessage For="() => createOrgModel.Name" class="text-danger small" />
+                            </div>
+                            <div class="col-md-8">
+                                <InputText class="form-control form-control-sm" placeholder="Description (optional)" @bind-Value="createOrgModel.Description" />
+                            </div>
                         </div>
-                        <div class="col-md-8">
-                            <input class="form-control form-control-sm" placeholder="Description (optional)" @bind="newOrgDescription" />
+                        <div class="mt-2 d-flex gap-2">
+                            <button type="submit" class="btn btn-sm btn-primary" disabled="@savingOrg">
+                                @if (savingOrg) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAddOrg = false">Cancel</button>
                         </div>
-                    </div>
-                    <div class="mt-2 d-flex gap-2">
-                        <button class="btn btn-sm btn-primary" @onclick="AddOrg" disabled="@savingOrg">
-                            @if (savingOrg) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                            Create
-                        </button>
-                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddOrg = false">Cancel</button>
-                    </div>
+                    </EditForm>
                 </div>
             </div>
         }
@@ -980,17 +1027,15 @@
     private string portalUserEditTab = "profile";
     private string? portalUserEditError;
     private bool portalSavingUser;
-    private string portalEditFirstName = "", portalEditLastName = "", portalEditEmail = "";
-    private bool portalEditEnabled, portalEditEmailVerified;
-    private string portalEditNewPassword = "";
-    private bool portalEditPasswordTemporary;
+    private PortalUserProfileModel portalProfileModel = new();
+    private PortalUserPasswordModel portalPasswordModel = new();
     private Dictionary<string, string> portalEditAttributes = [];
     private string portalNewAttrKey = "", portalNewAttrValue = "";
 
     // Client state
     private bool pShowAddClient, pSavingClient;
     private string? pClientError;
-    private string pNewClientId = "", pNewClientName = "", pNewClientPublic = "false";
+    private CreateClientModel createClientModel = new();
     private string? pSelectedClientUuid;
     private KeycloakClientDetail? pClientDetail;
     private string pClientEditTab = "settings";
@@ -1014,22 +1059,22 @@
     // User form
     private bool showAddUser, savingUser;
     private string? userError;
-    private string newUserUsername = "", newUserEmail = "", newUserFirstName = "", newUserLastName = "", newUserPassword = "";
+    private CreateUserModel createUserModel = new();
 
     // IdP form
     private bool showAddIdp, savingIdp;
     private string? idpError;
-    private string newIdpAlias = "", newIdpProviderId = "oidc", newIdpClientId = "", newIdpClientSecret = "";
+    private CreateIdpModel createIdpModel = new();
 
     // Group form
     private bool showAddGroup, savingGroup;
     private string? groupError;
-    private string newGroupName = "";
+    private CreateGroupModel createGroupModel = new();
 
     // Org form
     private bool showAddOrg, savingOrg;
     private string? orgError;
-    private string newOrgName = "", newOrgDescription = "";
+    private CreateOrgModel createOrgModel = new();
 
     protected override async Task OnInitializedAsync()
     {
@@ -1096,11 +1141,11 @@
         {
             await KeycloakService.CreateUserAsync(
                 TenantId, Realm.Id,
-                newUserUsername, newUserEmail, newUserFirstName, newUserLastName,
-                string.IsNullOrWhiteSpace(newUserPassword) ? null : newUserPassword);
+                createUserModel.Username, createUserModel.Email, createUserModel.FirstName, createUserModel.LastName,
+                string.IsNullOrWhiteSpace(createUserModel.Password) ? null : createUserModel.Password);
             users = await KeycloakService.GetUsersAsync(TenantId, Realm.Id);
             showAddUser = false;
-            newUserUsername = newUserEmail = newUserFirstName = newUserLastName = newUserPassword = "";
+            createUserModel = new CreateUserModel();
         }
         catch (Exception ex) { userError = ex.Message; }
         finally { savingUser = false; }
@@ -1127,10 +1172,10 @@
         {
             await KeycloakService.CreateIdpAsync(
                 TenantId, Realm.Id,
-                newIdpAlias, newIdpProviderId, newIdpClientId, newIdpClientSecret);
+                createIdpModel.Alias, createIdpModel.ProviderId, createIdpModel.ClientId, createIdpModel.ClientSecret);
             idps = await KeycloakService.GetIdpsAsync(TenantId, Realm.Id);
             showAddIdp = false;
-            newIdpAlias = newIdpClientId = newIdpClientSecret = "";
+            createIdpModel = new CreateIdpModel();
         }
         catch (Exception ex) { idpError = ex.Message; }
         finally { savingIdp = false; }
@@ -1155,10 +1200,10 @@
         groupError = null;
         try
         {
-            await KeycloakService.CreateGroupAsync(TenantId, Realm.Id, newGroupName);
+            await KeycloakService.CreateGroupAsync(TenantId, Realm.Id, createGroupModel.Name);
             groups = await KeycloakService.GetGroupsAsync(TenantId, Realm.Id);
             showAddGroup = false;
-            newGroupName = "";
+            createGroupModel = new CreateGroupModel();
         }
         catch (Exception ex) { groupError = ex.Message; }
         finally { savingGroup = false; }
@@ -1184,11 +1229,11 @@
         try
         {
             await KeycloakService.CreateOrganizationAsync(
-                TenantId, Realm.Id, newOrgName,
-                string.IsNullOrWhiteSpace(newOrgDescription) ? null : newOrgDescription);
+                TenantId, Realm.Id, createOrgModel.Name,
+                string.IsNullOrWhiteSpace(createOrgModel.Description) ? null : createOrgModel.Description);
             orgs = await KeycloakService.GetOrganizationsAsync(TenantId, Realm.Id);
             showAddOrg = false;
-            newOrgName = newOrgDescription = "";
+            createOrgModel = new CreateOrgModel();
         }
         catch (Exception ex) { orgError = ex.Message; }
         finally { savingOrg = false; }
@@ -1240,13 +1285,15 @@
         portalSelectedUserId = user.Id;
         portalUserEditTab = "profile";
         portalUserEditError = null;
-        portalEditFirstName = user.FirstName ?? "";
-        portalEditLastName = user.LastName ?? "";
-        portalEditEmail = user.Email ?? "";
-        portalEditEnabled = user.Enabled;
-        portalEditEmailVerified = user.EmailVerified;
-        portalEditNewPassword = "";
-        portalEditPasswordTemporary = false;
+        portalProfileModel = new PortalUserProfileModel
+        {
+            FirstName = user.FirstName ?? "",
+            LastName = user.LastName ?? "",
+            Email = user.Email ?? "",
+            Enabled = user.Enabled,
+            EmailVerified = user.EmailVerified
+        };
+        portalPasswordModel = new PortalUserPasswordModel();
         portalEditAttributes = user.Attributes.ToDictionary(kv => kv.Key, kv => string.Join(", ", kv.Value));
         portalNewAttrKey = "";
         portalNewAttrValue = "";
@@ -1262,8 +1309,8 @@
                 .Where(kv => !string.IsNullOrWhiteSpace(kv.Key))
                 .ToDictionary(kv => kv.Key, kv => new List<string> { kv.Value });
             await KeycloakService.UpdateUserAsync(TenantId, Realm.Id, userId,
-                portalEditFirstName, portalEditLastName, portalEditEmail,
-                portalEditEnabled, portalEditEmailVerified, attrs);
+                portalProfileModel.FirstName, portalProfileModel.LastName, portalProfileModel.Email,
+                portalProfileModel.Enabled, portalProfileModel.EmailVerified, attrs);
             users = await KeycloakService.GetUsersAsync(TenantId, Realm.Id);
         }
         catch (Exception ex) { portalUserEditError = ex.Message; }
@@ -1280,8 +1327,8 @@
                 .Where(kv => !string.IsNullOrWhiteSpace(kv.Key))
                 .ToDictionary(kv => kv.Key, kv => new List<string> { kv.Value });
             await KeycloakService.UpdateUserAsync(TenantId, Realm.Id, userId,
-                portalEditFirstName, portalEditLastName, portalEditEmail,
-                portalEditEnabled, portalEditEmailVerified, attrs);
+                portalProfileModel.FirstName, portalProfileModel.LastName, portalProfileModel.Email,
+                portalProfileModel.Enabled, portalProfileModel.EmailVerified, attrs);
             users = await KeycloakService.GetUsersAsync(TenantId, Realm.Id);
         }
         catch (Exception ex) { portalUserEditError = ex.Message; }
@@ -1290,14 +1337,14 @@
 
     private async Task ResetPortalUserPassword(string userId)
     {
-        if (string.IsNullOrWhiteSpace(portalEditNewPassword)) return;
+        if (string.IsNullOrWhiteSpace(portalPasswordModel.NewPassword)) return;
         portalSavingUser = true;
         portalUserEditError = null;
         try
         {
             await KeycloakService.ResetUserPasswordAsync(TenantId, Realm.Id, userId,
-                portalEditNewPassword, portalEditPasswordTemporary);
-            portalEditNewPassword = "";
+                portalPasswordModel.NewPassword, portalPasswordModel.Temporary);
+            portalPasswordModel.NewPassword = "";
         }
         catch (Exception ex) { portalUserEditError = ex.Message; }
         finally { portalSavingUser = false; }
@@ -1315,17 +1362,16 @@
 
     private async Task AddPortalClient()
     {
-        if (string.IsNullOrWhiteSpace(pNewClientId)) return;
         pSavingClient = true;
         pClientError = null;
         try
         {
-            await KeycloakService.CreateClientAsync(TenantId, Realm.Id, pNewClientId,
-                pNewClientPublic == "true",
-                string.IsNullOrWhiteSpace(pNewClientName) ? null : pNewClientName);
+            await KeycloakService.CreateClientAsync(TenantId, Realm.Id, createClientModel.ClientId,
+                createClientModel.Public == "true",
+                string.IsNullOrWhiteSpace(createClientModel.Name) ? null : createClientModel.Name);
             pClients = await KeycloakService.GetClientsAsync(TenantId, Realm.Id);
             pShowAddClient = false;
-            pNewClientId = pNewClientName = "";
+            createClientModel = new CreateClientModel();
         }
         catch (Exception ex) { pClientError = ex.Message; }
         finally { pSavingClient = false; }
@@ -1474,6 +1520,80 @@
             pClientMappers = await KeycloakService.GetClientMappersAsync(TenantId, Realm.Id, pSelectedClientUuid);
         }
         catch (Exception ex) { pClientEditError = ex.Message; }
+    }
+
+    // ── Form models (DataAnnotations validation) ─────────────────────────────
+
+    private sealed class CreateUserModel
+    {
+        [Required(ErrorMessage = "Username is required.")]
+        public string Username { get; set; } = "";
+
+        [EmailAddress(ErrorMessage = "Enter a valid email address.")]
+        public string Email { get; set; } = "";
+
+        public string FirstName { get; set; } = "";
+        public string LastName { get; set; } = "";
+        public string Password { get; set; } = "";
+    }
+
+    private sealed class CreateClientModel
+    {
+        [Required(ErrorMessage = "Client ID is required.")]
+        [RegularExpression(@"^\S+$", ErrorMessage = "Client ID cannot contain spaces.")]
+        public string ClientId { get; set; } = "";
+
+        public string Name { get; set; } = "";
+        public string Public { get; set; } = "false";
+    }
+
+    private sealed class CreateIdpModel
+    {
+        [Required(ErrorMessage = "Alias is required.")]
+        [RegularExpression(@"^\S+$", ErrorMessage = "Alias cannot contain spaces.")]
+        public string Alias { get; set; } = "";
+
+        public string ProviderId { get; set; } = "oidc";
+
+        [Required(ErrorMessage = "Client ID is required.")]
+        public string ClientId { get; set; } = "";
+
+        [Required(ErrorMessage = "Client secret is required.")]
+        public string ClientSecret { get; set; } = "";
+    }
+
+    private sealed class CreateGroupModel
+    {
+        [Required(ErrorMessage = "Group name is required.")]
+        public string Name { get; set; } = "";
+    }
+
+    private sealed class CreateOrgModel
+    {
+        [Required(ErrorMessage = "Name is required.")]
+        public string Name { get; set; } = "";
+
+        public string Description { get; set; } = "";
+    }
+
+    private sealed class PortalUserProfileModel
+    {
+        public string FirstName { get; set; } = "";
+        public string LastName { get; set; } = "";
+
+        [EmailAddress(ErrorMessage = "Enter a valid email address.")]
+        public string Email { get; set; } = "";
+
+        public bool Enabled { get; set; }
+        public bool EmailVerified { get; set; }
+    }
+
+    private sealed class PortalUserPasswordModel
+    {
+        [Required(ErrorMessage = "Enter a new password.")]
+        public string NewPassword { get; set; } = "";
+
+        public bool Temporary { get; set; }
     }
 
 }

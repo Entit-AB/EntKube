@@ -1,6 +1,8 @@
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject HarborService HarborService
+@inject ToastService Toasts
 
 <LoadingPanel Loading="@loading" LoadingText="Loading registry…" Error="@loadError">
 @if (!loading && loadError is null)
@@ -16,19 +18,25 @@
         </div>
     </div>
 
-    <ul class="nav nav-tabs mb-3">
-        <li class="nav-item">
-            <button class="nav-link @(activeTab == "repos" ? "active" : "")" @onclick='() => SwitchTab("repos")'>
+    <ul class="nav nav-tabs mb-3" role="tablist" aria-label="Registry sections">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link @(activeTab == "repos" ? "active" : "")"
+                    role="tab" aria-selected="@(activeTab == "repos")" tabindex="@(activeTab == "repos" ? 0 : -1)"
+                    @onclick='() => SwitchTab("repos")'>
                 <i class="bi bi-box-seam me-1"></i>Repositories
             </button>
         </li>
-        <li class="nav-item">
-            <button class="nav-link @(activeTab == "robots" ? "active" : "")" @onclick='() => SwitchTab("robots")'>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link @(activeTab == "robots" ? "active" : "")"
+                    role="tab" aria-selected="@(activeTab == "robots")" tabindex="@(activeTab == "robots" ? 0 : -1)"
+                    @onclick='() => SwitchTab("robots")'>
                 <i class="bi bi-robot me-1"></i>Robot Accounts
             </button>
         </li>
-        <li class="nav-item">
-            <button class="nav-link @(activeTab == "info" ? "active" : "")" @onclick='() => SwitchTab("info")'>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link @(activeTab == "info" ? "active" : "")"
+                    role="tab" aria-selected="@(activeTab == "info")" tabindex="@(activeTab == "info" ? 0 : -1)"
+                    @onclick='() => SwitchTab("info")'>
                 <i class="bi bi-info-circle me-1"></i>Info
             </button>
         </li>
@@ -168,35 +176,40 @@
                     }
                     else
                     {
-                        <div class="row g-2">
-                            <div class="col-md-4">
-                                <label class="form-label form-label-sm">Robot name</label>
-                                <input class="form-control form-control-sm font-monospace" placeholder="ci-runner"
-                                       @bind="newRobotName" />
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label form-label-sm">Description (optional)</label>
-                                <input class="form-control form-control-sm" @bind="newRobotDescription" />
-                            </div>
-                            <div class="col-12 d-flex gap-3 align-items-center">
-                                <div class="form-check">
-                                    <input type="checkbox" class="form-check-input" id="rPull" @bind="newRobotCanPull" />
-                                    <label class="form-check-label small" for="rPull">Pull</label>
+                        <EditForm Model="robotForm" OnValidSubmit="CreateRobot">
+                            <DataAnnotationsValidator />
+                            <div class="row g-2">
+                                <div class="col-md-4">
+                                    <label class="form-label form-label-sm">Robot name</label>
+                                    <InputText class="form-control form-control-sm font-monospace" placeholder="ci-runner"
+                                               @bind-Value="robotForm.Name" />
+                                    <ValidationMessage For="() => robotForm.Name" class="text-danger small" />
                                 </div>
-                                <div class="form-check">
-                                    <input type="checkbox" class="form-check-input" id="rPush" @bind="newRobotCanPush" />
-                                    <label class="form-check-label small" for="rPush">Push</label>
+                                <div class="col-md-4">
+                                    <label class="form-label form-label-sm">Description (optional)</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="robotForm.Description" />
+                                    <ValidationMessage For="() => robotForm.Description" class="text-danger small" />
+                                </div>
+                                <div class="col-12 d-flex gap-3 align-items-center">
+                                    <div class="form-check">
+                                        <InputCheckbox class="form-check-input" id="rPull" @bind-Value="robotForm.CanPull" />
+                                        <label class="form-check-label small" for="rPull">Pull</label>
+                                    </div>
+                                    <div class="form-check">
+                                        <InputCheckbox class="form-check-input" id="rPush" @bind-Value="robotForm.CanPush" />
+                                        <label class="form-check-label small" for="rPush">Push</label>
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                        <div class="mt-2 d-flex gap-2">
-                            <button class="btn btn-sm btn-primary" @onclick="CreateRobot" disabled="@savingRobot">
-                                @if (savingRobot) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                Create
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary"
-                                    @onclick="() => { showCreateRobot = false; robotError = null; }">Cancel</button>
-                        </div>
+                            <div class="mt-2 d-flex gap-2">
+                                <button type="submit" class="btn btn-sm btn-primary" disabled="@savingRobot">
+                                    @if (savingRobot) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Create
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary"
+                                        @onclick="() => { showCreateRobot = false; robotError = null; }">Cancel</button>
+                            </div>
+                        </EditForm>
                     }
                 </div>
             </div>
@@ -341,10 +354,7 @@
     private bool loadingRobots;
     private bool showCreateRobot;
     private bool savingRobot;
-    private string newRobotName = "";
-    private string newRobotDescription = "";
-    private bool newRobotCanPull = true;
-    private bool newRobotCanPush;
+    private CreateRobotForm robotForm = new();
     private string? newRobotSecret;
     private string? robotError;
     private string? robotListError;
@@ -455,8 +465,6 @@
 
     private async Task CreateRobot()
     {
-        if (string.IsNullOrWhiteSpace(newRobotName)) return;
-
         savingRobot = true;
         robotError = null;
 
@@ -464,26 +472,41 @@
         {
             string secret = await HarborService.CreateRobotAsync(
                 TenantId, Project.HarborComponentConfig!,
-                newRobotName.Trim(),
-                string.IsNullOrWhiteSpace(newRobotDescription) ? null : newRobotDescription.Trim(),
+                robotForm.Name.Trim(),
+                string.IsNullOrWhiteSpace(robotForm.Description) ? null : robotForm.Description.Trim(),
                 [Project.ProjectName],
-                newRobotCanPush, newRobotCanPull);
+                robotForm.CanPush, robotForm.CanPull);
 
             newRobotSecret = secret;
             await LoadRobots();
-            newRobotName = "";
-            newRobotDescription = "";
-            newRobotCanPull = true;
-            newRobotCanPush = false;
+            Toasts.Success($"Robot account '{robotForm.Name.Trim()}' created.");
+            robotForm = new CreateRobotForm();
         }
         catch (Exception ex)
         {
             robotError = ex.Message;
+            Toasts.Error(ex.Message, "Failed to create robot");
         }
         finally
         {
             savingRobot = false;
         }
+    }
+
+    private sealed class CreateRobotForm
+    {
+        [Required(ErrorMessage = "Robot name is required.")]
+        [StringLength(255, MinimumLength = 1)]
+        [RegularExpression(@"^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            ErrorMessage = "Use lowercase letters, digits, and single . _ - separators (e.g. ci-runner).")]
+        public string Name { get; set; } = "";
+
+        [StringLength(1024)]
+        public string? Description { get; set; }
+
+        public bool CanPull { get; set; } = true;
+
+        public bool CanPush { get; set; }
     }
 
     private async Task DeleteRobot(long robotId)

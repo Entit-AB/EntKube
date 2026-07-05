@@ -11,9 +11,8 @@
     <input class="form-control form-control-sm" style="width:220px" placeholder="Filter by pool or label…"
            value="@filterText" @oninput="OnSearchInput" />
     <span class="ms-auto text-muted small">@filtered.Count of @targets.Count targets</span>
-    <button class="btn btn-sm btn-outline-secondary" @onclick="Load" disabled="@isLoading">
-        <span class="bi bi-arrow-clockwise @(isLoading ? "spin" : "")"></span>
-    </button>
+    <AutoRefresh OnRefresh="RefreshQuietlyAsync" IntervalSeconds="30" Enabled="false"
+                 LastRefreshed="_lastRefreshed" />
 </div>
 
 @if (isLoading)
@@ -108,6 +107,7 @@ else
     private string filterText = "";
     private bool isLoading = true;
     private string? errorMessage;
+    private DateTime? _lastRefreshed;
 
     protected override async Task OnParametersSetAsync() => await Load();
 
@@ -116,13 +116,22 @@ else
         isLoading = true;
         errorMessage = null;
         StateHasChanged();
+        await FetchAsync();
+        isLoading = false;
+    }
 
+    // Reload in place without flipping the full-panel loading state — used by the auto-refresh control.
+    private async Task RefreshQuietlyAsync() => await FetchAsync();
+
+    private async Task FetchAsync()
+    {
         KubernetesOperationResult<List<ScrapeTarget>> result =
             await PrometheusService.GetScrapeTargetsAsync(ClusterId);
 
         if (result.IsSuccess)
         {
             targets = result.Data ?? [];
+            errorMessage = null;
             ApplyFilter();
         }
         else
@@ -131,7 +140,7 @@ else
             targets = [];
             filtered = [];
         }
-        isLoading = false;
+        _lastRefreshed = DateTime.UtcNow;
     }
 
     private void OnSearchInput(ChangeEventArgs e)

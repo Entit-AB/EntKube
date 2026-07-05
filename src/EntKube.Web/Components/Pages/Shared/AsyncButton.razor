@@ -1,0 +1,74 @@
+@inject EntKube.Web.Services.ToastService Toasts
+
+<button type="@Type" class="btn @CssClass" disabled="@(Disabled || _running)"
+        aria-busy="@_running" aria-label="@AriaLabel" @onclick="RunAsync">
+    @if (_running)
+    {
+        <span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+        @if (!string.IsNullOrEmpty(BusyText))
+        {
+            @BusyText
+        }
+        else
+        {
+            @ChildContent
+        }
+    }
+    else
+    {
+        @if (!string.IsNullOrEmpty(Icon))
+        {
+            <i class="bi @Icon @(HasContent ? "me-1" : null)" aria-hidden="true"></i>
+        }
+        @ChildContent
+    }
+</button>
+
+@code {
+    /// <summary>The work to run on click. The button stays busy until it completes.</summary>
+    [Parameter] public Func<Task>? OnClick { get; set; }
+
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    /// <summary>Optional label shown next to the spinner while busy (e.g. "Saving…").</summary>
+    [Parameter] public string? BusyText { get; set; }
+
+    /// <summary>Bootstrap-icon class shown when idle, e.g. "bi-plus".</summary>
+    [Parameter] public string? Icon { get; set; }
+
+    [Parameter] public string CssClass { get; set; } = "btn-primary";
+    [Parameter] public string Type { get; set; } = "button";
+    [Parameter] public bool Disabled { get; set; }
+
+    /// <summary>Accessible label — required for icon-only buttons with no text content.</summary>
+    [Parameter] public string? AriaLabel { get; set; }
+
+    /// <summary>
+    /// When true (default), an exception thrown by <see cref="OnClick"/> is surfaced as an
+    /// error toast instead of bubbling up as an unhandled error. Set false to handle errors yourself.
+    /// </summary>
+    [Parameter] public bool ShowErrorToast { get; set; } = true;
+
+    private bool _running;
+    private bool HasContent => ChildContent is not null;
+
+    private async Task RunAsync()
+    {
+        if (_running || OnClick is null)
+            return;
+
+        _running = true;
+        try
+        {
+            await OnClick();
+        }
+        catch (Exception ex) when (ShowErrorToast)
+        {
+            Toasts.Error(ex.Message);
+        }
+        finally
+        {
+            _running = false;
+        }
+    }
+}

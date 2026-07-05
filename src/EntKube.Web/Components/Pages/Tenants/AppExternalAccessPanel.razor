@@ -5,6 +5,7 @@
 @inject TenantService TenantService
 @inject ComponentLifecycleService ComponentLifecycleService
 @inject KubernetesOperationsService K8sOps
+@inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
    App External Access — ops panel for managing Gateway API HTTPRoutes.
@@ -124,6 +125,17 @@
                 Failed to load routes: @loadError
             </div>
         }
+        @if (pendingConfirm is not null)
+        {
+            <div class="px-3 pt-3">
+                <ConfirmDialog Visible="true"
+                               Message="@pendingConfirm.Message"
+                               ConfirmText="@pendingConfirm.ConfirmText"
+                               IsBusy="confirmBusy"
+                               OnConfirm="RunPendingConfirmAsync"
+                               OnCancel="() => pendingConfirm = null" />
+            </div>
+        }
         <LoadingPanel Loading="@(routes is null && loadError is null)">
             @if (routes is not null && routes.Count == 0 && !showAddRoute)
             {
@@ -168,6 +180,7 @@
                                 <div class="ms-auto d-flex gap-1" @onclick:stopPropagation="true">
                                     <button class="btn btn-sm @(route.IsManaged ? "btn-outline-success" : "btn-outline-info") py-0"
                                             title="@(route.IsManaged ? "EntKube manages this route — click to stop managing (relinquish ownership)" : "Observed only — click to let EntKube manage and reconcile this route now")"
+                                            aria-label="@(route.IsManaged ? $"Stop managing route {route.Hostname}" : $"Let EntKube manage route {route.Hostname}")"
                                             disabled="@(managingRouteId == route.Id)"
                                             @onclick="() => ToggleRouteManagement(route)">
                                         @if (managingRouteId == route.Id)
@@ -181,22 +194,16 @@
                                     </button>
                                     <button class="btn btn-sm btn-outline-secondary py-0"
                                             title="Toggle enabled"
+                                            aria-label="@(route.IsEnabled ? $"Disable route {route.Hostname}" : $"Enable route {route.Hostname}")"
                                             @onclick="() => ToggleRouteEnabled(route)">
                                         <i class="bi @(route.IsEnabled ? "bi-toggle-on text-success" : "bi-toggle-off text-muted")"></i>
                                     </button>
-                                    @if (deleteConfirmRouteId == route.Id)
-                                    {
-                                        <button class="btn btn-sm btn-danger py-0" @onclick="() => DeleteRoute(route.Id)">Confirm</button>
-                                        <button class="btn btn-sm btn-outline-secondary py-0" @onclick="() => deleteConfirmRouteId = null">Cancel</button>
-                                    }
-                                    else
-                                    {
-                                        <button class="btn btn-sm btn-outline-danger py-0"
-                                                title="Delete hostname and all deployment routes"
-                                                @onclick="() => deleteConfirmRouteId = route.Id">
-                                            <i class="bi bi-trash"></i>
-                                        </button>
-                                    }
+                                    <button class="btn btn-sm btn-outline-danger py-0"
+                                            title="Delete hostname and all deployment routes"
+                                            aria-label="@($"Delete hostname {route.Hostname} and all deployment routes")"
+                                            @onclick='() => pendingConfirm = new PendingConfirm($"Delete hostname \"{route.Hostname}\" and all {route.DeploymentRoutes.Count} deployment route(s)? Any HTTPRoute EntKube applied is removed from the cluster. This cannot be undone.", "Delete", () => DeleteRoute(route.Id))'>
+                                        <i class="bi bi-trash"></i>
+                                    </button>
                                 </div>
                             }
                         </div>
@@ -300,24 +307,16 @@
                                                         }
                                                         <button class="btn btn-sm btn-outline-secondary py-0 ms-1"
                                                                 title="View manifest YAML"
+                                                                aria-label="@($"View manifest YAML for {route.Hostname}")"
                                                                 @onclick="() => ShowYaml(route)">
                                                             <i class="bi bi-code-slash"></i>
                                                         </button>
-                                                        @if (deleteConfirmDrId == dr.Id)
-                                                        {
-                                                            <button class="btn btn-sm btn-danger py-0 ms-1"
-                                                                    @onclick="() => DeleteDeploymentRoute(dr.Id, route.Id)">Confirm</button>
-                                                            <button class="btn btn-sm btn-outline-secondary py-0 ms-1"
-                                                                    @onclick="() => deleteConfirmDrId = null">Cancel</button>
-                                                        }
-                                                        else
-                                                        {
-                                                            <button class="btn btn-sm btn-outline-danger py-0 ms-1"
-                                                                    title="Remove deployment route"
-                                                                    @onclick="() => deleteConfirmDrId = dr.Id">
-                                                                <i class="bi bi-x-lg"></i>
-                                                            </button>
-                                                        }
+                                                        <button class="btn btn-sm btn-outline-danger py-0 ms-1"
+                                                                title="Remove deployment route"
+                                                                aria-label="@($"Remove deployment route {dr.AppDeployment.Name} at {dr.PathPrefix}")"
+                                                                @onclick='() => pendingConfirm = new PendingConfirm($"Remove deployment route for \"{dr.AppDeployment.Name}\" at path \"{dr.PathPrefix}\"? Its HTTPRoute is removed from the cluster. This cannot be undone.", "Remove", () => DeleteDeploymentRoute(dr.Id, route.Id))'>
+                                                            <i class="bi bi-x-lg"></i>
+                                                        </button>
                                                     </td>
                                                 </tr>
                                             }
@@ -530,10 +529,21 @@
     private List<KubeServicePort> availablePorts = [];
     private KubeEndpointSummary? endpointSummary;
 
-    // Expand / delete state
+    // Expand state
     private Guid? expandedRouteId;
-    private Guid? deleteConfirmRouteId;
-    private Guid? deleteConfirmDrId;
+
+    // A destructive action awaiting user confirmation via the ConfirmDialog banner.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
 
     // Apply to cluster
     private Guid? applyingRouteId;
@@ -700,10 +710,17 @@
 
     private async Task DeleteRoute(Guid routeId)
     {
-        await AppRouteService.DeleteRouteAsync(routeId);
-        deleteConfirmRouteId = null;
-        if (expandedRouteId == routeId) expandedRouteId = null;
-        await LoadAsync();
+        try
+        {
+            await AppRouteService.DeleteRouteAsync(routeId);
+            if (expandedRouteId == routeId) expandedRouteId = null;
+            await LoadAsync();
+            Toasts.Success("Hostname deleted.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete hostname: {ex.Message}");
+        }
     }
 
     private void ToggleExpand(Guid routeId)
@@ -824,10 +841,17 @@
 
     private async Task DeleteDeploymentRoute(Guid drId, Guid routeId)
     {
-        await K8sOps.DeleteDeploymentRouteFromClusterAsync(drId);
-        await AppRouteService.DeleteDeploymentRouteAsync(drId);
-        deleteConfirmDrId = null;
-        await LoadAsync();
+        try
+        {
+            await K8sOps.DeleteDeploymentRouteFromClusterAsync(drId);
+            await AppRouteService.DeleteDeploymentRouteAsync(drId);
+            await LoadAsync();
+            Toasts.Success("Deployment route removed.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to remove deployment route: {ex.Message}");
+        }
     }
 
     private async Task ApplyRouteToCluster(Guid drId)

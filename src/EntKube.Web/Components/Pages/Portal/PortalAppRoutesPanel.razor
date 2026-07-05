@@ -3,6 +3,7 @@
 @inject AppRouteService AppRouteService
 @inject DeploymentService DeploymentService
 @inject KubernetesOperationsService K8sOps
+@inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
    Portal URL Management — customers configure which paths under
@@ -19,6 +20,13 @@
         <small class="text-muted">Manage which paths route to which services for each hostname.</small>
     </div>
 </div>
+
+<ConfirmDialog Visible="@(pendingConfirm is not null)"
+               Message="@(pendingConfirm?.Message ?? "")"
+               ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+               IsBusy="confirmBusy"
+               OnConfirm="RunPendingConfirmAsync"
+               OnCancel="() => pendingConfirm = null" />
 
 @if (loadError is not null)
 {
@@ -183,24 +191,17 @@ else
                                         {
                                             <td class="text-end align-middle pe-2" style="white-space: nowrap;">
                                                 <button class="btn btn-sm btn-outline-secondary py-0"
+                                                        title="Edit path"
+                                                        aria-label="@($"Edit path {dr.PathPrefix}")"
                                                         @onclick="() => StartEdit(dr)">
                                                     <i class="bi bi-pencil"></i>
                                                 </button>
-                                                @if (deleteConfirmId == dr.Id)
-                                                {
-                                                    <button class="btn btn-sm btn-danger py-0 ms-1"
-                                                            @onclick="() => DeleteDeploymentRoute(dr.Id)">Confirm</button>
-                                                    <button class="btn btn-sm btn-outline-secondary py-0 ms-1"
-                                                            @onclick="() => deleteConfirmId = null">Cancel</button>
-                                                }
-                                                else
-                                                {
-                                                    <button class="btn btn-sm btn-outline-danger py-0 ms-1"
-                                                            title="Remove this path"
-                                                            @onclick="() => deleteConfirmId = dr.Id">
-                                                        <i class="bi bi-x-lg"></i>
-                                                    </button>
-                                                }
+                                                <button class="btn btn-sm btn-outline-danger py-0 ms-1"
+                                                        title="Remove this path"
+                                                        aria-label="@($"Remove path {dr.PathPrefix}")"
+                                                        @onclick='() => pendingConfirm = new PendingConfirm($"Remove path \"{dr.PathPrefix}\" from {route.Hostname}? This cannot be undone.", "Remove", () => DeleteDeploymentRoute(dr.Id))'>
+                                                    <i class="bi bi-x-lg"></i>
+                                                </button>
                                             </td>
                                         }
                                     }
@@ -373,9 +374,28 @@ else
     private List<KubeServicePort> editAvailablePorts = [];
     private KubeEndpointSummary? editEndpointSummary;
 
-    // Delete confirm
-    private Guid? deleteConfirmId;
     private string? loadError;
+
+    // A destructive action awaiting user confirmation via the ConfirmDialog banner.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try
+        {
+            await pendingConfirm.Action();
+        }
+        finally
+        {
+            confirmBusy = false;
+            pendingConfirm = null;
+        }
+    }
 
     protected override async Task OnParametersSetAsync()
     {
@@ -576,9 +596,16 @@ else
 
     private async Task DeleteDeploymentRoute(Guid drId)
     {
-        await AppRouteService.DeleteDeploymentRouteAsync(drId);
-        deleteConfirmId = null;
-        routes = await AppRouteService.GetRoutesForAppAsync(App.Id);
+        try
+        {
+            await AppRouteService.DeleteDeploymentRouteAsync(drId);
+            routes = await AppRouteService.GetRoutesForAppAsync(App.Id);
+            Toasts.Success("Removed path.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to remove path: {ex.Message}");
+        }
     }
 
     private static RenderFragment TlsBadge(AppRoute route) => __builder =>

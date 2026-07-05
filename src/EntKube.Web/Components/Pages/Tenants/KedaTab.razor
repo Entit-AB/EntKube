@@ -1,6 +1,7 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject KedaScalerService KedaService
+@inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
    KedaTab — KEDA autoscaler management at app+environment scope.
@@ -32,6 +33,12 @@
         </div>
     </div>
     <div class="card-body pt-2">
+        <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                       Message="@(pendingConfirm?.Message ?? "")"
+                       ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+                       IsBusy="confirmBusy"
+                       OnConfirm="RunPendingConfirmAsync"
+                       OnCancel="() => pendingConfirm = null" />
         @if (loading)
         {
             <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></div>
@@ -116,10 +123,13 @@
                                 }
                             </div>
                             <div class="d-flex gap-1">
-                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => EditScaler(s)">
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => EditScaler(s)"
+                                        aria-label="@($"Edit autoscaler {s.Name}")">
                                     <i class="bi bi-pencil"></i>
                                 </button>
-                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteScaler(s)">
+                                <button class="btn btn-sm btn-outline-danger"
+                                        aria-label="@($"Delete autoscaler {s.Name}")"
+                                        @onclick='() => pendingConfirm = new PendingConfirm($"Delete autoscaler \"{s.Name}\"? It will be removed from the app namespace on the next apply. This cannot be undone.", "Delete autoscaler", () => DeleteScaler(s))'>
                                     <i class="bi bi-trash"></i>
                                 </button>
                             </div>
@@ -237,6 +247,19 @@
     private string? loadError;
     private bool kedaAvailable;
     private List<KedaScaler> scalers = [];
+
+    // A destructive action awaiting user confirmation.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
 
     // Apply
     private bool applying;
@@ -396,8 +419,16 @@
 
     private async Task DeleteScaler(KedaScaler s)
     {
-        await KedaService.DeleteScalerAsync(s.Id);
-        await LoadAsync();
+        try
+        {
+            await KedaService.DeleteScalerAsync(s.Id);
+            await LoadAsync();
+            Toasts.Success($"Deleted autoscaler \"{s.Name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete autoscaler \"{s.Name}\": {ex.Message}");
+        }
     }
 
     private async Task ApplyToClusters()

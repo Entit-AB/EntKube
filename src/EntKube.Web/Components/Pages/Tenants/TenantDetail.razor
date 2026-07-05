@@ -38,166 +38,166 @@ else
     </div>
 
     @* ── Category (top-level) nav ── *@
-    <ul class="nav nav-pills mb-2 gap-1 tenant-category-nav">
-        <li class="nav-item">
-            <button class="nav-link @(activeCategory == "apps" ? "active" : "")" @onclick='() => SetCategory("apps")' disabled="@tabLoading">
+    <ul class="nav nav-pills mb-2 gap-1 tenant-category-nav" role="tablist" aria-label="Tenant sections">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link @(activeCategory == "apps" ? "active" : "")" @onclick='() => SetCategory("apps")' disabled="@tabLoading" role="tab" aria-selected="@(activeCategory == "apps")" tabindex="@(activeCategory == "apps" ? 0 : -1)">
                 <i class="bi bi-people me-1"></i>Applications
             </button>
         </li>
-        <li class="nav-item">
-            <button class="nav-link @(activeCategory == "infra" ? "active" : "")" @onclick='() => SetCategory("infra")' disabled="@tabLoading">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link @(activeCategory == "infra" ? "active" : "")" @onclick='() => SetCategory("infra")' disabled="@tabLoading" role="tab" aria-selected="@(activeCategory == "infra")" tabindex="@(activeCategory == "infra" ? 0 : -1)">
                 <i class="bi bi-layers me-1"></i>Infrastructure
             </button>
         </li>
-        <li class="nav-item">
-            <button class="nav-link @(activeCategory == "services" ? "active" : "")" @onclick='() => SetCategory("services")' disabled="@tabLoading">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link @(activeCategory == "services" ? "active" : "")" @onclick='() => SetCategory("services")' disabled="@tabLoading" role="tab" aria-selected="@(activeCategory == "services")" tabindex="@(activeCategory == "services" ? 0 : -1)">
                 <i class="bi bi-box-seam me-1"></i>Services
             </button>
         </li>
-        <li class="nav-item">
-            <button class="nav-link @(activeCategory == "ops" ? "active" : "")" @onclick='() => SetCategory("ops")' disabled="@tabLoading">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link @(activeCategory == "ops" ? "active" : "")" @onclick='() => SetCategory("ops")' disabled="@tabLoading" role="tab" aria-selected="@(activeCategory == "ops")" tabindex="@(activeCategory == "ops" ? 0 : -1)">
                 <i class="bi bi-speedometer2 me-1"></i>Operations
             </button>
         </li>
     </ul>
 
     @* ── Sub-tab strip for the active category ── *@
-    <ul class="nav nav-tabs mb-4">
+    <ul class="nav nav-tabs mb-4" role="tablist" aria-label="Section tabs">
         @if (activeCategory == "apps")
         {
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "customers" ? "active" : "")" @onclick='() => SetTab("customers")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "customers" ? "active" : "")" @onclick='() => SetTab("customers")' role="tab" aria-selected="@(activeTab == "customers")" tabindex="@(activeTab == "customers" ? 0 : -1)" id="@($"tab-customers")">
                     <i class="bi bi-people me-1"></i>Customers
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "groups" ? "active" : "")" @onclick='() => SetTab("groups")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "groups" ? "active" : "")" @onclick='() => SetTab("groups")' role="tab" aria-selected="@(activeTab == "groups")" tabindex="@(activeTab == "groups" ? 0 : -1)" id="@($"tab-groups")">
                     <i class="bi bi-diagram-3 me-1"></i>Groups
                 </button>
             </li>
         }
         else if (activeCategory == "infra")
         {
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "environments" ? "active" : "")" @onclick='() => SetTab("environments")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "environments" ? "active" : "")" @onclick='() => SetTab("environments")' role="tab" aria-selected="@(activeTab == "environments")" tabindex="@(activeTab == "environments" ? 0 : -1)" id="@($"tab-environments")">
                     <i class="bi bi-layers me-1"></i>Environments
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "networking" ? "active" : "")" @onclick='() => SetTab("networking")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "networking" ? "active" : "")" @onclick='() => SetTab("networking")' role="tab" aria-selected="@(activeTab == "networking")" tabindex="@(activeTab == "networking" ? 0 : -1)" id="@($"tab-networking")">
                     <i class="bi bi-diagram-2 me-1"></i>Networking
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "blueprints" ? "active" : "")" @onclick='() => SetTab("blueprints")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "blueprints" ? "active" : "")" @onclick='() => SetTab("blueprints")' role="tab" aria-selected="@(activeTab == "blueprints")" tabindex="@(activeTab == "blueprints" ? 0 : -1)" id="@($"tab-blueprints")">
                     <i class="bi bi-diagram-3 me-1"></i>Blueprints
                 </button>
             </li>
         }
         else if (activeCategory == "services")
         {
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "databases" ? "active" : "")" @onclick='() => SetTab("databases")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "databases" ? "active" : "")" @onclick='() => SetTab("databases")' role="tab" aria-selected="@(activeTab == "databases")" tabindex="@(activeTab == "databases" ? 0 : -1)" id="@($"tab-databases")">
                     <i class="bi bi-database me-1"></i>Databases
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "storage" ? "active" : "")" @onclick='() => SetTab("storage")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "storage" ? "active" : "")" @onclick='() => SetTab("storage")' role="tab" aria-selected="@(activeTab == "storage")" tabindex="@(activeTab == "storage" ? 0 : -1)" id="@($"tab-storage")">
                     <i class="bi bi-bucket me-1"></i>Storage
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "messaging" ? "active" : "")" @onclick='() => SetTab("messaging")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "messaging" ? "active" : "")" @onclick='() => SetTab("messaging")' role="tab" aria-selected="@(activeTab == "messaging")" tabindex="@(activeTab == "messaging" ? 0 : -1)" id="@($"tab-messaging")">
                     <i class="bi bi-collection me-1"></i>Messaging
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "cache" ? "active" : "")" @onclick='() => SetTab("cache")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "cache" ? "active" : "")" @onclick='() => SetTab("cache")' role="tab" aria-selected="@(activeTab == "cache")" tabindex="@(activeTab == "cache" ? 0 : -1)" id="@($"tab-cache")">
                     <i class="bi bi-lightning-charge me-1"></i>Cache
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "identity" ? "active" : "")" @onclick='() => SetTab("identity")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "identity" ? "active" : "")" @onclick='() => SetTab("identity")' role="tab" aria-selected="@(activeTab == "identity")" tabindex="@(activeTab == "identity" ? 0 : -1)" id="@($"tab-identity")">
                     <i class="bi bi-person-badge me-1"></i>Identity
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "registry" ? "active" : "")" @onclick='() => SetTab("registry")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "registry" ? "active" : "")" @onclick='() => SetTab("registry")' role="tab" aria-selected="@(activeTab == "registry")" tabindex="@(activeTab == "registry" ? 0 : -1)" id="@($"tab-registry")">
                     <i class="bi bi-archive me-1"></i>Registry
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "vault" ? "active" : "")" @onclick='() => SetTab("vault")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "vault" ? "active" : "")" @onclick='() => SetTab("vault")' role="tab" aria-selected="@(activeTab == "vault")" tabindex="@(activeTab == "vault" ? 0 : -1)" id="@($"tab-vault")">
                     <i class="bi bi-shield-lock me-1"></i>Vault
                 </button>
             </li>
         }
         else if (activeCategory == "ops")
         {
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "overview" ? "active" : "")" @onclick='() => SetTab("overview")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "overview" ? "active" : "")" @onclick='() => SetTab("overview")' role="tab" aria-selected="@(activeTab == "overview")" tabindex="@(activeTab == "overview" ? 0 : -1)" id="@($"tab-overview")">
                     <i class="bi bi-speedometer2 me-1"></i>Overview
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "alerts" ? "active" : "")" @onclick='() => SetTab("alerts")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "alerts" ? "active" : "")" @onclick='() => SetTab("alerts")' role="tab" aria-selected="@(activeTab == "alerts")" tabindex="@(activeTab == "alerts" ? 0 : -1)" id="@($"tab-alerts")">
                     <i class="bi bi-bell me-1"></i>Alerts
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "alert-rules" ? "active" : "")" @onclick='() => SetTab("alert-rules")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "alert-rules" ? "active" : "")" @onclick='() => SetTab("alert-rules")' role="tab" aria-selected="@(activeTab == "alert-rules")" tabindex="@(activeTab == "alert-rules" ? 0 : -1)" id="@($"tab-alert-rules")">
                     <i class="bi bi-list-check me-1"></i>Alert Rules
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "logs" ? "active" : "")" @onclick='() => SetTab("logs")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "logs" ? "active" : "")" @onclick='() => SetTab("logs")' role="tab" aria-selected="@(activeTab == "logs")" tabindex="@(activeTab == "logs" ? 0 : -1)" id="@($"tab-logs")">
                     <i class="bi bi-journal-text me-1"></i>Logs
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "incidents" ? "active" : "")" @onclick='() => SetTab("incidents")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "incidents" ? "active" : "")" @onclick='() => SetTab("incidents")' role="tab" aria-selected="@(activeTab == "incidents")" tabindex="@(activeTab == "incidents" ? 0 : -1)" id="@($"tab-incidents")">
                     <i class="bi bi-bell-fill me-1"></i>Incidents
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "notifications" ? "active" : "")" @onclick='() => SetTab("notifications")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "notifications" ? "active" : "")" @onclick='() => SetTab("notifications")' role="tab" aria-selected="@(activeTab == "notifications")" tabindex="@(activeTab == "notifications" ? 0 : -1)" id="@($"tab-notifications")">
                     <i class="bi bi-send-fill me-1"></i>Notifications
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "secret-expiry" ? "active" : "")" @onclick='() => SetTab("secret-expiry")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "secret-expiry" ? "active" : "")" @onclick='() => SetTab("secret-expiry")' role="tab" aria-selected="@(activeTab == "secret-expiry")" tabindex="@(activeTab == "secret-expiry" ? 0 : -1)" id="@($"tab-secret-expiry")">
                     <i class="bi bi-shield-exclamation me-1"></i>Secret Expiry
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "maintenance" ? "active" : "")" @onclick='() => SetTab("maintenance")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "maintenance" ? "active" : "")" @onclick='() => SetTab("maintenance")' role="tab" aria-selected="@(activeTab == "maintenance")" tabindex="@(activeTab == "maintenance" ? 0 : -1)" id="@($"tab-maintenance")">
                     <i class="bi bi-tools me-1"></i>Maintenance
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "on-call" ? "active" : "")" @onclick='() => SetTab("on-call")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "on-call" ? "active" : "")" @onclick='() => SetTab("on-call")' role="tab" aria-selected="@(activeTab == "on-call")" tabindex="@(activeTab == "on-call" ? 0 : -1)" id="@($"tab-on-call")">
                     <i class="bi bi-person-badge me-1"></i>On-Call
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "alert-routing" ? "active" : "")" @onclick='() => SetTab("alert-routing")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "alert-routing" ? "active" : "")" @onclick='() => SetTab("alert-routing")' role="tab" aria-selected="@(activeTab == "alert-routing")" tabindex="@(activeTab == "alert-routing" ? 0 : -1)" id="@($"tab-alert-routing")">
                     <i class="bi bi-funnel me-1"></i>Alert Routing
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "analytics" ? "active" : "")" @onclick='() => SetTab("analytics")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "analytics" ? "active" : "")" @onclick='() => SetTab("analytics")' role="tab" aria-selected="@(activeTab == "analytics")" tabindex="@(activeTab == "analytics" ? 0 : -1)" id="@($"tab-analytics")">
                     <i class="bi bi-bar-chart-line me-1"></i>Analytics
                 </button>
             </li>
-            <li class="nav-item">
-                <button class="nav-link @(activeTab == "sla" ? "active" : "")" @onclick='() => SetTab("sla")'>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "sla" ? "active" : "")" @onclick='() => SetTab("sla")' role="tab" aria-selected="@(activeTab == "sla")" tabindex="@(activeTab == "sla" ? 0 : -1)" id="@($"tab-sla")">
                     <i class="bi bi-shield-check me-1"></i>SLA
                 </button>
             </li>
         }
     </ul>
 
-    <div class="tab-content">
+    <div class="tab-content" role="tabpanel" tabindex="0" aria-labelledby="@($"tab-{activeTab}")">
         @if (tabLoading)
         {
             <div class="text-center py-5">
@@ -234,16 +234,16 @@ else
                 <RegistryTab TenantId="tenant.Id" />
                 break;
             case "messaging":
-                <ul class="nav nav-pills mb-3">
-                    <li class="nav-item">
+                <ul class="nav nav-pills mb-3" role="tablist" aria-label="Messaging tabs">
+                    <li class="nav-item" role="presentation">
                         <button class="nav-link @(messagingSubTab == "rabbitmq" ? "active" : "")"
-                                @onclick='() => messagingSubTab = "rabbitmq"'>
+                                @onclick='() => messagingSubTab = "rabbitmq"' role="tab" aria-selected="@(messagingSubTab == "rabbitmq")" tabindex="@(messagingSubTab == "rabbitmq" ? 0 : -1)">
                             <i class="bi bi-collection me-1"></i>RabbitMQ
                         </button>
                     </li>
-                    <li class="nav-item">
+                    <li class="nav-item" role="presentation">
                         <button class="nav-link @(messagingSubTab == "kafka" ? "active" : "")"
-                                @onclick='() => messagingSubTab = "kafka"'>
+                                @onclick='() => messagingSubTab = "kafka"' role="tab" aria-selected="@(messagingSubTab == "kafka")" tabindex="@(messagingSubTab == "kafka" ? 0 : -1)">
                             <i class="bi bi-hdd-stack me-1"></i>Kafka
                         </button>
                     </li>
@@ -306,6 +306,11 @@ else
 @code {
     [Parameter] public string Slug { get; set; } = "";
 
+    // Tab state is mirrored to the URL (?category=&tab=) so a deep view is
+    // bookmarkable, shareable, and survives a refresh or Blazor reconnect.
+    [SupplyParameterFromQuery(Name = "category")] private string? CategoryParam { get; set; }
+    [SupplyParameterFromQuery(Name = "tab")] private string? TabParam { get; set; }
+
     private Tenant? tenant;
     private string activeCategory = "apps";
     private string activeTab = "customers";
@@ -320,11 +325,33 @@ else
         ["ops"] = "overview",
     };
 
+    // Restore tab state from the query string on load / navigation.
+    private void ApplyTabFromQuery()
+    {
+        activeCategory = CategoryParam is not null && CategoryDefaults.ContainsKey(CategoryParam)
+            ? CategoryParam
+            : "apps";
+        activeTab = string.IsNullOrWhiteSpace(TabParam)
+            ? CategoryDefaults[activeCategory]
+            : TabParam;
+    }
+
+    private void SyncUrl()
+    {
+        string uri = Navigation.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["category"] = activeCategory,
+            ["tab"] = activeTab,
+        });
+        Navigation.NavigateTo(uri, forceLoad: false, replace: true);
+    }
+
     private async Task SetCategory(string category)
     {
         tabLoading = true;
         activeCategory = category;
         activeTab = CategoryDefaults[category];
+        SyncUrl();
         StateHasChanged();
         await Task.Yield();
         tabLoading = false;
@@ -334,6 +361,7 @@ else
     {
         tabLoading = true;
         activeTab = tab;
+        SyncUrl();
         StateHasChanged();
         await Task.Yield();
         tabLoading = false;
@@ -370,6 +398,9 @@ else
         {
             bool hasMembership = await UserAccessService.HasAnyTenantMembershipAsync(userId);
             Navigation.NavigateTo(hasMembership ? "/tenants" : "/portal");
+            return;
         }
+
+        ApplyTabFromQuery();
     }
 }

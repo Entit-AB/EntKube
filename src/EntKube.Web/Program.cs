@@ -126,6 +126,7 @@ public class Program
 
         builder.Services.AddSingleton<IEmailSender<ApplicationUser>, IdentityNoOpEmailSender>();
         builder.Services.AddHttpClient();
+        builder.Services.AddScoped<ToastService>();
         builder.Services.AddScoped<TenantService>();
         builder.Services.AddScoped<UserAccessService>();
         builder.Services.AddScoped<UserManagementService>();

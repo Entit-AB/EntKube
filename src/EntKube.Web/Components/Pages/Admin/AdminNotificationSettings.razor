@@ -9,8 +9,16 @@
 
 @inject NotificationProviderConfigService ProviderConfigService
 @inject AuthenticationStateProvider AuthState
+@inject ToastService Toasts
 
 <PageTitle>Notification Settings</PageTitle>
+
+<ConfirmDialog Visible="@(pendingConfirm is not null)"
+               Message="@(pendingConfirm?.Message ?? "")"
+               ConfirmText="@(pendingConfirm?.ConfirmText ?? "Remove")"
+               IsBusy="confirmBusy"
+               OnConfirm="RunPendingConfirmAsync"
+               OnCancel="() => pendingConfirm = null" />
 
 <div class="d-flex align-items-center justify-content-between mb-4">
     <div>
@@ -100,7 +108,7 @@ else
                         </div>
                         @if (smtpConfig is not null)
                         {
-                            <button class="btn btn-outline-danger ms-auto" @onclick="DeleteSmtp" disabled="@smtpBusy">Remove</button>
+                            <button class="btn btn-outline-danger ms-auto" @onclick='() => pendingConfirm = new PendingConfirm("Remove the SMTP / Email provider configuration? Email notification channels will stop delivering until it is reconfigured.", "Remove", DeleteSmtp)' disabled="@smtpBusy">Remove</button>
                         }
                     </div>
                 </div>
@@ -170,7 +178,7 @@ else
                         </button>
                         @if (teamsConfig is not null)
                         {
-                            <button class="btn btn-outline-danger ms-auto" @onclick="DeleteTeams" disabled="@teamsBusy">Remove</button>
+                            <button class="btn btn-outline-danger ms-auto" @onclick='() => pendingConfirm = new PendingConfirm("Remove the Microsoft Teams (Graph API) provider configuration? Teams notification channels will stop delivering until it is reconfigured.", "Remove", DeleteTeams)' disabled="@teamsBusy">Remove</button>
                         }
                     </div>
                 </div>
@@ -218,6 +226,19 @@ else
 @code {
     private bool loading = true;
     private string? currentUserId;
+
+    // A destructive action awaiting user confirmation.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
 
     // SMTP state
     private NotificationProviderConfig? smtpConfig;
@@ -379,6 +400,12 @@ else
             smtpHost = ""; smtpPort = 587; smtpFrom = ""; smtpUsername = ""; smtpPassword = ""; smtpEnableSsl = true; smtpEnabled = true;
             await LoadAsync();
             smtpSuccess = "SMTP configuration removed.";
+            Toasts.Success("SMTP configuration removed.");
+        }
+        catch (Exception ex)
+        {
+            smtpError = ex.Message;
+            Toasts.Error($"Failed to remove SMTP configuration: {ex.Message}");
         }
         finally
         {
@@ -490,6 +517,12 @@ else
             teamsTenantId = ""; teamsClientId = ""; teamsClientSecret = ""; teamsEnabled = true;
             await LoadAsync();
             teamsSuccess = "Teams Graph configuration removed.";
+            Toasts.Success("Teams Graph configuration removed.");
+        }
+        catch (Exception ex)
+        {
+            teamsError = ex.Message;
+            Toasts.Error($"Failed to remove Teams configuration: {ex.Message}");
         }
         finally
         {

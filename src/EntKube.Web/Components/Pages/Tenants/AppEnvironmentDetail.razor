@@ -3,7 +3,9 @@
 @using EntKube.Web.Components.Pages.Portal
 @using EntKube.Web.Components.Pages.Shared
 @using Microsoft.EntityFrameworkCore
+@using System.ComponentModel.DataAnnotations
 @implements IAsyncDisposable
+@inject ToastService Toasts
 @inject DeploymentService DeploymentService
 @inject CnpgService CnpgService
 @inject MongoService MongoService
@@ -51,9 +53,12 @@
 </div>
 
 @* --- Per-environment tabs --- *@
-<ul class="nav nav-pills mb-3 gap-1">
-    <li class="nav-item">
+<ul class="nav nav-pills mb-3 gap-1" role="tablist" aria-label="Environment sections">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "deployments" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "deployments")"
+                tabindex="@(section == "deployments" ? 0 : -1)"
                 @onclick="SwitchToDeployments">
             <i class="bi bi-rocket-takeoff me-1"></i>Deployments
             @if (deployments is not null && deployments.Count > 0)
@@ -62,16 +67,22 @@
             }
         </button>
     </li>
-    <li class="nav-item">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "resources" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "resources")"
+                tabindex="@(section == "resources" ? 0 : -1)"
                 @onclick='() => section = "resources"'>
             <i class="bi bi-diagram-3 me-1"></i>Resources
         </button>
     </li>
     @if (!IsPortalView)
     {
-        <li class="nav-item">
+        <li class="nav-item" role="presentation">
             <button class="nav-link @(section == "governance" ? "active" : "")"
+                    role="tab"
+                    aria-selected="@(section == "governance")"
+                    tabindex="@(section == "governance" ? 0 : -1)"
                     @onclick='() => section = "governance"'>
                 <i class="bi bi-shield-check me-1"></i>Governance
             </button>
@@ -79,36 +90,51 @@
     }
     @if (!IsPortalView)
     {
-        <li class="nav-item">
+        <li class="nav-item" role="presentation">
             <button class="nav-link @(section == "autoscaling" ? "active" : "")"
+                    role="tab"
+                    aria-selected="@(section == "autoscaling")"
+                    tabindex="@(section == "autoscaling" ? 0 : -1)"
                     @onclick='() => section = "autoscaling"'>
                 <i class="bi bi-arrows-angle-expand me-1"></i>Autoscaling
             </button>
         </li>
     }
-    <li class="nav-item">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "metrics" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "metrics")"
+                tabindex="@(section == "metrics" ? 0 : -1)"
                 @onclick="OpenMetricsSection">
             <i class="bi bi-bar-chart-line me-1"></i>Metrics
         </button>
     </li>
-    <li class="nav-item">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "external-access" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "external-access")"
+                tabindex="@(section == "external-access" ? 0 : -1)"
                 @onclick='() => section = "external-access"'>
             <i class="bi bi-globe me-1"></i>External Access
         </button>
     </li>
     @if (!IsPortalView)
     {
-    <li class="nav-item">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "git-access" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "git-access")"
+                tabindex="@(section == "git-access" ? 0 : -1)"
                 @onclick="SwitchToGitAccess">
             <i class="bi bi-git me-1"></i>Git Access
         </button>
     </li>
     }
-    <li class="nav-item">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "databases" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "databases")"
+                tabindex="@(section == "databases" ? 0 : -1)"
                 @onclick="OpenDatabasesSection">
             <i class="bi bi-database me-1"></i>Databases
             @if (dbBindingsByDeployment.Values.Any(b => b.Count > 0))
@@ -117,8 +143,11 @@
             }
         </button>
     </li>
-    <li class="nav-item">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "messaging" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "messaging")"
+                tabindex="@(section == "messaging" ? 0 : -1)"
                 @onclick="OpenMessagingSection">
             <i class="bi bi-send me-1"></i>Messaging
             @if (msgBindingsByDeployment.Values.Any(b => b.Count > 0))
@@ -127,8 +156,11 @@
             }
         </button>
     </li>
-    <li class="nav-item">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "cache" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "cache")"
+                tabindex="@(section == "cache" ? 0 : -1)"
                 @onclick="OpenCacheSection">
             <i class="bi bi-lightning me-1"></i>Cache
             @if (cacheBindingsByDeployment.Values.Any(b => b.Count > 0))
@@ -137,8 +169,11 @@
             }
         </button>
     </li>
-    <li class="nav-item">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "storage" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "storage")"
+                tabindex="@(section == "storage" ? 0 : -1)"
                 @onclick="OpenStorageSection">
             <i class="bi bi-bucket me-1"></i>Storage
             @if (storageBindingsByDeployment.Values.Any(b => b.Count > 0))
@@ -147,8 +182,11 @@
             }
         </button>
     </li>
-    <li class="nav-item">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "identity" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "identity")"
+                tabindex="@(section == "identity" ? 0 : -1)"
                 @onclick="OpenIdentitySection">
             <i class="bi bi-shield-lock me-1"></i>Identity
             @if (identityBindingsByDeployment.Values.Any(b => b.Count > 0))
@@ -157,20 +195,29 @@
             }
         </button>
     </li>
-    <li class="nav-item">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "vault" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "vault")"
+                tabindex="@(section == "vault" ? 0 : -1)"
                 @onclick='() => section = "vault"'>
             <i class="bi bi-key me-1"></i>Vault
         </button>
     </li>
-    <li class="nav-item">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "registries" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "registries")"
+                tabindex="@(section == "registries" ? 0 : -1)"
                 @onclick='() => section = "registries"'>
             <i class="bi bi-box-seam me-1"></i>Registries
         </button>
     </li>
-    <li class="nav-item">
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "vpn" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "vpn")"
+                tabindex="@(section == "vpn" ? 0 : -1)"
                 @onclick='() => section = "vpn"'>
             <i class="bi bi-shield-lock me-1"></i>VPN
         </button>
@@ -215,7 +262,7 @@
                     <div class="d-flex align-items-start gap-1">
                         <button class="btn btn-sm @(selectedDeployment.IsManaged ? "btn-outline-success" : "btn-outline-info")"
                                 title="@(selectedDeployment.IsManaged ? "EntKube manages this deployment — click to stop managing (observe only)" : "Observed only — click to refresh manifests from the live cluster and let EntKube manage it")"
-                                disabled="@managingDeployment"
+                                disabled="@managingDeployment" aria-label="Toggle deployment management"
                                 @onclick="ToggleDeploymentManagement">
                             @if (managingDeployment)
                             {
@@ -235,12 +282,12 @@
                             @GetHealthBadge(selectedDeployment.HealthStatus)
                         </button>
                         <button class="btn btn-sm btn-outline-secondary ms-2"
-                                @onclick="StartEditDeployment" title="Edit deployment">
+                                @onclick="StartEditDeployment" title="Edit deployment" aria-label="Edit deployment">
                             <i class="bi bi-pencil"></i>
                         </button>
                         @if (!confirmDeleteDeployment)
                         {
-                            <button class="btn btn-sm btn-outline-danger"
+                            <button class="btn btn-sm btn-outline-danger" aria-label="Delete deployment"
                                     @onclick="() => confirmDeleteDeployment = true">
                                 <i class="bi bi-trash"></i>
                             </button>
@@ -255,47 +302,49 @@
                         {
                             <div class="alert alert-danger py-1 small mb-2">@editDeployError</div>
                         }
-                        <div class="row g-2 mb-2">
-                            <div class="col-md-6">
-                                <label class="form-label small">Name</label>
-                                <input class="form-control form-control-sm" @bind="editDeployName" />
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label small">Namespace</label>
-                                @if (!string.IsNullOrWhiteSpace(governanceNamespace))
+                        <EditForm Model="editDeployModel" OnValidSubmit="SaveDeployment">
+                            <DataAnnotationsValidator />
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-6">
+                                    <label class="form-label small">Name</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="editDeployModel.Name" />
+                                    <ValidationMessage For="() => editDeployModel.Name" class="text-danger small" />
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small">Namespace</label>
+                                    @if (!string.IsNullOrWhiteSpace(governanceNamespace))
+                                    {
+                                        <input class="form-control form-control-sm font-monospace" value="@governanceNamespace" disabled />
+                                        <div class="form-text small text-warning"><i class="bi bi-lock me-1"></i>Locked by governance policy.</div>
+                                    }
+                                    else
+                                    {
+                                        <InputText class="form-control form-control-sm" @bind-Value="editDeployModel.Namespace" />
+                                        <ValidationMessage For="() => editDeployModel.Namespace" class="text-danger small" />
+                                    }
+                                </div>
+                                @if (selectedDeployment.Type == DeploymentType.HelmChart)
                                 {
-                                    <input class="form-control form-control-sm font-monospace" value="@governanceNamespace" disabled />
-                                    <div class="form-text small text-warning"><i class="bi bi-lock me-1"></i>Locked by governance policy.</div>
-                                }
-                                else
-                                {
-                                    <input class="form-control form-control-sm" @bind="editDeployNamespace" />
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Helm Repo URL</label>
+                                        <InputText class="form-control form-control-sm" @bind-Value="editDeployModel.HelmRepoUrl" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Chart Name</label>
+                                        <InputText class="form-control form-control-sm" @bind-Value="editDeployModel.HelmChartName" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Chart Version</label>
+                                        <InputText class="form-control form-control-sm" @bind-Value="editDeployModel.HelmChartVersion" />
+                                    </div>
                                 }
                             </div>
-                            @if (selectedDeployment.Type == DeploymentType.HelmChart)
-                            {
-                                <div class="col-md-4">
-                                    <label class="form-label small">Helm Repo URL</label>
-                                    <input class="form-control form-control-sm" @bind="editHelmRepoUrl" />
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small">Chart Name</label>
-                                    <input class="form-control form-control-sm" @bind="editHelmChartName" />
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small">Chart Version</label>
-                                    <input class="form-control form-control-sm" @bind="editHelmChartVersion" />
-                                </div>
-                            }
-                        </div>
-                        <div class="d-flex gap-1">
-                            <button class="btn btn-sm btn-primary" @onclick="SaveDeployment"
-                                    disabled="@(string.IsNullOrWhiteSpace(editDeployName) || string.IsNullOrWhiteSpace(editDeployNamespace))">
-                                Save
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary"
-                                    @onclick="() => showEditDeployment = false">Cancel</button>
-                        </div>
+                            <div class="d-flex gap-1">
+                                <button type="submit" class="btn btn-sm btn-primary">Save</button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary"
+                                        @onclick="() => showEditDeployment = false">Cancel</button>
+                            </div>
+                        </EditForm>
                     </div>
                 }
 
@@ -410,7 +459,7 @@
                                 }
                             </div>
                             <div class="d-flex gap-1">
-                                <button class="btn btn-sm btn-outline-secondary" title="Edit git source"
+                                <button class="btn btn-sm btn-outline-secondary" title="Edit git source" aria-label="Edit git source"
                                         @onclick="StartEditGitSettings">
                                     <i class="bi bi-pencil"></i>
                                 </button>
@@ -442,11 +491,14 @@
         </div>
 
         @* ── Deployment sub-tabs ── *@
-        <ul class="nav nav-tabs mb-3">
+        <ul class="nav nav-tabs mb-3" role="tablist" aria-label="Deployment sections">
             @if (selectedDeployment.Type is DeploymentType.Manual or DeploymentType.Yaml or DeploymentType.GitYaml)
             {
-                <li class="nav-item">
+                <li class="nav-item" role="presentation">
                     <button class="nav-link @(deploymentSection == "manifests" ? "active" : "")"
+                            role="tab"
+                            aria-selected="@(deploymentSection == "manifests")"
+                            tabindex="@(deploymentSection == "manifests" ? 0 : -1)"
                             @onclick='() => deploymentSection = "manifests"'>
                         <i class="bi bi-file-earmark-code me-1"></i>Manifests
                     </button>
@@ -454,27 +506,39 @@
             }
             @if (selectedDeployment.Type is DeploymentType.HelmChart or DeploymentType.GitHelm)
             {
-                <li class="nav-item">
+                <li class="nav-item" role="presentation">
                     <button class="nav-link @(deploymentSection == "helm-values" ? "active" : "")"
+                            role="tab"
+                            aria-selected="@(deploymentSection == "helm-values")"
+                            tabindex="@(deploymentSection == "helm-values" ? 0 : -1)"
                             @onclick='() => deploymentSection = "helm-values"'>
                         <i class="bi bi-sliders me-1"></i>Values
                     </button>
                 </li>
             }
-            <li class="nav-item">
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(deploymentSection == "resources" ? "active" : "")"
+                        role="tab"
+                        aria-selected="@(deploymentSection == "resources")"
+                        tabindex="@(deploymentSection == "resources" ? 0 : -1)"
                         @onclick="OpenDeploymentResourcesTab">
                     <i class="bi bi-diagram-3 me-1"></i>Resources
                 </button>
             </li>
-            <li class="nav-item">
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(deploymentSection == "deployment-metrics" ? "active" : "")"
+                        role="tab"
+                        aria-selected="@(deploymentSection == "deployment-metrics")"
+                        tabindex="@(deploymentSection == "deployment-metrics" ? 0 : -1)"
                         @onclick="OpenDeploymentMetricsTab">
                     <i class="bi bi-bar-chart-line me-1"></i>Metrics
                 </button>
             </li>
-            <li class="nav-item">
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(deploymentSection == "activity" ? "active" : "")"
+                        role="tab"
+                        aria-selected="@(deploymentSection == "activity")"
+                        tabindex="@(deploymentSection == "activity" ? 0 : -1)"
                         @onclick="OpenActivityTab">
                     <i class="bi bi-clock-history me-1"></i>Activity
                 </button>
@@ -517,32 +581,36 @@
                         <div class="card border-primary mb-3">
                             <div class="card-body">
                                 <h6 class="mb-3"><i class="bi bi-plus-circle me-1"></i>Add YAML Manifest</h6>
-                                <div class="row g-2 mb-2">
-                                    <div class="col-md-4">
-                                        <label class="form-label small">Kind</label>
-                                        <input class="form-control form-control-sm" @bind="newManifestKind" placeholder="e.g. Deployment" />
+                                <EditForm Model="addManifestModel" OnValidSubmit="AddManifest">
+                                    <DataAnnotationsValidator />
+                                    <div class="row g-2 mb-2">
+                                        <div class="col-md-4">
+                                            <label class="form-label small">Kind</label>
+                                            <InputText class="form-control form-control-sm" @bind-Value="addManifestModel.Kind" placeholder="e.g. Deployment" />
+                                            <ValidationMessage For="() => addManifestModel.Kind" class="text-danger small" />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small">Name</label>
+                                            <InputText class="form-control form-control-sm" @bind-Value="addManifestModel.Name" placeholder="e.g. billing-api" />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small">Sort Order</label>
+                                            <InputNumber class="form-control form-control-sm" @bind-Value="addManifestModel.SortOrder" />
+                                        </div>
                                     </div>
-                                    <div class="col-md-4">
-                                        <label class="form-label small">Name</label>
-                                        <input class="form-control form-control-sm" @bind="newManifestName" placeholder="e.g. billing-api" />
+                                    <div class="mb-2">
+                                        <label class="form-label small">YAML Content</label>
+                                        <YamlEditor @bind-Value="addManifestModel.Yaml" />
+                                        <ValidationMessage For="() => addManifestModel.Yaml" class="text-danger small" />
                                     </div>
-                                    <div class="col-md-4">
-                                        <label class="form-label small">Sort Order</label>
-                                        <input class="form-control form-control-sm" type="number" @bind="newManifestSortOrder" />
+                                    <div class="d-flex gap-1">
+                                        <button type="submit" class="btn btn-sm btn-primary" disabled="@savingManifest">
+                                            @if (savingManifest) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            Add
+                                        </button>
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAddManifest = false">Cancel</button>
                                     </div>
-                                </div>
-                                <div class="mb-2">
-                                    <label class="form-label small">YAML Content</label>
-                                    <YamlEditor @bind-Value="newManifestYaml" />
-                                </div>
-                                <div class="d-flex gap-1">
-                                    <button class="btn btn-sm btn-primary" @onclick="AddManifest"
-                                            disabled="@(string.IsNullOrWhiteSpace(newManifestKind) || string.IsNullOrWhiteSpace(newManifestYaml) || savingManifest)">
-                                        @if (savingManifest) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                        Add
-                                    </button>
-                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddManifest = false">Cancel</button>
-                                </div>
+                                </EditForm>
                             </div>
                         </div>
                     }
@@ -582,10 +650,10 @@
                                             }
                                             else
                                             {
-                                                <button class="btn btn-sm btn-outline-primary" @onclick="() => StartEditManifest(manifest)">
+                                                <button class="btn btn-sm btn-outline-primary" aria-label="Edit manifest" @onclick="() => StartEditManifest(manifest)">
                                                     <i class="bi bi-pencil"></i>
                                                 </button>
-                                                <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteManifestId = manifest.Id">
+                                                <button class="btn btn-sm btn-outline-danger" aria-label="Delete manifest" @onclick="() => confirmDeleteManifestId = manifest.Id">
                                                     <i class="bi bi-trash"></i>
                                                 </button>
                                             }
@@ -614,7 +682,7 @@
                                     <i class="bi @(yamlApplySuccess == true ? "bi-check-circle" : "bi-x-circle") me-1"></i>
                                     @(yamlApplySuccess == true ? "Applied successfully" : "Apply failed")
                                 </span>
-                                <button class="btn btn-sm btn-link text-muted py-0" @onclick="() => yamlApplyOutput = null">
+                                <button class="btn btn-sm btn-link text-muted py-0" aria-label="Close" @onclick="() => yamlApplyOutput = null">
                                     <i class="bi bi-x"></i>
                                 </button>
                             </div>
@@ -656,7 +724,7 @@
                                     <i class="bi @(helmInstallSuccess == true ? "bi-check-circle" : "bi-x-circle") me-1"></i>
                                     @(helmInstallSuccess == true ? "Release applied successfully" : "Helm operation failed")
                                 </span>
-                                <button class="btn btn-sm btn-link text-muted py-0" @onclick="() => helmInstallOutput = null"><i class="bi bi-x"></i></button>
+                                <button class="btn btn-sm btn-link text-muted py-0" aria-label="Close" @onclick="() => helmInstallOutput = null"><i class="bi bi-x"></i></button>
                             </div>
                             <pre class="bg-dark text-light p-2 rounded small mb-0"
                                  style="max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;">@helmInstallOutput</pre>
@@ -1061,16 +1129,18 @@
                     <div><small class="text-muted">Allowed repository URL patterns. Supports <code>*</code> (within segment) and <code>**</code> (across segments).</small></div>
                 </div>
                 <div class="card-body">
-                    <div class="input-group mb-3">
-                        <input type="text" class="form-control form-control-sm font-monospace"
-                               placeholder="e.g. https://github.com/acme/* or git@github.com:acme/**"
-                               @bind="newRepoPolicyPattern" @bind:event="oninput"
-                               @onkeydown="@(async (e) => { if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(newRepoPolicyPattern)) await AddRepoPolicy(); })" />
-                        <button class="btn btn-sm btn-outline-primary" @onclick="AddRepoPolicy"
-                                disabled="@string.IsNullOrWhiteSpace(newRepoPolicyPattern)">
-                            <i class="bi bi-plus me-1"></i>Add
-                        </button>
-                    </div>
+                    <EditForm Model="repoPolicyModel" OnValidSubmit="AddRepoPolicy" class="mb-3">
+                        <DataAnnotationsValidator />
+                        <div class="input-group">
+                            <InputText type="text" class="form-control form-control-sm font-monospace"
+                                       placeholder="e.g. https://github.com/acme/* or git@github.com:acme/**"
+                                       @bind-Value="repoPolicyModel.Pattern" />
+                            <button type="submit" class="btn btn-sm btn-outline-primary">
+                                <i class="bi bi-plus me-1"></i>Add
+                            </button>
+                        </div>
+                        <ValidationMessage For="() => repoPolicyModel.Pattern" class="text-danger small" />
+                    </EditForm>
                     @if (!string.IsNullOrEmpty(repoPolicyError))
                     {
                         <div class="alert alert-danger py-1 small mb-2">@repoPolicyError</div>
@@ -1096,7 +1166,7 @@
                                 }
                                 else
                                 {
-                                    <button class="btn btn-sm btn-outline-danger" title="Remove pattern"
+                                    <button class="btn btn-sm btn-outline-danger" title="Remove pattern" aria-label="Remove pattern"
                                             @onclick="() => confirmDeletePolicyId = policy.Id">
                                         <i class="bi bi-x"></i>
                                     </button>
@@ -1118,42 +1188,45 @@
                     <div><small class="text-muted">Reusable credential sets for this customer's repositories in this environment.</small></div>
                 </div>
                 <div class="card-body">
-                    <div class="row g-2 align-items-end mb-3">
-                        <div class="col-md-4">
-                            <label class="form-label small mb-1">Name</label>
-                            <input type="text" class="form-control form-control-sm" placeholder="e.g. GitHub PAT"
-                                   @bind="newCredName" @bind:event="oninput" />
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small mb-1">Auth type</label>
-                            <select class="form-select form-select-sm" @bind="newCredAuthType">
-                                <option value="@GitAuthType.None">None (public)</option>
-                                <option value="@GitAuthType.HttpsPat">HTTPS – PAT</option>
-                                <option value="@GitAuthType.HttpsPassword">HTTPS – Password</option>
-                                <option value="@GitAuthType.SshKey">SSH Key</option>
-                            </select>
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small mb-1">Repo URL pattern <span class="text-muted">(optional)</span></label>
-                            <input type="text" class="form-control form-control-sm font-monospace"
-                                   placeholder="e.g. https://github.com/acme/*"
-                                   @bind="newCredUrlPattern" @bind:event="oninput" />
-                        </div>
-                        @if (newCredAuthType == GitAuthType.HttpsPassword)
-                        {
-                            <div class="col-md-3">
-                                <label class="form-label small mb-1">Username</label>
-                                <input type="text" class="form-control form-control-sm" placeholder="e.g. myuser"
-                                       @bind="newCredUsername" @bind:event="oninput" />
+                    <EditForm Model="addCredentialModel" OnValidSubmit="AddGitCredential">
+                        <DataAnnotationsValidator />
+                        <div class="row g-2 align-items-end mb-3">
+                            <div class="col-md-4">
+                                <label class="form-label small mb-1">Name</label>
+                                <InputText type="text" class="form-control form-control-sm" placeholder="e.g. GitHub PAT"
+                                           @bind-Value="addCredentialModel.Name" />
+                                <ValidationMessage For="() => addCredentialModel.Name" class="text-danger small" />
                             </div>
-                        }
-                        <div class="col-auto">
-                            <button class="btn btn-sm btn-outline-primary" @onclick="AddGitCredential"
-                                    disabled="@string.IsNullOrWhiteSpace(newCredName)">
-                                <i class="bi bi-plus me-1"></i>Add
-                            </button>
+                            <div class="col-md-4">
+                                <label class="form-label small mb-1">Auth type</label>
+                                <InputSelect class="form-select form-select-sm" @bind-Value="addCredentialModel.AuthType">
+                                    <option value="@GitAuthType.None">None (public)</option>
+                                    <option value="@GitAuthType.HttpsPat">HTTPS – PAT</option>
+                                    <option value="@GitAuthType.HttpsPassword">HTTPS – Password</option>
+                                    <option value="@GitAuthType.SshKey">SSH Key</option>
+                                </InputSelect>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small mb-1">Repo URL pattern <span class="text-muted">(optional)</span></label>
+                                <InputText type="text" class="form-control form-control-sm font-monospace"
+                                           placeholder="e.g. https://github.com/acme/*"
+                                           @bind-Value="addCredentialModel.UrlPattern" />
+                            </div>
+                            @if (addCredentialModel.AuthType == GitAuthType.HttpsPassword)
+                            {
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-1">Username</label>
+                                    <InputText type="text" class="form-control form-control-sm" placeholder="e.g. myuser"
+                                               @bind-Value="addCredentialModel.Username" />
+                                </div>
+                            }
+                            <div class="col-auto">
+                                <button type="submit" class="btn btn-sm btn-outline-primary">
+                                    <i class="bi bi-plus me-1"></i>Add
+                                </button>
+                            </div>
                         </div>
-                    </div>
+                    </EditForm>
                     @if (!string.IsNullOrEmpty(credentialError))
                     {
                         <div class="alert alert-danger py-1 small mb-2">@credentialError</div>
@@ -1194,7 +1267,7 @@
                                     }
                                     else
                                     {
-                                        <button class="btn btn-sm btn-outline-danger" title="Delete credential"
+                                        <button class="btn btn-sm btn-outline-danger" title="Delete credential" aria-label="Delete credential"
                                                 @onclick="() => confirmDeleteCredentialId = cred.Id">
                                             <i class="bi bi-trash"></i>
                                         </button>
@@ -1294,55 +1367,58 @@
                 @if (showDbAttachForm)
                 {
                     <div class="card-body">
-                        <div class="row g-2 mb-2">
-                            <div class="col-md-4">
-                                <label class="form-label small">Deployment</label>
-                                <select class="form-select form-select-sm" @bind="newDbAttachDeploymentId">
-                                    <option value="@Guid.Empty">Select deployment…</option>
-                                    @foreach (AppDeployment dep in deployments ?? [])
-                                    {
-                                        <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
-                                    }
-                                </select>
+                        <EditForm Model="attachDbModel" OnValidSubmit="AddDatabaseBindingAppLevel">
+                            <DataAnnotationsValidator />
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-4">
+                                    <label class="form-label small">Deployment</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="attachDbModel.DeploymentId">
+                                        <option value="">Select deployment…</option>
+                                        @foreach (AppDeployment dep in deployments ?? [])
+                                        {
+                                            <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
+                                        }
+                                    </InputSelect>
+                                    <ValidationMessage For="() => attachDbModel.DeploymentId" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Database</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="attachDbModel.DatabaseId">
+                                        <option value="">Select database…</option>
+                                        @if (availableCnpgDatabases is { Count: > 0 })
+                                        {
+                                            <optgroup label="PostgreSQL (CNPG)">
+                                                @foreach ((CnpgCluster cluster, CnpgDatabase database) in availableCnpgDatabases)
+                                                {
+                                                    <option value="@database.Id">@cluster.Name / @database.Name</option>
+                                                }
+                                            </optgroup>
+                                        }
+                                        @if (availableMongoDatabases is { Count: > 0 })
+                                        {
+                                            <optgroup label="MongoDB">
+                                                @foreach ((MongoCluster cluster, MongoDatabase database) in availableMongoDatabases)
+                                                {
+                                                    <option value="@database.Id">@cluster.Name / @database.Name</option>
+                                                }
+                                            </optgroup>
+                                        }
+                                    </InputSelect>
+                                    <ValidationMessage For="() => attachDbModel.DatabaseId" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">K8s Secret name</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="attachDbModel.SecretName" placeholder="e.g. my-app-db" />
+                                    <ValidationMessage For="() => attachDbModel.SecretName" class="text-danger small" />
+                                </div>
                             </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Database</label>
-                                <select class="form-select form-select-sm" @bind="newBindingDatabaseId">
-                                    <option value="@Guid.Empty">Select database…</option>
-                                    @if (availableCnpgDatabases is { Count: > 0 })
-                                    {
-                                        <optgroup label="PostgreSQL (CNPG)">
-                                            @foreach ((CnpgCluster cluster, CnpgDatabase database) in availableCnpgDatabases)
-                                            {
-                                                <option value="@database.Id">@cluster.Name / @database.Name</option>
-                                            }
-                                        </optgroup>
-                                    }
-                                    @if (availableMongoDatabases is { Count: > 0 })
-                                    {
-                                        <optgroup label="MongoDB">
-                                            @foreach ((MongoCluster cluster, MongoDatabase database) in availableMongoDatabases)
-                                            {
-                                                <option value="@database.Id">@cluster.Name / @database.Name</option>
-                                            }
-                                        </optgroup>
-                                    }
-                                </select>
+                            @if (bindingError is not null) { <div class="alert alert-danger py-1 small mb-2">@bindingError</div> }
+                            @if (bindingWarning is not null) { <div class="alert alert-warning py-1 small mb-2">@bindingWarning</div> }
+                            <div class="d-flex gap-1">
+                                <button type="submit" class="btn btn-sm btn-primary">Attach &amp; Sync</button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showDbAttachForm = false">Cancel</button>
                             </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">K8s Secret name</label>
-                                <input class="form-control form-control-sm" @bind="newBindingSecretName" placeholder="e.g. my-app-db" />
-                            </div>
-                        </div>
-                        @if (bindingError is not null) { <div class="alert alert-danger py-1 small mb-2">@bindingError</div> }
-                        @if (bindingWarning is not null) { <div class="alert alert-warning py-1 small mb-2">@bindingWarning</div> }
-                        <div class="d-flex gap-1">
-                            <button class="btn btn-sm btn-primary" @onclick="AddDatabaseBindingAppLevel"
-                                    disabled="@(newDbAttachDeploymentId == Guid.Empty || newBindingDatabaseId == Guid.Empty || string.IsNullOrWhiteSpace(newBindingSecretName))">
-                                Attach &amp; Sync
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showDbAttachForm = false">Cancel</button>
-                        </div>
+                        </EditForm>
                     </div>
                 }
             </div>
@@ -1409,7 +1485,7 @@
                                             </td>
                                             <td class="text-end">
                                                 <button class="btn btn-sm btn-outline-secondary me-1"
-                                                        @onclick="() => ToggleDbCredentials(binding)"
+                                                        @onclick="() => ToggleDbCredentials(binding)" aria-label="Toggle credentials visibility"
                                                         title="@(revealedDbBindingId == binding.Id ? "Hide credentials" : "View credentials")">
                                                     <i class="bi @(revealedDbBindingId == binding.Id ? "bi-eye-slash" : "bi-eye")"></i>
                                                 </button>
@@ -1430,7 +1506,7 @@
                                                     }
                                                     else
                                                     {
-                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmRemoveBindingId = binding.Id" title="Detach database">
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmRemoveBindingId = binding.Id" title="Detach database" aria-label="Detach database">
                                                             <i class="bi bi-x-circle"></i>
                                                         </button>
                                                     }
@@ -1459,12 +1535,12 @@
                                                                         @if (revealedDbPasswordSecretId == sec.Id)
                                                                         {
                                                                             <code class="user-select-all small">@dbCredValues.GetValueOrDefault(sec.Id, "•••")</code>
-                                                                            <button class="btn btn-sm btn-link py-0 px-1" @onclick="() => revealedDbPasswordSecretId = null"><i class="bi bi-eye-slash"></i></button>
+                                                                            <button class="btn btn-sm btn-link py-0 px-1" aria-label="Hide password" @onclick="() => revealedDbPasswordSecretId = null"><i class="bi bi-eye-slash"></i></button>
                                                                         }
                                                                         else
                                                                         {
                                                                             <code class="small text-muted">••••••••</code>
-                                                                            <button class="btn btn-sm btn-link py-0 px-1" @onclick="() => RevealDbPassword(sec)" disabled="@dbPasswordRevealing">
+                                                                            <button class="btn btn-sm btn-link py-0 px-1" aria-label="Reveal password" @onclick="() => RevealDbPassword(sec)" disabled="@dbPasswordRevealing">
                                                                                 @if (dbPasswordRevealing) { <span class="spinner-border spinner-border-sm"></span> }
                                                                                 else { <i class="bi bi-eye"></i> }
                                                                             </button>
@@ -1518,54 +1594,57 @@
                 {
                     <div class="card-body">
                         @if (msgAttachError is not null) { <div class="alert alert-danger py-1 small mb-2">@msgAttachError</div> }
-                        <div class="row g-2 mb-2">
-                            <div class="col-md-4">
-                                <label class="form-label small">Deployment</label>
-                                <select class="form-select form-select-sm" @bind="newMsgDeploymentId">
-                                    <option value="@Guid.Empty">Select deployment…</option>
-                                    @foreach (AppDeployment dep in deployments ?? [])
-                                    {
-                                        <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
-                                    }
-                                </select>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">RabbitMQ Cluster</label>
-                                <select class="form-select form-select-sm" @bind="newMsgClusterId">
-                                    <option value="@Guid.Empty">Select cluster…</option>
-                                    @if (availableRabbitClusters is not null)
-                                    {
-                                        @foreach (RabbitMQCluster rc in availableRabbitClusters)
+                        <EditForm Model="attachMsgModel" OnValidSubmit="AddMessagingBinding">
+                            <DataAnnotationsValidator />
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-4">
+                                    <label class="form-label small">Deployment</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="attachMsgModel.DeploymentId">
+                                        <option value="">Select deployment…</option>
+                                        @foreach (AppDeployment dep in deployments ?? [])
                                         {
-                                            <option value="@rc.Id">@rc.Name</option>
+                                            <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
                                         }
-                                    }
-                                </select>
+                                    </InputSelect>
+                                    <ValidationMessage For="() => attachMsgModel.DeploymentId" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">RabbitMQ Cluster</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="attachMsgModel.ClusterId">
+                                        <option value="">Select cluster…</option>
+                                        @if (availableRabbitClusters is not null)
+                                        {
+                                            @foreach (RabbitMQCluster rc in availableRabbitClusters)
+                                            {
+                                                <option value="@rc.Id">@rc.Name</option>
+                                            }
+                                        }
+                                    </InputSelect>
+                                    <ValidationMessage For="() => attachMsgModel.ClusterId" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Vhost</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="attachMsgModel.Vhost" placeholder="/" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Queue name <span class="text-muted">(optional)</span></label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="attachMsgModel.QueueName" placeholder="my-queue" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Exchange name <span class="text-muted">(optional)</span></label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="attachMsgModel.ExchangeName" placeholder="my-exchange" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">K8s Secret name</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="attachMsgModel.SecretName" placeholder="e.g. rabbitmq-creds" />
+                                    <ValidationMessage For="() => attachMsgModel.SecretName" class="text-danger small" />
+                                </div>
                             </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Vhost</label>
-                                <input class="form-control form-control-sm" @bind="newMsgVhost" placeholder="/" />
+                            <div class="d-flex gap-1">
+                                <button type="submit" class="btn btn-sm btn-primary">Attach &amp; Sync</button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showMsgAttachForm = false">Cancel</button>
                             </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Queue name <span class="text-muted">(optional)</span></label>
-                                <input class="form-control form-control-sm" @bind="newMsgQueueName" placeholder="my-queue" />
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Exchange name <span class="text-muted">(optional)</span></label>
-                                <input class="form-control form-control-sm" @bind="newMsgExchangeName" placeholder="my-exchange" />
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">K8s Secret name</label>
-                                <input class="form-control form-control-sm" @bind="newMsgSecretName" placeholder="e.g. rabbitmq-creds" />
-                            </div>
-                        </div>
-                        <div class="d-flex gap-1">
-                            <button class="btn btn-sm btn-primary" @onclick="AddMessagingBinding"
-                                    disabled="@(newMsgDeploymentId == Guid.Empty || newMsgClusterId == Guid.Empty || string.IsNullOrWhiteSpace(newMsgSecretName))">
-                                Attach &amp; Sync
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showMsgAttachForm = false">Cancel</button>
-                        </div>
+                        </EditForm>
                     </div>
                 }
             </div>
@@ -1659,7 +1738,7 @@
                                                     }
                                                     else
                                                     {
-                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDetachMsgId = binding.Id" title="Detach">
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDetachMsgId = binding.Id" title="Detach" aria-label="Detach">
                                                             <i class="bi bi-x-circle"></i>
                                                         </button>
                                                     }
@@ -1703,42 +1782,45 @@
                 {
                     <div class="card-body">
                         @if (!string.IsNullOrEmpty(cacheBindingError)) { <div class="alert alert-danger py-1 small mb-2">@cacheBindingError</div> }
-                        <div class="row g-2 mb-2">
-                            <div class="col-md-4">
-                                <label class="form-label small">Deployment</label>
-                                <select class="form-select form-select-sm" @bind="newCacheAttachDeploymentId">
-                                    <option value="@Guid.Empty">Select deployment…</option>
-                                    @foreach (AppDeployment dep in deployments ?? [])
-                                    {
-                                        <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
-                                    }
-                                </select>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Redis Cluster</label>
-                                <select class="form-select form-select-sm" @bind="newCacheBindingClusterId">
-                                    <option value="@Guid.Empty">Select cluster…</option>
-                                    @if (availableRedisClusters is not null)
-                                    {
-                                        @foreach (RedisCluster rc in availableRedisClusters)
+                        <EditForm Model="attachCacheModel" OnValidSubmit="AddCacheBindingAppLevel">
+                            <DataAnnotationsValidator />
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-4">
+                                    <label class="form-label small">Deployment</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="attachCacheModel.DeploymentId">
+                                        <option value="">Select deployment…</option>
+                                        @foreach (AppDeployment dep in deployments ?? [])
                                         {
-                                            <option value="@rc.Id">@rc.Name (@rc.Namespace)</option>
+                                            <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
                                         }
-                                    }
-                                </select>
+                                    </InputSelect>
+                                    <ValidationMessage For="() => attachCacheModel.DeploymentId" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Redis Cluster</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="attachCacheModel.ClusterId">
+                                        <option value="">Select cluster…</option>
+                                        @if (availableRedisClusters is not null)
+                                        {
+                                            @foreach (RedisCluster rc in availableRedisClusters)
+                                            {
+                                                <option value="@rc.Id">@rc.Name (@rc.Namespace)</option>
+                                            }
+                                        }
+                                    </InputSelect>
+                                    <ValidationMessage For="() => attachCacheModel.ClusterId" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">K8s Secret name</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="attachCacheModel.SecretName" placeholder="redis-cache" />
+                                    <ValidationMessage For="() => attachCacheModel.SecretName" class="text-danger small" />
+                                </div>
                             </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">K8s Secret name</label>
-                                <input class="form-control form-control-sm" @bind="newCacheBindingSecretName" placeholder="redis-cache" />
+                            <div class="d-flex gap-1">
+                                <button type="submit" class="btn btn-sm btn-warning">Attach &amp; Sync</button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showCacheAttachForm = false">Cancel</button>
                             </div>
-                        </div>
-                        <div class="d-flex gap-1">
-                            <button class="btn btn-sm btn-warning" @onclick="AddCacheBindingAppLevel"
-                                    disabled="@(newCacheAttachDeploymentId == Guid.Empty || newCacheBindingClusterId == Guid.Empty || string.IsNullOrWhiteSpace(newCacheBindingSecretName))">
-                                Attach &amp; Sync
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showCacheAttachForm = false">Cancel</button>
-                        </div>
+                        </EditForm>
                     </div>
                 }
             </div>
@@ -1816,7 +1898,7 @@
                                                     }
                                                     else
                                                     {
-                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmRemoveCacheBindingId = binding.Id" title="Detach">
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmRemoveCacheBindingId = binding.Id" title="Detach" aria-label="Detach">
                                                             <i class="bi bi-x-circle"></i>
                                                         </button>
                                                     }
@@ -1855,39 +1937,44 @@
                 </div>
                 <div class="card-body">
                     @if (storageBindingError is not null) { <div class="alert alert-danger py-1 small mb-2">@storageBindingError</div> }
-                    <div class="row g-2 mb-2">
-                        <div class="col-md-4">
-                            <label class="form-label small">Deployment</label>
-                            <select class="form-select form-select-sm" @bind="newStorageDeploymentId">
-                                <option value="@Guid.Empty">Select deployment…</option>
-                                @foreach (AppDeployment dep in deployments ?? [])
-                                {
-                                    <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
-                                }
-                            </select>
+                    <EditForm Model="attachStorageModel" OnValidSubmit="AddStorageBinding">
+                        <DataAnnotationsValidator />
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-4">
+                                <label class="form-label small">Deployment</label>
+                                <InputSelect class="form-select form-select-sm" @bind-Value="attachStorageModel.DeploymentId">
+                                    <option value="">Select deployment…</option>
+                                    @foreach (AppDeployment dep in deployments ?? [])
+                                    {
+                                        <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
+                                    }
+                                </InputSelect>
+                                <ValidationMessage For="() => attachStorageModel.DeploymentId" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Storage Link</label>
+                                <InputSelect class="form-select form-select-sm" @bind-Value="attachStorageModel.StorageLinkId">
+                                    <option value="">Select storage link…</option>
+                                    @foreach (StorageLink link in availableStorageLinks)
+                                    {
+                                        <option value="@link.Id">@link.Name (@link.Provider)</option>
+                                    }
+                                </InputSelect>
+                                <ValidationMessage For="() => attachStorageModel.StorageLinkId" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">K8s Secret name</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="attachStorageModel.SecretName" placeholder="e.g. s3-creds" />
+                                <ValidationMessage For="() => attachStorageModel.SecretName" class="text-danger small" />
+                            </div>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Storage Link</label>
-                            <select class="form-select form-select-sm" @bind="newStorageLinkId">
-                                <option value="@Guid.Empty">Select storage link…</option>
-                                @foreach (StorageLink link in availableStorageLinks)
-                                {
-                                    <option value="@link.Id">@link.Name (@link.Provider)</option>
-                                }
-                            </select>
+                        <div class="d-flex gap-1">
+                            <button type="submit" class="btn btn-sm btn-info" disabled="@addingStorageBinding">
+                                @if (addingStorageBinding) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Attach
+                            </button>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">K8s Secret name</label>
-                            <input class="form-control form-control-sm" @bind="newStorageSecretName" placeholder="e.g. s3-creds" />
-                        </div>
-                    </div>
-                    <div class="d-flex gap-1">
-                        <button class="btn btn-sm btn-info" @onclick="AddStorageBinding"
-                                disabled="@(addingStorageBinding || newStorageDeploymentId == Guid.Empty || newStorageLinkId == Guid.Empty || string.IsNullOrWhiteSpace(newStorageSecretName))">
-                            @if (addingStorageBinding) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                            Attach
-                        </button>
-                    </div>
+                    </EditForm>
                 </div>
             </div>
         }
@@ -1958,7 +2045,7 @@
                                                     }
                                                     else
                                                     {
-                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmUnbindStorageId = binding.Id" title="Unlink storage">
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmUnbindStorageId = binding.Id" title="Unlink storage" aria-label="Unlink storage">
                                                             <i class="bi bi-x-circle"></i>
                                                         </button>
                                                     }
@@ -2010,23 +2097,26 @@
                         {
                             <div class="alert alert-danger py-1 small mb-2">@linkRealmError</div>
                         }
-                        <div class="d-flex align-items-end gap-2">
-                            <div>
-                                <label class="form-label small">Realm</label>
-                                <select class="form-select form-select-sm" @bind="newIdentityLinkRealmId">
-                                    <option value="@Guid.Empty">Select realm…</option>
-                                    @foreach (KeycloakRealm r in availableRealmsForLinking.Where(r => r.LinkedAppId is null))
-                                    {
-                                        <option value="@r.Id">@r.DisplayName (@r.RealmName)</option>
-                                    }
-                                </select>
+                        <EditForm Model="linkRealmModel" OnValidSubmit="LinkRealmToApp">
+                            <DataAnnotationsValidator />
+                            <div class="d-flex align-items-end gap-2">
+                                <div>
+                                    <label class="form-label small">Realm</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="linkRealmModel.RealmId">
+                                        <option value="">Select realm…</option>
+                                        @foreach (KeycloakRealm r in availableRealmsForLinking.Where(r => r.LinkedAppId is null))
+                                        {
+                                            <option value="@r.Id">@r.DisplayName (@r.RealmName)</option>
+                                        }
+                                    </InputSelect>
+                                    <ValidationMessage For="() => linkRealmModel.RealmId" class="text-danger small" />
+                                </div>
+                                <button type="submit" class="btn btn-sm btn-primary" disabled="@linkingRealm">
+                                    @if (linkingRealm) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Link Realm
+                                </button>
                             </div>
-                            <button class="btn btn-sm btn-primary" @onclick="LinkRealmToApp"
-                                    disabled="@(linkingRealm || newIdentityLinkRealmId == Guid.Empty)">
-                                @if (linkingRealm) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                Link Realm
-                            </button>
-                        </div>
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -2058,44 +2148,49 @@
                             Could not load OIDC clients from Keycloak: <code>@clientsLoadError</code>
                         </div>
                     }
-                    <div class="row g-2 mb-2">
-                        <div class="col-md-3">
-                            <label class="form-label small">Deployment</label>
-                            <select class="form-select form-select-sm" @bind="newIdentityDeploymentId">
-                                <option value="@Guid.Empty">Select deployment…</option>
-                                @foreach (AppDeployment dep in deployments ?? [])
-                                {
-                                    <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
-                                }
-                            </select>
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label small">OIDC Client</label>
-                            @if (loadingIdentityClients)
-                            {
-                                <div class="mt-1"><span class="spinner-border spinner-border-sm text-primary"></span></div>
-                            }
-                            else
-                            {
-                                <select class="form-select form-select-sm" @bind="newIdentityClientUuid">
-                                    <option value="">Select client…</option>
-                                    @foreach (KeycloakClientInfo client in availableIdentityClients)
+                    <EditForm Model="attachIdentityModel" OnValidSubmit="AddIdentityBinding">
+                        <DataAnnotationsValidator />
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-3">
+                                <label class="form-label small">Deployment</label>
+                                <InputSelect class="form-select form-select-sm" @bind-Value="attachIdentityModel.DeploymentId">
+                                    <option value="">Select deployment…</option>
+                                    @foreach (AppDeployment dep in deployments ?? [])
                                     {
-                                        <option value="@client.Id">@client.ClientId@(string.IsNullOrEmpty(client.Name) ? "" : $" — {client.Name}")</option>
+                                        <option value="@dep.Id">@dep.Name (@dep.Namespace)</option>
                                     }
-                                </select>
-                            }
+                                </InputSelect>
+                                <ValidationMessage For="() => attachIdentityModel.DeploymentId" class="text-danger small" />
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small">OIDC Client</label>
+                                @if (loadingIdentityClients)
+                                {
+                                    <div class="mt-1"><span class="spinner-border spinner-border-sm text-primary"></span></div>
+                                }
+                                else
+                                {
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="attachIdentityModel.ClientUuid">
+                                        <option value="">Select client…</option>
+                                        @foreach (KeycloakClientInfo client in availableIdentityClients)
+                                        {
+                                            <option value="@client.Id">@client.ClientId@(string.IsNullOrEmpty(client.Name) ? "" : $" — {client.Name}")</option>
+                                        }
+                                    </InputSelect>
+                                    <ValidationMessage For="() => attachIdentityModel.ClientUuid" class="text-danger small" />
+                                }
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small">K8s Secret name</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="attachIdentityModel.SecretName" placeholder="e.g. oidc-credentials" />
+                                <ValidationMessage For="() => attachIdentityModel.SecretName" class="text-danger small" />
+                            </div>
                         </div>
-                        <div class="col-md-3">
-                            <label class="form-label small">K8s Secret name</label>
-                            <input class="form-control form-control-sm" @bind="newIdentitySecretName" placeholder="e.g. oidc-credentials" />
-                        </div>
-                    </div>
-                    <button class="btn btn-sm btn-primary" @onclick="AddIdentityBinding"
-                            disabled="@(addingIdentityBinding || newIdentityDeploymentId == Guid.Empty || string.IsNullOrWhiteSpace(newIdentityClientUuid) || string.IsNullOrWhiteSpace(newIdentitySecretName))">
-                        @if (addingIdentityBinding) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                        Attach
-                    </button>
+                        <button type="submit" class="btn btn-sm btn-primary" disabled="@addingIdentityBinding">
+                            @if (addingIdentityBinding) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Attach
+                        </button>
+                    </EditForm>
                 </div>
             </div>
         }
@@ -2169,7 +2264,7 @@
                                                 <button class="btn btn-sm btn-outline-primary me-1"
                                                         @onclick="() => SyncIdentityBinding(binding)"
                                                         disabled="@syncingBindingIds.Contains(binding.Id)"
-                                                        title="Sync to K8s">
+                                                        title="Sync to K8s" aria-label="Sync to K8s">
                                                     @if (syncingBindingIds.Contains(binding.Id))
                                                     { <span class="spinner-border spinner-border-sm"></span> }
                                                     else
@@ -2188,7 +2283,7 @@
                                                     }
                                                     else
                                                     {
-                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDetachIdentityId = binding.Id" title="Detach">
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDetachIdentityId = binding.Id" title="Detach" aria-label="Detach">
                                                             <i class="bi bi-x-circle"></i>
                                                         </button>
                                                     }
@@ -2260,8 +2355,7 @@
 
     // Edit deployment
     private bool showEditDeployment;
-    private string editDeployName = "", editDeployNamespace = "";
-    private string editHelmRepoUrl = "", editHelmChartName = "", editHelmChartVersion = "";
+    private EditDeploymentModel editDeployModel = new();
     private string? editDeployError;
 
     // Edit git settings
@@ -2277,8 +2371,7 @@
     // Manifests
     private List<DeploymentManifest>? manifests;
     private bool showAddManifest, savingManifest;
-    private string newManifestKind = "", newManifestName = "", newManifestYaml = "";
-    private int newManifestSortOrder;
+    private AddManifestModel addManifestModel = new();
     private Guid? editingManifestId, confirmDeleteManifestId;
     private string editManifestYaml = "";
 
@@ -2315,16 +2408,14 @@
     // Database bindings (form state shared between app-level tab and legacy methods)
     private List<(CnpgCluster Cluster, CnpgDatabase Database)>? availableCnpgDatabases;
     private List<(MongoCluster Cluster, MongoDatabase Database)>? availableMongoDatabases;
-    private Guid newBindingDatabaseId;
-    private string newBindingSecretName = "";
+    private AttachDatabaseModel attachDbModel = new();
     private string? bindingError;
     private string? bindingWarning;
     private Guid? confirmRemoveBindingId;
 
     // Cache bindings (form state shared with app-level tab)
     private List<RedisCluster>? availableRedisClusters;
-    private Guid newCacheBindingClusterId;
-    private string newCacheBindingSecretName = "redis-cache";
+    private AttachCacheModel attachCacheModel = new();
     private string? cacheBindingError;
     private Guid? confirmRemoveCacheBindingId;
 
@@ -2337,7 +2428,6 @@
     private Dictionary<Guid, string?> dbCredValues = new();
     private Guid? revealedDbPasswordSecretId;
     private bool dbPasswordRevealing;
-    private Guid newDbAttachDeploymentId;
     private bool showDbAttachForm;
 
     // Shared sync state for app-level binding tabs
@@ -2348,12 +2438,7 @@
     private Dictionary<Guid, List<MessagingBinding>> msgBindingsByDeployment = new();
     private bool msgBindingsLoaded;
     private List<RabbitMQCluster>? availableRabbitClusters;
-    private Guid newMsgDeploymentId;
-    private Guid newMsgClusterId;
-    private string newMsgVhost = "/";
-    private string newMsgQueueName = "";
-    private string newMsgExchangeName = "";
-    private string newMsgSecretName = "";
+    private AttachMessagingModel attachMsgModel = new();
     private bool showMsgAttachForm;
     private string? msgAttachError;
     private Guid? confirmDetachMsgId;
@@ -2361,16 +2446,13 @@
     // ── App-level cache bindings ─────────────────────────────────────
     private Dictionary<Guid, List<CacheBinding>> cacheBindingsByDeployment = new();
     private bool cacheBindingsLoaded;
-    private Guid newCacheAttachDeploymentId;
     private bool showCacheAttachForm;
 
     // ── App-level storage bindings ───────────────────────────────────
     private Dictionary<Guid, List<StorageBinding>> storageBindingsByDeployment = new();
     private bool storageBindingsLoaded;
     private List<StorageLink> availableStorageLinks = [];
-    private Guid newStorageDeploymentId;
-    private Guid newStorageLinkId;
-    private string newStorageSecretName = "";
+    private AttachStorageModel attachStorageModel = new();
     private bool addingStorageBinding;
     private string? storageBindingError;
     private Guid? confirmUnbindStorageId;
@@ -2382,15 +2464,13 @@
     private string? identityLoadError;
     private KeycloakRealm? identityRealm;
     private List<KeycloakRealm> availableRealmsForLinking = [];
-    private Guid newIdentityLinkRealmId;
+    private LinkRealmModel linkRealmModel = new();
     private bool linkingRealm;
     private string? linkRealmError;
     private List<KeycloakClientInfo> availableIdentityClients = [];
     private bool loadingIdentityClients;
     private string? clientsLoadError;
-    private Guid newIdentityDeploymentId;
-    private string newIdentityClientUuid = "";
-    private string newIdentitySecretName = "";
+    private AttachIdentityModel attachIdentityModel = new();
     private bool addingIdentityBinding;
     private string? identityBindingError;
     private Guid? confirmDetachIdentityId;
@@ -2398,15 +2478,12 @@
 
     // Git Access tab
     private List<CustomerGitRepoPolicy>? gitRepoPolicies;
-    private string newRepoPolicyPattern = "";
+    private RepoPolicyModel repoPolicyModel = new();
     private string? repoPolicyError;
     private Guid? confirmDeletePolicyId;
 
     private List<CustomerGitCredential>? gitCredentials;
-    private string newCredName = "";
-    private GitAuthType newCredAuthType = GitAuthType.HttpsPat;
-    private string newCredUsername = "";
-    private string newCredUrlPattern = "";
+    private AddCredentialModel addCredentialModel = new();
     private string? credentialError;
     private string? credentialSuccess;
     private Dictionary<Guid, string> credSecretValues = new();
@@ -2474,7 +2551,10 @@
         {
             governanceNamespace = await AppGovernanceService.GetNamespaceAsync(App.Id, Environment.Id);
         }
-        catch { }
+        catch
+        {
+            // Best-effort: namespace column may be absent on databases that haven't been migrated yet.
+        }
     }
 
     private async Task LoadDeployments()
@@ -2587,11 +2667,14 @@
     private void StartEditDeployment()
     {
         if (selectedDeployment is null) return;
-        editDeployName = selectedDeployment.Name;
-        editDeployNamespace = selectedDeployment.Namespace;
-        editHelmRepoUrl = selectedDeployment.HelmRepoUrl ?? "";
-        editHelmChartName = selectedDeployment.HelmChartName ?? "";
-        editHelmChartVersion = selectedDeployment.HelmChartVersion ?? "";
+        editDeployModel = new EditDeploymentModel
+        {
+            Name = selectedDeployment.Name,
+            Namespace = selectedDeployment.Namespace,
+            HelmRepoUrl = selectedDeployment.HelmRepoUrl ?? "",
+            HelmChartName = selectedDeployment.HelmChartName ?? "",
+            HelmChartVersion = selectedDeployment.HelmChartVersion ?? "",
+        };
         editDeployError = null;
         showEditDeployment = true;
         showEditGitSettings = false;
@@ -2640,15 +2723,16 @@
         editDeployError = null;
         try
         {
-            string effectiveNs = !string.IsNullOrWhiteSpace(governanceNamespace) ? governanceNamespace : editDeployNamespace;
+            string effectiveNs = !string.IsNullOrWhiteSpace(governanceNamespace) ? governanceNamespace : editDeployModel.Namespace;
             await DeploymentService.UpdateDeploymentAsync(
-                selectedDeployment.Id, editDeployName, effectiveNs,
-                selectedDeployment.Type == DeploymentType.HelmChart ? editHelmRepoUrl : null,
-                selectedDeployment.Type == DeploymentType.HelmChart ? editHelmChartName : null,
-                selectedDeployment.Type == DeploymentType.HelmChart ? editHelmChartVersion : null);
+                selectedDeployment.Id, editDeployModel.Name, effectiveNs,
+                selectedDeployment.Type == DeploymentType.HelmChart ? editDeployModel.HelmRepoUrl : null,
+                selectedDeployment.Type == DeploymentType.HelmChart ? editDeployModel.HelmChartName : null,
+                selectedDeployment.Type == DeploymentType.HelmChart ? editDeployModel.HelmChartVersion : null);
             await LoadDeployments();
             selectedDeployment = deployments?.FirstOrDefault(d => d.Id == selectedDeployment.Id) ?? selectedDeployment;
             showEditDeployment = false;
+            Toasts.Success("Deployment updated.");
         }
         catch (Exception ex) { editDeployError = ex.Message; }
     }
@@ -2691,9 +2775,10 @@
         try
         {
             await DeploymentService.AddManifestAsync(
-                selectedDeployment.Id, newManifestKind, newManifestName, newManifestYaml, newManifestSortOrder);
-            showAddManifest = false; newManifestKind = newManifestName = newManifestYaml = ""; newManifestSortOrder = 0;
+                selectedDeployment.Id, addManifestModel.Kind, addManifestModel.Name, addManifestModel.Yaml, addManifestModel.SortOrder);
+            showAddManifest = false; addManifestModel = new();
             await LoadManifests();
+            Toasts.Success("Manifest added.");
         }
         finally { savingManifest = false; }
     }
@@ -2887,30 +2972,33 @@
 
     private async Task AddDatabaseBindingAppLevel()
     {
-        if (newDbAttachDeploymentId == Guid.Empty || newBindingDatabaseId == Guid.Empty) return;
         bindingError = null;
         bindingWarning = null;
+        Guid deploymentId = attachDbModel.DeploymentId!.Value;
+        Guid databaseId = attachDbModel.DatabaseId!.Value;
+        string secretName = attachDbModel.SecretName;
         try
         {
-            var mongoMatch = availableMongoDatabases?.FirstOrDefault(x => x.Database.Id == newBindingDatabaseId);
+            var mongoMatch = availableMongoDatabases?.FirstOrDefault(x => x.Database.Id == databaseId);
             if (mongoMatch is { Database: not null })
             {
-                await MongoService.AddMongoDatabaseBindingAsync(newDbAttachDeploymentId, newBindingDatabaseId, newBindingSecretName);
-                try { await MongoService.SyncDatabaseCredentialsToK8sAsync(TenantId, mongoMatch.Value.Cluster.Id, newBindingDatabaseId); }
+                await MongoService.AddMongoDatabaseBindingAsync(deploymentId, databaseId, secretName);
+                try { await MongoService.SyncDatabaseCredentialsToK8sAsync(TenantId, mongoMatch.Value.Cluster.Id, databaseId); }
                 catch (Exception syncEx) { bindingWarning = $"Database attached, but credential sync failed: {syncEx.Message}"; }
             }
             else
             {
-                await CnpgService.AddCnpgDatabaseBindingAsync(newDbAttachDeploymentId, newBindingDatabaseId, newBindingSecretName);
-                var cnpgMatch = availableCnpgDatabases?.FirstOrDefault(x => x.Database.Id == newBindingDatabaseId);
+                await CnpgService.AddCnpgDatabaseBindingAsync(deploymentId, databaseId, secretName);
+                var cnpgMatch = availableCnpgDatabases?.FirstOrDefault(x => x.Database.Id == databaseId);
                 if (cnpgMatch is { Database: not null })
                 {
-                    try { await CnpgService.SyncDatabaseCredentialsToK8sAsync(TenantId, cnpgMatch.Value.Cluster.Id, newBindingDatabaseId); }
+                    try { await CnpgService.SyncDatabaseCredentialsToK8sAsync(TenantId, cnpgMatch.Value.Cluster.Id, databaseId); }
                     catch (Exception syncEx) { bindingWarning = $"Database attached, but credential sync failed: {syncEx.Message}"; }
                 }
             }
-            showDbAttachForm = false; newDbAttachDeploymentId = Guid.Empty; newBindingDatabaseId = Guid.Empty; newBindingSecretName = "";
+            showDbAttachForm = false; attachDbModel = new();
             await LoadAppDatabaseBindings();
+            Toasts.Success("Database attached.");
         }
         catch (Exception ex)
         {
@@ -3001,20 +3089,19 @@
 
     private async Task AddMessagingBinding()
     {
-        if (newMsgDeploymentId == Guid.Empty || newMsgClusterId == Guid.Empty) return;
         msgAttachError = null;
         try
         {
             await RabbitMQService.CreateMessagingBindingAsync(
-                TenantId, newMsgClusterId, newMsgDeploymentId,
-                newMsgVhost.Trim(),
-                string.IsNullOrWhiteSpace(newMsgQueueName) ? null : newMsgQueueName.Trim(),
-                string.IsNullOrWhiteSpace(newMsgExchangeName) ? null : newMsgExchangeName.Trim(),
-                newMsgSecretName.Trim());
+                TenantId, attachMsgModel.ClusterId!.Value, attachMsgModel.DeploymentId!.Value,
+                attachMsgModel.Vhost.Trim(),
+                string.IsNullOrWhiteSpace(attachMsgModel.QueueName) ? null : attachMsgModel.QueueName.Trim(),
+                string.IsNullOrWhiteSpace(attachMsgModel.ExchangeName) ? null : attachMsgModel.ExchangeName.Trim(),
+                attachMsgModel.SecretName.Trim());
             showMsgAttachForm = false;
-            newMsgDeploymentId = Guid.Empty; newMsgClusterId = Guid.Empty;
-            newMsgVhost = "/"; newMsgSecretName = ""; newMsgQueueName = ""; newMsgExchangeName = "";
+            attachMsgModel = new();
             await LoadAppMessagingBindings();
+            Toasts.Success("Messaging binding attached.");
         }
         catch (Exception ex) { msgAttachError = ex.Message; }
     }
@@ -3027,7 +3114,7 @@
             await RabbitMQService.DeleteMessagingBindingAsync(TenantId, id);
             await LoadAppMessagingBindings();
         }
-        catch { }
+        catch (Exception ex) { Toasts.Error($"Failed to remove messaging binding: {ex.Message}"); }
     }
 
     private async Task SyncMessagingBinding(MessagingBinding binding)
@@ -3047,13 +3134,13 @@
 
     private async Task AddCacheBindingAppLevel()
     {
-        if (newCacheAttachDeploymentId == Guid.Empty || newCacheBindingClusterId == Guid.Empty) return;
         cacheBindingError = null;
         try
         {
-            await RedisService.CreateCacheBindingAsync(TenantId, newCacheBindingClusterId, newCacheAttachDeploymentId, newCacheBindingSecretName.Trim());
-            showCacheAttachForm = false; newCacheAttachDeploymentId = Guid.Empty; newCacheBindingClusterId = Guid.Empty; newCacheBindingSecretName = "redis-cache";
+            await RedisService.CreateCacheBindingAsync(TenantId, attachCacheModel.ClusterId!.Value, attachCacheModel.DeploymentId!.Value, attachCacheModel.SecretName.Trim());
+            showCacheAttachForm = false; attachCacheModel = new();
             await LoadAppCacheBindings();
+            Toasts.Success("Redis cache attached.");
         }
         catch (Exception ex) { cacheBindingError = $"Failed to attach Redis: {ex.Message}"; }
     }
@@ -3089,9 +3176,10 @@
         storageBindingError = null; addingStorageBinding = true;
         try
         {
-            await StorageService.BindStorageToDeploymentAsync(newStorageLinkId, newStorageDeploymentId, newStorageSecretName.Trim());
-            newStorageDeploymentId = Guid.Empty; newStorageLinkId = Guid.Empty; newStorageSecretName = "";
+            await StorageService.BindStorageToDeploymentAsync(attachStorageModel.StorageLinkId!.Value, attachStorageModel.DeploymentId!.Value, attachStorageModel.SecretName.Trim());
+            attachStorageModel = new();
             await LoadAppStorageBindings();
+            Toasts.Success("Storage attached.");
         }
         catch (Exception ex) { storageBindingError = ex.Message; }
         finally { addingStorageBinding = false; }
@@ -3164,10 +3252,11 @@
         linkingRealm = true;
         try
         {
-            await KeycloakService.LinkRealmToAppAsync(TenantId, newIdentityLinkRealmId, App.Id);
+            await KeycloakService.LinkRealmToAppAsync(TenantId, linkRealmModel.RealmId!.Value, App.Id);
             identityRealm = null;
-            newIdentityLinkRealmId = Guid.Empty;
+            linkRealmModel = new();
             await LoadAppIdentityBindings();
+            Toasts.Success("Realm linked.");
         }
         catch (Exception ex) { linkRealmError = ex.Message; }
         finally { linkingRealm = false; }
@@ -3178,19 +3267,20 @@
         identityBindingError = null; addingIdentityBinding = true;
         try
         {
-            KeycloakClientInfo? client = availableIdentityClients.FirstOrDefault(c => c.Id == newIdentityClientUuid);
+            KeycloakClientInfo? client = availableIdentityClients.FirstOrDefault(c => c.Id == attachIdentityModel.ClientUuid);
             if (client is null) { identityBindingError = "Selected client not found."; return; }
             if (identityRealm is null) { identityBindingError = "No realm linked to this app."; return; }
 
             IdentityBinding binding = await KeycloakService.CreateIdentityBindingAsync(
-                identityRealm.Id, newIdentityDeploymentId,
-                client.Id, client.ClientId, newIdentitySecretName.Trim());
+                identityRealm.Id, attachIdentityModel.DeploymentId!.Value,
+                client.Id, client.ClientId, attachIdentityModel.SecretName.Trim());
 
             try { await KeycloakService.SyncIdentityBindingAsync(TenantId, binding.Id); }
             catch (Exception syncEx) { identityBindingError = $"Attached, but sync failed: {syncEx.Message}"; }
 
-            newIdentityDeploymentId = Guid.Empty; newIdentityClientUuid = ""; newIdentitySecretName = "";
+            attachIdentityModel = new();
             await LoadAppIdentityBindings();
+            Toasts.Success("OIDC client attached.");
         }
         catch (Exception ex) { identityBindingError = ex.Message; }
         finally { addingIdentityBinding = false; }
@@ -3277,9 +3367,10 @@
         repoPolicyError = null;
         try
         {
-            await CustomerGitService.AddRepoPolicyAsync(App.CustomerId, Environment.Id, newRepoPolicyPattern.Trim());
-            newRepoPolicyPattern = "";
+            await CustomerGitService.AddRepoPolicyAsync(App.CustomerId, Environment.Id, repoPolicyModel.Pattern.Trim());
+            repoPolicyModel = new();
             gitRepoPolicies = await CustomerGitService.GetRepoPoliciesAsync(App.CustomerId, Environment.Id);
+            Toasts.Success("URL policy added.");
         }
         catch (Microsoft.EntityFrameworkCore.DbUpdateException)
         {
@@ -3302,13 +3393,10 @@
         {
             await CustomerGitService.CreateCredentialAsync(
                 App.CustomerId, Environment.Id, TenantId,
-                newCredName.Trim(), newCredAuthType,
-                newCredAuthType == GitAuthType.HttpsPassword ? newCredUsername : null,
-                string.IsNullOrWhiteSpace(newCredUrlPattern) ? null : newCredUrlPattern.Trim());
-            newCredName = "";
-            newCredAuthType = GitAuthType.HttpsPat;
-            newCredUsername = "";
-            newCredUrlPattern = "";
+                addCredentialModel.Name.Trim(), addCredentialModel.AuthType,
+                addCredentialModel.AuthType == GitAuthType.HttpsPassword ? addCredentialModel.Username : null,
+                string.IsNullOrWhiteSpace(addCredentialModel.UrlPattern) ? null : addCredentialModel.UrlPattern.Trim());
+            addCredentialModel = new();
             gitCredentials = await CustomerGitService.GetCredentialsAsync(App.CustomerId, Environment.Id);
             foreach (CustomerGitCredential c in gitCredentials)
                 credSecretValues.TryAdd(c.Id, "");
@@ -3389,4 +3477,117 @@
         HealthStatus.Suspended   => @<span class="badge bg-secondary"><i class="bi bi-pause-circle me-1"></i>Suspended</span>,
         _                        => @<span class="badge bg-secondary">Unknown</span>
     };
+
+    // ── Form models (DataAnnotations validation) ──────────────────
+
+    private sealed class EditDeploymentModel
+    {
+        [Required(ErrorMessage = "Enter a name.")]
+        public string Name { get; set; } = "";
+
+        [Required(ErrorMessage = "Enter a namespace.")]
+        public string Namespace { get; set; } = "";
+
+        public string HelmRepoUrl { get; set; } = "";
+        public string HelmChartName { get; set; } = "";
+        public string HelmChartVersion { get; set; } = "";
+    }
+
+    private sealed class AddManifestModel
+    {
+        [Required(ErrorMessage = "Enter a kind (e.g. Deployment).")]
+        public string Kind { get; set; } = "";
+
+        public string Name { get; set; } = "";
+        public int SortOrder { get; set; }
+
+        [Required(ErrorMessage = "Enter YAML content.")]
+        public string Yaml { get; set; } = "";
+    }
+
+    private sealed class RepoPolicyModel
+    {
+        [Required(ErrorMessage = "Enter a URL pattern.")]
+        public string Pattern { get; set; } = "";
+    }
+
+    private sealed class AddCredentialModel
+    {
+        [Required(ErrorMessage = "Enter a name.")]
+        public string Name { get; set; } = "";
+
+        public GitAuthType AuthType { get; set; } = GitAuthType.HttpsPat;
+        public string Username { get; set; } = "";
+        public string UrlPattern { get; set; } = "";
+    }
+
+    private sealed class AttachDatabaseModel
+    {
+        [Required(ErrorMessage = "Select a deployment.")]
+        public Guid? DeploymentId { get; set; }
+
+        [Required(ErrorMessage = "Select a database.")]
+        public Guid? DatabaseId { get; set; }
+
+        [Required(ErrorMessage = "Enter a secret name.")]
+        public string SecretName { get; set; } = "";
+    }
+
+    private sealed class AttachMessagingModel
+    {
+        [Required(ErrorMessage = "Select a deployment.")]
+        public Guid? DeploymentId { get; set; }
+
+        [Required(ErrorMessage = "Select a cluster.")]
+        public Guid? ClusterId { get; set; }
+
+        public string Vhost { get; set; } = "/";
+        public string QueueName { get; set; } = "";
+        public string ExchangeName { get; set; } = "";
+
+        [Required(ErrorMessage = "Enter a secret name.")]
+        public string SecretName { get; set; } = "";
+    }
+
+    private sealed class AttachCacheModel
+    {
+        [Required(ErrorMessage = "Select a deployment.")]
+        public Guid? DeploymentId { get; set; }
+
+        [Required(ErrorMessage = "Select a cluster.")]
+        public Guid? ClusterId { get; set; }
+
+        [Required(ErrorMessage = "Enter a secret name.")]
+        public string SecretName { get; set; } = "redis-cache";
+    }
+
+    private sealed class AttachStorageModel
+    {
+        [Required(ErrorMessage = "Select a deployment.")]
+        public Guid? DeploymentId { get; set; }
+
+        [Required(ErrorMessage = "Select a storage link.")]
+        public Guid? StorageLinkId { get; set; }
+
+        [Required(ErrorMessage = "Enter a secret name.")]
+        public string SecretName { get; set; } = "";
+    }
+
+    private sealed class LinkRealmModel
+    {
+        [Required(ErrorMessage = "Select a realm.")]
+        public Guid? RealmId { get; set; }
+    }
+
+    private sealed class AttachIdentityModel
+    {
+        [Required(ErrorMessage = "Select a deployment.")]
+        public Guid? DeploymentId { get; set; }
+
+        [Required(ErrorMessage = "Select an OIDC client.")]
+        public string ClientUuid { get; set; } = "";
+
+        [Required(ErrorMessage = "Enter a secret name.")]
+        public string SecretName { get; set; } = "";
+    }
 }

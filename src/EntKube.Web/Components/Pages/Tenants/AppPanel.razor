@@ -2,6 +2,14 @@
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject TenantService TenantService
+@inject ToastService Toasts
+
+<ConfirmDialog Visible="@(pendingConfirm is not null)"
+               Message="@(pendingConfirm?.Message ?? "")"
+               ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+               IsBusy="confirmBusy"
+               OnConfirm="RunPendingConfirmAsync"
+               OnCancel="() => pendingConfirm = null" />
 
 <div class="card mt-3">
     <div class="card-header d-flex justify-content-between align-items-center">
@@ -55,7 +63,7 @@
                                 <button class="btn btn-sm btn-link p-0 ms-2" @onclick="() => ToggleEnvPicker(app.Id)">Edit</button>
                             </td>
                             <td>
-                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteApp(app.Id)">Delete</button>
+                                <button class="btn btn-sm btn-outline-danger" @onclick='() => pendingConfirm = new PendingConfirm($"Delete app \"{app.Name}\"? This cannot be undone.", "Delete", () => DeleteApp(app.Id, app.Name))'>Delete</button>
                             </td>
                         </tr>
 
@@ -94,6 +102,19 @@
     private string? errorMessage;
     private Guid? envPickerAppId;
 
+    // A destructive action awaiting user confirmation.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
+
     protected override async Task OnInitializedAsync()
     {
         await Load();
@@ -121,10 +142,19 @@
         }
     }
 
-    private async Task DeleteApp(Guid id)
+    private async Task DeleteApp(Guid id, string name)
     {
-        await TenantService.DeleteAppAsync(id);
-        await Load();
+        try
+        {
+            await TenantService.DeleteAppAsync(id);
+            await Load();
+            Toasts.Success($"Deleted app \"{name}\".");
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+            Toasts.Error($"Failed to delete app \"{name}\": {ex.Message}");
+        }
     }
 
     private void ToggleEnvPicker(Guid appId)

@@ -1,8 +1,10 @@
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject IncidentService IncidentService
 @inject OnCallService OnCallService
 @inject NotificationService NotificationService
+@inject ToastService Toasts
 @inject AuthenticationStateProvider AuthStateProvider
 
 @* ── On-call banner ── *@
@@ -286,17 +288,19 @@ else if (!isLoading)
                                             }
                                             @if (assigningId == incident.Id)
                                             {
-                                                <div class="d-flex gap-2 align-items-center mt-1">
-                                                    <input class="form-control form-control-sm" style="max-width:220px"
-                                                           @bind="assigneeInput" placeholder="Assignee name or email" />
-                                                    <button class="btn btn-sm btn-primary"
-                                                            @onclick="() => SubmitAssign(incident)"
-                                                            disabled="@string.IsNullOrWhiteSpace(assigneeInput)">
-                                                        Assign
-                                                    </button>
-                                                    <button class="btn btn-sm btn-outline-secondary"
-                                                            @onclick="() => assigningId = null">Cancel</button>
-                                                </div>
+                                                <EditForm Model="assignForm" OnValidSubmit="() => SubmitAssign(incident)" class="mt-1">
+                                                    <DataAnnotationsValidator />
+                                                    <div class="d-flex gap-2 align-items-center">
+                                                        <div>
+                                                            <InputText class="form-control form-control-sm" style="max-width:220px"
+                                                                       @bind-Value="assignForm.Assignee" placeholder="Assignee name or email" />
+                                                            <ValidationMessage For="() => assignForm.Assignee" class="text-danger small" />
+                                                        </div>
+                                                        <button type="submit" class="btn btn-sm btn-primary">Assign</button>
+                                                        <button type="button" class="btn btn-sm btn-outline-secondary"
+                                                                @onclick="() => assigningId = null">Cancel</button>
+                                                    </div>
+                                                </EditForm>
                                             }
                                             else
                                             {
@@ -359,15 +363,18 @@ else if (!isLoading)
 
                                         @* Add note *@
                                         <strong class="small d-block mb-1">Add note</strong>
-                                        <div class="d-flex gap-2">
-                                            <textarea class="form-control form-control-sm" rows="2"
-                                                      placeholder="Add a note…"
-                                                      @bind="noteText" style="max-width:360px"></textarea>
-                                            <button class="btn btn-sm btn-primary align-self-end"
-                                                    @onclick="() => AddNote(incident)">
-                                                Add
-                                            </button>
-                                        </div>
+                                        <EditForm Model="noteForm" OnValidSubmit="() => AddNote(incident)">
+                                            <DataAnnotationsValidator />
+                                            <div class="d-flex gap-2">
+                                                <div style="max-width:360px">
+                                                    <InputTextArea class="form-control form-control-sm" rows="2"
+                                                                   placeholder="Add a note…"
+                                                                   @bind-Value="noteForm.Content" />
+                                                    <ValidationMessage For="() => noteForm.Content" class="text-danger small" />
+                                                </div>
+                                                <button type="submit" class="btn btn-sm btn-primary align-self-end">Add</button>
+                                            </div>
+                                        </EditForm>
                                     </div>
 
                                 </div>
@@ -392,13 +399,13 @@ else if (!isLoading)
     private string filterSeverity = "";
     private string filterClusterId = "";
     private int filterDays = 7;
-    private string noteText = "";
+    private NoteForm noteForm = new();
     private bool isLoading = true;
     private string? currentUser;
 
     private HashSet<Guid> selectedIds = [];
     private Guid? assigningId;
-    private string assigneeInput = "";
+    private AssignForm assignForm = new();
     private bool filterUnassigned;
     private string searchText = "";
     private OnCallShift? currentOnCall;
@@ -498,7 +505,7 @@ else if (!isLoading)
             expandedId = id;
             _ = LoadDeliveriesAsync(id);
         }
-        noteText = "";
+        noteForm = new NoteForm();
         if (assigningId != id) assigningId = null;
     }
 
@@ -568,16 +575,24 @@ else if (!isLoading)
     private void StartAssign(AlertIncident incident)
     {
         assigningId = incident.Id;
-        assigneeInput = incident.AssignedTo ?? "";
+        assignForm = new AssignForm { Assignee = incident.AssignedTo ?? "" };
     }
 
     private async Task SubmitAssign(AlertIncident incident)
     {
-        if (string.IsNullOrWhiteSpace(assigneeInput)) return;
-        await IncidentService.AssignAsync(incident.Id, assigneeInput.Trim());
-        assigningId = null;
-        await Task.WhenAll(LoadIncidents(), LoadStats());
-        expandedId = incident.Id;
+        try
+        {
+            string assignee = assignForm.Assignee.Trim();
+            await IncidentService.AssignAsync(incident.Id, assignee);
+            assigningId = null;
+            await Task.WhenAll(LoadIncidents(), LoadStats());
+            expandedId = incident.Id;
+            Toasts.Success($"Incident assigned to {assignee}.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message, "Failed to assign incident");
+        }
     }
 
     private async Task Acknowledge(AlertIncident incident)
@@ -594,11 +609,32 @@ else if (!isLoading)
 
     private async Task AddNote(AlertIncident incident)
     {
-        if (string.IsNullOrWhiteSpace(noteText)) return;
-        await IncidentService.AddNoteAsync(incident.Id, currentUser!, noteText.Trim());
-        noteText = "";
-        await LoadIncidents();
-        expandedId = incident.Id;
+        try
+        {
+            await IncidentService.AddNoteAsync(incident.Id, currentUser!, noteForm.Content.Trim());
+            noteForm = new NoteForm();
+            await LoadIncidents();
+            expandedId = incident.Id;
+            Toasts.Success("Note added.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message, "Failed to add note");
+        }
+    }
+
+    private sealed class AssignForm
+    {
+        [Required(ErrorMessage = "Enter an assignee name or email.")]
+        [StringLength(200)]
+        public string Assignee { get; set; } = "";
+    }
+
+    private sealed class NoteForm
+    {
+        [Required(ErrorMessage = "Note cannot be empty.")]
+        [StringLength(2000)]
+        public string Content { get; set; } = "";
     }
 
     private record TimelineEvent(DateTime At, string Icon, string IconColor, string Label, string Detail);

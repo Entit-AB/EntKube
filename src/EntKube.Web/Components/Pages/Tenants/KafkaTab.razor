@@ -2,6 +2,7 @@
 @using EntKube.Web.Services
 @inject KafkaService KafkaService
 @inject TenantService TenantService
+@inject ToastService Toasts
 
 @* ===========================================================================
    Kafka Tab — Apache Kafka cluster management via the Strimzi operator.
@@ -13,6 +14,13 @@
 <LoadingPanel Loading="@loading" LoadingText="Loading Kafka clusters…">
 @if (!loading)
 {
+    <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                   Message="@(pendingConfirm?.Message ?? "")"
+                   ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+                   IsBusy="confirmBusy"
+                   OnConfirm="RunPendingConfirmAsync"
+                   OnCancel="() => pendingConfirm = null" />
+
     @* ── Operator availability badge ── *@
     <div class="d-flex gap-2 mb-4 flex-wrap">
         @if (operatorStatus?.OperatorAvailable == true)
@@ -251,7 +259,12 @@
                                 </div></div>
                             }
                             @{ List<KafkaTopic> topics = allTopics.TryGetValue(cluster.Id, out List<KafkaTopic>? tl) ? tl : []; }
-                            @if (topics.Count == 0) { <p class="text-muted small mb-0">No topics yet.</p> }
+                            @if (topics.Count == 0)
+                            {
+                                <EmptyState Icon="bi-collection" Title="No topics yet"
+                                            Message="Create a topic to start producing and consuming messages."
+                                            ActionLabel="Add topic" OnAction="() => ShowAddTopic(cluster.Id)" />
+                            }
                             else
                             {
                                 <table class="table table-sm table-borderless small mb-0">
@@ -264,7 +277,7 @@
                                                 <td>@t.Partitions</td>
                                                 <td>@t.Replicas</td>
                                                 <td class="text-muted">@(t.RetentionMs.HasValue ? $"{t.RetentionMs.Value / 3600000}h" : "default")</td>
-                                                <td>@RenderDeleteCell($"topic:{t.Id}", () => DeleteTopic(cluster.Id, t.Id))</td>
+                                                <td>@RenderDeleteCell($"Delete topic \"{t.Name}\"? This cannot be undone.", "Delete topic", () => DeleteTopic(cluster.Id, t.Id, t.Name))</td>
                                             </tr>
                                         }
                                     </tbody>
@@ -326,7 +339,12 @@
                                         @if (userError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0">@userError</div> }
                                     </div></div>
                                 }
-                                @if (users.Count == 0) { <p class="text-muted small mb-0">No users yet.</p> }
+                                @if (users.Count == 0)
+                                {
+                                    <EmptyState Icon="bi-person-badge" Title="No users yet"
+                                                Message="Add a Kafka user with SCRAM credentials and ACLs."
+                                                ActionLabel="Add user" OnAction="() => ShowAddUser(cluster.Id)" />
+                                }
                                 else
                                 {
                                     <table class="table table-sm table-borderless small mb-0">
@@ -339,7 +357,7 @@
                                                     <td class="text-muted">@(string.IsNullOrWhiteSpace(u.ProducerTopics) ? "—" : u.ProducerTopics)</td>
                                                     <td class="text-muted">@(string.IsNullOrWhiteSpace(u.ConsumerTopics) ? "—" : u.ConsumerTopics)</td>
                                                     <td class="text-muted">@(u.ConsumerGroup ?? "*")</td>
-                                                    <td>@RenderDeleteCell($"user:{u.Id}", () => DeleteUser(cluster.Id, u.Id))</td>
+                                                    <td>@RenderDeleteCell($"Delete user \"{u.Username}\" and its ACLs? This cannot be undone.", "Delete user", () => DeleteUser(cluster.Id, u.Id, u.Username))</td>
                                                 </tr>
                                             }
                                         </tbody>
@@ -400,7 +418,12 @@
                                 </div></div>
                             }
                             @{ List<KafkaBinding> binds = allBindings.TryGetValue(cluster.Id, out List<KafkaBinding>? bl) ? bl : []; }
-                            @if (binds.Count == 0) { <p class="text-muted small mb-0">No app bindings yet.</p> }
+                            @if (binds.Count == 0)
+                            {
+                                <EmptyState Icon="bi-link-45deg" Title="No app bindings yet"
+                                            Message="Bind an app deployment to sync the bootstrap address and credentials into its namespace."
+                                            ActionLabel="Add binding" OnAction="() => ShowAddBinding(cluster)" />
+                            }
                             else
                             {
                                 <table class="table table-sm table-borderless small mb-0">
@@ -415,10 +438,11 @@
                                                 <td class="text-muted">@(bind.LastSyncedAt.HasValue ? bind.LastSyncedAt.Value.ToString("yyyy-MM-dd HH:mm") : "Never")</td>
                                                 <td class="text-nowrap">
                                                     <button class="btn btn-xs btn-sm btn-outline-secondary border-0 py-0" title="Re-sync"
+                                                            aria-label="@($"Re-sync binding for {bind.AppDeployment.App.Name}/{bind.AppDeployment.Name}")"
                                                             @onclick="() => SyncBinding(cluster.Id, bind.Id)">
                                                         <i class="bi bi-arrow-repeat"></i>
                                                     </button>
-                                                    @RenderDeleteCell($"binding:{bind.Id}", () => RemoveBinding(cluster.Id, bind.Id))
+                                                    @RenderDeleteCell($"Remove Kafka binding for \"{bind.AppDeployment.App.Name}/{bind.AppDeployment.Name}\"? This cannot be undone.", "Remove binding", () => RemoveBinding(cluster.Id, bind.Id, $"{bind.AppDeployment.App.Name}/{bind.AppDeployment.Name}"))
                                                 </td>
                                             </tr>
                                         }
@@ -472,21 +496,10 @@
                                 <i class="bi bi-pencil me-1"></i>Edit
                             </button>
 
-                            @if (deleteTarget?.Id == cluster.Id)
-                            {
-                                <span class="small text-danger align-self-center ms-auto me-2">Delete cluster and all its data?</span>
-                                <button class="btn btn-sm btn-danger" @onclick="DeleteCluster" disabled="@deleting">
-                                    @if (deleting) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                    Confirm Delete
-                                </button>
-                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => deleteTarget = null">Cancel</button>
-                            }
-                            else
-                            {
-                                <button class="btn btn-sm btn-outline-danger ms-auto" @onclick="() => deleteTarget = cluster">
-                                    <i class="bi bi-trash me-1"></i>Delete
-                                </button>
-                            }
+                            <button class="btn btn-sm btn-outline-danger ms-auto"
+                                    @onclick='() => pendingConfirm = new PendingConfirm($"Delete Kafka cluster \"{cluster.Name}\" and ALL of its data? This cannot be undone.", "Delete cluster", () => DeleteCluster(cluster))'>
+                                <i class="bi bi-trash me-1"></i>Delete
+                            </button>
                         </div>
                     </div>
                 }
@@ -495,7 +508,8 @@
 
         @if (clusters.Count == 0 && !showCreateForm)
         {
-            <p class="text-muted">No Kafka clusters. Install the Strimzi Kafka Operator from the Components tab, then create a cluster here.</p>
+            <EmptyState Icon="bi-diagram-2" Title="No Kafka clusters"
+                        Message="Install the Strimzi Kafka Operator from the Components tab, then create a cluster here." />
         }
     </div>
 }
@@ -571,10 +585,26 @@
     private bool savingEdit;
     private string? editError;
 
-    // Delete
-    private KafkaCluster? deleteTarget;
-    private bool deleting;
-    private string? pendingRowDelete;   // inline delete confirm key for topics/users/bindings
+    // A destructive action awaiting user confirmation via the ConfirmDialog banner.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try
+        {
+            await pendingConfirm.Action();
+        }
+        finally
+        {
+            confirmBusy = false;
+            pendingConfirm = null;
+        }
+    }
 
     // Topic form
     private Guid? addTopicClusterId;
@@ -738,19 +768,19 @@
     }
 
     // Delete cluster
-    private async Task DeleteCluster()
+    private async Task DeleteCluster(KafkaCluster cluster)
     {
-        if (deleteTarget is null) return;
-        deleting = true;
         try
         {
-            await KafkaService.DeleteClusterAsync(TenantId, deleteTarget.Id);
-            deleteTarget = null;
+            await KafkaService.DeleteClusterAsync(TenantId, cluster.Id);
             expandedId = null;
             await LoadAsync();
+            Toasts.Success($"Deleted Kafka cluster \"{cluster.Name}\".");
         }
-        catch (Exception ex) { if (deleteTarget is not null) deleteTarget.LastError = ex.Message; }
-        finally { deleting = false; }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete cluster \"{cluster.Name}\": {ex.Message}");
+        }
     }
 
     // Topics
@@ -773,15 +803,15 @@
         catch (Exception ex) { topicError = ex.Message; }
     }
 
-    private async Task DeleteTopic(Guid clusterId, Guid topicId)
+    private async Task DeleteTopic(Guid clusterId, Guid topicId, string name)
     {
-        pendingRowDelete = null;
         try
         {
             await KafkaService.DeleteTopicAsync(TenantId, topicId);
             allTopics[clusterId] = await KafkaService.GetTopicsAsync(TenantId, clusterId);
+            Toasts.Success($"Deleted topic \"{name}\".");
         }
-        catch { }
+        catch (Exception ex) { Toasts.Error($"Failed to delete topic \"{name}\": {ex.Message}"); }
     }
 
     // Users
@@ -805,15 +835,15 @@
         catch (Exception ex) { userError = ex.Message; }
     }
 
-    private async Task DeleteUser(Guid clusterId, Guid userId)
+    private async Task DeleteUser(Guid clusterId, Guid userId, string name)
     {
-        pendingRowDelete = null;
         try
         {
             await KafkaService.DeleteUserAsync(TenantId, userId);
             allUsers[clusterId] = await KafkaService.GetUsersAsync(TenantId, clusterId);
+            Toasts.Success($"Deleted user \"{name}\".");
         }
-        catch { }
+        catch (Exception ex) { Toasts.Error($"Failed to delete user \"{name}\": {ex.Message}"); }
     }
 
     // Bindings
@@ -853,45 +883,31 @@
         catch { }
     }
 
-    private async Task RemoveBinding(Guid clusterId, Guid bindingId)
+    private async Task RemoveBinding(Guid clusterId, Guid bindingId, string name)
     {
-        pendingRowDelete = null;
         try
         {
             await KafkaService.DeleteBindingAsync(TenantId, bindingId);
             allBindings[clusterId] = await KafkaService.GetBindingsAsync(TenantId, clusterId);
+            Toasts.Success($"Removed binding for \"{name}\".");
         }
-        catch { }
+        catch (Exception ex) { Toasts.Error($"Failed to remove binding for \"{name}\": {ex.Message}"); }
     }
 
-    // Inline delete-confirm cell shared by topics/users/bindings.
-    private RenderFragment RenderDeleteCell(string key, Func<Task> onConfirm) => builder =>
+    // Delete-confirm cell shared by topics/users/bindings — funnels through the
+    // ConfirmDialog banner via pendingConfirm.
+    private RenderFragment RenderDeleteCell(string confirmMessage, string confirmText, Func<Task> onConfirm) => builder =>
     {
-        if (pendingRowDelete == key)
-        {
-            builder.OpenElement(0, "button");
-            builder.AddAttribute(1, "class", "btn btn-xs btn-sm btn-danger border-0 py-0 me-1");
-            builder.AddAttribute(2, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, onConfirm));
-            builder.AddContent(3, "Confirm");
-            builder.CloseElement();
-
-            builder.OpenElement(4, "button");
-            builder.AddAttribute(5, "class", "btn btn-xs btn-sm btn-outline-secondary border-0 py-0");
-            builder.AddAttribute(6, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, () => pendingRowDelete = null));
-            builder.AddContent(7, "Cancel");
-            builder.CloseElement();
-        }
-        else
-        {
-            builder.OpenElement(0, "button");
-            builder.AddAttribute(1, "class", "btn btn-xs btn-sm btn-outline-danger border-0 py-0");
-            builder.AddAttribute(2, "title", "Delete");
-            builder.AddAttribute(3, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, () => pendingRowDelete = key));
-            builder.OpenElement(4, "i");
-            builder.AddAttribute(5, "class", "bi bi-trash");
-            builder.CloseElement();
-            builder.CloseElement();
-        }
+        builder.OpenElement(0, "button");
+        builder.AddAttribute(1, "class", "btn btn-xs btn-sm btn-outline-danger border-0 py-0");
+        builder.AddAttribute(2, "title", "Delete");
+        builder.AddAttribute(3, "aria-label", confirmText);
+        builder.AddAttribute(4, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this,
+            () => pendingConfirm = new PendingConfirm(confirmMessage, confirmText, onConfirm)));
+        builder.OpenElement(5, "i");
+        builder.AddAttribute(6, "class", "bi bi-trash");
+        builder.CloseElement();
+        builder.CloseElement();
     };
 
     private static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();

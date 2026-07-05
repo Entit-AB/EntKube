@@ -1,7 +1,16 @@
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject OnCallService OnCallService
 @inject AuthenticationStateProvider AuthStateProvider
+@inject ToastService Toasts
+
+<ConfirmDialog Visible="@(pendingConfirm is not null)"
+               Message="@(pendingConfirm?.Message ?? "")"
+               ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+               IsBusy="confirmBusy"
+               OnConfirm="RunPendingConfirmAsync"
+               OnCancel="() => pendingConfirm = null" />
 
 @* ── Current on-call banner ── *@
 @if (currentShift is not null)
@@ -39,27 +48,28 @@ else
 {
     <div class="card border-primary mb-3">
         <div class="card-body">
-            <div class="row g-2 mb-2">
-                <div class="col-md-5">
-                    <label class="form-label small">Name</label>
-                    <input class="form-control form-control-sm" @bind="newScheduleName" placeholder="Primary On-Call" />
+            <EditForm Model="scheduleForm" OnValidSubmit="CreateSchedule">
+                <DataAnnotationsValidator />
+                <div class="row g-2 mb-2">
+                    <div class="col-md-5">
+                        <label class="form-label small">Name</label>
+                        <InputText class="form-control form-control-sm" @bind-Value="scheduleForm.Name" placeholder="Primary On-Call" />
+                        <ValidationMessage For="() => scheduleForm.Name" class="text-danger small" />
+                    </div>
+                    <div class="col-md-7">
+                        <label class="form-label small">Description</label>
+                        <InputText class="form-control form-control-sm" @bind-Value="scheduleForm.Description" placeholder="Optional description" />
+                        <ValidationMessage For="() => scheduleForm.Description" class="text-danger small" />
+                    </div>
                 </div>
-                <div class="col-md-7">
-                    <label class="form-label small">Description</label>
-                    <input class="form-control form-control-sm" @bind="newScheduleDescription" placeholder="Optional description" />
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-sm btn-primary" disabled="@savingSchedule">
+                        @if (savingSchedule) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Create
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showCreateSchedule = false">Cancel</button>
                 </div>
-            </div>
-            @if (!string.IsNullOrEmpty(scheduleError))
-            {
-                <div class="alert alert-danger py-1 small mb-2">@scheduleError</div>
-            }
-            <div class="d-flex gap-2">
-                <button class="btn btn-sm btn-primary" @onclick="CreateSchedule"
-                        disabled="@(string.IsNullOrWhiteSpace(newScheduleName))">
-                    Create
-                </button>
-                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showCreateSchedule = false">Cancel</button>
-            </div>
+            </EditForm>
         </div>
     </div>
 }
@@ -100,7 +110,8 @@ else
                 }
                 <button class="btn btn-sm btn-outline-danger ms-2"
                         @onclick:stopPropagation="true"
-                        @onclick="() => DeleteSchedule(schedule)">
+                        aria-label="@($"Delete schedule {schedule.Name}")"
+                        @onclick='() => pendingConfirm = new PendingConfirm($"Delete schedule \"{schedule.Name}\" and all its shifts? This cannot be undone.", "Delete schedule", () => DeleteSchedule(schedule))'>
                     <span class="bi bi-trash"></span>
                 </button>
                 <span class="bi bi-chevron-@(isExpanded ? "up" : "down") text-muted"></span>
@@ -158,7 +169,8 @@ else
                                             </td>
                                             <td>
                                                 <button class="btn btn-sm btn-outline-danger"
-                                                        @onclick="() => DeleteShift(shift)">
+                                                        aria-label="@($"Delete shift for {shift.AssigneeName}")"
+                                                        @onclick='() => pendingConfirm = new PendingConfirm($"Delete the on-call shift for \"{shift.AssigneeName}\"? This cannot be undone.", "Delete shift", () => DeleteShift(shift))'>
                                                     <span class="bi bi-trash"></span>
                                                 </button>
                                             </td>
@@ -174,41 +186,45 @@ else
                     {
                         <div class="border rounded p-3 bg-light">
                             <h6 class="mb-2 small fw-semibold">Add Shift</h6>
-                            <div class="row g-2 mb-2">
-                                <div class="col-md-4">
-                                    <label class="form-label small">Assignee name</label>
-                                    <input class="form-control form-control-sm" @bind="newShiftName" placeholder="Alice Smith" />
+                            <EditForm Model="shiftForm" OnValidSubmit="() => AddShift(schedule.Id)">
+                                <DataAnnotationsValidator />
+                                <div class="row g-2 mb-2">
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Assignee name</label>
+                                        <InputText class="form-control form-control-sm" @bind-Value="shiftForm.AssigneeName" placeholder="Alice Smith" />
+                                        <ValidationMessage For="() => shiftForm.AssigneeName" class="text-danger small" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Email (optional)</label>
+                                        <InputText class="form-control form-control-sm" @bind-Value="shiftForm.Email" placeholder="alice@example.com" />
+                                        <ValidationMessage For="() => shiftForm.Email" class="text-danger small" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Notes</label>
+                                        <InputText class="form-control form-control-sm" @bind-Value="shiftForm.Notes" placeholder="Optional notes" />
+                                        <ValidationMessage For="() => shiftForm.Notes" class="text-danger small" />
+                                    </div>
                                 </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small">Email (optional)</label>
-                                    <input class="form-control form-control-sm" @bind="newShiftEmail" placeholder="alice@example.com" />
+                                <div class="row g-2 mb-2">
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Starts at (local time)</label>
+                                        <InputDate Type="InputDateType.DateTimeLocal" class="form-control form-control-sm" @bind-Value="shiftForm.StartsAt" />
+                                        <ValidationMessage For="() => shiftForm.StartsAt" class="text-danger small" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Ends at (local time)</label>
+                                        <InputDate Type="InputDateType.DateTimeLocal" class="form-control form-control-sm" @bind-Value="shiftForm.EndsAt" />
+                                        <ValidationMessage For="() => shiftForm.EndsAt" class="text-danger small" />
+                                    </div>
                                 </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small">Notes</label>
-                                    <input class="form-control form-control-sm" @bind="newShiftNotes" placeholder="Optional notes" />
+                                <div class="d-flex gap-2">
+                                    <button type="submit" class="btn btn-sm btn-primary" disabled="@savingShift">
+                                        @if (savingShift) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        Add Shift
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelAddShift">Cancel</button>
                                 </div>
-                            </div>
-                            <div class="row g-2 mb-2">
-                                <div class="col-md-4">
-                                    <label class="form-label small">Starts at (local time)</label>
-                                    <input type="datetime-local" class="form-control form-control-sm" @bind="newShiftStartsAt" />
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small">Ends at (local time)</label>
-                                    <input type="datetime-local" class="form-control form-control-sm" @bind="newShiftEndsAt" />
-                                </div>
-                            </div>
-                            @if (!string.IsNullOrEmpty(shiftError))
-                            {
-                                <div class="alert alert-danger py-1 small mb-2">@shiftError</div>
-                            }
-                            <div class="d-flex gap-2">
-                                <button class="btn btn-sm btn-primary" @onclick="() => AddShift(schedule.Id)"
-                                        disabled="@(string.IsNullOrWhiteSpace(newShiftName))">
-                                    Add Shift
-                                </button>
-                                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelAddShift">Cancel</button>
-                            </div>
+                            </EditForm>
                         </div>
                     }
                     else
@@ -233,18 +249,61 @@ else
 
     // Create schedule form
     private bool showCreateSchedule;
-    private string newScheduleName = "";
-    private string? newScheduleDescription;
-    private string? scheduleError;
+    private bool savingSchedule;
+    private ScheduleForm scheduleForm = new();
 
     // Add shift form
     private Guid? addShiftScheduleId;
-    private string newShiftName = "";
-    private string? newShiftEmail;
-    private string? newShiftNotes;
-    private DateTime newShiftStartsAt = DateTime.Now.Date.AddHours(DateTime.Now.Hour + 1);
-    private DateTime newShiftEndsAt = DateTime.Now.Date.AddHours(DateTime.Now.Hour + 9);
-    private string? shiftError;
+    private bool savingShift;
+    private ShiftForm shiftForm = new();
+
+    private sealed class ScheduleForm
+    {
+        [Required(ErrorMessage = "Name is required.")]
+        [StringLength(100, MinimumLength = 1, ErrorMessage = "Name must be 1-100 characters.")]
+        public string Name { get; set; } = "";
+
+        [StringLength(500, ErrorMessage = "Description must be 500 characters or fewer.")]
+        public string? Description { get; set; }
+    }
+
+    private sealed class ShiftForm : IValidatableObject
+    {
+        [Required(ErrorMessage = "Assignee name is required.")]
+        [StringLength(200, MinimumLength = 1, ErrorMessage = "Assignee name must be 1-200 characters.")]
+        public string AssigneeName { get; set; } = "";
+
+        [EmailAddress(ErrorMessage = "Enter a valid email address.")]
+        public string? Email { get; set; }
+
+        [StringLength(1000, ErrorMessage = "Notes must be 1000 characters or fewer.")]
+        public string? Notes { get; set; }
+
+        [Required]
+        public DateTime StartsAt { get; set; } = DateTime.Now.Date.AddHours(DateTime.Now.Hour + 1);
+
+        [Required]
+        public DateTime EndsAt { get; set; } = DateTime.Now.Date.AddHours(DateTime.Now.Hour + 9);
+
+        public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+        {
+            if (EndsAt <= StartsAt)
+                yield return new ValidationResult("End time must be after start time.", new[] { nameof(EndsAt) });
+        }
+    }
+
+    // A destructive action awaiting user confirmation.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -270,73 +329,95 @@ else
 
     private async Task CreateSchedule()
     {
-        scheduleError = null;
-        if (string.IsNullOrWhiteSpace(newScheduleName)) return;
-
+        savingSchedule = true;
         try
         {
-            await OnCallService.CreateScheduleAsync(TenantId, newScheduleName.Trim(), newScheduleDescription?.Trim());
-            newScheduleName = "";
-            newScheduleDescription = null;
+            await OnCallService.CreateScheduleAsync(TenantId, scheduleForm.Name.Trim(),
+                string.IsNullOrWhiteSpace(scheduleForm.Description) ? null : scheduleForm.Description.Trim());
+            scheduleForm = new ScheduleForm();
             showCreateSchedule = false;
             await Load();
+            Toasts.Success("Schedule created.");
         }
         catch (Exception ex)
         {
-            scheduleError = ex.Message;
+            Toasts.Error($"Failed to create schedule: {ex.Message}");
+        }
+        finally
+        {
+            savingSchedule = false;
         }
     }
 
     private async Task DeleteSchedule(OnCallSchedule schedule)
     {
-        await OnCallService.DeleteScheduleAsync(schedule.Id);
-        await Load();
+        try
+        {
+            await OnCallService.DeleteScheduleAsync(schedule.Id);
+            await Load();
+            Toasts.Success($"Deleted schedule \"{schedule.Name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete schedule \"{schedule.Name}\": {ex.Message}");
+        }
     }
 
     private void StartAddShift(Guid scheduleId)
     {
         addShiftScheduleId = scheduleId;
-        newShiftName = "";
-        newShiftEmail = null;
-        newShiftNotes = null;
-        newShiftStartsAt = DateTime.Now.Date.AddHours(DateTime.Now.Hour + 1);
-        newShiftEndsAt = DateTime.Now.Date.AddHours(DateTime.Now.Hour + 9);
-        shiftError = null;
+        shiftForm = new ShiftForm
+        {
+            StartsAt = DateTime.Now.Date.AddHours(DateTime.Now.Hour + 1),
+            EndsAt = DateTime.Now.Date.AddHours(DateTime.Now.Hour + 9),
+        };
     }
 
     private void CancelAddShift()
     {
         addShiftScheduleId = null;
-        shiftError = null;
     }
 
     private async Task AddShift(Guid scheduleId)
     {
-        shiftError = null;
-        if (string.IsNullOrWhiteSpace(newShiftName)) return;
-        if (newShiftEndsAt <= newShiftStartsAt)
+        savingShift = true;
+        try
         {
-            shiftError = "End time must be after start time.";
-            return;
+            await OnCallService.AddShiftAsync(
+                scheduleId,
+                shiftForm.AssigneeName.Trim(),
+                string.IsNullOrWhiteSpace(shiftForm.Email) ? null : shiftForm.Email.Trim(),
+                shiftForm.StartsAt.ToUniversalTime(),
+                shiftForm.EndsAt.ToUniversalTime(),
+                string.IsNullOrWhiteSpace(shiftForm.Notes) ? null : shiftForm.Notes.Trim());
+
+            addShiftScheduleId = null;
+            await Load();
+            expandedScheduleId = scheduleId;
+            Toasts.Success($"Added shift for \"{shiftForm.AssigneeName.Trim()}\".");
         }
-
-        await OnCallService.AddShiftAsync(
-            scheduleId,
-            newShiftName.Trim(),
-            string.IsNullOrWhiteSpace(newShiftEmail) ? null : newShiftEmail.Trim(),
-            newShiftStartsAt.ToUniversalTime(),
-            newShiftEndsAt.ToUniversalTime(),
-            string.IsNullOrWhiteSpace(newShiftNotes) ? null : newShiftNotes.Trim());
-
-        addShiftScheduleId = null;
-        await Load();
-        expandedScheduleId = scheduleId;
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to add shift: {ex.Message}");
+        }
+        finally
+        {
+            savingShift = false;
+        }
     }
 
     private async Task DeleteShift(OnCallShift shift)
     {
-        await OnCallService.DeleteShiftAsync(shift.Id);
-        await Load();
-        expandedScheduleId = shift.ScheduleId;
+        try
+        {
+            await OnCallService.DeleteShiftAsync(shift.Id);
+            await Load();
+            expandedScheduleId = shift.ScheduleId;
+            Toasts.Success($"Deleted shift for \"{shift.AssigneeName}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete shift: {ex.Message}");
+        }
     }
 }

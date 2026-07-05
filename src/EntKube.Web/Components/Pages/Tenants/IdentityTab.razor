@@ -1,11 +1,19 @@
+@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject KeycloakService KeycloakService
 @inject StorageService StorageService
 @inject ComponentLifecycleService LifecycleService
 @inject RegisteredPostgresService RegisteredPostgresService
+@inject ToastService Toasts
 
 <LoadingPanel Loading="@loading" LoadingText="Scanning for Keycloak instances…">
+<ConfirmDialog Visible="@(pendingConfirm is not null)"
+               Message="@(pendingConfirm?.Message ?? "")"
+               ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+               IsBusy="confirmBusy"
+               OnConfirm="RunPendingConfirmAsync"
+               OnCancel="() => pendingConfirm = null" />
 @if (selectedRealm is not null && selectedKeycloak is not null)
 {
     @* ── Level 3: Realm detail ── *@
@@ -31,7 +39,7 @@
         }
     </div>
 
-    <ul class="nav nav-tabs mb-3 flex-wrap">
+    <ul class="nav nav-tabs mb-3 flex-wrap" role="tablist" aria-label="Realm sections">
         @foreach (string tab in new[] { "users", "roles", "clients", "idp", "groups", "orgs", "themes", "settings", "backup", "portal" })
         {
             string label = tab switch
@@ -48,8 +56,11 @@
                 "portal" => "Customer Portal",
                 _ => tab
             };
-            <li class="nav-item">
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(realmTab == tab ? "active" : "")"
+                        role="tab"
+                        aria-selected="@(realmTab == tab)"
+                        tabindex="@(realmTab == tab ? 0 : -1)"
                         @onclick="() => SwitchRealmTab(tab)">@label</button>
             </li>
         }
@@ -79,30 +90,35 @@
                         {
                             <div class="alert alert-danger py-2 small">@userError</div>
                         }
-                        <div class="row g-2">
-                            <div class="col-md-4">
-                                <input class="form-control form-control-sm" placeholder="Username" @bind="newUserUsername" />
+                        <EditForm Model="addUserForm" OnValidSubmit="AddUser">
+                            <DataAnnotationsValidator />
+                            <div class="row g-2">
+                                <div class="col-md-4">
+                                    <InputText class="form-control form-control-sm" placeholder="Username" @bind-Value="addUserForm.Username" />
+                                    <ValidationMessage For="() => addUserForm.Username" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <InputText class="form-control form-control-sm" placeholder="Email" @bind-Value="addUserForm.Email" />
+                                    <ValidationMessage For="() => addUserForm.Email" class="text-danger small" />
+                                </div>
+                                <div class="col-md-2">
+                                    <InputText class="form-control form-control-sm" placeholder="First name" @bind-Value="addUserForm.FirstName" />
+                                </div>
+                                <div class="col-md-2">
+                                    <InputText class="form-control form-control-sm" placeholder="Last name" @bind-Value="addUserForm.LastName" />
+                                </div>
+                                <div class="col-md-4">
+                                    <InputText type="password" class="form-control form-control-sm" placeholder="Password (optional)" @bind-Value="addUserForm.Password" />
+                                </div>
                             </div>
-                            <div class="col-md-4">
-                                <input class="form-control form-control-sm" placeholder="Email" @bind="newUserEmail" />
+                            <div class="mt-2 d-flex gap-2">
+                                <button type="submit" class="btn btn-sm btn-primary" disabled="@savingUser">
+                                    @if (savingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Create
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAddUser = false">Cancel</button>
                             </div>
-                            <div class="col-md-2">
-                                <input class="form-control form-control-sm" placeholder="First name" @bind="newUserFirstName" />
-                            </div>
-                            <div class="col-md-2">
-                                <input class="form-control form-control-sm" placeholder="Last name" @bind="newUserLastName" />
-                            </div>
-                            <div class="col-md-4">
-                                <input type="password" class="form-control form-control-sm" placeholder="Password (optional)" @bind="newUserPassword" />
-                            </div>
-                        </div>
-                        <div class="mt-2 d-flex gap-2">
-                            <button class="btn btn-sm btn-primary" @onclick="AddUser" disabled="@savingUser">
-                                @if (savingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                Create
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddUser = false">Cancel</button>
-                        </div>
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -141,11 +157,13 @@
                                 </div>
                                 <div class="d-flex gap-1">
                                     <button class="btn btn-sm btn-outline-secondary border-0"
-                                            @onclick="() => OpenUserEdit(user)">
+                                            @onclick="() => OpenUserEdit(user)"
+                                            aria-label="@($"Edit user {user.Username}")">
                                         <i class="bi bi-pencil"></i>
                                     </button>
                                     <button class="btn btn-sm btn-outline-danger border-0"
-                                            @onclick="() => DeleteUser(user.Id)">
+                                            @onclick='() => pendingConfirm = new PendingConfirm($"Delete user \"{user.Username}\"? This cannot be undone.", "Delete", () => DeleteUser(user.Id))'
+                                            aria-label="@($"Delete user {user.Username}")">
                                         <i class="bi bi-trash"></i>
                                     </button>
                                 </div>
@@ -158,11 +176,14 @@
                                     {
                                         <div class="alert alert-danger py-2 small mb-2">@userEditError</div>
                                     }
-                                    <ul class="nav nav-tabs mb-3 nav-sm">
+                                    <ul class="nav nav-tabs mb-3 nav-sm" role="tablist" aria-label="User settings">
                                         @foreach (string ut in new[] { "profile", "roles", "groups", "password", "attributes" })
                                         {
-                                            <li class="nav-item">
+                                            <li class="nav-item" role="presentation">
                                                 <button class="nav-link py-1 px-2 small @(userEditTab == ut ? "active" : "")"
+                                                        role="tab"
+                                                        aria-selected="@(userEditTab == ut)"
+                                                        tabindex="@(userEditTab == ut ? 0 : -1)"
                                                         @onclick="() => SwitchUserEditTab(ut, user)">
                                                     @(ut switch { "profile" => "Profile", "roles" => "Roles", "groups" => "Groups", "password" => "Password", "attributes" => "Attributes", _ => ut })
                                                 </button>
@@ -236,7 +257,7 @@
                                             }
                                             else
                                             {
-                                                <p class="text-muted small mb-2">No roles assigned.</p>
+                                                <EmptyState Icon="bi-shield-lock" Title="No roles" Message="No roles assigned." />
                                             }
                                             @if (roles is not null)
                                             {
@@ -286,7 +307,7 @@
                                             }
                                             else
                                             {
-                                                <p class="text-muted small mb-2">Not a member of any group.</p>
+                                                <EmptyState Icon="bi-people" Title="No groups" Message="Not a member of any group." />
                                             }
                                             @if (groups is not null)
                                             {
@@ -411,33 +432,37 @@
                         {
                             <div class="alert alert-danger py-2 small">@idpError</div>
                         }
-                        <div class="row g-2">
-                            <div class="col-md-3">
-                                <input class="form-control form-control-sm" placeholder="Alias (e.g. google)" @bind="newIdpAlias" />
+                        <EditForm Model="addIdpForm" OnValidSubmit="AddIdp">
+                            <DataAnnotationsValidator />
+                            <div class="row g-2">
+                                <div class="col-md-3">
+                                    <InputText class="form-control form-control-sm" placeholder="Alias (e.g. google)" @bind-Value="addIdpForm.Alias" />
+                                    <ValidationMessage For="() => addIdpForm.Alias" class="text-danger small" />
+                                </div>
+                                <div class="col-md-3">
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="addIdpForm.ProviderId">
+                                        <option value="oidc">OpenID Connect</option>
+                                        <option value="saml">SAML</option>
+                                        <option value="google">Google</option>
+                                        <option value="github">GitHub</option>
+                                        <option value="microsoft">Microsoft</option>
+                                    </InputSelect>
+                                </div>
+                                <div class="col-md-3">
+                                    <InputText class="form-control form-control-sm" placeholder="Client ID" @bind-Value="addIdpForm.ClientId" />
+                                </div>
+                                <div class="col-md-3">
+                                    <InputText type="password" class="form-control form-control-sm" placeholder="Client Secret" @bind-Value="addIdpForm.ClientSecret" />
+                                </div>
                             </div>
-                            <div class="col-md-3">
-                                <select class="form-select form-select-sm" @bind="newIdpProviderId">
-                                    <option value="oidc">OpenID Connect</option>
-                                    <option value="saml">SAML</option>
-                                    <option value="google">Google</option>
-                                    <option value="github">GitHub</option>
-                                    <option value="microsoft">Microsoft</option>
-                                </select>
+                            <div class="mt-2 d-flex gap-2">
+                                <button type="submit" class="btn btn-sm btn-primary" disabled="@savingIdp">
+                                    @if (savingIdp) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Add
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAddIdp = false">Cancel</button>
                             </div>
-                            <div class="col-md-3">
-                                <input class="form-control form-control-sm" placeholder="Client ID" @bind="newIdpClientId" />
-                            </div>
-                            <div class="col-md-3">
-                                <input type="password" class="form-control form-control-sm" placeholder="Client Secret" @bind="newIdpClientSecret" />
-                            </div>
-                        </div>
-                        <div class="mt-2 d-flex gap-2">
-                            <button class="btn btn-sm btn-primary" @onclick="AddIdp" disabled="@savingIdp">
-                                @if (savingIdp) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                Add
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddIdp = false">Cancel</button>
-                        </div>
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -458,7 +483,8 @@
                                 }
                             </div>
                             <button class="btn btn-sm btn-outline-danger border-0"
-                                    @onclick="() => DeleteIdp(idp.Alias)">
+                                    @onclick='() => pendingConfirm = new PendingConfirm($"Delete identity provider \"{idp.Alias}\"? Users will no longer be able to log in through it. This cannot be undone.", "Delete", () => DeleteIdp(idp.Alias))'
+                                    aria-label="@($"Delete identity provider {idp.Alias}")">
                                 <i class="bi bi-trash"></i>
                             </button>
                         </div>
@@ -486,14 +512,18 @@
 
             @if (showAddGroup)
             {
-                <div class="d-flex gap-2 mb-3">
-                    <input class="form-control form-control-sm" placeholder="Group name" @bind="newGroupName" />
-                    <button class="btn btn-sm btn-primary" @onclick="AddGroup" disabled="@savingGroup">
-                        @if (savingGroup) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                        Create
-                    </button>
-                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddGroup = false">Cancel</button>
-                </div>
+                <EditForm Model="addGroupForm" OnValidSubmit="AddGroup" class="mb-3">
+                    <DataAnnotationsValidator />
+                    <div class="d-flex gap-2">
+                        <InputText class="form-control form-control-sm" placeholder="Group name" @bind-Value="addGroupForm.Name" />
+                        <button type="submit" class="btn btn-sm btn-primary" disabled="@savingGroup">
+                            @if (savingGroup) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Create
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAddGroup = false">Cancel</button>
+                    </div>
+                    <ValidationMessage For="() => addGroupForm.Name" class="text-danger small" />
+                </EditForm>
                 @if (groupError is not null)
                 {
                     <div class="alert alert-danger py-2 small mb-3">@groupError</div>
@@ -508,7 +538,8 @@
                         <div class="list-group-item d-flex justify-content-between align-items-center py-2">
                             <span><i class="bi bi-people me-2 text-muted"></i>@g.Name <span class="text-muted small">@g.Path</span></span>
                             <button class="btn btn-sm btn-outline-danger border-0"
-                                    @onclick="() => DeleteGroup(g.Id)">
+                                    @onclick='() => pendingConfirm = new PendingConfirm($"Delete group \"{g.Name}\"? This cannot be undone.", "Delete", () => DeleteGroup(g.Id))'
+                                    aria-label="@($"Delete group {g.Name}")">
                                 <i class="bi bi-trash"></i>
                             </button>
                         </div>
@@ -542,21 +573,25 @@
                         {
                             <div class="alert alert-danger py-2 small">@orgError</div>
                         }
-                        <div class="row g-2">
-                            <div class="col-md-4">
-                                <input class="form-control form-control-sm" placeholder="Name" @bind="newOrgName" />
+                        <EditForm Model="addOrgForm" OnValidSubmit="AddOrg">
+                            <DataAnnotationsValidator />
+                            <div class="row g-2">
+                                <div class="col-md-4">
+                                    <InputText class="form-control form-control-sm" placeholder="Name" @bind-Value="addOrgForm.Name" />
+                                    <ValidationMessage For="() => addOrgForm.Name" class="text-danger small" />
+                                </div>
+                                <div class="col-md-8">
+                                    <InputText class="form-control form-control-sm" placeholder="Description (optional)" @bind-Value="addOrgForm.Description" />
+                                </div>
                             </div>
-                            <div class="col-md-8">
-                                <input class="form-control form-control-sm" placeholder="Description (optional)" @bind="newOrgDescription" />
+                            <div class="mt-2 d-flex gap-2">
+                                <button type="submit" class="btn btn-sm btn-primary" disabled="@savingOrg">
+                                    @if (savingOrg) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Create
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAddOrg = false">Cancel</button>
                             </div>
-                        </div>
-                        <div class="mt-2 d-flex gap-2">
-                            <button class="btn btn-sm btn-primary" @onclick="AddOrg" disabled="@savingOrg">
-                                @if (savingOrg) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                Create
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddOrg = false">Cancel</button>
-                        </div>
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -751,11 +786,12 @@
                                 {
                                     <div class="d-flex gap-1">
                                         <button class="btn btn-sm btn-outline-primary border-0"
-                                                @onclick="() => RestoreBackup(b.Id)">
+                                                @onclick='() => pendingConfirm = new PendingConfirm($"Restore backup of realm \"{b.RealmName}\" from {b.CreatedAt:yyyy-MM-dd HH:mm}? This overwrites the current realm state and cannot be undone.", "Restore", () => RestoreBackup(b.Id))'>
                                             <i class="bi bi-arrow-counterclockwise me-1"></i>Restore
                                         </button>
                                         <button class="btn btn-sm btn-outline-danger border-0"
-                                                @onclick="() => DeleteBackup(b.Id)">
+                                                @onclick='() => pendingConfirm = new PendingConfirm($"Delete backup of realm \"{b.RealmName}\" from {b.CreatedAt:yyyy-MM-dd HH:mm}? This cannot be undone.", "Delete", () => DeleteBackup(b.Id))'
+                                                aria-label="@($"Delete backup of {b.RealmName} from {b.CreatedAt:yyyy-MM-dd HH:mm}")">
                                             <i class="bi bi-trash"></i>
                                         </button>
                                     </div>
@@ -792,23 +828,27 @@
                         {
                             <div class="alert alert-danger py-2 small">@roleError</div>
                         }
-                        <div class="row g-2" style="max-width:480px">
-                            <div class="col-md-5">
-                                <label class="form-label small">Role Name</label>
-                                <input class="form-control form-control-sm" placeholder="e.g. app-admin" @bind="newRoleName" />
+                        <EditForm Model="addRoleForm" OnValidSubmit="AddRole">
+                            <DataAnnotationsValidator />
+                            <div class="row g-2" style="max-width:480px">
+                                <div class="col-md-5">
+                                    <label class="form-label small">Role Name</label>
+                                    <InputText class="form-control form-control-sm" placeholder="e.g. app-admin" @bind-Value="addRoleForm.RoleName" />
+                                    <ValidationMessage For="() => addRoleForm.RoleName" class="text-danger small" />
+                                </div>
+                                <div class="col-md-7">
+                                    <label class="form-label small">Description <span class="text-muted">(optional)</span></label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="addRoleForm.Description" />
+                                </div>
                             </div>
-                            <div class="col-md-7">
-                                <label class="form-label small">Description <span class="text-muted">(optional)</span></label>
-                                <input class="form-control form-control-sm" @bind="newRoleDescription" />
+                            <div class="mt-2 d-flex gap-2">
+                                <button type="submit" class="btn btn-sm btn-primary" disabled="@savingRole">
+                                    @if (savingRole) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Create
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAddRole = false">Cancel</button>
                             </div>
-                        </div>
-                        <div class="mt-2 d-flex gap-2">
-                            <button class="btn btn-sm btn-primary" @onclick="AddRole" disabled="@(savingRole || string.IsNullOrWhiteSpace(newRoleName))">
-                                @if (savingRole) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                Create
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddRole = false">Cancel</button>
-                        </div>
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -831,7 +871,8 @@
                                 }
                             </div>
                             <button class="btn btn-sm btn-outline-danger border-0"
-                                    @onclick="() => DeleteRole(role.Name)">
+                                    @onclick='() => pendingConfirm = new PendingConfirm($"Delete role \"{role.Name}\"? It will be removed from all users and groups. This cannot be undone.", "Delete", () => DeleteRole(role.Name))'
+                                    aria-label="@($"Delete role {role.Name}")">
                                 <i class="bi bi-trash"></i>
                             </button>
                         </div>
@@ -865,31 +906,34 @@
                         {
                             <div class="alert alert-danger py-2 small">@clientError</div>
                         }
-                        <div class="row g-2" style="max-width:520px">
-                            <div class="col-md-5">
-                                <label class="form-label small">Client ID</label>
-                                <input class="form-control form-control-sm font-monospace" placeholder="my-app" @bind="newClientId" />
+                        <EditForm Model="addClientForm" OnValidSubmit="AddClient">
+                            <DataAnnotationsValidator />
+                            <div class="row g-2" style="max-width:520px">
+                                <div class="col-md-5">
+                                    <label class="form-label small">Client ID</label>
+                                    <InputText class="form-control form-control-sm font-monospace" placeholder="my-app" @bind-Value="addClientForm.ClientId" />
+                                    <ValidationMessage For="() => addClientForm.ClientId" class="text-danger small" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small">Name <span class="text-muted">(optional)</span></label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="addClientForm.Name" />
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small">Access Type</label>
+                                    <InputSelect class="form-select form-select-sm" @bind-Value="addClientForm.Public">
+                                        <option value="false">Confidential</option>
+                                        <option value="true">Public</option>
+                                    </InputSelect>
+                                </div>
                             </div>
-                            <div class="col-md-4">
-                                <label class="form-label small">Name <span class="text-muted">(optional)</span></label>
-                                <input class="form-control form-control-sm" @bind="newClientName" />
+                            <div class="mt-2 d-flex gap-2">
+                                <button type="submit" class="btn btn-sm btn-primary" disabled="@savingClient">
+                                    @if (savingClient) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Create
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showAddClient = false">Cancel</button>
                             </div>
-                            <div class="col-md-3">
-                                <label class="form-label small">Access Type</label>
-                                <select class="form-select form-select-sm" @bind="newClientPublic">
-                                    <option value="false">Confidential</option>
-                                    <option value="true">Public</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div class="mt-2 d-flex gap-2">
-                            <button class="btn btn-sm btn-primary" @onclick="AddClient"
-                                    disabled="@(savingClient || string.IsNullOrWhiteSpace(newClientId))">
-                                @if (savingClient) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                Create
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddClient = false">Cancel</button>
-                        </div>
+                        </EditForm>
                     </div>
                 </div>
             }
@@ -927,11 +971,13 @@
                                 </div>
                                 <div class="d-flex gap-1">
                                     <button class="btn btn-sm btn-outline-secondary border-0"
-                                            @onclick="() => OpenClientEdit(client)">
+                                            @onclick="() => OpenClientEdit(client)"
+                                            aria-label="@($"Edit client {client.ClientId}")">
                                         <i class="bi @(isEditingClient ? "bi-chevron-up" : "bi-pencil")"></i>
                                     </button>
                                     <button class="btn btn-sm btn-outline-danger border-0"
-                                            @onclick="() => DeleteClient(client.Id)">
+                                            @onclick='() => pendingConfirm = new PendingConfirm($"Delete client \"{client.ClientId}\"? Applications using this client will stop working. This cannot be undone.", "Delete", () => DeleteClient(client.Id))'
+                                            aria-label="@($"Delete client {client.ClientId}")">
                                         <i class="bi bi-trash"></i>
                                     </button>
                                 </div>
@@ -944,12 +990,15 @@
                                     {
                                         <div class="alert alert-danger py-2 small mb-2">@clientEditError</div>
                                     }
-                                    <ul class="nav nav-tabs mb-3 nav-sm">
+                                    <ul class="nav nav-tabs mb-3 nav-sm" role="tablist" aria-label="Client settings">
                                         @foreach (string ct2 in new[] { "settings", "secret", "mappers" }
                                             .Where(t => !(t == "secret" && clientDetail.PublicClient)))
                                         {
-                                            <li class="nav-item">
+                                            <li class="nav-item" role="presentation">
                                                 <button class="nav-link py-1 px-2 small @(clientEditTab == ct2 ? "active" : "")"
+                                                        role="tab"
+                                                        aria-selected="@(clientEditTab == ct2)"
+                                                        tabindex="@(clientEditTab == ct2 ? 0 : -1)"
                                                         @onclick="() => SwitchClientTab(ct2)">
                                                     @(ct2 switch { "settings" => "Settings", "secret" => "Credentials", "mappers" => "Mappers", _ => ct2 })
                                                 </button>
@@ -1041,7 +1090,8 @@
                                                     </button>
                                                 </div>
                                             }
-                                            <button class="btn btn-sm btn-warning" @onclick="RegenerateSecret"
+                                            <button class="btn btn-sm btn-warning"
+                                                    @onclick='() => pendingConfirm = new PendingConfirm("Regenerate the client secret? The current secret stops working immediately and every integration using it must be updated. This cannot be undone.", "Regenerate", RegenerateSecret)'
                                                     disabled="@savingClient">
                                                 @if (savingClient) { <span class="spinner-border spinner-border-sm me-1"></span> }
                                                 <i class="bi bi-arrow-clockwise me-1"></i>Regenerate Secret
@@ -1272,11 +1322,13 @@
                                                                 </div>
                                                                 <div class="d-flex gap-1">
                                                                     <button class="btn btn-sm btn-outline-secondary border-0"
-                                                                            @onclick="() => OpenMapperEdit(mapper)">
+                                                                            @onclick="() => OpenMapperEdit(mapper)"
+                                                                            aria-label="@($"Edit mapper {mapper.Name}")">
                                                                         <i class="bi bi-pencil"></i>
                                                                     </button>
                                                                     <button class="btn btn-sm btn-outline-danger border-0"
-                                                                            @onclick="() => DeleteMapper(mapper.Id)">
+                                                                            @onclick='() => pendingConfirm = new PendingConfirm($"Delete protocol mapper \"{mapper.Name}\"? This cannot be undone.", "Delete", () => DeleteMapper(mapper.Id))'
+                                                                            aria-label="@($"Delete mapper {mapper.Name}")">
                                                                         <i class="bi bi-trash"></i>
                                                                     </button>
                                                                 </div>
@@ -1801,21 +1853,30 @@ else if (selectedKeycloak is not null)
     else
     {
         @* Instance-level tabs: Realms | Themes *@
-        <ul class="nav nav-tabs mb-4">
-            <li class="nav-item">
+        <ul class="nav nav-tabs mb-4" role="tablist" aria-label="Instance sections">
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(instanceTab == "realms" ? "active" : "")"
+                        role="tab"
+                        aria-selected="@(instanceTab == "realms")"
+                        tabindex="@(instanceTab == "realms" ? 0 : -1)"
                         @onclick='() => SwitchInstanceTab("realms")'>
                     <i class="bi bi-shield-lock me-1"></i>Realms
                 </button>
             </li>
-            <li class="nav-item">
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(instanceTab == "themes" ? "active" : "")"
+                        role="tab"
+                        aria-selected="@(instanceTab == "themes")"
+                        tabindex="@(instanceTab == "themes" ? 0 : -1)"
                         @onclick='() => SwitchInstanceTab("themes")'>
                     <i class="bi bi-palette me-1"></i>Themes
                 </button>
             </li>
-            <li class="nav-item">
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(instanceTab == "migrate" ? "active" : "")"
+                        role="tab"
+                        aria-selected="@(instanceTab == "migrate")"
+                        tabindex="@(instanceTab == "migrate" ? 0 : -1)"
                         @onclick='() => SwitchInstanceTab("migrate")'>
                     <i class="bi bi-arrow-left-right me-1"></i>Migrate
                 </button>
@@ -1856,44 +1917,47 @@ else if (selectedKeycloak is not null)
                             {
                                 <div class="alert alert-danger py-2 small mb-2">@createThemeError</div>
                             }
-                            <div class="mb-2">
-                                <label class="form-label small fw-semibold">Name</label>
-                                <input class="form-control form-control-sm" placeholder="e.g. Capio Blue"
-                                       @bind="newThemeName" />
-                            </div>
-                            @if (availableThemes is not null)
-                            {
-                                <div class="row g-2 mb-2">
-                                    <div class="col-6">
-                                        <label class="form-label small fw-semibold">Login Theme</label>
-                                        <select class="form-select form-select-sm" @bind="newThemeLoginTheme">
-                                            <option value="">(default)</option>
-                                            @foreach (string t in availableThemes.GetValueOrDefault("login") ?? [])
-                                            {
-                                                <option value="@t">@t</option>
-                                            }
-                                        </select>
-                                    </div>
-                                    <div class="col-6">
-                                        <label class="form-label small fw-semibold">Account Theme</label>
-                                        <select class="form-select form-select-sm" @bind="newThemeAccountTheme">
-                                            <option value="">(default)</option>
-                                            @foreach (string t in availableThemes.GetValueOrDefault("account") ?? [])
-                                            {
-                                                <option value="@t">@t</option>
-                                            }
-                                        </select>
-                                    </div>
+                            <EditForm Model="createThemeForm" OnValidSubmit="CreateNamedTheme">
+                                <DataAnnotationsValidator />
+                                <div class="mb-2">
+                                    <label class="form-label small fw-semibold">Name</label>
+                                    <InputText class="form-control form-control-sm" placeholder="e.g. Capio Blue"
+                                               @bind-Value="createThemeForm.Name" />
+                                    <ValidationMessage For="() => createThemeForm.Name" class="text-danger small" />
                                 </div>
-                            }
-                            <div class="d-flex gap-2">
-                                <button class="btn btn-sm btn-primary" @onclick="CreateNamedTheme"
-                                        disabled="@(creatingTheme || string.IsNullOrWhiteSpace(newThemeName))">
-                                    @if (creatingTheme) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                    Create
-                                </button>
-                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showCreateTheme = false">Cancel</button>
-                            </div>
+                                @if (availableThemes is not null)
+                                {
+                                    <div class="row g-2 mb-2">
+                                        <div class="col-6">
+                                            <label class="form-label small fw-semibold">Login Theme</label>
+                                            <InputSelect class="form-select form-select-sm" @bind-Value="createThemeForm.LoginTheme">
+                                                <option value="">(default)</option>
+                                                @foreach (string t in availableThemes.GetValueOrDefault("login") ?? [])
+                                                {
+                                                    <option value="@t">@t</option>
+                                                }
+                                            </InputSelect>
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label small fw-semibold">Account Theme</label>
+                                            <InputSelect class="form-select form-select-sm" @bind-Value="createThemeForm.AccountTheme">
+                                                <option value="">(default)</option>
+                                                @foreach (string t in availableThemes.GetValueOrDefault("account") ?? [])
+                                                {
+                                                    <option value="@t">@t</option>
+                                                }
+                                            </InputSelect>
+                                        </div>
+                                    </div>
+                                }
+                                <div class="d-flex gap-2">
+                                    <button type="submit" class="btn btn-sm btn-primary" disabled="@creatingTheme">
+                                        @if (creatingTheme) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        Create
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showCreateTheme = false">Cancel</button>
+                                </div>
+                            </EditForm>
                         </div>
                     </div>
                 }
@@ -1957,7 +2021,8 @@ else if (selectedKeycloak is not null)
                                         @if (duplicatingTheme) { <span class="spinner-border spinner-border-sm me-1"></span> }
                                         <i class="bi bi-copy me-1"></i>Duplicate
                                     </button>
-                                    <button class="btn btn-sm btn-outline-danger" @onclick="DeleteNamedTheme"
+                                    <button class="btn btn-sm btn-outline-danger"
+                                            @onclick='() => pendingConfirm = new PendingConfirm($"Delete theme \"{selectedNamedTheme?.Name}\"? All its CSS, variables, and resources will be removed. This cannot be undone.", "Delete", DeleteNamedTheme)'
                                             disabled="@deletingTheme">
                                         @if (deletingTheme) { <span class="spinner-border spinner-border-sm me-1"></span> }
                                         <i class="bi bi-trash me-1"></i>Delete
@@ -1980,9 +2045,9 @@ else if (selectedKeycloak is not null)
                 }
                 else if (namedThemes.Count == 0 && !showCreateTheme)
                 {
-                    <div class="text-muted small">
-                        No themes yet. Create a named theme to save CSS overrides and native theme settings in one bundle.
-                    </div>
+                    <EmptyState Icon="bi-palette" Title="No themes yet"
+                                Message="Create a named theme to save CSS overrides and native theme settings in one bundle."
+                                ActionLabel="New theme" OnAction="() => { showCreateTheme = true; createThemeError = null; }" />
                 }
             }
         }
@@ -2161,27 +2226,31 @@ else if (selectedKeycloak is not null)
                     {
                         <div class="alert alert-danger py-2 small">@realmError</div>
                     }
-                    <div class="row g-2">
-                        <div class="col-md-4">
-                            <label class="form-label small">Realm ID</label>
-                            <input class="form-control form-control-sm" placeholder="e.g. acme-prod" @bind="newRealmName" />
+                    <EditForm Model="createRealmForm" OnValidSubmit="CreateRealm">
+                        <DataAnnotationsValidator />
+                        <div class="row g-2">
+                            <div class="col-md-4">
+                                <label class="form-label small">Realm ID</label>
+                                <InputText class="form-control form-control-sm" placeholder="e.g. acme-prod" @bind-Value="createRealmForm.RealmName" />
+                                <ValidationMessage For="() => createRealmForm.RealmName" class="text-danger small" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Display Name</label>
+                                <InputText class="form-control form-control-sm" placeholder="e.g. Acme Production" @bind-Value="createRealmForm.DisplayName" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Login Theme <span class="text-muted">(optional)</span></label>
+                                <InputText class="form-control form-control-sm" placeholder="keycloak" @bind-Value="createRealmForm.Theme" />
+                            </div>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Display Name</label>
-                            <input class="form-control form-control-sm" placeholder="e.g. Acme Production" @bind="newRealmDisplayName" />
+                        <div class="mt-2 d-flex gap-2">
+                            <button type="submit" class="btn btn-sm btn-primary" disabled="@creatingRealm">
+                                @if (creatingRealm) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showCreateRealm = false">Cancel</button>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Login Theme <span class="text-muted">(optional)</span></label>
-                            <input class="form-control form-control-sm" placeholder="keycloak" @bind="newRealmTheme" />
-                        </div>
-                    </div>
-                    <div class="mt-2 d-flex gap-2">
-                        <button class="btn btn-sm btn-primary" @onclick="CreateRealm" disabled="@creatingRealm">
-                            @if (creatingRealm) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                            Create
-                        </button>
-                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => showCreateRealm = false">Cancel</button>
-                    </div>
+                    </EditForm>
                 </div>
             </div>
         }
@@ -2190,10 +2259,9 @@ else if (selectedKeycloak is not null)
         {
             @if (realms.Count == 0)
             {
-                <div class="text-center py-4 text-muted">
-                    <i class="bi bi-shield-lock display-6 d-block mb-2"></i>
-                    No realms yet. Create one above.
-                </div>
+                <EmptyState Icon="bi-shield-lock" Title="No realms yet"
+                            Message="Create your first realm to manage users, roles, clients and more."
+                            ActionLabel="New realm" OnAction="() => showCreateRealm = true" />
             }
             else
             {
@@ -2221,11 +2289,13 @@ else if (selectedKeycloak is not null)
                             </div>
                             <div class="d-flex gap-1">
                                 <button class="btn btn-sm btn-outline-primary border-0"
-                                        @onclick="() => OpenRealm(realm)">
+                                        @onclick="() => OpenRealm(realm)"
+                                        aria-label="@($"Manage realm {realm.DisplayName}")">
                                     <i class="bi bi-gear"></i>
                                 </button>
                                 <button class="btn btn-sm btn-outline-danger border-0"
-                                        @onclick="() => DeleteRealm(realm.Id)"
+                                        @onclick='() => pendingConfirm = new PendingConfirm($"Delete realm \"{realm.DisplayName}\" ({realm.RealmName})? All its users, clients, roles, and configuration will be permanently destroyed. This cannot be undone.", "Delete realm", () => DeleteRealm(realm.Id))'
+                                        aria-label="@($"Delete realm {realm.DisplayName}")"
                                         disabled="@(deletingRealmId == realm.Id)">
                                     @if (deletingRealmId == realm.Id)
                                     {
@@ -2270,35 +2340,37 @@ else
                     Connect a Keycloak instance that was deployed outside of EntKube.
                     Admin credentials are stored in EntKube's vault and are only used to call the Keycloak Admin API.
                 </p>
-                <div class="row g-2" style="max-width:560px">
-                    <div class="col-12">
-                        <label class="form-label small fw-semibold">Display Name</label>
-                        <input class="form-control form-control-sm" placeholder="e.g. Production Keycloak" @bind="registerExternalDisplayName" />
+                <EditForm Model="registerExternalForm" OnValidSubmit="RegisterExternal">
+                    <DataAnnotationsValidator />
+                    <div class="row g-2" style="max-width:560px">
+                        <div class="col-12">
+                            <label class="form-label small fw-semibold">Display Name</label>
+                            <InputText class="form-control form-control-sm" placeholder="e.g. Production Keycloak" @bind-Value="registerExternalForm.DisplayName" />
+                            <ValidationMessage For="() => registerExternalForm.DisplayName" class="text-danger small" />
+                        </div>
+                        <div class="col-md-8">
+                            <label class="form-label small fw-semibold">Admin URL</label>
+                            <InputText class="form-control form-control-sm" placeholder="https://auth.example.com/auth" @bind-Value="registerExternalForm.AdminUrl" />
+                            <ValidationMessage For="() => registerExternalForm.AdminUrl" class="text-danger small" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small fw-semibold">Admin Username</label>
+                            <InputText class="form-control form-control-sm" @bind-Value="registerExternalForm.Username" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">Admin Password</label>
+                            <InputText type="password" class="form-control form-control-sm" @bind-Value="registerExternalForm.Password" />
+                            <ValidationMessage For="() => registerExternalForm.Password" class="text-danger small" />
+                        </div>
                     </div>
-                    <div class="col-md-8">
-                        <label class="form-label small fw-semibold">Admin URL</label>
-                        <input class="form-control form-control-sm" placeholder="https://auth.example.com/auth" @bind="registerExternalAdminUrl" />
+                    <div class="mt-3 d-flex gap-2">
+                        <button type="submit" class="btn btn-sm btn-primary" disabled="@registeringExternal">
+                            @if (registeringExternal) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Register
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showRegisterExternal = false">Cancel</button>
                     </div>
-                    <div class="col-md-4">
-                        <label class="form-label small fw-semibold">Admin Username</label>
-                        <input class="form-control form-control-sm" @bind="registerExternalUsername" />
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small fw-semibold">Admin Password</label>
-                        <input type="password" class="form-control form-control-sm" @bind="registerExternalPassword" />
-                    </div>
-                </div>
-                <div class="mt-3 d-flex gap-2">
-                    <button class="btn btn-sm btn-primary" @onclick="RegisterExternal"
-                            disabled="@(registeringExternal
-                                || string.IsNullOrWhiteSpace(registerExternalDisplayName)
-                                || string.IsNullOrWhiteSpace(registerExternalAdminUrl)
-                                || string.IsNullOrWhiteSpace(registerExternalPassword))">
-                        @if (registeringExternal) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                        Register
-                    </button>
-                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showRegisterExternal = false">Cancel</button>
-                </div>
+                </EditForm>
             </div>
         </div>
     }
@@ -2306,11 +2378,8 @@ else
 
     @if (detectedKeycloaks is null || detectedKeycloaks.Count == 0)
     {
-        <div class="text-center py-5 text-muted">
-            <i class="bi bi-person-badge display-4 d-block mb-3"></i>
-            <p class="mb-1">No Keycloak instances found on this tenant's clusters.</p>
-            <small>Install the Keycloak component from the Components tab, or register an external instance above.</small>
-        </div>
+        <EmptyState Icon="bi-person-badge" Title="No Keycloak instances"
+                    Message="No Keycloak instances found on this tenant's clusters. Install the Keycloak component from the Components tab, or register an external instance above." />
     }
     else
     {
@@ -2448,9 +2517,7 @@ else
     private bool showCreateTheme;
     private bool creatingTheme;
     private string? createThemeError;
-    private string newThemeName = "";
-    private string newThemeLoginTheme = "";
-    private string newThemeAccountTheme = "";
+    private CreateThemeForm createThemeForm = new();
 
     // ── Named theme edit form ─────────────────────────────────────────────────
     private bool savingThemeMeta;
@@ -2495,42 +2562,32 @@ else
     private bool creatingRealm;
     private string? realmError;
     private string? realmSyncError;
-    private string newRealmName = "";
-    private string newRealmDisplayName = "";
-    private string newRealmTheme = "";
+    private CreateRealmForm createRealmForm = new();
     private Guid? deletingRealmId;
 
     // ── User form ─────────────────────────────────────────────────────────────
     private bool showAddUser;
     private bool savingUser;
     private string? userError;
-    private string newUserUsername = "";
-    private string newUserEmail = "";
-    private string newUserFirstName = "";
-    private string newUserLastName = "";
-    private string newUserPassword = "";
+    private AddUserForm addUserForm = new();
 
     // ── IdP form ──────────────────────────────────────────────────────────────
     private bool showAddIdp;
     private bool savingIdp;
     private string? idpError;
-    private string newIdpAlias = "";
-    private string newIdpProviderId = "oidc";
-    private string newIdpClientId = "";
-    private string newIdpClientSecret = "";
+    private AddIdpForm addIdpForm = new();
 
     // ── Group form ────────────────────────────────────────────────────────────
     private bool showAddGroup;
     private bool savingGroup;
     private string? groupError;
-    private string newGroupName = "";
+    private AddGroupForm addGroupForm = new();
 
     // ── Org form ─────────────────────────────────────────────────────────────
     private bool showAddOrg;
     private bool savingOrg;
     private string? orgError;
-    private string newOrgName = "";
-    private string newOrgDescription = "";
+    private AddOrgForm addOrgForm = new();
 
     // ── Realm theme form ──────────────────────────────────────────────────────
     private bool savingThemes;
@@ -2553,10 +2610,7 @@ else
     private bool showRegisterExternal;
     private bool registeringExternal;
     private string? registerExternalError;
-    private string registerExternalDisplayName = "";
-    private string registerExternalAdminUrl = "";
-    private string registerExternalUsername = "admin";
-    private string registerExternalPassword = "";
+    private RegisterExternalForm registerExternalForm = new();
 
     // ── Roles tab ────────────────────────────────────────────────────────────
     private List<KeycloakRole>? roles;
@@ -2564,8 +2618,7 @@ else
     private bool showAddRole;
     private bool savingRole;
     private string? roleError;
-    private string newRoleName = "";
-    private string newRoleDescription = "";
+    private AddRoleForm addRoleForm = new();
 
     // ── Clients tab ───────────────────────────────────────────────────────────
     private List<KeycloakClientInfo>? clients;
@@ -2573,9 +2626,7 @@ else
     private bool showAddClient;
     private bool savingClient;
     private string? clientError;
-    private string newClientId = "";
-    private string newClientName = "";
-    private string newClientPublic = "false";
+    private AddClientForm addClientForm = new();
 
     private string? selectedClientUuid;
     private KeycloakClientDetail? clientDetail;
@@ -2640,6 +2691,20 @@ else
     private int migrateCssCopied;
     private int migrateNamedThemesCopied;
     private string? migrateError;
+
+    // ── Confirm-before-destroy ────────────────────────────────────────────────
+    // A destructive action awaiting user confirmation via the ConfirmDialog banner.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -2762,7 +2827,7 @@ else
 
     private async Task CreateNamedTheme()
     {
-        if (selectedKeycloak?.Config is null || string.IsNullOrWhiteSpace(newThemeName)) return;
+        if (selectedKeycloak?.Config is null) return;
 
         creatingTheme = true;
         createThemeError = null;
@@ -2771,16 +2836,15 @@ else
         {
             KeycloakTheme created = await KeycloakService.CreateNamedThemeAsync(
                 TenantId, selectedKeycloak.Config.Id,
-                newThemeName,
-                string.IsNullOrWhiteSpace(newThemeLoginTheme) ? null : newThemeLoginTheme,
-                string.IsNullOrWhiteSpace(newThemeAccountTheme) ? null : newThemeAccountTheme);
+                createThemeForm.Name,
+                string.IsNullOrWhiteSpace(createThemeForm.LoginTheme) ? null : createThemeForm.LoginTheme,
+                string.IsNullOrWhiteSpace(createThemeForm.AccountTheme) ? null : createThemeForm.AccountTheme);
 
             namedThemes = await KeycloakService.GetNamedThemesAsync(TenantId, selectedKeycloak.Config.Id);
             showCreateTheme = false;
-            newThemeName = "";
-            newThemeLoginTheme = "";
-            newThemeAccountTheme = "";
+            createThemeForm = new CreateThemeForm();
             SelectNamedTheme(created);
+            Toasts.Success("Theme created.");
         }
         catch (Exception ex)
         {
@@ -2867,10 +2931,11 @@ else
 
             namedThemes = await KeycloakService.GetNamedThemesAsync(TenantId, selectedKeycloak.Config!.Id);
             selectedNamedTheme = null;
+            Toasts.Success("Theme deleted.");
         }
         catch (Exception ex)
         {
-            themeMetaError = ex.Message;
+            Toasts.Error($"Failed to delete theme: {ex.Message}");
         }
         finally
         {
@@ -2889,18 +2954,19 @@ else
         {
             KeycloakComponentConfig config = await KeycloakService.RegisterExternalAsync(
                 TenantId,
-                registerExternalDisplayName,
-                registerExternalAdminUrl,
-                registerExternalUsername,
-                registerExternalPassword);
+                registerExternalForm.DisplayName,
+                registerExternalForm.AdminUrl,
+                registerExternalForm.Username,
+                registerExternalForm.Password);
 
             await KeycloakService.SyncRealmsFromKeycloakAsync(TenantId, config.Id);
 
             detectedKeycloaks = await LoadDetectedKeycloaksAsync();
             showRegisterExternal = false;
-            registerExternalDisplayName = "";
-            registerExternalAdminUrl = "";
-            registerExternalPassword = "";
+            registerExternalForm.DisplayName = "";
+            registerExternalForm.AdminUrl = "";
+            registerExternalForm.Password = "";
+            Toasts.Success("External Keycloak registered.");
         }
         catch (Exception ex)
         {
@@ -3227,14 +3293,13 @@ else
         {
             await KeycloakService.CreateRealmAsync(
                 TenantId, selectedKeycloak.Config.Id,
-                newRealmName, newRealmDisplayName,
-                string.IsNullOrWhiteSpace(newRealmTheme) ? null : newRealmTheme);
+                createRealmForm.RealmName, createRealmForm.DisplayName,
+                string.IsNullOrWhiteSpace(createRealmForm.Theme) ? null : createRealmForm.Theme);
 
             realms = await KeycloakService.GetRealmsForConfigAsync(TenantId, selectedKeycloak.Config.Id);
             showCreateRealm = false;
-            newRealmName = "";
-            newRealmDisplayName = "";
-            newRealmTheme = "";
+            createRealmForm = new CreateRealmForm();
+            Toasts.Success("Realm created.");
         }
         catch (Exception ex)
         {
@@ -3256,10 +3321,11 @@ else
         {
             await KeycloakService.DeleteRealmAsync(TenantId, realmId);
             realms = await KeycloakService.GetRealmsForConfigAsync(TenantId, selectedKeycloak.Config.Id);
+            Toasts.Success("Realm deleted.");
         }
         catch (Exception ex)
         {
-            realmError = ex.Message;
+            Toasts.Error($"Failed to delete realm: {ex.Message}");
         }
         finally
         {
@@ -3280,16 +3346,13 @@ else
         {
             await KeycloakService.CreateUserAsync(
                 TenantId, selectedRealm.Id,
-                newUserUsername, newUserEmail, newUserFirstName, newUserLastName,
-                string.IsNullOrWhiteSpace(newUserPassword) ? null : newUserPassword);
+                addUserForm.Username, addUserForm.Email, addUserForm.FirstName, addUserForm.LastName,
+                string.IsNullOrWhiteSpace(addUserForm.Password) ? null : addUserForm.Password);
 
             users = await KeycloakService.GetUsersAsync(TenantId, selectedRealm.Id);
             showAddUser = false;
-            newUserUsername = "";
-            newUserEmail = "";
-            newUserFirstName = "";
-            newUserLastName = "";
-            newUserPassword = "";
+            addUserForm = new AddUserForm();
+            Toasts.Success("User created.");
         }
         catch (Exception ex)
         {
@@ -3309,10 +3372,11 @@ else
         {
             await KeycloakService.DeleteUserAsync(TenantId, selectedRealm.Id, userId);
             users = await KeycloakService.GetUsersAsync(TenantId, selectedRealm.Id);
+            Toasts.Success("User deleted.");
         }
         catch (Exception ex)
         {
-            userError = ex.Message;
+            Toasts.Error($"Failed to delete user: {ex.Message}");
         }
     }
 
@@ -3329,13 +3393,15 @@ else
         {
             await KeycloakService.CreateIdpAsync(
                 TenantId, selectedRealm.Id,
-                newIdpAlias, newIdpProviderId, newIdpClientId, newIdpClientSecret);
+                addIdpForm.Alias, addIdpForm.ProviderId, addIdpForm.ClientId, addIdpForm.ClientSecret);
 
             idps = await KeycloakService.GetIdpsAsync(TenantId, selectedRealm.Id);
             showAddIdp = false;
-            newIdpAlias = "";
-            newIdpClientId = "";
-            newIdpClientSecret = "";
+            // Reset entered fields but keep the selected provider type.
+            addIdpForm.Alias = "";
+            addIdpForm.ClientId = "";
+            addIdpForm.ClientSecret = "";
+            Toasts.Success("Identity provider added.");
         }
         catch (Exception ex)
         {
@@ -3355,10 +3421,11 @@ else
         {
             await KeycloakService.DeleteIdpAsync(TenantId, selectedRealm.Id, alias);
             idps = await KeycloakService.GetIdpsAsync(TenantId, selectedRealm.Id);
+            Toasts.Success($"Identity provider \"{alias}\" deleted.");
         }
         catch (Exception ex)
         {
-            idpError = ex.Message;
+            Toasts.Error($"Failed to delete identity provider: {ex.Message}");
         }
     }
 
@@ -3373,10 +3440,11 @@ else
 
         try
         {
-            await KeycloakService.CreateGroupAsync(TenantId, selectedRealm.Id, newGroupName);
+            await KeycloakService.CreateGroupAsync(TenantId, selectedRealm.Id, addGroupForm.Name);
             groups = await KeycloakService.GetGroupsAsync(TenantId, selectedRealm.Id);
             showAddGroup = false;
-            newGroupName = "";
+            addGroupForm = new AddGroupForm();
+            Toasts.Success("Group created.");
         }
         catch (Exception ex)
         {
@@ -3396,10 +3464,11 @@ else
         {
             await KeycloakService.DeleteGroupAsync(TenantId, selectedRealm.Id, groupId);
             groups = await KeycloakService.GetGroupsAsync(TenantId, selectedRealm.Id);
+            Toasts.Success("Group deleted.");
         }
         catch (Exception ex)
         {
-            groupError = ex.Message;
+            Toasts.Error($"Failed to delete group: {ex.Message}");
         }
     }
 
@@ -3415,13 +3484,13 @@ else
         try
         {
             await KeycloakService.CreateOrganizationAsync(
-                TenantId, selectedRealm.Id, newOrgName,
-                string.IsNullOrWhiteSpace(newOrgDescription) ? null : newOrgDescription);
+                TenantId, selectedRealm.Id, addOrgForm.Name,
+                string.IsNullOrWhiteSpace(addOrgForm.Description) ? null : addOrgForm.Description);
 
             orgs = await KeycloakService.GetOrganizationsAsync(TenantId, selectedRealm.Id);
             showAddOrg = false;
-            newOrgName = "";
-            newOrgDescription = "";
+            addOrgForm = new AddOrgForm();
+            Toasts.Success("Organization created.");
         }
         catch (Exception ex)
         {
@@ -3527,10 +3596,11 @@ else
         try
         {
             await KeycloakService.RestoreBackupAsync(TenantId, backupId, null);
+            Toasts.Success("Backup restored.");
         }
         catch (Exception ex)
         {
-            backupError = ex.Message;
+            Toasts.Error($"Failed to restore backup: {ex.Message}");
         }
     }
 
@@ -3545,10 +3615,11 @@ else
             {
                 backups = await KeycloakService.GetBackupsAsync(TenantId, selectedRealm.Id);
             }
+            Toasts.Success("Backup deleted.");
         }
         catch (Exception ex)
         {
-            backupError = ex.Message;
+            Toasts.Error($"Failed to delete backup: {ex.Message}");
         }
     }
 
@@ -3615,19 +3686,19 @@ else
 
     private async Task AddRole()
     {
-        if (selectedRealm is null || string.IsNullOrWhiteSpace(newRoleName)) return;
+        if (selectedRealm is null) return;
 
         savingRole = true;
         roleError = null;
 
         try
         {
-            await KeycloakService.CreateRealmRoleAsync(TenantId, selectedRealm.Id, newRoleName,
-                string.IsNullOrWhiteSpace(newRoleDescription) ? null : newRoleDescription);
+            await KeycloakService.CreateRealmRoleAsync(TenantId, selectedRealm.Id, addRoleForm.RoleName,
+                string.IsNullOrWhiteSpace(addRoleForm.Description) ? null : addRoleForm.Description);
             roles = await KeycloakService.GetRealmRolesAsync(TenantId, selectedRealm.Id);
             showAddRole = false;
-            newRoleName = "";
-            newRoleDescription = "";
+            addRoleForm = new AddRoleForm();
+            Toasts.Success("Role created.");
         }
         catch (Exception ex) { roleError = ex.Message; }
         finally { savingRole = false; }
@@ -3641,28 +3712,31 @@ else
         {
             await KeycloakService.DeleteRealmRoleAsync(TenantId, selectedRealm.Id, roleName);
             roles = await KeycloakService.GetRealmRolesAsync(TenantId, selectedRealm.Id);
+            Toasts.Success($"Role \"{roleName}\" deleted.");
         }
-        catch (Exception ex) { roleError = ex.Message; }
+        catch (Exception ex) { Toasts.Error($"Failed to delete role: {ex.Message}"); }
     }
 
     // ── Clients ───────────────────────────────────────────────────────────────
 
     private async Task AddClient()
     {
-        if (selectedRealm is null || string.IsNullOrWhiteSpace(newClientId)) return;
+        if (selectedRealm is null) return;
 
         savingClient = true;
         clientError = null;
 
         try
         {
-            bool isPublic = newClientPublic == "true";
-            await KeycloakService.CreateClientAsync(TenantId, selectedRealm.Id, newClientId, isPublic,
-                string.IsNullOrWhiteSpace(newClientName) ? null : newClientName);
+            bool isPublic = addClientForm.Public == "true";
+            await KeycloakService.CreateClientAsync(TenantId, selectedRealm.Id, addClientForm.ClientId, isPublic,
+                string.IsNullOrWhiteSpace(addClientForm.Name) ? null : addClientForm.Name);
             clients = await KeycloakService.GetClientsAsync(TenantId, selectedRealm.Id);
             showAddClient = false;
-            newClientId = "";
-            newClientName = "";
+            // Reset entered fields but keep the chosen access type.
+            addClientForm.ClientId = "";
+            addClientForm.Name = "";
+            Toasts.Success("Client created.");
         }
         catch (Exception ex) { clientError = ex.Message; }
         finally { savingClient = false; }
@@ -3745,8 +3819,9 @@ else
             await KeycloakService.DeleteClientAsync(TenantId, selectedRealm.Id, clientUuid);
             if (selectedClientUuid == clientUuid) { selectedClientUuid = null; clientDetail = null; }
             clients = await KeycloakService.GetClientsAsync(TenantId, selectedRealm.Id);
+            Toasts.Success("Client deleted.");
         }
-        catch (Exception ex) { clientError = ex.Message; }
+        catch (Exception ex) { Toasts.Error($"Failed to delete client: {ex.Message}"); }
     }
 
     private async Task RegenerateSecret()
@@ -3760,8 +3835,9 @@ else
         {
             clientSecret = await KeycloakService.RegenerateClientSecretAsync(TenantId, selectedRealm.Id, selectedClientUuid);
             showClientSecret = true;
+            Toasts.Success("Client secret regenerated.");
         }
-        catch (Exception ex) { clientEditError = ex.Message; }
+        catch (Exception ex) { Toasts.Error($"Failed to regenerate secret: {ex.Message}"); }
         finally { savingClient = false; }
     }
 
@@ -3834,8 +3910,9 @@ else
         {
             await KeycloakService.DeleteClientMapperAsync(TenantId, selectedRealm.Id, selectedClientUuid, mapperId);
             clientMappers = await KeycloakService.GetClientMappersAsync(TenantId, selectedRealm.Id, selectedClientUuid);
+            Toasts.Success("Mapper deleted.");
         }
-        catch (Exception ex) { clientEditError = ex.Message; }
+        catch (Exception ex) { Toasts.Error($"Failed to delete mapper: {ex.Message}"); }
     }
 
     private void OnMapperTypeChanged()
@@ -3917,7 +3994,7 @@ else
                 loadingRoles = true;
                 StateHasChanged();
                 try { roles = await KeycloakService.GetRealmRolesAsync(TenantId, selectedRealm!.Id); }
-                catch { }
+                catch (Exception ex) { userEditError = ex.Message; }
                 finally { loadingRoles = false; }
             }
             if (userRoles is null)
@@ -3936,7 +4013,7 @@ else
                 loadingGroups = true;
                 StateHasChanged();
                 try { groups = await KeycloakService.GetGroupsAsync(TenantId, selectedRealm!.Id); }
-                catch { }
+                catch (Exception ex) { userEditError = ex.Message; }
                 finally { loadingGroups = false; }
             }
             if (userGroupMemberships is null)
@@ -4122,5 +4199,94 @@ else
         if (bytes < 1024) return $"{bytes} B";
         if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
         return $"{bytes / (1024.0 * 1024):F1} MB";
+    }
+
+    // ── Create/edit form models (DataAnnotations validation) ──────────────────
+
+    private sealed class CreateRealmForm
+    {
+        [Required(ErrorMessage = "Realm ID is required.")]
+        public string RealmName { get; set; } = "";
+
+        public string DisplayName { get; set; } = "";
+        public string Theme { get; set; } = "";
+    }
+
+    private sealed class AddUserForm
+    {
+        [Required(ErrorMessage = "Username is required.")]
+        public string Username { get; set; } = "";
+
+        [EmailAddress(ErrorMessage = "Enter a valid email address.")]
+        public string Email { get; set; } = "";
+
+        public string FirstName { get; set; } = "";
+        public string LastName { get; set; } = "";
+        public string Password { get; set; } = "";
+    }
+
+    private sealed class AddIdpForm
+    {
+        [Required(ErrorMessage = "Alias is required.")]
+        public string Alias { get; set; } = "";
+
+        public string ProviderId { get; set; } = "oidc";
+        public string ClientId { get; set; } = "";
+        public string ClientSecret { get; set; } = "";
+    }
+
+    private sealed class AddGroupForm
+    {
+        [Required(ErrorMessage = "Group name is required.")]
+        public string Name { get; set; } = "";
+    }
+
+    private sealed class AddOrgForm
+    {
+        [Required(ErrorMessage = "Name is required.")]
+        public string Name { get; set; } = "";
+
+        public string Description { get; set; } = "";
+    }
+
+    private sealed class AddRoleForm
+    {
+        [Required(ErrorMessage = "Role name is required.")]
+        public string RoleName { get; set; } = "";
+
+        public string Description { get; set; } = "";
+    }
+
+    private sealed class AddClientForm
+    {
+        [Required(ErrorMessage = "Client ID is required.")]
+        public string ClientId { get; set; } = "";
+
+        public string Name { get; set; } = "";
+        public string Public { get; set; } = "false";
+    }
+
+    private sealed class CreateThemeForm
+    {
+        [Required(ErrorMessage = "Name is required.")]
+        public string Name { get; set; } = "";
+
+        public string LoginTheme { get; set; } = "";
+        public string AccountTheme { get; set; } = "";
+    }
+
+    private sealed class RegisterExternalForm
+    {
+        [Required(ErrorMessage = "Display name is required.")]
+        public string DisplayName { get; set; } = "";
+
+        [Required(ErrorMessage = "Admin URL is required.")]
+        [Url(ErrorMessage = "Enter a valid URL.")]
+        public string AdminUrl { get; set; } = "";
+
+        public string Username { get; set; } = "admin";
+
+        [Required(ErrorMessage = "Admin password is required.")]
+        public string Password { get; set; } = "";
     }
 }

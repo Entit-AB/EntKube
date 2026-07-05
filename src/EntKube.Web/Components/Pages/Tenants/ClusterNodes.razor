@@ -3,6 +3,7 @@
 @inject NodeManagementService NodeService
 @inject AuthenticationStateProvider AuthState
 @inject IJSRuntime JS
+@inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
    ClusterNodes — live node management + server inventory panel.
@@ -64,10 +65,16 @@ else
 
     <div class="d-flex align-items-center justify-content-between mb-3">
         <span class="text-muted small">@nodes.Count node@(nodes.Count == 1 ? "" : "s")</span>
-        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync" disabled="@loading">
-            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
-        </button>
+        <AutoRefresh OnRefresh="RefreshQuietlyAsync" IntervalSeconds="15" Enabled="false"
+                     LastRefreshed="_lastRefreshed" />
     </div>
+
+    <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                   Message="@(pendingConfirm?.Message ?? "")"
+                   ConfirmText="@(pendingConfirm?.ConfirmText ?? "Confirm")"
+                   IsBusy="confirmBusy"
+                   OnConfirm="RunPendingConfirmAsync"
+                   OnCancel="() => pendingConfirm = null" />
 
     @* ── Node list ──────────────────────────────────────────────── *@
     <div class="mb-4">
@@ -139,29 +146,12 @@ else
                         </button>
                     }
 
-                    @if (drainConfirmNode == node.Name)
-                    {
-                        <div class="d-flex align-items-center gap-2" @onclick:stopPropagation>
-                            <span class="text-danger small">
-                                <i class="bi bi-exclamation-triangle me-1"></i>
-                                Evicts all pods from <strong>@node.Name</strong>. Continue?
-                            </span>
-                            <button class="btn btn-sm btn-danger"
-                                    @onclick="() => DrainConfirmedAsync(node.Name)"
-                                    disabled="@IsBusy(node.Name)">Drain</button>
-                            <button class="btn btn-sm btn-outline-secondary"
-                                    @onclick="() => drainConfirmNode = null">Cancel</button>
-                        </div>
-                    }
-                    else
-                    {
-                        <button class="btn btn-sm btn-outline-danger"
-                                @onclick="() => drainConfirmNode = node.Name"
-                                @onclick:stopPropagation
-                                disabled="@IsBusy(node.Name)">
-                            <i class="bi bi-water me-1"></i>Drain
-                        </button>
-                    }
+                    <button class="btn btn-sm btn-outline-danger"
+                            @onclick='() => pendingConfirm = new PendingConfirm($"Drain node \"{node.Name}\"? This evicts all pods from it.", "Drain node", () => DrainConfirmedAsync(node.Name))'
+                            @onclick:stopPropagation
+                            disabled="@IsBusy(node.Name)">
+                        <i class="bi bi-water me-1"></i>Drain
+                    </button>
 
                     @if (IsBusy(node.Name))
                     {
@@ -182,12 +172,13 @@ else
                 @if (expanded)
                 {
                     <div class="border-top p-3">
-                        <ul class="nav nav-pills nav-sm gap-1 mb-3">
+                        <ul class="nav nav-pills nav-sm gap-1 mb-3" role="tablist" aria-label="Node detail sections">
                             @foreach (string tab in new[] { "overview", "conditions", "labels", "taints", "pods", "events", "server" })
                             {
-                                <li class="nav-item">
+                                <li class="nav-item" role="presentation">
                                     <button class="nav-link py-1 px-2 @(detailTab == tab ? "active" : "")"
-                                            @onclick="() => SwitchTabAsync(tab)">
+                                            @onclick="() => SwitchTabAsync(tab)"
+                                            role="tab" aria-selected="@(detailTab == tab)" tabindex="@(detailTab == tab ? 0 : -1)">
                                         @TabLabel(tab)
                                         @if (tab == "events" && nodeEvents.Any(e => e.Type == "Warning"))
                                         {
@@ -313,6 +304,8 @@ else
                                             <td><span class="badge @TaintEffectBadge(taint.Effect)">@taint.Effect</span></td>
                                             <td>
                                                 <button class="btn btn-sm btn-outline-danger py-0"
+                                                        title="Remove taint"
+                                                        aria-label="@($"Remove taint {taint.Key} from {node.Name}")"
                                                         @onclick="() => RemoveTaintAsync(node.Name, node.Taints, taint)">
                                                     <i class="bi bi-x"></i>
                                                 </button>
@@ -371,6 +364,7 @@ else
                                 <div class="d-flex justify-content-between align-items-center mb-2">
                                     <span class="text-muted small">@nodePods.Count pod@(nodePods.Count == 1 ? "" : "s") on this node</span>
                                     <button class="btn btn-sm btn-outline-secondary"
+                                            title="Refresh pods" aria-label="Refresh pods"
                                             @onclick="() => LoadPodsAsync(node.Name)">
                                         <i class="bi bi-arrow-clockwise"></i>
                                     </button>
@@ -414,6 +408,7 @@ else
                                 <div class="d-flex justify-content-between align-items-center mb-2">
                                     <span class="text-muted small">@nodeEvents.Count event@(nodeEvents.Count == 1 ? "" : "s")</span>
                                     <button class="btn btn-sm btn-outline-secondary"
+                                            title="Refresh events" aria-label="Refresh events"
                                             @onclick="() => LoadEventsAsync(node.Name)">
                                         <i class="bi bi-arrow-clockwise"></i>
                                     </button>
@@ -469,6 +464,7 @@ else
                                                         <span class="font-monospace">@sshCmd</span>
                                                         <button class="btn btn-sm btn-link p-0 ms-2"
                                                                 title="Copy SSH command"
+                                                                aria-label="Copy SSH command"
                                                                 @onclick="() => CopyToClipboard(sshCmd)">
                                                             <i class="bi bi-clipboard"></i>
                                                         </button>
@@ -496,7 +492,7 @@ else
                                             <i class="bi bi-pencil me-1"></i>Edit
                                         </button>
                                         <button class="btn btn-sm btn-outline-danger"
-                                                @onclick="() => DeleteServerAsync(server.Id)">
+                                                @onclick='() => pendingConfirm = new PendingConfirm($"Remove server record \"{server.DisplayName}\"? This deletes only the inventory record, not the node itself.", "Remove", () => DeleteServerAsync(server.Id, server.DisplayName))'>
                                             <i class="bi bi-trash me-1"></i>Remove
                                         </button>
                                     </div>
@@ -568,11 +564,15 @@ else
                                 </td>
                                 <td>
                                     <button class="btn btn-sm btn-outline-primary py-0 me-1"
+                                            title="Edit server record"
+                                            aria-label="@($"Edit server record {s.DisplayName}")"
                                             @onclick="() => StartEditServer(s, s.NodeName)">
                                         <i class="bi bi-pencil"></i>
                                     </button>
                                     <button class="btn btn-sm btn-outline-danger py-0"
-                                            @onclick="() => DeleteServerAsync(s.Id)">
+                                            title="Remove server record"
+                                            aria-label="@($"Remove server record {s.DisplayName}")"
+                                            @onclick='() => pendingConfirm = new PendingConfirm($"Remove server record \"{s.DisplayName}\"? This deletes only the inventory record, not the node itself.", "Remove", () => DeleteServerAsync(s.Id, s.DisplayName))'>
                                         <i class="bi bi-trash"></i>
                                     </button>
                                 </td>
@@ -627,6 +627,7 @@ else
     // ── State ─────────────────────────────────────────────────────
 
     private List<NodeInfo> nodes = [];
+    private DateTime? _lastRefreshed;
     private List<ClusterServer> servers = [];
     private string? loadError;
     private bool loading = true;
@@ -636,8 +637,28 @@ else
 
     private string? busyNode;
     private string busyMessage = "";
-    private string? drainConfirmNode;
     private Dictionary<string, (bool Ok, string Msg)> actionResults = new();
+
+    // A destructive action awaiting user confirmation via the ConfirmDialog banner.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try
+        {
+            await pendingConfirm.Action();
+        }
+        finally
+        {
+            confirmBusy = false;
+            pendingConfirm = null;
+        }
+    }
 
     private List<PodInfo> nodePods = [];
     private bool loadingPods;
@@ -664,7 +685,15 @@ else
         loading = true;
         loadError = null;
         StateHasChanged();
+        await FetchAsync();
+        loading = false;
+    }
 
+    // Reload in place without flipping the full-page spinner — used by the auto-refresh control.
+    private async Task RefreshQuietlyAsync() => await FetchAsync();
+
+    private async Task FetchAsync()
+    {
         Task<KubernetesOperationResult<List<NodeInfo>>> nodeTask = NodeService.GetNodesAsync(ClusterId);
         Task<List<ClusterServer>> serverTask = NodeService.GetServersAsync(ClusterId);
         await Task.WhenAll(nodeTask, serverTask);
@@ -672,12 +701,17 @@ else
         List<ClusterServer> serverList = serverTask.Result;
 
         if (nodeResult.IsSuccess)
+        {
             nodes = nodeResult.Data!;
+            loadError = null;
+        }
         else
+        {
             loadError = nodeResult.Error;
+        }
 
         servers = serverList;
-        loading = false;
+        _lastRefreshed = DateTime.UtcNow;
     }
 
     // ── Expand / tabs ─────────────────────────────────────────────
@@ -760,7 +794,6 @@ else
 
     private async Task DrainConfirmedAsync(string nodeName)
     {
-        drainConfirmNode = null;
         await RunNodeActionAsync(nodeName, "Draining…", async () =>
         {
             string? user = await GetCurrentUserAsync();
@@ -789,7 +822,15 @@ else
             ? (true, successMsg)
             : (false, result.Error ?? failPrefix);
 
-        if (result.IsSuccess) await LoadAsync();
+        if (result.IsSuccess)
+        {
+            Toasts.Success($"{successMsg} {nodeName}.");
+            await LoadAsync();
+        }
+        else
+        {
+            Toasts.Error($"{failPrefix} on {nodeName}: {result.Error}");
+        }
         StateHasChanged();
     }
 
@@ -902,10 +943,18 @@ else
         showAddUnlinked = false;
     }
 
-    private async Task DeleteServerAsync(Guid serverId)
+    private async Task DeleteServerAsync(Guid serverId, string name)
     {
-        await NodeService.DeleteServerAsync(serverId);
-        await LoadAsync();
+        try
+        {
+            await NodeService.DeleteServerAsync(serverId);
+            await LoadAsync();
+            Toasts.Success($"Removed server record \"{name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to remove server record \"{name}\": {ex.Message}");
+        }
     }
 
     // ── SSH helper ────────────────────────────────────────────────

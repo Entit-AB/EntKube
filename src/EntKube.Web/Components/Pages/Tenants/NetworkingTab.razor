@@ -34,7 +34,7 @@
     {
         <div class="alert alert-danger alert-dismissible">
             <i class="bi bi-exclamation-triangle me-2"></i>@errorMessage
-            <button type="button" class="btn-close" @onclick="() => errorMessage = null"></button>
+            <button type="button" class="btn-close" aria-label="Dismiss" @onclick="() => errorMessage = null"></button>
         </div>
     }
 
@@ -44,7 +44,7 @@
         <div class="card shadow-sm mb-4 border-primary border-opacity-25">
             <div class="card-header bg-primary bg-opacity-10 d-flex justify-content-between align-items-center">
                 <span><i class="bi bi-plus-circle me-2"></i><strong>New VPN Tunnel</strong> — Step @wizardStep of @(newTunnelType == VpnTunnelType.SiteToSite ? 4 : 3)</span>
-                <button class="btn-close btn-sm" @onclick="CancelAdd"></button>
+                <button class="btn-close btn-sm" aria-label="Close" @onclick="CancelAdd"></button>
             </div>
             <div class="card-body">
 
@@ -626,10 +626,12 @@
                                                         <div class="d-flex gap-1">
                                                             <button class="btn btn-sm btn-outline-secondary"
                                                                     title="Rotate PSK"
+                                                                    aria-label="Rotate PSK"
                                                                     @onclick="() => StartRotatePsk(rep.Id)">
                                                                 <i class="bi bi-key"></i>
                                                             </button>
                                                             <button class="btn btn-sm btn-outline-danger"
+                                                                    aria-label="@($"Delete remote site {rep.Name}")"
                                                                     @onclick="() => ConfirmDeleteRemoteEndpoint(rep.Id)">
                                                                 <i class="bi bi-trash"></i>
                                                             </button>
@@ -643,11 +645,13 @@
                                                                        placeholder="New PSK"
                                                                        autocomplete="new-password" />
                                                                 <button class="btn btn-sm btn-success"
+                                                                        aria-label="Save new PSK"
                                                                         @onclick="() => RotatePsk(tunnel.TenantId)"
                                                                         disabled="@saving">
                                                                     <i class="bi bi-check-lg"></i>
                                                                 </button>
                                                                 <button class="btn btn-sm btn-outline-secondary"
+                                                                        aria-label="Cancel PSK rotation"
                                                                         @onclick="() => rotatePskEndpointId = null">
                                                                     <i class="bi bi-x-lg"></i>
                                                                 </button>
@@ -953,7 +957,10 @@
             if (!string.IsNullOrWhiteSpace(pod)) { gatewayPodCidr = pod; podCidrDetected = true; }
             if (!string.IsNullOrWhiteSpace(svc)) { gatewayServiceCidr = svc; serviceCidrDetected = true; }
         }
-        catch { }
+        catch
+        {
+            // Best-effort auto-detect; leave fields blank so the user can enter CIDRs manually.
+        }
         finally
         {
             detectingCidrs = false;

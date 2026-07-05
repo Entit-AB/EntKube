@@ -4,6 +4,7 @@
 @using System.Text.Json
 @inject KeycloakService KeycloakService
 @inject IJSRuntime JS
+@inject ToastService Toasts
 
 @* ── Header row ─────────────────────────────────────────────────────────────── *@
 <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
@@ -620,6 +621,12 @@ else
                         </div>
                         <div class="te-modal-body">
                     <div class="te-section-body">
+                        <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                                       Message="@(pendingConfirm?.Message ?? "")"
+                                       ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+                                       IsBusy="confirmBusy"
+                                       OnConfirm="RunPendingConfirmAsync"
+                                       OnCancel="() => pendingConfirm = null" />
                         @if (_uploadError is not null)
                         {
                             <div class="alert alert-danger py-1 small mb-2">@_uploadError</div>
@@ -631,7 +638,8 @@ else
                         </label>
                         @if (_resources.Count == 0)
                         {
-                            <p class="small text-muted mb-0">No resources yet. Upload a logo or background image.</p>
+                            <EmptyState Icon="bi-folder-symlink" Title="No resources yet"
+                                        Message="Upload a logo or background image to use in this theme." />
                         }
                         else
                         {
@@ -649,7 +657,8 @@ else
                                         }
                                         <span class="text-truncate flex-grow-1" title="@res">@res</span>
                                         <button class="btn btn-link btn-sm p-0 text-danger" title="Delete"
-                                                @onclick="() => DeleteResource(res)">
+                                                aria-label="@($"Delete resource {res}")"
+                                                @onclick='() => pendingConfirm = new PendingConfirm($"Delete the resource \"{res}\"? Any logo or background using it will be cleared. This cannot be undone.", "Delete", () => DeleteResource(res))'>
                                             <i class="bi bi-trash3"></i>
                                         </button>
                                     </div>
@@ -689,9 +698,8 @@ else
                         }
                         else if (_history is null || _history.Count == 0)
                         {
-                            <p class="small text-muted mb-0">
-                                No saved versions yet. The previous state is automatically snapshotted each time you save (last 5 kept).
-                            </p>
+                            <EmptyState Icon="bi-clock-history" Title="No saved versions yet"
+                                        Message="The previous state is automatically snapshotted each time you save (last 5 kept)." />
                         }
                         else
                         {
@@ -823,7 +831,8 @@ else
         {
             @if (_realms.Count == 0)
             {
-                <p class="small text-muted mb-0 mt-1">No realms found for this Keycloak instance.</p>
+                <EmptyState Icon="bi-diagram-3" Title="No realms found"
+                            Message="No realms were found for this Keycloak instance." />
             }
             else
             {
@@ -912,6 +921,19 @@ else
 
     private IJSObjectReference? _jsModule;
     private DotNetObjectReference<KeycloakThemeEditor>? _selfRef;
+
+    // A destructive action awaiting user confirmation.
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
 
     private static readonly (string val, string label)[] _fontOptions =
     [
@@ -1219,11 +1241,20 @@ else
 
     private async Task DeleteResource(string filename)
     {
-        await KeycloakService.DeleteThemeResourceAsync(TenantId, ComponentId, Theme.Id, filename);
-        _resources = await KeycloakService.ListThemeResourcesAsync(TenantId, ComponentId, Theme.Id);
-        _resourcePreviews.Remove(filename);
-        if (_vars.LogoResourceName == filename) _vars.LogoResourceName = null;
-        if (_vars.BackgroundImageResourceName == filename) _vars.BackgroundImageResourceName = null;
+        try
+        {
+            await KeycloakService.DeleteThemeResourceAsync(TenantId, ComponentId, Theme.Id, filename);
+            _resources = await KeycloakService.ListThemeResourcesAsync(TenantId, ComponentId, Theme.Id);
+            _resourcePreviews.Remove(filename);
+            if (_vars.LogoResourceName == filename) _vars.LogoResourceName = null;
+            if (_vars.BackgroundImageResourceName == filename) _vars.BackgroundImageResourceName = null;
+            Toasts.Success($"Deleted resource \"{filename}\".");
+        }
+        catch (Exception ex)
+        {
+            _uploadError = ex.Message;
+            Toasts.Error($"Failed to delete resource \"{filename}\": {ex.Message}");
+        }
     }
 
     // ── Property change helpers → direct preview JS calls ────────────────────
