@@ -69,7 +69,7 @@
                             <label class="form-label small">Kubernetes Cluster</label>
                             <select class="form-select form-select-sm" @bind="createK8sClusterId">
                                 <option value="@Guid.Empty">Select cluster...</option>
-                                @foreach (KubernetesCluster k in allK8sClusters)
+                                @foreach (KubernetesCluster k in formK8sClusters)
                                 {
                                     <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
                                 }
@@ -383,7 +383,7 @@
                                             <label class="form-label small mb-1">App Deployment</label>
                                             <select class="form-select form-select-sm" @bind="bindingDeploymentId">
                                                 <option value="@Guid.Empty">Select deployment...</option>
-                                                @foreach (AppDeployment dep in allDeployments)
+                                                @foreach (AppDeployment dep in BindingDeploymentOptions)
                                                 {
                                                     <option value="@dep.Id">@dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
                                                 }
@@ -518,10 +518,34 @@
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    /// <summary>
+    /// When set, scopes the tab to a single environment: only Kafka clusters whose
+    /// Kubernetes cluster belongs to this environment are shown, and the create form's
+    /// Kubernetes-cluster picker is restricted to (and preselected from) that environment.
+    /// When null, behaviour is unchanged (all of the tenant's clusters are shown/offered).
+    /// </summary>
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
     private bool loading = true;
     private List<KafkaCluster> clusters = [];
     private List<KubernetesCluster> allK8sClusters = [];
+
+    // Kubernetes clusters offered by the create form. Equals allK8sClusters when
+    // EnvironmentId is null; otherwise restricted to the environment's clusters.
+    private List<KubernetesCluster> formK8sClusters = [];
+
+    // Ids of the environment's Kubernetes clusters (only populated when EnvironmentId is set).
+    private HashSet<Guid>? envClusterIds;
     private List<AppDeployment> allDeployments = [];
+
+    // Deployments offered by the app-binding form's picker. When the tab is scoped to an
+    // environment, only deployments in that environment are eligible; otherwise the full
+    // list (unchanged tenant-wide behaviour).
+    private List<AppDeployment> BindingDeploymentOptions =>
+        EnvironmentId is Guid envId
+            ? allDeployments.Where(d => d.EnvironmentId == envId).ToList()
+            : allDeployments;
+
     private KafkaOperatorStatus? operatorStatus;
 
     private readonly Dictionary<Guid, List<KafkaTopic>> allTopics = [];
@@ -624,6 +648,23 @@
         operatorStatus = operatorTask.Result;
         allDeployments = depTask.Result;
 
+        // Environment scoping: when EnvironmentId is set, restrict both the displayed
+        // Kafka clusters and the create-form picker to that environment's clusters.
+        if (EnvironmentId.HasValue)
+        {
+            envClusterIds = allK8sClusters
+                .Where(c => c.EnvironmentId == EnvironmentId.Value)
+                .Select(c => c.Id)
+                .ToHashSet();
+            formK8sClusters = allK8sClusters.Where(c => envClusterIds.Contains(c.Id)).ToList();
+            clusters = clusters.Where(c => envClusterIds.Contains(c.KubernetesClusterId)).ToList();
+        }
+        else
+        {
+            envClusterIds = null;
+            formK8sClusters = allK8sClusters;
+        }
+
         allTopics.Clear();
         allUsers.Clear();
         allBindings.Clear();
@@ -638,7 +679,15 @@
     }
 
     // Create
-    private void ShowCreateForm() { showCreateForm = true; createError = null; }
+    private void ShowCreateForm()
+    {
+        showCreateForm = true;
+        createError = null;
+        // When scoped to an environment with a single Kubernetes cluster, preselect it.
+        createK8sClusterId = EnvironmentId.HasValue && formK8sClusters.Count == 1
+            ? formK8sClusters[0].Id
+            : Guid.Empty;
+    }
     private void CancelCreate() { showCreateForm = false; createError = null; }
 
     private async Task CreateCluster()
@@ -801,7 +850,11 @@
     private void ShowAddBinding(KafkaCluster cluster)
     {
         addBindingClusterId = cluster.Id;
-        bindingDeploymentId = Guid.Empty;
+        // When scoped to an environment with exactly one eligible deployment, preselect it.
+        List<AppDeployment> options = BindingDeploymentOptions;
+        bindingDeploymentId = EnvironmentId is not null && options.Count == 1
+            ? options[0].Id
+            : Guid.Empty;
         bindingUserId = Guid.Empty;
         bindingSecretName = "kafka";
         bindingError = null;

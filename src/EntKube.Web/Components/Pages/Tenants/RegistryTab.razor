@@ -1196,6 +1196,15 @@ else
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    /// <summary>
+    /// When set, restricts the tab to Harbor instances whose backing cluster is in this
+    /// environment. Harbor ties to an environment via
+    /// ClusterComponent.ClusterId → KubernetesCluster.EnvironmentId (exposed here as
+    /// DetectedHarbor.Component.Cluster.EnvironmentId, already eager-loaded by the service).
+    /// When null the tab behaves exactly as before (all tenant Harbor instances).
+    /// </summary>
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
     private static readonly (string Id, string Label)[] InstanceTabs =
     [
         ("projects",    "Projects"),
@@ -1342,6 +1351,16 @@ else
     protected override async Task OnInitializedAsync()
     {
         harborInstances = await HarborService.GetDetectedHarborInstancesAsync(TenantId);
+
+        // Environment scoping: when an environment is selected, only surface Harbor
+        // instances whose backing cluster belongs to that environment. Null = unchanged.
+        if (EnvironmentId.HasValue && harborInstances is not null)
+        {
+            harborInstances = harborInstances
+                .Where(h => h.Component.Cluster.EnvironmentId == EnvironmentId.Value)
+                .ToList();
+        }
+
         loading = false;
     }
 

@@ -121,7 +121,7 @@
                                     <option value="">Select cluster...</option>
                                     @if (allClusters is not null)
                                     {
-                                        @foreach (KubernetesCluster k in allClusters)
+                                        @foreach (KubernetesCluster k in allClusters.Where(k => EnvironmentId is null || k.EnvironmentId == EnvironmentId.Value))
                                         {
                                             <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
                                         }
@@ -611,7 +611,7 @@
                                                                         <option value="@Guid.Empty">Select cluster...</option>
                                                                         @if (managedClusters is not null)
                                                                         {
-                                                                            @foreach (CnpgCluster c in managedClusters)
+                                                                            @foreach (CnpgCluster c in managedClusters.Where(c => InScope(c.KubernetesClusterId)))
                                                                             {
                                                                                 <option value="@c.Id">@c.Name (@c.KubernetesCluster.Environment.Name)</option>
                                                                             }
@@ -751,7 +751,7 @@
                                                                                     <option value="@Guid.Empty">Select cluster...</option>
                                                                                     @if (managedClusters is not null)
                                                                                     {
-                                                                                        @foreach (CnpgCluster c in managedClusters)
+                                                                                        @foreach (CnpgCluster c in managedClusters.Where(c => InScope(c.KubernetesClusterId)))
                                                                                         {
                                                                                             <option value="@c.Id">@c.Name (@c.KubernetesCluster.Environment.Name)</option>
                                                                                         }
@@ -851,7 +851,7 @@
                                         <option value="">Select cluster...</option>
                                         @if (availableClusters is not null)
                                         {
-                                            @foreach (KubernetesCluster k in availableClusters)
+                                            @foreach (KubernetesCluster k in availableClusters.Where(k => EnvironmentId is null || k.EnvironmentId == EnvironmentId.Value))
                                             {
                                                 <option value="@k.Id">@k.Name</option>
                                             }
@@ -955,7 +955,7 @@
                                         <option value="">Select cluster...</option>
                                         @if (availableClusters is not null)
                                         {
-                                            @foreach (KubernetesCluster k in availableClusters)
+                                            @foreach (KubernetesCluster k in availableClusters.Where(k => EnvironmentId is null || k.EnvironmentId == EnvironmentId.Value))
                                             {
                                                 <option value="@k.Id">@k.Name</option>
                                             }
@@ -2007,7 +2007,7 @@
                                         <option value="">Select cluster...</option>
                                         @if (mongoAvailableClusters is not null)
                                         {
-                                            @foreach (KubernetesCluster k in mongoAvailableClusters)
+                                            @foreach (KubernetesCluster k in mongoAvailableClusters.Where(k => EnvironmentId is null || k.EnvironmentId == EnvironmentId.Value))
                                             {
                                                 <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
                                             }
@@ -2077,7 +2077,7 @@
                                         <option value="">Select cluster...</option>
                                         @if (mongoAvailableClusters is not null)
                                         {
-                                            @foreach (KubernetesCluster k in mongoAvailableClusters)
+                                            @foreach (KubernetesCluster k in mongoAvailableClusters.Where(k => EnvironmentId is null || k.EnvironmentId == EnvironmentId.Value))
                                             {
                                                 <option value="@k.Id">@k.Name</option>
                                             }
@@ -2483,7 +2483,7 @@
                                     The migration runs on the target cluster's Kubernetes environment. Existing data in the target is overwritten (mongorestore --drop).
                                 </p>
                                 @{
-                                    var managedMongoTargets = managedMongoClusters?.Where(c => !c.IsExternal).ToList() ?? [];
+                                    var managedMongoTargets = managedMongoClusters?.Where(c => !c.IsExternal && InScope(c.KubernetesClusterId)).ToList() ?? [];
                                 }
                                 @if (managedMongoTargets.Count == 0)
                                 {
@@ -2848,7 +2848,7 @@
                                                                                 <option value="@Guid.Empty">Select target cluster...</option>
                                                                                 @if (managedMongoClusters is not null)
                                                                                 {
-                                                                                    @foreach (MongoCluster t in managedMongoClusters.Where(c => !c.IsExternal && c.Id != mc.Id))
+                                                                                    @foreach (MongoCluster t in managedMongoClusters.Where(c => !c.IsExternal && c.Id != mc.Id && InScope(c.KubernetesClusterId)))
                                                                                     {
                                                                                         <option value="@t.Id">@t.Name (@t.KubernetesCluster.Name — @t.MongoVersion)</option>
                                                                                     }
@@ -3421,6 +3421,29 @@
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    // When set, this tab is scoped to a single environment: only databases whose Kubernetes
+    // cluster belongs to that environment are shown, and create/register forms only offer that
+    // environment's clusters. When null, behaviour is unchanged (tenant-wide view).
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
+    // K8s cluster ids belonging to the scoped environment (empty when not scoped / not yet loaded).
+    private HashSet<Guid> EnvClusterIds =>
+        EnvironmentId is null || allClusters is null
+            ? new HashSet<Guid>()
+            : allClusters.Where(c => c.EnvironmentId == EnvironmentId.Value).Select(c => c.Id).ToHashSet();
+
+    // True when the resource's Kubernetes cluster is in scope (always true when not env-scoped).
+    private bool InScope(Guid kubernetesClusterId) =>
+        EnvironmentId is null || EnvClusterIds.Contains(kubernetesClusterId);
+
+    // Returns the sole env cluster's id for preselection, or Guid.Empty otherwise.
+    private Guid PreselectEnvCluster(IEnumerable<KubernetesCluster>? clusters)
+    {
+        if (EnvironmentId is null || clusters is null) return Guid.Empty;
+        var envList = clusters.Where(c => c.EnvironmentId == EnvironmentId.Value).ToList();
+        return envList.Count == 1 ? envList[0].Id : Guid.Empty;
+    }
+
     // A destructive action awaiting user confirmation via the ConfirmDialog banner.
     private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
 
@@ -3454,20 +3477,22 @@
         {
             var names = new HashSet<string>(StringComparer.Ordinal);
             if (managedClusters is not null)
-                foreach (var c in managedClusters) names.Add(c.KubernetesCluster.Environment.Name);
+                foreach (var c in managedClusters.Where(c => InScope(c.KubernetesClusterId))) names.Add(c.KubernetesCluster.Environment.Name);
             if (managedMongoClusters is not null)
-                foreach (var c in managedMongoClusters) names.Add(c.KubernetesCluster.Environment.Name);
+                foreach (var c in managedMongoClusters.Where(c => InScope(c.KubernetesClusterId))) names.Add(c.KubernetesCluster.Environment.Name);
             if (registeredPgInstances is not null)
-                foreach (var i in registeredPgInstances) names.Add(i.KubernetesCluster.Environment.Name);
+                foreach (var i in registeredPgInstances.Where(i => InScope(i.KubernetesClusterId))) names.Add(i.KubernetesCluster.Environment.Name);
             return names.OrderBy(n => n).ToList();
         }
     }
 
     private List<CnpgCluster>? FilteredManagedClusters =>
-        managedClusters?.Where(c => selectedEnvironment is null || c.KubernetesCluster.Environment.Name == selectedEnvironment).ToList();
+        managedClusters?.Where(c => InScope(c.KubernetesClusterId)
+            && (selectedEnvironment is null || c.KubernetesCluster.Environment.Name == selectedEnvironment)).ToList();
 
     private List<MongoCluster>? FilteredManagedMongoClusters =>
-        managedMongoClusters?.Where(c => selectedEnvironment is null || c.KubernetesCluster.Environment.Name == selectedEnvironment).ToList();
+        managedMongoClusters?.Where(c => InScope(c.KubernetesClusterId)
+            && (selectedEnvironment is null || c.KubernetesCluster.Environment.Name == selectedEnvironment)).ToList();
 
     // Managed CNPG cluster state
     private List<CnpgCluster>? managedClusters;
@@ -3792,8 +3817,8 @@
     private List<KubernetesCluster>? allClusters;
 
     private List<RegisteredPostgresInstance>? FilteredRegisteredPgInstances =>
-        registeredPgInstances?.Where(i => selectedEnvironment is null ||
-            i.KubernetesCluster.Environment.Name == selectedEnvironment).ToList();
+        registeredPgInstances?.Where(i => InScope(i.KubernetesClusterId)
+            && (selectedEnvironment is null || i.KubernetesCluster.Environment.Name == selectedEnvironment)).ToList();
 
     // Register form
     private bool showRegisterPgForm;
@@ -4083,6 +4108,8 @@
 
         availableClusters = await DatabaseService.GetCnpgEnabledClustersAsync(TenantId);
         storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+        var preCreateCluster = PreselectEnvCluster(availableClusters);
+        createModel.ClusterId = preCreateCluster == Guid.Empty ? null : preCreateCluster;
     }
 
     private void CancelCreate()
@@ -4130,6 +4157,8 @@
         showImportCnpg = true;
         importCnpgError = null;
         availableClusters = await DatabaseService.GetCnpgEnabledClustersAsync(TenantId);
+        var preImportCluster = PreselectEnvCluster(availableClusters);
+        importCnpgModel.K8sClusterId = preImportCluster == Guid.Empty ? null : preImportCluster;
     }
 
     private void CancelImportCnpg()
@@ -4764,6 +4793,8 @@
         showMongoRegister = true;
         mongoRegisterError = null;
         mongoAvailableClusters = await DatabaseService.GetMongoEnabledClustersAsync(TenantId);
+        var preMongoRegCluster = PreselectEnvCluster(mongoAvailableClusters);
+        mongoRegModel.ClusterId = preMongoRegCluster == Guid.Empty ? null : preMongoRegCluster;
     }
 
     private void CancelMongoRegister()
@@ -4804,6 +4835,8 @@
         mongoCreateError = null;
         mongoAvailableClusters = await DatabaseService.GetMongoEnabledClustersAsync(TenantId);
         storageLinks ??= await StorageService.GetStorageLinksAsync(TenantId);
+        var preMongoCreateCluster = PreselectEnvCluster(mongoAvailableClusters);
+        mongoCreateModel.ClusterId = preMongoCreateCluster == Guid.Empty ? null : preMongoCreateCluster;
     }
 
     private void CancelMongoCreate()
@@ -5405,7 +5438,7 @@
         mongoMigrateDbTargetName = db.Name;
         // Default to first other managed cluster in the same environment, if available.
         mongoMigrateDbTargetClusterId = managedMongoClusters?
-            .FirstOrDefault(c => !c.IsExternal && c.Id != sourceCluster.Id)?.Id ?? Guid.Empty;
+            .FirstOrDefault(c => !c.IsExternal && c.Id != sourceCluster.Id && InScope(c.KubernetesClusterId))?.Id ?? Guid.Empty;
         mongoMigrateDbError = null;
         mongoMigrateDbSuccess = null;
     }
@@ -5532,7 +5565,7 @@
     private void ShowMongoMigrate(MongoCluster source)
     {
         mongoMigrateSourceClusterId = source.Id;
-        var managed = managedMongoClusters?.Where(c => !c.IsExternal).ToList();
+        var managed = managedMongoClusters?.Where(c => !c.IsExternal && InScope(c.KubernetesClusterId)).ToList();
         mongoMigrateTargetClusterId = managed?.FirstOrDefault()?.Id ?? Guid.Empty;
         mongoMigrateError = null;
         mongoMigrateSuccess = null;
@@ -5663,6 +5696,8 @@
     {
         showRegisterPgForm = true;
         registerPgError = null;
+        var preRegPgCluster = PreselectEnvCluster(allClusters);
+        regPgModel.ClusterId = preRegPgCluster == Guid.Empty ? null : preRegPgCluster;
     }
 
     private void CancelRegisterPgForm()
@@ -6010,7 +6045,7 @@
         showMigrateFormForDbId = db.Id;
         showDumpFormForDbId = null;
         migrateFormNewDbName = db.Name;
-        migrateFormCnpgClusterId = managedClusters?.FirstOrDefault()?.Id ?? Guid.Empty;
+        migrateFormCnpgClusterId = managedClusters?.FirstOrDefault(c => InScope(c.KubernetesClusterId))?.Id ?? Guid.Empty;
         migrateError = null;
         migrateSuccess = null;
         migrateErrorDbId = null;
@@ -6019,7 +6054,7 @@
     private void ShowDumpRestoreForm(RegisteredPostgresDump dump)
     {
         showRestoreFormForDumpId = dump.Id;
-        restoreFormCnpgClusterId = managedClusters?.FirstOrDefault()?.Id ?? Guid.Empty;
+        restoreFormCnpgClusterId = managedClusters?.FirstOrDefault(c => InScope(c.KubernetesClusterId))?.Id ?? Guid.Empty;
         restoreFormNewDbName = "";
         dumpRestoreError = null;
         dumpRestoreSuccess = null;

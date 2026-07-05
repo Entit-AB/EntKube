@@ -2,6 +2,7 @@
 @using EntKube.Web.Services
 @inject StorageService StorageService
 @inject StorageBrowserService BrowserService
+@inject TenantService TenantService
 @inject ToastService Toasts
 
 @* ===========================================================================
@@ -859,6 +860,15 @@
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    // When set, the tab is scoped to a single environment: it only shows and
+    // creates storage resources belonging to that environment. When null, the
+    // classic tenant-wide behaviour is unchanged (show/allow everything).
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
+    // Cluster ids belonging to the scoped environment; used to filter
+    // cluster-tied MinIO instances. Populated only when EnvironmentId is set.
+    private HashSet<Guid> _envClusterIds = [];
+
     private bool loading = true;
     private bool refreshing;
     private bool showForm;
@@ -969,7 +979,22 @@
         environments = await StorageService.GetEnvironmentsAsync(TenantId);
         openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
 
-        if (environments.Count > 0 && formEnvironmentId == Guid.Empty)
+        // When scoped to a single environment, restrict the env picker to that
+        // environment and build the set of its cluster ids (used to filter
+        // cluster-tied MinIO instances). Null EnvironmentId = unchanged.
+        if (EnvironmentId.HasValue)
+        {
+            environments = environments.Where(e => e.Id == EnvironmentId.Value).ToList();
+
+            List<KubernetesCluster> clusters = await TenantService.GetClustersAsync(TenantId);
+            _envClusterIds = clusters
+                .Where(c => c.EnvironmentId == EnvironmentId.Value)
+                .Select(c => c.Id)
+                .ToHashSet();
+
+            formEnvironmentId = EnvironmentId.Value;
+        }
+        else if (environments.Count > 0 && formEnvironmentId == Guid.Empty)
         {
             formEnvironmentId = environments[0].Id;
         }
@@ -977,7 +1002,7 @@
         // Check MinIO availability and discover instances in parallel with loading links.
 
         Task<bool> minioTask = StorageService.IsMinioAvailableAsync(TenantId);
-        Task<List<StorageLink>> linksTask = StorageService.GetStorageLinksAsync(TenantId);
+        Task<List<StorageLink>> linksTask = StorageService.GetStorageLinksAsync(TenantId, EnvironmentId);
 
         await Task.WhenAll(minioTask, linksTask);
 
@@ -987,6 +1012,14 @@
         if (minioAvailable)
         {
             minioInstances = await StorageService.GetMinioInstancesAsync(TenantId);
+
+            // Restrict to MinIO instances running on clusters in this environment.
+            if (EnvironmentId.HasValue)
+            {
+                minioInstances = minioInstances
+                    .Where(i => _envClusterIds.Contains(i.ClusterId))
+                    .ToList();
+            }
         }
 
         loading = false;
@@ -1061,7 +1094,7 @@
 
             showForm = false;
             ResetForm();
-            storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+            storageLinks = await StorageService.GetStorageLinksAsync(TenantId, EnvironmentId);
         }
         catch (Exception ex)
         {
@@ -1078,7 +1111,7 @@
         try
         {
             await StorageService.DeleteStorageLinkAsync(TenantId, linkId);
-            storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+            storageLinks = await StorageService.GetStorageLinksAsync(TenantId, EnvironmentId);
             Toasts.Success("Storage link removed.");
         }
         catch (Exception ex)
@@ -1122,7 +1155,7 @@
         try
         {
             await StorageService.DeleteCleuraS3BucketAsync(TenantId, linkId);
-            storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+            storageLinks = await StorageService.GetStorageLinksAsync(TenantId, EnvironmentId);
             CloseManageBucket();
             Toasts.Success("Bucket and storage link deleted.");
         }
@@ -1512,7 +1545,7 @@
                 notes: null);
 
             registeringInstance = null;
-            storageLinks = await StorageService.GetStorageLinksAsync(TenantId);
+            storageLinks = await StorageService.GetStorageLinksAsync(TenantId, EnvironmentId);
         }
         catch (Exception ex)
         {

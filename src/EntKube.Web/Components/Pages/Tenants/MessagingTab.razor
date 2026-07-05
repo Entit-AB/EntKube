@@ -98,7 +98,7 @@
                                 <label class="form-label small">Kubernetes Cluster</label>
                                 <InputSelect class="form-select form-select-sm" @bind-Value="createModel.K8sClusterId">
                                     <option value="">Select cluster...</option>
-                                    @foreach (KubernetesCluster k in allK8sClusters)
+                                    @foreach (KubernetesCluster k in K8sClusterOptions)
                                     {
                                         <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
                                     }
@@ -690,7 +690,7 @@
                                                         <label class="form-label small">App Deployment</label>
                                                         <InputSelect class="form-select form-select-sm" @bind-Value="appLinkModel.DeploymentId">
                                                             <option value="">Select deployment...</option>
-                                                            @foreach (AppDeployment dep in allDeployments)
+                                                            @foreach (AppDeployment dep in AppLinkDeploymentOptions)
                                                             {
                                                                 <option value="@dep.Id">@dep.App.Customer.Name / @dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
                                                             }
@@ -1118,13 +1118,34 @@
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    // When set, the tab is scoped to a single environment: only RabbitMQ clusters
+    // whose Kubernetes cluster is in this environment are shown, and creates are
+    // constrained to that environment's Kubernetes clusters. Null = classic tenant
+    // view (show/allow everything) — behaviour must be unchanged.
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
     // ── State ──────────────────────────────────────────────────────────────────
 
     private bool loading = true;
     private List<RabbitMQCluster> clusters = [];
     private List<KubernetesCluster> allK8sClusters = [];
+    // Kubernetes cluster ids belonging to the scoped environment (only populated
+    // when EnvironmentId is set); used to filter clusters and constrain creates.
+    private HashSet<Guid> _envClusterIds = [];
+    // Kubernetes clusters offered by the create form's picker (env-filtered when scoped).
+    private List<KubernetesCluster> K8sClusterOptions =>
+        EnvironmentId.HasValue ? allK8sClusters.Where(k => _envClusterIds.Contains(k.Id)).ToList() : allK8sClusters;
     private List<StorageLink> storageLinks = [];
     private List<AppDeployment> allDeployments = [];
+
+    // Deployments offered by the app-link form's picker. When the tab is scoped to an
+    // environment, only deployments in that environment are eligible; otherwise the full
+    // list (unchanged tenant-wide behaviour).
+    private List<AppDeployment> AppLinkDeploymentOptions =>
+        EnvironmentId is Guid envId
+            ? allDeployments.Where(d => d.EnvironmentId == envId).ToList()
+            : allDeployments;
+
     private bool clusterOperatorAvailable;
     private bool topologyOperatorAvailable;
     private RabbitMQOperatorStatus? operatorStatus;
@@ -1254,6 +1275,17 @@
         storageLinks = storageTask.Result;
         allDeployments = deploymentsTask.Result;
 
+        // Env scoping: restrict the visible RabbitMQ clusters to those whose
+        // Kubernetes cluster is in the scoped environment. Null = unchanged.
+        if (EnvironmentId.HasValue)
+        {
+            _envClusterIds = allK8sClusters
+                .Where(k => k.EnvironmentId == EnvironmentId.Value)
+                .Select(k => k.Id)
+                .ToHashSet();
+            clusters = clusters.Where(c => _envClusterIds.Contains(c.KubernetesClusterId)).ToList();
+        }
+
         operatorStatus = operatorTask.Result;
         clusterOperatorAvailable = operatorStatus.ClusterOperatorAvailable;
         topologyOperatorAvailable = operatorStatus.TopologyOperatorAvailable;
@@ -1263,7 +1295,18 @@
 
     // ── Cluster create / delete ────────────────────────────────────────────────
 
-    private void ShowCreateForm() { showCreateForm = true; createError = null; createModel = new(); }
+    private void ShowCreateForm()
+    {
+        showCreateForm = true;
+        createError = null;
+        createModel = new();
+        // When scoped to an environment, preselect the Kubernetes cluster if there's exactly one.
+        if (EnvironmentId.HasValue)
+        {
+            List<KubernetesCluster> opts = K8sClusterOptions;
+            createModel.K8sClusterId = opts.Count == 1 ? opts[0].Id : null;
+        }
+    }
     private void CancelCreate() { showCreateForm = false; createError = null; }
 
     private async Task DiscoverClusters()
@@ -1688,6 +1731,11 @@
         appLinkModel.Queue = queueName ?? "";
         appLinkModel.Exchange = exchangeName ?? "";
         appLinkModel.SecretName = "rabbitmq";
+        // When scoped to an environment with exactly one eligible deployment, preselect it.
+        List<AppDeployment> options = AppLinkDeploymentOptions;
+        appLinkModel.DeploymentId = EnvironmentId is not null && options.Count == 1
+            ? options[0].Id
+            : null;
         _ = LoadAppLinks(cluster.Id);
     }
 

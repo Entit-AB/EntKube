@@ -2,6 +2,7 @@
 @page "/tenants/{Slug}/explore"
 @using EntKube.Web.Data
 @using EntKube.Web.Services
+@using Microsoft.AspNetCore.Components.Rendering
 @rendermode InteractiveServer
 @inject TenantService TenantService
 @inject UserAccessService UserAccessService
@@ -126,6 +127,18 @@ else
                             }
                         }
 
+                        @* Services in this environment *@
+                        <div class="tree-subhead indent-2"><span class="tree-sub">Services</span></div>
+                        @foreach (SectionItem svc in VisibleEnvServices())
+                        {
+                            <button type="button" class="node leaf indent-3 @(selectedSection == svc.Key && selectedServiceEnvId == env.Id ? "selected" : "")"
+                                    @onclick="() => SelectEnvService(env.Id, svc.Key)">
+                                <span class="caret"></span>
+                                <i class="ico bi @svc.Icon" aria-hidden="true"></i>
+                                <span class="label">@svc.Label</span>
+                            </button>
+                        }
+
                         @* Clusters under this environment *@
                         <div class="tree-subhead indent-2">
                             <span class="tree-sub">Clusters</span>
@@ -148,30 +161,15 @@ else
                     }
                 }
 
-                @* ── Services ── *@
-                <div class="tree-section-head"><span class="tree-section-label">Services</span></div>
-                @foreach (TreeGroup g in ServiceGroups)
+                @* ── Platform (tenant-wide) ── *@
+                <div class="tree-section-head"><span class="tree-section-label">Platform</span></div>
+                @foreach (SectionItem item in VisiblePlatform())
                 {
-                    List<SectionItem> gi = VisibleGroupItems(g);
-                    if (HasFilter && gi.Count == 0) { continue; }
-                    bool gopen = GroupOpen(g.Name);
-                    <button type="button" class="node group indent-1" @onclick="() => ToggleGroup(g.Name)" aria-expanded="@gopen">
-                        <span class="caret">@(gopen ? "▾" : "▸")</span>
-                        <i class="ico bi @g.Icon" aria-hidden="true"></i>
-                        <span class="label">@g.Name</span>
-                        <span class="badge-count">@g.Items.Length</span>
+                    <button type="button" class="node leaf indent-1 @(selectedSection == item.Key && selectedServiceEnvId == null ? "selected" : "")" @onclick="() => SelectSection(item.Key)">
+                        <span class="caret"></span>
+                        <i class="ico bi @item.Icon" aria-hidden="true"></i>
+                        <span class="label">@item.Label</span>
                     </button>
-                    @if (gopen)
-                    {
-                        @foreach (SectionItem item in gi)
-                        {
-                            <button type="button" class="node leaf indent-2 @(selectedSection == item.Key ? "selected" : "")" @onclick="() => SelectSection(item.Key)">
-                                <span class="caret"></span>
-                                <i class="ico bi @item.Icon" aria-hidden="true"></i>
-                                <span class="label">@item.Label</span>
-                            </button>
-                        }
-                    }
                 }
 
                 @* ── Operations ── *@
@@ -251,18 +249,26 @@ else
     [SupplyParameterFromQuery(Name = "app")] private Guid? AppParam { get; set; }
     [SupplyParameterFromQuery(Name = "cluster")] private Guid? ClusterParam { get; set; }
     [SupplyParameterFromQuery(Name = "section")] private string? SectionParam { get; set; }
+    [SupplyParameterFromQuery(Name = "env")] private Guid? EnvParam { get; set; }
 
     private sealed record SectionItem(string Key, string Label, string Icon);
     private sealed record TreeGroup(string Name, string Icon, SectionItem[] Items);
 
-    private static readonly TreeGroup[] ServiceGroups =
+    // Environment-scoped services — rendered under each environment, opened with that EnvironmentId.
+    private static readonly SectionItem[] EnvServiceItems =
     [
-        new("Data", "bi-hdd-stack",
-        [ new("databases", "Databases", "bi-hdd-stack"), new("cache", "Cache", "bi-lightning-charge"), new("storage", "Storage", "bi-bucket") ]),
-        new("Messaging", "bi-collection",
-        [ new("messaging", "RabbitMQ", "bi-collection"), new("kafka", "Kafka", "bi-diagram-3") ]),
-        new("Platform", "bi-shield-lock",
-        [ new("identity", "Identity", "bi-person-badge"), new("registry", "Registry", "bi-box-seam"), new("vault", "Vault", "bi-safe2") ]),
+        new("databases", "Databases", "bi-hdd-stack"),
+        new("cache", "Cache", "bi-lightning-charge"),
+        new("storage", "Storage", "bi-bucket"),
+        new("messaging", "RabbitMQ", "bi-collection"),
+        new("kafka", "Kafka", "bi-diagram-3"),
+        new("registry", "Registry", "bi-box-seam"),
+        new("identity", "Identity", "bi-person-badge"),
+    ];
+    // Tenant-scoped (shared) services.
+    private static readonly SectionItem[] PlatformItems =
+    [
+        new("vault", "Vault", "bi-safe2"),
     ];
     private static readonly TreeGroup[] OpsGroups =
     [
@@ -279,7 +285,6 @@ else
     [
         new("customers", "Customers", "bi-people"),
         new("groups", "Groups", "bi-diagram-2"),
-        new("networking", "Networking", "bi-hdd-network"),
         new("blueprints", "Blueprints", "bi-diagram-2-fill"),
     ];
 
@@ -307,6 +312,7 @@ else
     private Customer? selectedAppCustomer;
     private KubernetesCluster? selectedCluster;
     private string? selectedSection;
+    private Guid? selectedServiceEnvId;   // environment a per-env service was opened under
     private Guid? registerEnvId;
 
     private bool HasFilter => !string.IsNullOrWhiteSpace(filter);
@@ -367,6 +373,11 @@ else
         else if (!string.IsNullOrEmpty(SectionParam))
         {
             selectedSection = SectionParam;
+            if (EnvParam is Guid svcEnv)
+            {
+                selectedServiceEnvId = svcEnv;
+                collapsedEnvs.Remove(svcEnv);
+            }
         }
     }
 
@@ -406,6 +417,10 @@ else
         HasFilter ? g.Items.Where(i => Match(i.Label) || Match(g.Name)).ToList() : g.Items.ToList();
     private List<SectionItem> VisibleManage() =>
         HasFilter ? ManageItems.Where(i => Match(i.Label)).ToList() : ManageItems.ToList();
+    private List<SectionItem> VisibleEnvServices() =>
+        HasFilter ? EnvServiceItems.Where(i => Match(i.Label)).ToList() : EnvServiceItems.ToList();
+    private List<SectionItem> VisiblePlatform() =>
+        HasFilter ? PlatformItems.Where(i => Match(i.Label)).ToList() : PlatformItems.ToList();
 
     private bool EnvOpen(Data.Environment env) => HasFilter || !collapsedEnvs.Contains(env.Id);
     private void ToggleEnv(Guid id) { if (!collapsedEnvs.Remove(id)) collapsedEnvs.Add(id); }
@@ -461,36 +476,42 @@ else
     private void SelectApp(Customer c, Data.App app)
     {
         selectedApp = app; selectedAppCustomer = c;
-        selectedCluster = null; selectedSection = null; registerEnvId = null;
-        UpdateUrl(app: app.Id, cluster: null, section: null);
+        selectedCluster = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        UpdateUrl(app: app.Id, cluster: null, section: null, env: null);
     }
     private void SelectCluster(KubernetesCluster cl)
     {
-        selectedCluster = cl; selectedApp = null; selectedAppCustomer = null; selectedSection = null; registerEnvId = null;
-        UpdateUrl(app: null, cluster: cl.Id, section: null);
+        selectedCluster = cl; selectedApp = null; selectedAppCustomer = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        UpdateUrl(app: null, cluster: cl.Id, section: null, env: null);
     }
     private void SelectSection(string key)
     {
-        selectedSection = key; selectedApp = null; selectedAppCustomer = null; selectedCluster = null; registerEnvId = null;
-        UpdateUrl(app: null, cluster: null, section: key);
+        selectedSection = key; selectedApp = null; selectedAppCustomer = null; selectedCluster = null; selectedServiceEnvId = null; registerEnvId = null;
+        UpdateUrl(app: null, cluster: null, section: key, env: null);
+    }
+    private void SelectEnvService(Guid envId, string key)
+    {
+        selectedSection = key; selectedServiceEnvId = envId;
+        selectedApp = null; selectedAppCustomer = null; selectedCluster = null; registerEnvId = null;
+        UpdateUrl(app: null, cluster: null, section: key, env: envId);
     }
     private void RegisterClusterInEnv(Guid envId)
     {
         registerEnvId = envId;
-        selectedApp = null; selectedAppCustomer = null; selectedCluster = null;
+        selectedApp = null; selectedAppCustomer = null; selectedCluster = null; selectedServiceEnvId = null;
         selectedSection = "environments";
-        UpdateUrl(app: null, cluster: null, section: "environments");
+        UpdateUrl(app: null, cluster: null, section: "environments", env: null);
     }
     private void ClearSelection()
     {
-        selectedApp = null; selectedAppCustomer = null; selectedCluster = null; selectedSection = null; registerEnvId = null;
-        UpdateUrl(null, null, null);
+        selectedApp = null; selectedAppCustomer = null; selectedCluster = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        UpdateUrl(null, null, null, null);
     }
-    private void UpdateUrl(Guid? app, Guid? cluster, string? section)
+    private void UpdateUrl(Guid? app, Guid? cluster, string? section, Guid? env)
     {
         string uri = Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
         {
-            ["app"] = app, ["cluster"] = cluster, ["section"] = section,
+            ["app"] = app, ["cluster"] = cluster, ["section"] = section, ["env"] = env,
         });
         Nav.NavigateTo(uri, forceLoad: false, replace: true);
     }
@@ -512,6 +533,16 @@ else
 
     private void NavigateToSection(string key) => SelectSection(key);
 
+    // Opens an environment-scoped service tab (TenantId + EnvironmentId), re-init per env via key.
+    private void OpenEnvScoped<T>(RenderTreeBuilder builder, Guid tid) where T : IComponent
+    {
+        builder.OpenComponent<T>(0);
+        builder.SetKey(selectedServiceEnvId);
+        builder.AddComponentParameter(1, "TenantId", tid);
+        builder.AddComponentParameter(2, "EnvironmentId", selectedServiceEnvId);
+        builder.CloseComponent();
+    }
+
     // ── Detail pane: reuse the existing tab components ──
     private RenderFragment RenderTenantSection(string key) => builder =>
     {
@@ -529,13 +560,13 @@ else
             case "groups": builder.OpenComponent<GroupTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "networking": builder.OpenComponent<NetworkingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "blueprints": builder.OpenComponent<BlueprintsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "databases": builder.OpenComponent<DatabaseTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "cache": builder.OpenComponent<CacheTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "messaging": builder.OpenComponent<MessagingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "kafka": builder.OpenComponent<KafkaTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "storage": builder.OpenComponent<StorageTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "identity": builder.OpenComponent<IdentityTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "registry": builder.OpenComponent<RegistryTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "databases": OpenEnvScoped<DatabaseTab>(builder, tid); break;
+            case "cache": OpenEnvScoped<CacheTab>(builder, tid); break;
+            case "messaging": OpenEnvScoped<MessagingTab>(builder, tid); break;
+            case "kafka": OpenEnvScoped<KafkaTab>(builder, tid); break;
+            case "storage": OpenEnvScoped<StorageTab>(builder, tid); break;
+            case "identity": OpenEnvScoped<IdentityTab>(builder, tid); break;
+            case "registry": OpenEnvScoped<RegistryTab>(builder, tid); break;
             case "vault": builder.OpenComponent<VaultTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "overview":
                 builder.OpenComponent<TenantMonitoringOverview>(0);

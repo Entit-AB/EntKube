@@ -321,7 +321,7 @@
                                                     <label class="form-label small mb-1">App Deployment</label>
                                                     <InputSelect class="form-select form-select-sm" @bind-Value="bindingForm.DeploymentId">
                                                         <option value="">Select deployment...</option>
-                                                        @foreach (AppDeployment dep in allDeployments)
+                                                        @foreach (AppDeployment dep in BindingDeploymentOptions)
                                                         {
                                                             <option value="@dep.Id">@dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
                                                         }
@@ -430,6 +430,10 @@
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    /// When set, the tab shows and creates Redis clusters only for this environment
+    /// (i.e. those whose Kubernetes cluster belongs to it). Null = classic tenant view, unchanged.
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
     // ── State ──
     private bool loading = true;
     private List<RedisCluster> clusters = [];
@@ -482,6 +486,15 @@
     // ── Bindings ──
     private Dictionary<Guid, List<CacheBinding>> allBindings = [];
     private List<AppDeployment> allDeployments = [];
+
+    // Deployments offered by the binding form's picker. When the tab is scoped to an
+    // environment, only deployments in that environment are eligible; otherwise the full
+    // list (unchanged tenant-wide behaviour).
+    private List<AppDeployment> BindingDeploymentOptions =>
+        EnvironmentId is Guid envId
+            ? allDeployments.Where(d => d.EnvironmentId == envId).ToList()
+            : allDeployments;
+
     private Guid? addBindingClusterId;
     private AddBindingForm bindingForm = new();
     private string? addBindingError;
@@ -526,6 +539,16 @@
         operatorStatus = operatorTask.Result;
         allDeployments = deploymentsTask.Result;
 
+        // Environment scoping: when an EnvironmentId is supplied, restrict the Kubernetes-cluster
+        // choices and the visible Redis clusters to that one environment. A RedisCluster is "in"
+        // the environment iff its KubernetesCluster's EnvironmentId matches.
+        if (EnvironmentId is Guid envId)
+        {
+            allK8sClusters = allK8sClusters.Where(c => c.EnvironmentId == envId).ToList();
+            HashSet<Guid> envClusterIds = allK8sClusters.Select(c => c.Id).ToHashSet();
+            clusters = clusters.Where(c => envClusterIds.Contains(c.KubernetesClusterId)).ToList();
+        }
+
         // Load bindings per cluster.
         IEnumerable<Task<(Guid, List<CacheBinding>)>> bindingTasks = clusters.Select(async c =>
             (c.Id, await RedisService.GetCacheBindingsAsync(TenantId, c.Id)));
@@ -538,7 +561,16 @@
 
     // ── Create ──
 
-    private void ShowCreateForm() { showCreateForm = true; createForm = new CreateClusterForm(); createError = null; }
+    private void ShowCreateForm()
+    {
+        showCreateForm = true;
+        createForm = new CreateClusterForm();
+        createError = null;
+
+        // When scoped to an environment with exactly one Kubernetes cluster, preselect it.
+        if (EnvironmentId is not null && allK8sClusters.Count == 1)
+            createForm.K8sClusterId = allK8sClusters[0].Id;
+    }
     private void CancelCreate() { showCreateForm = false; createError = null; }
 
     private async Task CreateCluster()
@@ -633,6 +665,12 @@
     {
         addBindingClusterId = clusterId;
         bindingForm = new AddBindingForm();
+
+        // When scoped to an environment with exactly one eligible deployment, preselect it.
+        List<AppDeployment> options = BindingDeploymentOptions;
+        if (EnvironmentId is not null && options.Count == 1)
+            bindingForm.DeploymentId = options[0].Id;
+
         addBindingError = null;
     }
 
