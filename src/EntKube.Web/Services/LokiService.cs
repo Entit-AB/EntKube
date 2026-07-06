@@ -27,6 +27,9 @@ public class LokiLogEntry
     public DateTime Timestamp { get; set; }
     public string Line { get; set; } = "";
     public LogLevel DetectedLevel { get; set; } = LogLevel.None;
+
+    /// <summary>Trace id this line belongs to, if the app propagated trace context into its logs.</summary>
+    public string? TraceId { get; set; }
 }
 
 public enum LogLevel { None, Debug, Info, Warn, Error, Fatal }
@@ -162,6 +165,67 @@ public class LokiService(
     {
         var (info, _) = await ResolveLokiInfoAsync(clusterId, ct);
         return info is not null;
+    }
+
+    /// <summary>
+    /// Log-volume histogram for a Loki-backed cluster, via a <c>count_over_time</c> metric query — so
+    /// the viewer's volume strip works on Loki too, at parity with the native store. Total counts only
+    /// (no error subcount): the native path derives errors from stored severity, whereas splitting by
+    /// level in LogQL would depend on Loki's detected_level being enabled.
+    /// </summary>
+    public async Task<KubernetesOperationResult<List<LogHistogramBucket>>> GetHistogramAsync(
+        Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int buckets = 48, CancellationToken ct = default)
+    {
+        var (info, error) = await ResolveLokiInfoAsync(clusterId, ct);
+        if (info is null) return KubernetesOperationResult<List<LogHistogramBucket>>.Failure(error!);
+
+        string logQL = BuildLogQL(filter.Namespaces, filter.Pod, filter.Container, filter.Text);
+        long stepSecs = Math.Max(1, (long)Math.Ceiling((to - from).TotalSeconds / Math.Max(1, buckets)));
+        string metric = $"sum(count_over_time({logQL} [{stepSecs}s]))";
+        long fromNs = new DateTimeOffset(from.ToUniversalTime()).ToUnixTimeMilliseconds() * 1_000_000;
+        long toNs   = new DateTimeOffset(to.ToUniversalTime()).ToUnixTimeMilliseconds() * 1_000_000;
+        string url = $"/loki/api/v1/query_range?query={Uri.EscapeDataString(metric)}" +
+                     $"&start={fromNs}&end={toNs}&step={stepSecs}";
+
+        return await WithLokiAsync<List<LogHistogramBucket>>(info,
+            async (http, baseUrl, token) =>
+            {
+                string json = await http.GetStringAsync($"{baseUrl}{url}", token);
+                return ParseHistogramMatrix(json);
+            },
+            $"loki histogram {clusterId}", ct);
+    }
+
+    // Parses a Loki query_range matrix (single summed series) into volume buckets. Each value pair is
+    // [<unix seconds>, "<count>"]; errors are left 0 (Loki path reports totals only).
+    private static List<LogHistogramBucket> ParseHistogramMatrix(string json)
+    {
+        List<LogHistogramBucket> result = [];
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            JsonElement root = doc.RootElement;
+            if (root.GetProperty("status").GetString() != "success") return result;
+
+            JsonElement data = root.GetProperty("data");
+            if (!string.Equals(data.GetProperty("resultType").GetString(), "matrix", StringComparison.OrdinalIgnoreCase))
+                return result;
+
+            foreach (JsonElement series in data.GetProperty("result").EnumerateArray())
+            {
+                if (!series.TryGetProperty("values", out JsonElement values)) continue;
+                foreach (JsonElement pair in values.EnumerateArray())
+                {
+                    if (pair.GetArrayLength() < 2) continue;
+                    DateTime start = DateTimeOffset.FromUnixTimeSeconds((long)pair[0].GetDouble()).UtcDateTime;
+                    long total = long.TryParse(pair[1].GetString(), out long v) ? v
+                        : (double.TryParse(pair[1].GetString(), System.Globalization.CultureInfo.InvariantCulture, out double d) ? (long)d : 0);
+                    result.Add(new LogHistogramBucket(start, total, 0));
+                }
+            }
+        }
+        catch { }
+        return result;
     }
 
     // ──────── Storage configuration ────────
@@ -338,11 +402,22 @@ public class LokiService(
                             ? DateTimeOffset.FromUnixTimeMilliseconds(ns / 1_000_000).UtcDateTime
                             : DateTime.UtcNow;
 
+                        // Loki 3.x carries OTLP trace context as structured metadata — a 3rd array
+                        // element (object). Surface it so the viewer can link a line to its trace.
+                        string? traceId = null;
+                        if (entry.GetArrayLength() >= 3 && entry[2].ValueKind == JsonValueKind.Object)
+                        {
+                            if (entry[2].TryGetProperty("trace_id", out JsonElement t1)) traceId = t1.GetString();
+                            else if (entry[2].TryGetProperty("traceID", out JsonElement t2)) traceId = t2.GetString();
+                            else if (entry[2].TryGetProperty("traceid", out JsonElement t3)) traceId = t3.GetString();
+                        }
+
                         ls.Entries.Add(new LokiLogEntry
                         {
                             Timestamp = ts,
                             Line = line,
-                            DetectedLevel = labelLevel ?? DetectLevel(line)
+                            DetectedLevel = labelLevel ?? DetectLevel(line),
+                            TraceId = string.IsNullOrEmpty(traceId) ? null : traceId
                         });
                     }
 
@@ -354,16 +429,9 @@ public class LokiService(
     }
 
     // Maps Loki's detected_level label value to our LogLevel. Returns null when absent
-    // or unrecognized so the caller can fall back to the line heuristic.
-    private static LogLevel? MapDetectedLevel(string? value) => value?.ToLowerInvariant() switch
-    {
-        "fatal" or "critical" => LogLevel.Fatal,
-        "error" or "err"      => LogLevel.Error,
-        "warn" or "warning"   => LogLevel.Warn,
-        "info"                => LogLevel.Info,
-        "debug" or "trace"    => LogLevel.Debug,
-        _ => null
-    };
+    // or unrecognized so the caller can fall back to the line heuristic. Shared with the
+    // native OTLP parser via LogLevelMap so both backends classify severity identically.
+    private static LogLevel? MapDetectedLevel(string? value) => LogLevelMap.FromText(value);
 
     private static LogLevel DetectLevel(string line)
     {

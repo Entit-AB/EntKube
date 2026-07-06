@@ -3,7 +3,7 @@
 @using Microsoft.AspNetCore.Components.Web
 @using Microsoft.AspNetCore.Components.Web.Virtualization
 @using Microsoft.EntityFrameworkCore
-@inject LokiService LokiService
+@inject LogQueryService Logs
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject IJSRuntime JS
 @implements IAsyncDisposable
@@ -434,12 +434,12 @@ else
                      .Distinct())
         {
             KubernetesOperationResult<List<string>> pr =
-                await LokiService.GetPodsAsync(pair.ClusterId, pair.Namespace);
+                await Logs.GetPodsAsync(pair.ClusterId, pair.Namespace);
             if (pr.IsSuccess && pr.Data is not null)
                 foreach (string p in pr.Data) podSet.Add(p);
 
             KubernetesOperationResult<List<string>> cr =
-                await LokiService.GetContainersAsync(pair.ClusterId, pair.Namespace);
+                await Logs.GetContainersAsync(pair.ClusterId, pair.Namespace);
             if (cr.IsSuccess && cr.Data is not null)
                 foreach (string c in cr.Data) containerSet.Add(c);
         }
@@ -613,8 +613,10 @@ else
         foreach (var cluster in byCluster)
         {
             KubernetesOperationResult<List<LokiLogStream>> result =
-                await LokiService.QueryRangeMultiAsync(
-                    cluster.ClusterId, cluster.Namespaces, pod, container, text, from, to, limit);
+                await Logs.QueryAsync(
+                    cluster.ClusterId,
+                    new LogQueryFilter { Namespaces = cluster.Namespaces, Pod = pod, Container = container, Text = text },
+                    from, to, limit);
 
             if (result.IsSuccess && result.Data is not null)
             {

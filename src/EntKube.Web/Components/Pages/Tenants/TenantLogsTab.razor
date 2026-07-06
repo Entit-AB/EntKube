@@ -2,6 +2,9 @@
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IngestTokenService IngestTokens
+@inject TelemetryStore Telemetry
+@inject Microsoft.Extensions.Configuration.IConfiguration Config
 
 @* Cluster picker — required because LogBrowser is cluster-scoped *@
 <div class="d-flex align-items-center gap-3 mb-4">
@@ -12,9 +15,9 @@
             <option value="">— select a cluster —</option>
             @foreach (ClusterOption opt in clusterOptions)
             {
-                <option value="@opt.Id" disabled="@(!opt.HasLoki && !opt.HasPrometheus)">
+                <option value="@opt.Id" disabled="@(!opt.HasLoki && !opt.HasOtel && !opt.HasPrometheus)">
                     @opt.Name
-                    @if (!opt.HasLoki) { @(" (Loki not installed)") }
+                    @if (!opt.HasLoki && !opt.HasOtel) { @(" (no log collector)") }
                 </option>
             }
         </select>
@@ -23,12 +26,46 @@
     @if (selectedCluster is not null)
     {
         <div class="d-flex gap-2 small">
+            @if (selectedCluster.HasOtel)
+            {
+                <span class="badge bg-success">
+                    <span class="bi bi-broadcast me-1"></span>EntKube telemetry
+                </span>
+            }
             <span class="badge @(selectedCluster.HasLoki ? "bg-success" : "bg-secondary")">
                 <span class="bi bi-journal me-1"></span>Loki @(selectedCluster.HasLoki ? "installed" : "not installed")
             </span>
         </div>
     }
 </div>
+
+@if (selectedCluster is not null && Telemetry.IsEnabled)
+{
+    <details class="mb-4">
+        <summary class="small text-muted" style="cursor:pointer">
+            <span class="bi bi-broadcast me-1"></span>Send logs to EntKube (native telemetry)
+        </summary>
+        <div class="card card-body bg-light border mt-2">
+            <p class="small text-muted mb-2">
+                Install the <strong>EntKube Telemetry Collector</strong> component on this cluster and paste these two
+                values into its <em>EntKube Ingest URL</em> and <em>Ingest Token</em> fields. Logs then appear here
+                automatically — no Loki required.
+            </p>
+            <label class="form-label small mb-1">Ingest URL</label>
+            <input class="form-control form-control-sm mb-2 font-monospace" readonly value="@IngestUrl" />
+            <label class="form-label small mb-1">Ingest token (unique to this cluster)</label>
+            <input class="form-control form-control-sm font-monospace" readonly value="@IngestToken" />
+            @if (string.IsNullOrWhiteSpace(Config["Telemetry:PublicIngestUrl"]))
+            {
+                <div class="small text-warning mt-2">
+                    <span class="bi bi-exclamation-triangle me-1"></span>
+                    Set <code>Telemetry:PublicIngestUrl</code> in EntKube configuration to the URL clusters use to
+                    reach this server, then the Ingest URL above will be complete.
+                </div>
+            }
+        </div>
+    </details>
+}
 
 @if (string.IsNullOrEmpty(selectedClusterId) && clusterOptions.Count == 0 && !isLoading)
 {
@@ -74,11 +111,15 @@ else
             HasLoki: c.Components.Any(comp =>
                 (comp.HelmChartName ?? "").Contains("loki", StringComparison.OrdinalIgnoreCase) &&
                 comp.Status == ComponentStatus.Installed),
+            HasOtel: c.Components.Any(comp =>
+                ((comp.HelmChartName ?? "").Contains("opentelemetry", StringComparison.OrdinalIgnoreCase) ||
+                 comp.Name.Contains("otel", StringComparison.OrdinalIgnoreCase)) &&
+                comp.Status == ComponentStatus.Installed),
             HasPrometheus: c.Components.Any(comp => comp.HelmChartName == "kube-prometheus-stack" && comp.Status == ComponentStatus.Installed)
         )).ToList();
 
         // Auto-select the first cluster that has Loki, then any cluster
-        ClusterOption? best = clusterOptions.FirstOrDefault(c => c.HasLoki)
+        ClusterOption? best = clusterOptions.FirstOrDefault(c => c.HasLoki || c.HasOtel)
                            ?? clusterOptions.FirstOrDefault();
         if (best is not null)
         {
@@ -94,5 +135,20 @@ else
         selectedCluster = clusterOptions.FirstOrDefault(c => c.Id == selectedClusterId);
     }
 
-    private record ClusterOption(string Id, string Name, bool HasLoki, bool HasPrometheus);
+    private record ClusterOption(string Id, string Name, bool HasLoki, bool HasOtel, bool HasPrometheus);
+
+    private string IngestUrl
+    {
+        get
+        {
+            string? baseUrl = Config["Telemetry:PublicIngestUrl"];
+            return string.IsNullOrWhiteSpace(baseUrl)
+                ? "https://<your-entkube-host>/ingest/otlp"
+                : $"{baseUrl.TrimEnd('/')}/ingest/otlp";
+        }
+    }
+
+    private string IngestToken => string.IsNullOrEmpty(selectedClusterId)
+        ? ""
+        : IngestTokens.Mint(Guid.Parse(selectedClusterId), TenantId);
 }

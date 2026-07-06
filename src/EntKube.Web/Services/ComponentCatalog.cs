@@ -916,6 +916,20 @@ public static class ComponentCatalog
                   # writes to local paths.
                   containerSecurityContext:
                     readOnlyRootFilesystem: false
+                  # Promote the OTLP resource attributes the EntKube Telemetry Collector
+                  # (otel-collector) sets — namespace/pod/container/app/node — to stream
+                  # labels under their SHORT names, so logs ingested via Loki's OTLP
+                  # endpoint carry the exact labels the EntKube log viewer's LogQL filters
+                  # on (BuildLogQL). Without this, Loki's OTLP path would emit sanitized
+                  # names (k8s_namespace_name, …) and the namespace/pod dropdowns would be
+                  # empty. Harmless for logs pushed the classic way (Alloy → /loki push),
+                  # which already carry these labels directly.
+                  limits_config:
+                    otlp_config:
+                      resource_attributes:
+                        attributes_config:
+                          - action: index_label
+                            attributes: [namespace, pod, container, app, node]
 
                 # Same seccomp gap on the gateway (nginx) pod.
                 gateway:
@@ -1251,6 +1265,180 @@ public static class ComponentCatalog
                           url = "http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push"
                         }
                       }
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "otel-collector",
+            DisplayName = "EntKube Telemetry Collector",
+            Description = "Node-level telemetry collector built on the OpenTelemetry Collector (Apache 2.0). Runs as a DaemonSet, tails container logs on every node, and ships them to the EntKube native telemetry store over OTLP/JSON (Bearer-authenticated with a per-cluster ingest token) — no Loki required. Also exposes OTLP receivers (4317/4318) so instrumented apps can send traces and metrics to the platform. For a Loki-backed setup instead, use Grafana Alloy.",
+            Icon = "bi-arrow-down-up",
+            Category = "Monitoring",
+            HelmRepoUrl = "https://open-telemetry.github.io/opentelemetry-helm-charts",
+            HelmChartName = "opentelemetry-collector",
+            // Version intentionally unpinned (latest tested). The value schema
+            // (mode, presets.logsCollection, config.*) is stable across recent releases.
+            DefaultNamespace = "monitoring",
+            DefaultReleaseName = "otel-collector",
+            // DaemonSet rollout (one pod per node) can be slow on busy clusters — give --wait headroom.
+            InstallTimeout = "30m0s",
+            // No component dependency: it ships to the EntKube management plane, not an in-cluster
+            // backend. Requires only the Ingest URL + per-cluster token (form fields below).
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "image-tag", Label = "Collector Version",
+                    YamlPath = "image.tag", Type = FormFieldType.Text,
+                    DefaultValue = "", Placeholder = "e.g. 0.119.0 (blank = chart default)",
+                    HelpText = "opentelemetry-collector-contrib image tag. Leave blank to use the chart's tested default; set to pin/upgrade."
+                },
+                new ComponentFormField
+                {
+                    Key = "cpu-request", Label = "CPU Request",
+                    YamlPath = "resources.requests.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "50m", Placeholder = "e.g. 50m, 100m"
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-request", Label = "Memory Request",
+                    YamlPath = "resources.requests.memory", Type = FormFieldType.Text,
+                    DefaultValue = "128Mi", Placeholder = "e.g. 128Mi, 256Mi"
+                },
+                new ComponentFormField
+                {
+                    Key = "cpu-limit", Label = "CPU Limit",
+                    YamlPath = "resources.limits.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "200m", Placeholder = "e.g. 200m, 500m",
+                    HelpText = "Required on clusters that enforce a LimitRange — pods without limits are rejected."
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-limit", Label = "Memory Limit",
+                    YamlPath = "resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "256Mi", Placeholder = "e.g. 256Mi, 512Mi",
+                    HelpText = "Keep comfortably above the request to avoid OOMKills under log bursts."
+                },
+                new ComponentFormField
+                {
+                    Key = "ingest-endpoint", Label = "EntKube Ingest URL",
+                    YamlPath = "config.exporters.otlphttp/entkube.endpoint", Type = FormFieldType.Text,
+                    DefaultValue = "", Placeholder = "https://entkube.example.com/ingest/otlp",
+                    HelpText = "EntKube's telemetry ingest base URL reachable from this cluster (ending in /ingest/otlp). The collector appends /v1/logs and /v1/traces."
+                },
+                new ComponentFormField
+                {
+                    Key = "ingest-token", Label = "Ingest Token",
+                    YamlPath = "config.extensions.bearertokenauth.token", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "otel-ingest-token",
+                    HelpText = "Per-cluster ingest token from the cluster's Telemetry Ingest panel. Sent as a Bearer token; stored encrypted in the vault and injected at install."
+                }
+            ],
+            // DaemonSet. The contrib image is required for the filelog receiver + k8sattributes
+            // processor; when overriding image.repository to contrib you MUST also set command.name
+            // to otelcol-contrib or the pod won't start.
+            //
+            // presets.logsCollection wires the filelog receiver (with the `container` operator that
+            // parses the CRI envelope and extracts k8s.namespace.name/k8s.pod.name/k8s.container.name
+            // from the log path) AND the hostPath mounts for /var/log/pods.
+            // presets.kubernetesAttributes creates the ClusterRole/RBAC + k8sattributes processor.
+            //
+            // The resource/short-labels processor aliases the long k8s.* resource attributes to
+            // short names; the EntKube ingest reads k8s.namespace.name/pod/container primarily and
+            // falls back to these. The bearertokenauth extension adds "Authorization: Bearer <token>"
+            // to every export request; the token is injected from the vault at install time
+            // (config.extensions.bearertokenauth.token, from the "Ingest Token" field).
+            DefaultValues = """
+                mode: daemonset
+
+                image:
+                  repository: otel/opentelemetry-collector-contrib
+                command:
+                  name: otelcol-contrib
+
+                presets:
+                  logsCollection:
+                    enabled: true
+                    includeCollectorLogs: false
+                    # Container-runtime partial-line splits (a multi-line app log chopped by containerd)
+                    # are already recombined by the preset's `container` operator. For APP-level
+                    # multi-line (e.g. stack traces the app writes as separate lines), add a `recombine`
+                    # operator under config.receivers.filelog.operators keyed on your log-start pattern —
+                    # it's log-format-specific, so it's intentionally not a default.
+                  kubernetesAttributes:
+                    enabled: true
+
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 128Mi
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+
+                config:
+                  extensions:
+                    # Bearer auth for the exporter. Token is replaced at install by the vault-stored
+                    # per-cluster ingest token (see the "Ingest Token" form field).
+                    bearertokenauth:
+                      scheme: "Bearer"
+                      token: "REPLACE_WITH_INGEST_TOKEN"
+
+                  receivers:
+                    # Accept traces/metrics/logs from instrumented apps now so Phase 3 needs no redeploy.
+                    otlp:
+                      protocols:
+                        grpc:
+                          endpoint: 0.0.0.0:4317
+                        http:
+                          endpoint: 0.0.0.0:4318
+
+                  processors:
+                    # Enrich with node name + the app.kubernetes.io/name pod label.
+                    k8sattributes:
+                      extract:
+                        metadata:
+                          - k8s.namespace.name
+                          - k8s.pod.name
+                          - k8s.container.name
+                          - k8s.node.name
+                        labels:
+                          - tag_name: app.kubernetes.io/name
+                            key: app.kubernetes.io/name
+                            from: pod
+                    # Alias long OTel resource attributes -> short names (ingest fallback).
+                    resource/short-labels:
+                      attributes:
+                        - { action: insert, key: namespace, from_attribute: k8s.namespace.name }
+                        - { action: insert, key: pod,       from_attribute: k8s.pod.name }
+                        - { action: insert, key: container, from_attribute: k8s.container.name }
+                        - { action: insert, key: node,      from_attribute: k8s.node.name }
+                        - { action: insert, key: app,       from_attribute: app.kubernetes.io/name }
+
+                  exporters:
+                    # EntKube native telemetry ingest. JSON encoding (no protobuf dep on the ingest
+                    # side); gzip is applied by default. The base endpoint is set via the "EntKube
+                    # Ingest URL" field; the otlphttp exporter appends /v1/logs and /v1/traces. Auth via
+                    # the bearertokenauth extension above.
+                    otlphttp/entkube:
+                      endpoint: https://REPLACE_WITH_ENTKUBE_URL/ingest/otlp
+                      encoding: json
+                      auth:
+                        authenticator: bearertokenauth
+
+                  service:
+                    extensions: [bearertokenauth]
+                    pipelines:
+                      logs:
+                        receivers: [filelog, otlp]
+                        processors: [k8sattributes, resource/short-labels, batch]
+                        exporters: [otlphttp/entkube]
+                      # Traces from instrumented apps (OTLP receiver) → EntKube for APM/trace view.
+                      traces:
+                        receivers: [otlp]
+                        processors: [k8sattributes, batch]
+                        exporters: [otlphttp/entkube]
                 """
         },
 
