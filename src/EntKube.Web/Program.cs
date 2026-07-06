@@ -158,6 +158,7 @@ public class Program
         builder.Services.AddScoped<PgMetricsService>();
         // Native telemetry alerting: rules evaluated over logs/spans → incidents via the existing pipeline.
         builder.Services.AddScoped<TelemetryAlertRuleService>();
+        builder.Services.AddScoped<DashboardService>();
         builder.Services.AddScoped<IncidentDispatcher>();
         builder.Services.AddHostedService<TelemetryAlertEvaluator>();
         // Backend-agnostic log facade: routes each cluster to the native store (when it has data)

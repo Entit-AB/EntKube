@@ -170,6 +170,11 @@ else
                 </button>
             </li>
             <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "dashboards" ? "active" : "")" @onclick='() => SetTab("dashboards")' role="tab" aria-selected="@(activeTab == "dashboards")" tabindex="@(activeTab == "dashboards" ? 0 : -1)" id="@($"tab-dashboards")">
+                    <i class="bi bi-grid-1x2 me-1"></i>Dashboards
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(activeTab == "incidents" ? "active" : "")" @onclick='() => SetTab("incidents")' role="tab" aria-selected="@(activeTab == "incidents")" tabindex="@(activeTab == "incidents" ? 0 : -1)" id="@($"tab-incidents")">
                     <i class="bi bi-bell-fill me-1"></i>Incidents
                 </button>
@@ -292,6 +297,9 @@ else
                 break;
             case "metrics":
                 <TenantMetricsTab TenantId="tenant.Id" />
+                break;
+            case "dashboards":
+                <TenantDashboardsTab TenantId="tenant.Id" />
                 break;
             case "telemetry-alerts":
                 <TelemetryAlertRulesTab TenantId="tenant.Id" />

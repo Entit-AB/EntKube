@@ -1521,6 +1521,34 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("CustomerGitRepoPolicies");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.Dashboard", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("PanelsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Dashboards");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.DatabaseBinding", b =>
                 {
                     b.Property<Guid>("Id")

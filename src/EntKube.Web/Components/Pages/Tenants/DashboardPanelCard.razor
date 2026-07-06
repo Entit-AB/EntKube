@@ -1,0 +1,159 @@
+@using EntKube.Web.Services
+@inject PgMetricsService Metrics
+@inject PgTraceService Traces
+@inject LogQueryService Logs
+
+<div class="card h-100">
+    <div class="card-header py-1 px-2 d-flex justify-content-between align-items-center">
+        <span class="small fw-semibold text-truncate">@Heading</span>
+        <span class="d-flex gap-2">
+            @if (Editable)
+            {
+                <button class="btn btn-sm btn-link p-0" title="Configure" @onclick="() => OnEdit.InvokeAsync(Panel)"><span class="bi bi-gear"></span></button>
+                <button class="btn btn-sm btn-link text-danger p-0" title="Remove" @onclick="() => OnRemove.InvokeAsync(Panel)"><span class="bi bi-x-lg"></span></button>
+            }
+        </span>
+    </div>
+    <div class="card-body p-2" style="min-height:150px">
+        @if (loading)
+        {
+            <div class="text-center py-4"><span class="spinner-border spinner-border-sm"></span></div>
+        }
+        else if (Panel.Type == DashboardPanelType.MetricSeries)
+        {
+            @if (series.Count > 0) { <MetricChart DataPoints="series" Color="#4a90d9" HeightPx="140" /> }
+            else { <div class="text-muted small py-4 text-center">@EmptyText</div> }
+        }
+        else if (Panel.Type == DashboardPanelType.ServiceRed)
+        {
+            @if (red.Count > 0)
+            {
+                <div class="d-flex justify-content-between mb-2 small">
+                    <span><span class="text-muted">req</span> @RedTotal.ToString("N0")</span>
+                    <span><span class="text-muted">err</span> <span class="@(RedErrPct >= 5 ? "text-danger" : "")">@RedErrPct.ToString("0.0")%</span></span>
+                    <span><span class="text-muted">p95</span> @FormatMs(RedPeakP95)</span>
+                </div>
+                <div class="d-flex align-items-end gap-1" style="height:80px">
+                    @{ long maxReq = red.Max(b => b.Count); }
+                    @foreach (RedBucket b in red)
+                    {
+                        int barPx = maxReq > 0 ? (int)Math.Round(b.Count * 72.0 / maxReq) : 0;
+                        int errPx = b.Count > 0 ? (int)Math.Round(b.Errors * (double)barPx / b.Count) : 0;
+                        <div style="flex:1 1 0;display:flex;flex-direction:column;justify-content:flex-end;height:80px">
+                            <div style="background:#f48771;height:@(errPx)px"></div>
+                            <div style="background:#4a90d9;height:@(barPx - errPx)px"></div>
+                        </div>
+                    }
+                </div>
+            }
+            else { <div class="text-muted small py-4 text-center">@EmptyText</div> }
+        }
+        else
+        {
+            @if (histogram.Count > 0)
+            {
+                <div class="d-flex align-items-end gap-1" style="height:110px">
+                    @{ long maxTotal = histogram.Max(b => b.Total); }
+                    @foreach (LogHistogramBucket b in histogram)
+                    {
+                        int barPx = maxTotal > 0 ? (int)Math.Round(b.Total * 100.0 / maxTotal) : 0;
+                        int errPx = b.Total > 0 ? (int)Math.Round(b.Errors * (double)barPx / b.Total) : 0;
+                        <div style="flex:1 1 0;display:flex;flex-direction:column;justify-content:flex-end;height:110px">
+                            <div style="background:#f48771;height:@(errPx)px"></div>
+                            <div style="background:#4a90d9;height:@(barPx - errPx)px"></div>
+                        </div>
+                    }
+                </div>
+            }
+            else { <div class="text-muted small py-4 text-center">@EmptyText</div> }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public required DashboardPanel Panel { get; set; }
+    [Parameter] public required Guid ClusterId { get; set; }
+    [Parameter] public DateTime From { get; set; }
+    [Parameter] public DateTime To { get; set; }
+    [Parameter] public bool Editable { get; set; }
+    [Parameter] public EventCallback<DashboardPanel> OnRemove { get; set; }
+    [Parameter] public EventCallback<DashboardPanel> OnEdit { get; set; }
+
+    private bool loading = true;
+    private List<TimeSeriesDataPoint> series = [];
+    private List<RedBucket> red = [];
+    private List<LogHistogramBucket> histogram = [];
+    private string _lastKey = "";
+
+    private string Heading => string.IsNullOrEmpty(Panel.Title) ? DefaultTitle() : Panel.Title;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        string key = $"{ClusterId}|{From:o}|{To:o}|{Panel.Type}|{Panel.Metric}|{Panel.Service}|{Panel.Namespace}|{Panel.MatchText}";
+        if (key == _lastKey) return;
+        _lastKey = key;
+        await RefreshAsync();
+    }
+
+    private async Task RefreshAsync()
+    {
+        loading = true;
+        StateHasChanged();
+
+        switch (Panel.Type)
+        {
+            case DashboardPanelType.MetricSeries:
+                series = [];
+                if (!string.IsNullOrEmpty(Panel.Metric))
+                {
+                    var r = await Metrics.GetSeriesAsync(ClusterId, Panel.Metric,
+                        string.IsNullOrEmpty(Panel.Service) ? null : Panel.Service, From, To);
+                    if (r.IsSuccess && r.Data is not null) series = r.Data;
+                }
+                break;
+            case DashboardPanelType.ServiceRed:
+                red = [];
+                if (!string.IsNullOrEmpty(Panel.Service))
+                {
+                    var r = await Traces.GetServiceRedAsync(ClusterId, Panel.Service, From, To);
+                    if (r.IsSuccess && r.Data is not null) red = r.Data;
+                }
+                break;
+            default: // LogVolume — needs a namespace
+                histogram = [];
+                if (!string.IsNullOrEmpty(Panel.Namespace))
+                {
+                    var filter = new LogQueryFilter
+                    {
+                        Namespaces = [Panel.Namespace],
+                        Text = string.IsNullOrEmpty(Panel.MatchText) ? null : Panel.MatchText
+                    };
+                    var r = await Logs.GetHistogramAsync(ClusterId, filter, From, To);
+                    if (r.IsSuccess && r.Data is not null) histogram = r.Data;
+                }
+                break;
+        }
+
+        loading = false;
+    }
+
+    private long RedTotal => red.Sum(b => b.Count);
+    private double RedErrPct => RedTotal > 0 ? red.Sum(b => b.Errors) * 100.0 / RedTotal : 0;
+    private double RedPeakP95 => red.Count > 0 ? red.Max(b => b.P95Ms) : 0;
+
+    private string DefaultTitle() => Panel.Type switch
+    {
+        DashboardPanelType.MetricSeries => Panel.Metric ?? "metric",
+        DashboardPanelType.ServiceRed => $"{Panel.Service} RED",
+        _ => $"logs {Panel.Namespace}"
+    };
+
+    private string EmptyText => Panel.Type switch
+    {
+        DashboardPanelType.MetricSeries => string.IsNullOrEmpty(Panel.Metric) ? "Configure a metric." : "No data.",
+        DashboardPanelType.ServiceRed => string.IsNullOrEmpty(Panel.Service) ? "Configure a service." : "No data.",
+        _ => string.IsNullOrEmpty(Panel.Namespace) ? "Configure a namespace." : "No data."
+    };
+
+    private static string FormatMs(double ms) => ms >= 1000 ? $"{ms / 1000:0.##} s" : $"{ms:0.#} ms";
+}
