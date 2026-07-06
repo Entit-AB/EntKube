@@ -175,6 +175,11 @@ else
                 </button>
             </li>
             <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "rum" ? "active" : "")" @onclick='() => SetTab("rum")' role="tab" aria-selected="@(activeTab == "rum")" tabindex="@(activeTab == "rum" ? 0 : -1)" id="@($"tab-rum")">
+                    <i class="bi bi-browser-chrome me-1"></i>RUM
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(activeTab == "incidents" ? "active" : "")" @onclick='() => SetTab("incidents")' role="tab" aria-selected="@(activeTab == "incidents")" tabindex="@(activeTab == "incidents" ? 0 : -1)" id="@($"tab-incidents")">
                     <i class="bi bi-bell-fill me-1"></i>Incidents
                 </button>
@@ -297,6 +302,9 @@ else
                 break;
             case "metrics":
                 <TenantMetricsTab TenantId="tenant.Id" />
+                break;
+            case "rum":
+                <TenantRumTab TenantId="tenant.Id" />
                 break;
             case "dashboards":
                 <TenantDashboardsTab TenantId="tenant.Id" />

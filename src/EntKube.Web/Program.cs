@@ -496,6 +496,14 @@ public class Program
             return Results.Json(new { });
         }).DisableAntiforgery();
 
+        // The first-party RUM snippet — embedded as <script src="…/rum/v1/rum.js" data-key="…">. Static,
+        // cacheable, no per-site templating (the key comes from data-key, the ingest origin from the src).
+        app.MapGet("/rum/v1/rum.js", (HttpContext ctx) =>
+        {
+            ctx.Response.Headers.CacheControl = "public, max-age=3600";
+            return Results.Text(RumSnippet.Js, "application/javascript; charset=utf-8");
+        });
+
         // Public RUM ingest — the browser snippet POSTs a compact JSON beacon (text/plain to avoid a CORS
         // preflight, or application/json) to /ingest/rum/v1/{publicKey}. UNLIKE the OTLP endpoints there is
         // no secret token (the key ships in client JS); abuse is bounded by the site's Origin allow-list,

@@ -1,0 +1,196 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject RumSiteService Sites
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject NavigationManager Nav
+@inject IConfiguration Config
+@inject IJSRuntime JS
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <h6 class="mb-0">RUM sites</h6>
+        <small class="text-muted">Register a front-end origin, then embed its snippet to collect Core Web Vitals, JS errors, and AJAX timings.</small>
+    </div>
+    <button class="btn btn-sm btn-primary" @onclick="StartNew"><span class="bi bi-plus-lg me-1"></span>New site</button>
+</div>
+
+@if (editing is not null)
+{
+    <div class="card card-body mb-3">
+        <div class="row g-2">
+            <div class="col-md-4">
+                <label class="form-label small mb-1">Name</label>
+                <input class="form-control form-control-sm" @bind="editing.Name" placeholder="e.g. Storefront (prod)" />
+            </div>
+            <div class="col-md-4">
+                <label class="form-label small mb-1">Cluster (optional — for AJAX → trace links)</label>
+                <select class="form-select form-select-sm" @bind="clusterIdStr">
+                    <option value="">None</option>
+                    @foreach (ClusterOption c in clusters)
+                    {
+                        <option value="@c.Id">@c.Name</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label small mb-1">Sample rate (0–1)</label>
+                <input type="number" step="0.05" min="0" max="1" class="form-control form-control-sm" @bind="editing.SampleRate" />
+            </div>
+            <div class="col-12">
+                <label class="form-label small mb-1">Allowed origins (one per line — exact scheme+host+port)</label>
+                <textarea class="form-control form-control-sm font-monospace" rows="3" @bind="editing.AllowedOrigins"
+                          placeholder="https://app.example.com&#10;https://www.example.com"></textarea>
+                <div class="form-text">Requests whose <code>Origin</code> isn't listed are rejected. Leave empty to allow any origin (not recommended).</div>
+            </div>
+            <div class="col-12 d-flex gap-2 mt-1">
+                <button class="btn btn-sm btn-primary" @onclick="SaveAsync" disabled="@(string.IsNullOrWhiteSpace(editing.Name))">Save</button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => editing = null">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (sites.Count == 0 && editing is null)
+{
+    <div class="text-muted small py-3">No RUM sites yet. Create one to get an embeddable snippet.</div>
+}
+else if (sites.Count > 0)
+{
+    <div class="table-responsive">
+        <table class="table table-sm align-middle small">
+            <thead><tr><th>Name</th><th>Origins</th><th class="text-end">Sample</th><th>Enabled</th><th></th></tr></thead>
+            <tbody>
+                @foreach (RumSite s in sites)
+                {
+                    <tr class="@(s.IsEnabled ? "" : "text-muted")">
+                        <td class="fw-semibold">@s.Name</td>
+                        <td class="font-monospace text-truncate" style="max-width:260px">@OriginsSummary(s)</td>
+                        <td class="text-end">@s.SampleRate.ToString("0.##")</td>
+                        <td>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" checked="@s.IsEnabled"
+                                       @onchange="e => ToggleAsync(s, (bool)e.Value!)" />
+                            </div>
+                        </td>
+                        <td class="text-end text-nowrap">
+                            <button class="btn btn-sm btn-link p-0 me-2" @onclick="() => ToggleEmbed(s.Id)">Embed</button>
+                            <button class="btn btn-sm btn-link p-0 me-2" @onclick="() => StartEdit(s)">Edit</button>
+                            <button class="btn btn-sm btn-link p-0 me-2" @onclick="() => RotateAsync(s)">Rotate key</button>
+                            <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteAsync(s)">Delete</button>
+                        </td>
+                    </tr>
+                    @if (expandedId == s.Id)
+                    {
+                        <tr>
+                            <td colspan="5">
+                                <div class="bg-body-secondary rounded p-2">
+                                    <div class="d-flex justify-content-between align-items-center mb-1">
+                                        <span class="small text-muted">Paste this into your site's <code>&lt;head&gt;</code>:</span>
+                                        <button class="btn btn-sm btn-outline-secondary py-0" @onclick="() => CopyAsync(Embed(s))">
+                                            <span class="bi bi-clipboard me-1"></span>Copy
+                                        </button>
+                                    </div>
+                                    <code class="d-block user-select-all text-break">@Embed(s)</code>
+                                    <div class="form-text mt-1">Public key <span class="font-monospace">@s.PublicKey</span> — safe to expose in client code; abuse is bounded by the origin allow-list, rate limiting, and sampling.</div>
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<RumSite> sites = [];
+    private List<ClusterOption> clusters = [];
+    private RumSite? editing;
+    private bool editingIsNew;
+    private string clusterIdStr = "";
+    private Guid? expandedId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        clusters = await db.KubernetesClusters.Where(c => c.TenantId == TenantId)
+            .OrderBy(c => c.Name).Select(c => new ClusterOption(c.Id, c.Name)).ToListAsync();
+        await Reload();
+    }
+
+    private async Task Reload() => sites = await Sites.ListAsync(TenantId);
+
+    private void StartNew()
+    {
+        editingIsNew = true;
+        clusterIdStr = "";
+        editing = new RumSite { Name = "", SampleRate = 1.0, AllowedOrigins = "" };
+    }
+
+    private void StartEdit(RumSite s)
+    {
+        editingIsNew = false;
+        clusterIdStr = s.ClusterId?.ToString() ?? "";
+        // Edit a copy so a cancelled edit doesn't mutate the rendered row.
+        editing = new RumSite { Id = s.Id, Name = s.Name, ClusterId = s.ClusterId, AllowedOrigins = s.AllowedOrigins, SampleRate = s.SampleRate, IsEnabled = s.IsEnabled };
+    }
+
+    private async Task SaveAsync()
+    {
+        if (editing is null) return;
+        Guid? clusterId = string.IsNullOrEmpty(clusterIdStr) ? null : Guid.Parse(clusterIdStr);
+        if (editingIsNew)
+            await Sites.CreateAsync(TenantId, editing.Name, clusterId, editing.AllowedOrigins, editing.SampleRate);
+        else
+            await Sites.UpdateAsync(TenantId, editing.Id, editing.Name, clusterId, editing.AllowedOrigins, editing.SampleRate, editing.IsEnabled);
+        editing = null;
+        await Reload();
+    }
+
+    private async Task ToggleAsync(RumSite s, bool enabled)
+    {
+        await Sites.UpdateAsync(TenantId, s.Id, s.Name, s.ClusterId, s.AllowedOrigins, s.SampleRate, enabled);
+        await Reload();
+    }
+
+    private async Task RotateAsync(RumSite s)
+    {
+        await Sites.RotateKeyAsync(TenantId, s.Id);
+        expandedId = s.Id;   // reveal the new embed
+        await Reload();
+    }
+
+    private async Task DeleteAsync(RumSite s)
+    {
+        await Sites.DeleteAsync(TenantId, s.Id);
+        if (expandedId == s.Id) expandedId = null;
+        await Reload();
+    }
+
+    private void ToggleEmbed(Guid id) => expandedId = expandedId == id ? null : id;
+
+    private async Task CopyAsync(string text)
+    {
+        try { await JS.InvokeVoidAsync("navigator.clipboard.writeText", text); } catch { /* clipboard unavailable */ }
+    }
+
+    private string Embed(RumSite s) => $"<script src=\"{Origin()}/rum/v1/rum.js\" data-key=\"{s.PublicKey}\" defer></script>";
+
+    private string Origin()
+    {
+        string? cfg = Config["Rum:PublicBaseUrl"] ?? Config["Telemetry:PublicIngestUrl"];
+        string src = string.IsNullOrEmpty(cfg) ? Nav.BaseUri : cfg;
+        return Uri.TryCreate(src, UriKind.Absolute, out Uri? u) ? u.GetLeftPart(UriPartial.Authority) : src.TrimEnd('/');
+    }
+
+    private static string OriginsSummary(RumSite s)
+    {
+        IReadOnlyList<string> o = s.Origins;
+        return o.Count == 0 ? "any (unrestricted)" : (o.Count == 1 ? o[0] : $"{o[0]} +{o.Count - 1}");
+    }
+
+    private record ClusterOption(Guid Id, string Name);
+}
