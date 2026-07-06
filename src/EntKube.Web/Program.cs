@@ -171,6 +171,7 @@ public class Program
         builder.Services.AddScoped<ComponentLifecycleService>();
         builder.Services.AddScoped<ExternalRouteService>();
         builder.Services.AddScoped<AppRouteService>();
+        builder.Services.AddScoped<AppL4RouteService>();
         builder.Services.AddScoped<DatabaseService>();
         builder.Services.AddScoped<CnpgService>();
         builder.Services.AddScoped<MongoService>();
@@ -217,6 +218,7 @@ public class Program
         builder.Services.AddScoped<GitWebhookService>();
         builder.Services.AddHostedService<DeploymentSyncService>();
         builder.Services.AddHostedService<ExternalRouteHealthService>();
+        builder.Services.AddHostedService<AppL4RouteHealthService>();
         builder.Services.AddHostedService<AlertSyncService>();
         builder.Services.AddHostedService<AlertEscalationService>();
         builder.Services.AddHostedService<UptimeTrackingService>();

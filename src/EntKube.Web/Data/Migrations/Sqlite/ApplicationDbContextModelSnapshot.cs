@@ -493,6 +493,71 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("AppEnvironments");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.AppL4Route", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("AppDeploymentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("ClusterAppliedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ExternalPort")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("GatewayName")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("GatewayNamespace")
+                        .HasMaxLength(63)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("IsManaged")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(true);
+
+                    b.Property<bool?>("IsReachable")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("LastHealthCheckAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Protocol")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ServiceName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ServicePort")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppDeploymentId");
+
+                    b.HasIndex("AppId");
+
+                    b.ToTable("AppL4Routes");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.AppNetworkPolicy", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4674,6 +4739,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("App");
 
                     b.Navigation("Environment");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.AppL4Route", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.AppDeployment", "AppDeployment")
+                        .WithMany()
+                        .HasForeignKey("AppDeploymentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("AppDeployment");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppNetworkPolicy", b =>

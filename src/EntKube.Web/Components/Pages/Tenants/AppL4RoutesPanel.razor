@@ -1,0 +1,407 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject AppL4RouteService L4RouteService
+@inject DeploymentService DeploymentService
+@inject KubernetesOperationsService K8sOps
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   App TCP/UDP Ports — raw L4 routes through the dedicated Istio L4
+   ingress gateway. Each row maps one external LoadBalancer port
+   (TCP or UDP) to one backend Service:port (Gateway API TCPRoute/UDPRoute).
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mt-3">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <div class="d-flex align-items-center">
+            <i class="bi bi-hdd-network me-2 text-primary"></i>
+            <strong>TCP / UDP Ports</strong>
+            <span class="text-muted small ms-2">Raw L4 through the Istio external ingress</span>
+        </div>
+        @if (!IsPortalView)
+        {
+            <button class="btn btn-sm btn-outline-primary" @onclick="ToggleAdd" disabled="@((deployments?.Count ?? 0) == 0)">
+                <i class="bi bi-plus me-1"></i>Add Port
+            </button>
+        }
+    </div>
+
+    @* ── Add form (ops only) ── *@
+    @if (!IsPortalView && showAdd)
+    {
+        <div class="card-body border-bottom">
+            @if (addError is not null)
+            {
+                <div class="alert alert-danger py-1 small mb-2">@addError</div>
+            }
+            <div class="row g-2 align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label small">Deployment (environment)</label>
+                    <select class="form-select form-select-sm" value="@newDeploymentId"
+                            @onchange="OnDeploymentChanged">
+                        <option value="">— select —</option>
+                        @foreach (AppDeployment d in (deployments ?? []))
+                        {
+                            <option value="@d.Id">@d.Name (@d.Namespace)</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small">Protocol</label>
+                    <select class="form-select form-select-sm" @bind="newProtocol">
+                        <option value="@L4Protocol.Tcp">TCP</option>
+                        <option value="@L4Protocol.Udp">UDP</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small">External port</label>
+                    <input type="number" min="1" max="65535" class="form-control form-control-sm"
+                           placeholder="5432" @bind="newExternalPort" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">Backend service</label>
+                    @if (loadingServices)
+                    {
+                        <div class="form-control form-control-sm text-muted small">
+                            <span class="spinner-border spinner-border-sm me-1"></span>Loading…
+                        </div>
+                    }
+                    else if (availableServices.Count > 0)
+                    {
+                        <select class="form-select form-select-sm" value="@newService" @onchange="OnServiceChanged">
+                            <option value="">— select —</option>
+                            @foreach (KubeServiceInfo svc in availableServices)
+                            {
+                                <option value="@svc.Name">@svc.Name</option>
+                            }
+                        </select>
+                    }
+                    else
+                    {
+                        <input class="form-control form-control-sm" placeholder="my-service" @bind="newService" />
+                    }
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small">Service port</label>
+                    @if (availablePorts.Count > 0)
+                    {
+                        <select class="form-select form-select-sm" @bind="newServicePort">
+                            @foreach (KubeServicePort p in availablePorts)
+                            {
+                                <option value="@p.Port">@p.Port@(p.Name is not null ? $" ({p.Name})" : "")</option>
+                            }
+                        </select>
+                    }
+                    else
+                    {
+                        <input type="number" min="1" max="65535" class="form-control form-control-sm"
+                               @bind="newServicePort" />
+                    }
+                </div>
+            </div>
+            <div class="form-text small text-muted mt-1">
+                The port is opened on a dedicated Istio L4 LoadBalancer (its own external IP). Each port must be unique on the cluster per protocol — TCP and UDP may share a number.
+            </div>
+            <div class="d-flex gap-1 mt-2">
+                <button class="btn btn-sm btn-primary" @onclick="AddRoute"
+                        disabled="@(newDeploymentId == Guid.Empty || newExternalPort < 1 || string.IsNullOrWhiteSpace(newService) || adding)">
+                    @if (adding) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                    Save
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAdd = false">Cancel</button>
+            </div>
+        </div>
+    }
+
+    @* ── Confirm banner ── *@
+    @if (pendingConfirm is not null)
+    {
+        <div class="px-3 pt-3">
+            <ConfirmDialog Visible="true"
+                           Message="@pendingConfirm.Message"
+                           ConfirmText="@pendingConfirm.ConfirmText"
+                           IsBusy="confirmBusy"
+                           OnConfirm="RunPendingConfirmAsync"
+                           OnCancel="() => pendingConfirm = null" />
+        </div>
+    }
+
+    <div class="card-body p-0">
+        <LoadingPanel Loading="@(routes is null && loadError is null)">
+            @if (loadError is not null)
+            {
+                <div class="alert alert-danger m-3 py-2 small mb-0">@loadError</div>
+            }
+            else if (routes is { Count: 0 })
+            {
+                <div class="text-muted small text-center py-4">
+                    No TCP/UDP ports configured. @(IsPortalView ? "" : "Add one to expose a raw L4 service through the ingress.")
+                </div>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th class="ps-3">Proto</th>
+                                <th>Endpoint</th>
+                                <th>Backend</th>
+                                <th>Environment</th>
+                                <th>Status</th>
+                                @if (!IsPortalView)
+                                {
+                                    <th class="text-end pe-3">Actions</th>
+                                }
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (AppL4Route r in routes!)
+                            {
+                                string? addr = clusterAddresses.GetValueOrDefault(r.AppDeployment.ClusterId);
+                                <tr>
+                                    <td class="ps-3">
+                                        <span class="badge @(r.Protocol == L4Protocol.Udp ? "bg-info" : "bg-primary")">
+                                            @r.Protocol.ToString().ToUpperInvariant()
+                                        </span>
+                                    </td>
+                                    <td class="font-monospace small">
+                                        @(addr ?? r.AppDeployment.Cluster?.Name ?? "cluster"):@r.ExternalPort
+                                        @if (addr is null)
+                                        {
+                                            <i class="bi bi-hourglass-split text-muted ms-1" title="LoadBalancer address pending"></i>
+                                        }
+                                    </td>
+                                    <td class="font-monospace small">@r.ServiceName:@r.ServicePort</td>
+                                    <td class="small">@r.AppDeployment.Environment?.Name</td>
+                                    <td>
+                                        @if (!r.IsManaged)
+                                        {
+                                            <span class="badge bg-secondary">Observed</span>
+                                        }
+                                        else if (r.ClusterAppliedAt is null)
+                                        {
+                                            <span class="badge bg-warning text-dark">Not applied</span>
+                                        }
+                                        else if (r.IsReachable == true)
+                                        {
+                                            <span class="badge bg-success" title="@HealthTitle(r)">Reachable</span>
+                                        }
+                                        else if (r.IsReachable == false)
+                                        {
+                                            <span class="badge bg-danger" title="@HealthTitle(r)">Unreachable</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="badge bg-success bg-opacity-75"
+                                                  title="@(r.Protocol == L4Protocol.Udp ? "Applied — UDP is not actively health-checked" : "Applied — awaiting first health check")">
+                                                Applied
+                                            </span>
+                                        }
+                                    </td>
+                                    @if (!IsPortalView)
+                                    {
+                                        <td class="text-end pe-3">
+                                            @if (r.IsManaged)
+                                            {
+                                                <button class="btn btn-sm btn-outline-primary me-1" @onclick="() => ApplyRoute(r.Id)"
+                                                        disabled="@(applyingId == r.Id)">
+                                                    @if (applyingId == r.Id) { <span class="spinner-border spinner-border-sm"></span> }
+                                                    else { <span>Apply</span> }
+                                                </button>
+                                            }
+                                            <button class="btn btn-sm btn-outline-danger"
+                                                    @onclick='() => pendingConfirm = new PendingConfirm($"Delete {r.Protocol.ToString().ToUpperInvariant()} port {r.ExternalPort} → {r.ServiceName}:{r.ServicePort}? Its route is removed from the cluster and the listener is closed. This cannot be undone.", "Delete", () => DeleteRoute(r.Id))'>
+                                                Delete
+                                            </button>
+                                        </td>
+                                    }
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+                <div class="alert alert-warning small py-2 m-3 mb-2">
+                    <i class="bi bi-shield-lock me-1"></i>
+                    <strong>Raw L4 passthrough.</strong> The gateway forwards the connection/datagrams unmodified — it does
+                    <em>not</em> terminate TLS or DTLS. Any encryption is the application's responsibility, so terminate
+                    it inside your service if the protocol carries sensitive data. Connect clients to the endpoint address
+                    and port shown above using the listed protocol.
+                </div>
+            }
+        </LoadingPanel>
+    </div>
+</div>
+
+@code {
+    [Parameter] public required Data.App App { get; set; }
+    [Parameter] public Guid? EnvironmentId { get; set; }
+    [Parameter] public bool IsPortalView { get; set; }
+
+    private List<AppL4Route>? routes;
+    private List<AppDeployment>? deployments;
+    private readonly Dictionary<Guid, string?> clusterAddresses = new();
+    private string? loadError;
+
+    // Add form
+    private bool showAdd;
+    private Guid newDeploymentId;
+    private L4Protocol newProtocol = L4Protocol.Tcp;
+    private int newExternalPort;
+    private string newService = "";
+    private int newServicePort = 80;
+    private string? addError;
+    private bool adding;
+
+    // Service discovery
+    private bool loadingServices;
+    private List<KubeServiceInfo> availableServices = [];
+    private List<KubeServicePort> availablePorts = [];
+
+    // Apply
+    private Guid? applyingId;
+
+    // Confirm
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        loadError = null;
+        try { await LoadAsync(); }
+        catch (Exception ex) { loadError = ex.Message; }
+    }
+
+    private async Task LoadAsync()
+    {
+        List<AppL4Route> all = await L4RouteService.GetRoutesForAppAsync(App.Id);
+        List<AppDeployment> allDeployments = await DeploymentService.GetDeploymentsAsync(App.Id);
+
+        if (EnvironmentId.HasValue)
+        {
+            HashSet<Guid> envDeploymentIds = allDeployments
+                .Where(d => d.EnvironmentId == EnvironmentId.Value)
+                .Select(d => d.Id)
+                .ToHashSet();
+            routes = all.Where(r => envDeploymentIds.Contains(r.AppDeploymentId)).ToList();
+            deployments = allDeployments.Where(d => d.EnvironmentId == EnvironmentId.Value).ToList();
+        }
+        else
+        {
+            routes = all;
+            deployments = allDeployments;
+        }
+
+        // Resolve the dedicated L4 gateway's external address once per involved cluster.
+        foreach (Guid clusterId in routes.Select(r => r.AppDeployment.ClusterId).Distinct())
+        {
+            if (!clusterAddresses.ContainsKey(clusterId))
+                clusterAddresses[clusterId] = await K8sOps.GetL4EndpointAddressAsync(clusterId);
+        }
+    }
+
+    private void ToggleAdd()
+    {
+        showAdd = !showAdd;
+        if (showAdd)
+        {
+            newDeploymentId = deployments?.Count == 1 ? deployments[0].Id : Guid.Empty;
+            newProtocol = L4Protocol.Tcp;
+            newExternalPort = 0;
+            newService = "";
+            newServicePort = 80;
+            addError = null;
+            availableServices = [];
+            availablePorts = [];
+            if (newDeploymentId != Guid.Empty) _ = LoadServices(newDeploymentId);
+        }
+    }
+
+    private async Task OnDeploymentChanged(ChangeEventArgs e)
+    {
+        newDeploymentId = Guid.TryParse(e.Value?.ToString(), out Guid id) ? id : Guid.Empty;
+        newService = "";
+        availablePorts = [];
+        if (newDeploymentId != Guid.Empty) await LoadServices(newDeploymentId);
+    }
+
+    private async Task LoadServices(Guid deploymentId)
+    {
+        AppDeployment? d = deployments?.FirstOrDefault(x => x.Id == deploymentId);
+        if (d is null) return;
+        loadingServices = true;
+        availableServices = [];
+        try { availableServices = await K8sOps.GetServicesInNamespaceAsync(d.Cluster.Id, d.Namespace); }
+        catch { availableServices = []; }
+        finally { loadingServices = false; }
+    }
+
+    private void OnServiceChanged(ChangeEventArgs e)
+    {
+        newService = e.Value?.ToString() ?? "";
+        KubeServiceInfo? svc = availableServices.FirstOrDefault(s => s.Name == newService);
+        availablePorts = svc?.Ports ?? [];
+        if (availablePorts.Count > 0) newServicePort = availablePorts[0].Port;
+    }
+
+    private async Task AddRoute()
+    {
+        adding = true;
+        addError = null;
+        try
+        {
+            await L4RouteService.AddRouteAsync(App.Id, newDeploymentId, new AppL4RouteRequest
+            {
+                Protocol = newProtocol,
+                ExternalPort = newExternalPort,
+                ServiceName = newService,
+                ServicePort = newServicePort
+            });
+            showAdd = false;
+            await LoadAsync();
+            Toasts.Success($"{newProtocol.ToString().ToUpperInvariant()} port {newExternalPort} added. Click Apply to publish it.");
+        }
+        catch (Exception ex) { addError = ex.Message; }
+        finally { adding = false; }
+    }
+
+    private async Task ApplyRoute(Guid id)
+    {
+        applyingId = id;
+        try
+        {
+            KubernetesOperationResult<string> result = await K8sOps.ApplyL4RouteAsync(id);
+            if (result.IsSuccess) Toasts.Success(result.Data ?? "Route applied.");
+            else Toasts.Error(result.Error ?? "Failed to apply route.");
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error($"Failed to apply route: {ex.Message}"); }
+        finally { applyingId = null; }
+    }
+
+    private async Task DeleteRoute(Guid id)
+    {
+        try
+        {
+            await K8sOps.DeleteL4RouteFromClusterAsync(id);
+            await L4RouteService.DeleteRouteAsync(id);
+            await LoadAsync();
+            Toasts.Success("Port deleted.");
+        }
+        catch (Exception ex) { Toasts.Error($"Failed to delete port: {ex.Message}"); }
+    }
+
+    private static string HealthTitle(AppL4Route r) =>
+        r.LastHealthCheckAt is null
+            ? "No health check yet"
+            : $"Last checked {r.LastHealthCheckAt:u}";
+}

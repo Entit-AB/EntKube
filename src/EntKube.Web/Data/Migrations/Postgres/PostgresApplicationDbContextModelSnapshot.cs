@@ -498,6 +498,71 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("AppEnvironments");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.AppL4Route", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AppDeploymentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("ClusterAppliedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("ExternalPort")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("GatewayName")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("GatewayNamespace")
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsManaged")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
+
+                    b.Property<bool?>("IsReachable")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("LastHealthCheckAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Protocol")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)");
+
+                    b.Property<string>("ServiceName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int>("ServicePort")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppDeploymentId");
+
+                    b.HasIndex("AppId");
+
+                    b.ToTable("AppL4Routes");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.AppNetworkPolicy", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4683,6 +4748,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("App");
 
                     b.Navigation("Environment");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.AppL4Route", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.AppDeployment", "AppDeployment")
+                        .WithMany()
+                        .HasForeignKey("AppDeploymentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("AppDeployment");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppNetworkPolicy", b =>
