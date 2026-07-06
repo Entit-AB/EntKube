@@ -1439,6 +1439,11 @@ public static class ComponentCatalog
                         receivers: [otlp]
                         processors: [k8sattributes, batch]
                         exporters: [otlphttp/entkube]
+                      # Metrics from instrumented apps (OTLP receiver) → EntKube native metrics.
+                      metrics:
+                        receivers: [otlp]
+                        processors: [k8sattributes, batch]
+                        exporters: [otlphttp/entkube]
                 """
         },
 

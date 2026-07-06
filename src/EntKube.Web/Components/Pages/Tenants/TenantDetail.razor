@@ -165,6 +165,11 @@ else
                 </button>
             </li>
             <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "metrics" ? "active" : "")" @onclick='() => SetTab("metrics")' role="tab" aria-selected="@(activeTab == "metrics")" tabindex="@(activeTab == "metrics" ? 0 : -1)" id="@($"tab-metrics")">
+                    <i class="bi bi-graph-up me-1"></i>Metrics
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(activeTab == "incidents" ? "active" : "")" @onclick='() => SetTab("incidents")' role="tab" aria-selected="@(activeTab == "incidents")" tabindex="@(activeTab == "incidents" ? 0 : -1)" id="@($"tab-incidents")">
                     <i class="bi bi-bell-fill me-1"></i>Incidents
                 </button>
@@ -284,6 +289,9 @@ else
                 break;
             case "traces":
                 <TenantTracesTab TenantId="tenant.Id" PresetClusterId="@ClusterParam" PresetTraceId="@TraceParam" />
+                break;
+            case "metrics":
+                <TenantMetricsTab TenantId="tenant.Id" />
                 break;
             case "telemetry-alerts":
                 <TelemetryAlertRulesTab TenantId="tenant.Id" />

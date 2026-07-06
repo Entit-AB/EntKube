@@ -28,7 +28,7 @@ public sealed class TelemetryStore : IAsyncDisposable
     private const int PartitionLookaheadDays = 2;
 
     /// <summary>The RANGE-partitioned-by-time tables this store manages (partitions + retention).</summary>
-    private static readonly string[] PartitionedTables = ["logs", "spans"];
+    private static readonly string[] PartitionedTables = ["logs", "spans", "metrics"];
 
     /// <summary>True when a telemetry database is configured and usable.</summary>
     public bool IsEnabled => _dataSource is not null;
@@ -244,6 +244,20 @@ public sealed class TelemetryStore : IAsyncDisposable
         -- Service-scoped trace listing + RED aggregates (rate/errors/duration) over time.
         CREATE INDEX IF NOT EXISTS spans_scope_service_ts
             ON spans (tenant_id, cluster_id, service, ts DESC);
+
+        CREATE TABLE IF NOT EXISTS metrics (
+            ts          timestamptz NOT NULL,
+            tenant_id   uuid        NOT NULL,
+            cluster_id  uuid        NOT NULL,
+            name        text        NOT NULL,
+            service     text,
+            namespace   text,
+            pod         text,
+            value       double precision NOT NULL,
+            labels      jsonb
+        ) PARTITION BY RANGE (ts);
+        CREATE INDEX IF NOT EXISTS metrics_ts_brin ON metrics USING brin (ts) WITH (pages_per_range = 32);
+        CREATE INDEX IF NOT EXISTS metrics_scope_name_ts ON metrics (tenant_id, cluster_id, name, ts DESC);
 
         -- Distinct (namespace, pod, container) seen per cluster, upserted on ingest, so the log-viewer
         -- dropdowns are a tiny index lookup instead of a DISTINCT scan over the huge partitioned logs.
@@ -485,6 +499,44 @@ public sealed class TelemetryStore : IAsyncDisposable
         return records.Count;
     }
 
+    /// <summary>Bulk-writes a batch of metric data points via binary COPY. Same clamp/atomicity as logs/spans.</summary>
+    public async Task<int> WriteMetricsAsync(
+        Guid tenantId, Guid clusterId, IReadOnlyList<MetricIngestRecord> records, CancellationToken ct = default)
+    {
+        if (_dataSource is null || records.Count == 0) return 0;
+
+        DateTime now = DateTime.UtcNow;
+
+        await using NpgsqlConnection conn = await _dataSource.OpenConnectionAsync(ct);
+        await using NpgsqlBinaryImporter writer = await conn.BeginBinaryImportAsync(
+            "COPY metrics (ts, tenant_id, cluster_id, name, service, namespace, pod, value, labels) " +
+            "FROM STDIN (FORMAT BINARY)", ct);
+
+        foreach (MetricIngestRecord m in records)
+        {
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(ClampTimestamp(m.Timestamp, now), NpgsqlDbType.TimestampTz, ct);
+            await writer.WriteAsync(tenantId, NpgsqlDbType.Uuid, ct);
+            await writer.WriteAsync(clusterId, NpgsqlDbType.Uuid, ct);
+            await writer.WriteAsync(m.Name, NpgsqlDbType.Text, ct);
+
+            if (m.Service is null) await writer.WriteNullAsync(ct);
+            else await writer.WriteAsync(m.Service, NpgsqlDbType.Text, ct);
+            if (m.Namespace is null) await writer.WriteNullAsync(ct);
+            else await writer.WriteAsync(m.Namespace, NpgsqlDbType.Text, ct);
+            if (m.Pod is null) await writer.WriteNullAsync(ct);
+            else await writer.WriteAsync(m.Pod, NpgsqlDbType.Text, ct);
+
+            await writer.WriteAsync(m.Value, NpgsqlDbType.Double, ct);
+
+            if (m.LabelsJson is null) await writer.WriteNullAsync(ct);
+            else await writer.WriteAsync(m.LabelsJson, NpgsqlDbType.Jsonb, ct);
+        }
+
+        await writer.CompleteAsync(ct);
+        return records.Count;
+    }
+
     // Clamps a timestamp into the partitioned range [now-(retention-1), now+lookahead] so a
     // pathological value (seconds-as-nanos giving 1970, far-future clock skew, stale backfill beyond
     // retention) can never land outside all partitions. Postgres binary COPY is atomic, so one such
@@ -538,3 +590,17 @@ public sealed record SpanIngestRecord(
     string? Namespace,
     string? Pod,
     string? AttributesJson);
+
+/// <summary>
+/// One numeric metric data point ready to write. <paramref name="Timestamp"/> must be UTC;
+/// <paramref name="Value"/> is the point value (gauge / sum). <paramref name="LabelsJson"/> is the
+/// data point's attributes as a JSON object string (or null).
+/// </summary>
+public sealed record MetricIngestRecord(
+    DateTime Timestamp,
+    string Name,
+    string? Service,
+    string? Namespace,
+    string? Pod,
+    double Value,
+    string? LabelsJson);

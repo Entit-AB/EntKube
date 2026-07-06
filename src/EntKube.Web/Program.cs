@@ -155,6 +155,7 @@ public class Program
         builder.Services.AddScoped<ClusterTenantResolver>();
         builder.Services.AddScoped<PgLogService>();
         builder.Services.AddScoped<PgTraceService>();
+        builder.Services.AddScoped<PgMetricsService>();
         // Native telemetry alerting: rules evaluated over logs/spans → incidents via the existing pipeline.
         builder.Services.AddScoped<TelemetryAlertRuleService>();
         builder.Services.AddScoped<IncidentDispatcher>();
@@ -456,6 +457,37 @@ public class Program
             catch (Exception ex)
             {
                 log.LogError(ex, "Failed to persist OTLP traces batch.");
+                return Results.StatusCode(StatusCodes.Status500InternalServerError);
+            }
+            return Results.Json(new { });
+        }).DisableAntiforgery();
+
+        app.MapPost("/ingest/otlp/v1/metrics", async (
+            HttpContext httpContext, TelemetryStore telemetry, IngestTokenService tokens,
+            IngestRateLimiter rateLimiter, ILoggerFactory loggerFactory, CancellationToken ct) =>
+        {
+            ILogger log = loggerFactory.CreateLogger("OtlpIngest");
+            OtlpIngest.Result r = await OtlpIngest.ReadAsync(httpContext, telemetry, tokens, rateLimiter, log, ct);
+            if (r.Error is not null) return r.Error;
+
+            using System.Text.Json.JsonDocument doc = r.Doc!;
+            List<MetricIngestRecord> metrics;
+            try
+            {
+                metrics = OtlpMetricsParser.Parse(doc);
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Failed to parse OTLP metrics payload.");
+                return Results.BadRequest();
+            }
+            try
+            {
+                await telemetry.WriteMetricsAsync(r.TenantId, r.ClusterId, metrics, ct);
+            }
+            catch (Exception ex)
+            {
+                log.LogError(ex, "Failed to persist OTLP metrics batch.");
                 return Results.StatusCode(StatusCodes.Status500InternalServerError);
             }
             return Results.Json(new { });
