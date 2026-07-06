@@ -1,0 +1,265 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject TelemetryAlertRuleService Rules
+@inject RumSiteService RumSites
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <h6 class="mb-0">Telemetry alert rules</h6>
+        <small class="text-muted">Evaluated against the native store (logs/traces) every minute; firing raises an incident.</small>
+    </div>
+    <button class="btn btn-sm btn-primary" @onclick="StartNew">
+        <span class="bi bi-plus-lg me-1"></span>New rule
+    </button>
+</div>
+
+@if (editing is not null)
+{
+    <div class="card card-body mb-3">
+        <div class="row g-2">
+            <div class="col-md-4">
+                <label class="form-label small mb-1">Name</label>
+                <input class="form-control form-control-sm" @bind="editing.Name" placeholder="e.g. api high latency" />
+            </div>
+            <div class="col-md-4">
+                <label class="form-label small mb-1">Type</label>
+                <select class="form-select form-select-sm" @bind="editing.Kind">
+                    <option value="@TelemetryAlertKind.TraceLatencyP95">Trace: service p95 latency (ms)</option>
+                    <option value="@TelemetryAlertKind.TraceErrorRate">Trace: service error rate (%)</option>
+                    <option value="@TelemetryAlertKind.LogErrorRate">Log: error rate (per min)</option>
+                    <option value="@TelemetryAlertKind.RumErrorRate">RUM: browser error rate (per min)</option>
+                    <option value="@TelemetryAlertKind.RumLcpP75">RUM: LCP p75 (ms)</option>
+                </select>
+            </div>
+            @if (IsRum)
+            {
+                <div class="col-md-4">
+                    <label class="form-label small mb-1">RUM site</label>
+                    <select class="form-select form-select-sm" @bind="siteIdStr">
+                        <option value="">— select a site —</option>
+                        @foreach (RumSite s in rumSites)
+                        {
+                            <option value="@s.Id">@s.Name</option>
+                        }
+                    </select>
+                    @if (SelectedSiteNeedsCluster)
+                    {
+                        <div class="form-text text-warning">This site isn't linked to a cluster. RUM alerts need a cluster link — set one on the Sites tab.</div>
+                    }
+                </div>
+            }
+            else
+            {
+                <div class="col-md-4">
+                    <label class="form-label small mb-1">Cluster</label>
+                    <select class="form-select form-select-sm" @bind="clusterIdStr">
+                        <option value="">All clusters</option>
+                        @foreach (var c in clusters)
+                        {
+                            <option value="@c.Id">@c.Name</option>
+                        }
+                    </select>
+                </div>
+
+                @if (editing.Kind is TelemetryAlertKind.TraceLatencyP95 or TelemetryAlertKind.TraceErrorRate)
+                {
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">Service</label>
+                        <input class="form-control form-control-sm font-monospace" @bind="editing.Service" placeholder="service.name" />
+                    </div>
+                }
+                else if (editing.Kind == TelemetryAlertKind.LogErrorRate)
+                {
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">Namespace (optional)</label>
+                        <input class="form-control form-control-sm font-monospace" @bind="editing.Namespace" placeholder="blank = all" />
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">Body contains (optional)</label>
+                        <input class="form-control form-control-sm font-monospace" @bind="editing.MatchText" placeholder="substring" />
+                    </div>
+                }
+            }
+
+            <div class="col-md-3">
+                <label class="form-label small mb-1">Threshold (@ThresholdUnit)</label>
+                <input type="number" step="any" class="form-control form-control-sm" @bind="editing.Threshold" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small mb-1">Window (min)</label>
+                <input type="number" min="1" class="form-control form-control-sm" @bind="editing.WindowMinutes" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small mb-1">Severity</label>
+                <select class="form-select form-select-sm" @bind="editing.Severity">
+                    <option value="critical">critical</option>
+                    <option value="warning">warning</option>
+                    <option value="info">info</option>
+                </select>
+            </div>
+            <div class="col-md-3 d-flex align-items-center pt-3">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="ruleEnabled" @bind="editing.IsEnabled" />
+                    <label class="form-check-label small" for="ruleEnabled">Enabled</label>
+                </div>
+            </div>
+
+            <div class="col-12 d-flex gap-2 mt-1">
+                <button class="btn btn-sm btn-primary" @onclick="SaveAsync" disabled="@(string.IsNullOrWhiteSpace(editing.Name) || SaveBlocked)">Save</button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => editing = null">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (rules.Count == 0 && editing is null)
+{
+    <div class="text-muted small py-3">No telemetry alert rules yet. Create one to alert on service latency/errors or log error rates.</div>
+}
+else if (rules.Count > 0)
+{
+    <div class="table-responsive">
+        <table class="table table-sm align-middle small">
+            <thead><tr><th>Name</th><th>Type</th><th>Target</th><th class="text-end">Threshold</th><th>Window</th><th>Severity</th><th></th><th></th></tr></thead>
+            <tbody>
+                @foreach (var r in rules)
+                {
+                    <tr class="@(r.IsEnabled ? "" : "text-muted")">
+                        <td class="fw-semibold">@r.Name</td>
+                        <td>@KindLabel(r.Kind)</td>
+                        <td class="font-monospace">@Target(r)</td>
+                        <td class="text-end">@r.Threshold @UnitFor(r.Kind)</td>
+                        <td>@r.WindowMinutes m</td>
+                        <td><span class="badge @SeverityClass(r.Severity)">@r.Severity</span></td>
+                        <td>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" checked="@r.IsEnabled"
+                                       @onchange="e => ToggleAsync(r, (bool)e.Value!)" />
+                            </div>
+                        </td>
+                        <td class="text-end text-nowrap">
+                            <button class="btn btn-sm btn-link p-0 me-2" @onclick="() => StartEdit(Clone(r))">Edit</button>
+                            <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteAsync(r)">Delete</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<TelemetryAlertRule> rules = [];
+    private List<ClusterOption> clusters = [];
+    private List<RumSite> rumSites = [];
+    private TelemetryAlertRule? editing;
+    private string clusterIdStr = "";
+    private string siteIdStr = "";
+
+    private bool IsRum => editing?.Kind is TelemetryAlertKind.RumErrorRate or TelemetryAlertKind.RumLcpP75;
+    private RumSite? SelectedSite => rumSites.FirstOrDefault(s => s.Id.ToString() == siteIdStr);
+    private bool SelectedSiteNeedsCluster => IsRum && SelectedSite is not null && SelectedSite.ClusterId is null;
+    private bool SaveBlocked => IsRum && (SelectedSite is null || SelectedSite.ClusterId is null);
+
+    protected override async Task OnInitializedAsync()
+    {
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        clusters = await db.KubernetesClusters.Where(c => c.TenantId == TenantId)
+            .OrderBy(c => c.Name).Select(c => new ClusterOption(c.Id, c.Name)).ToListAsync();
+        rumSites = await RumSites.ListAsync(TenantId);
+        await Reload();
+    }
+
+    private async Task Reload() => rules = await Rules.ListAsync(TenantId);
+
+    private void StartNew() => StartEdit(new TelemetryAlertRule { Name = "", TenantId = TenantId });
+
+    private void StartEdit(TelemetryAlertRule r)
+    {
+        editing = r;
+        clusterIdStr = r.ClusterId?.ToString() ?? "";
+        siteIdStr = r.SiteId?.ToString() ?? "";
+    }
+
+    private async Task SaveAsync()
+    {
+        if (editing is null) return;
+        editing.TenantId = TenantId;
+        if (IsRum)
+        {
+            if (SelectedSite?.ClusterId is not Guid siteCluster) return;   // guarded by SaveBlocked
+            editing.SiteId = SelectedSite.Id;
+            editing.ClusterId = siteCluster;   // the incident is attributed to the site's linked cluster
+        }
+        else
+        {
+            editing.SiteId = null;
+            editing.ClusterId = string.IsNullOrEmpty(clusterIdStr) ? null : Guid.Parse(clusterIdStr);
+        }
+        await Rules.UpsertAsync(editing);
+        editing = null;
+        await Reload();
+    }
+
+    private async Task ToggleAsync(TelemetryAlertRule r, bool enabled)
+    {
+        await Rules.SetEnabledAsync(TenantId, r.Id, enabled);
+        await Reload();
+    }
+
+    private async Task DeleteAsync(TelemetryAlertRule r)
+    {
+        await Rules.DeleteAsync(TenantId, r.Id);
+        await Reload();
+    }
+
+    private string ThresholdUnit => editing?.Kind switch
+    {
+        TelemetryAlertKind.TraceLatencyP95 or TelemetryAlertKind.RumLcpP75 => "ms",
+        TelemetryAlertKind.TraceErrorRate => "%",
+        _ => "per min"
+    };
+
+    private static string UnitFor(TelemetryAlertKind k) => k switch
+    {
+        TelemetryAlertKind.TraceLatencyP95 or TelemetryAlertKind.RumLcpP75 => "ms",
+        TelemetryAlertKind.TraceErrorRate => "%",
+        _ => "/min"
+    };
+
+    private static string KindLabel(TelemetryAlertKind k) => k switch
+    {
+        TelemetryAlertKind.TraceLatencyP95 => "p95 latency",
+        TelemetryAlertKind.TraceErrorRate => "error rate",
+        TelemetryAlertKind.LogErrorRate => "log error rate",
+        TelemetryAlertKind.RumErrorRate => "RUM error rate",
+        TelemetryAlertKind.RumLcpP75 => "RUM LCP p75",
+        _ => k.ToString()
+    };
+
+    private string Target(TelemetryAlertRule r) => r.Kind switch
+    {
+        TelemetryAlertKind.LogErrorRate => r.Namespace is null ? "all namespaces" : r.Namespace,
+        TelemetryAlertKind.RumErrorRate or TelemetryAlertKind.RumLcpP75 =>
+            rumSites.FirstOrDefault(s => s.Id == r.SiteId)?.Name ?? "(site)",
+        _ => r.Service ?? "—"
+    };
+
+    private static string SeverityClass(string s) => s switch
+    {
+        "critical" => "bg-danger", "warning" => "bg-warning text-dark", _ => "bg-secondary"
+    };
+
+    private static TelemetryAlertRule Clone(TelemetryAlertRule r) => new()
+    {
+        Id = r.Id, TenantId = r.TenantId, ClusterId = r.ClusterId, SiteId = r.SiteId, Name = r.Name, Kind = r.Kind,
+        Service = r.Service, Namespace = r.Namespace, MatchText = r.MatchText, Threshold = r.Threshold,
+        WindowMinutes = r.WindowMinutes, Severity = r.Severity, RunbookUrl = r.RunbookUrl, IsEnabled = r.IsEnabled
+    };
+
+    private record ClusterOption(Guid Id, string Name);
+}

@@ -253,6 +253,43 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
         }
     }
 
+    /// <summary>
+    /// Aggregate stats for a service over a window (inbound spans only): total, error count, p95 latency
+    /// in ms. Drives the trace-based alert rules (error-rate / p95 threshold).
+    /// </summary>
+    public async Task<KubernetesOperationResult<ServiceStats>> GetServiceStatsAsync(
+        Guid clusterId, string service, DateTime from, DateTime to, CancellationToken ct = default)
+    {
+        Guid? tenantId = await ResolveOrNull(clusterId, ct);
+        if (tenantId is null) return Fail<ServiceStats>();
+
+        try
+        {
+            await using NpgsqlConnection conn = await Store.OpenConnectionAsync(ct);
+            await using NpgsqlCommand cmd = conn.CreateCommand();
+            cmd.CommandText =
+                "SELECT count(*) AS total, count(*) FILTER (WHERE status_code = 2) AS errors, " +
+                "coalesce(percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms), 0) AS p95 " +
+                "FROM spans WHERE tenant_id = @t AND cluster_id = @c AND service = @service " +
+                "AND ts >= @from AND ts < @to AND (kind IN (2, 5) OR parent_span_id IS NULL)";
+            cmd.Parameters.AddWithValue("t", tenantId.Value);
+            cmd.Parameters.AddWithValue("c", clusterId);
+            cmd.Parameters.AddWithValue("service", service);
+            cmd.Parameters.AddWithValue("from", NpgsqlDbType.TimestampTz, from.ToUniversalTime());
+            cmd.Parameters.AddWithValue("to", NpgsqlDbType.TimestampTz, to.ToUniversalTime());
+
+            await using NpgsqlDataReader r = await cmd.ExecuteReaderAsync(ct);
+            if (await r.ReadAsync(ct))
+                return KubernetesOperationResult<ServiceStats>.Success(
+                    new ServiceStats(r.GetInt64(0), r.GetInt64(1), r.IsDBNull(2) ? 0 : r.GetDouble(2)));
+            return KubernetesOperationResult<ServiceStats>.Success(new ServiceStats(0, 0, 0));
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Service stats failed (cluster {Cluster}, service {Service})", clusterId, service);
+            return Fail<ServiceStats>(ex.Message);
+        }
+    }
 }
 
 /// <summary>A row in the trace-search list: the trace and its root span's service/operation.</summary>
@@ -271,3 +308,6 @@ public sealed record RedBucket(
 
 /// <summary>A caller→callee edge in the service map, with call/error counts and average callee latency.</summary>
 public sealed record ServiceEdge(string From, string To, long Calls, long Errors, double AvgMs);
+
+/// <summary>Aggregate service stats over a window (for alert evaluation): request count, errors, p95 ms.</summary>
+public sealed record ServiceStats(long Count, long Errors, double P95Ms);

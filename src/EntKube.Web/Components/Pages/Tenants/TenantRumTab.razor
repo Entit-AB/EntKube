@@ -1,0 +1,97 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject RumSiteService Sites
+
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <ul class="nav nav-pills nav-sm">
+        <li class="nav-item"><button class="nav-link py-1 @(sub == "overview" ? "active" : "")" @onclick='() => sub = "overview"'>Overview</button></li>
+        <li class="nav-item"><button class="nav-link py-1 @(sub == "sessions" ? "active" : "")" @onclick='() => sub = "sessions"'>Sessions</button></li>
+        <li class="nav-item"><button class="nav-link py-1 @(sub == "sites" ? "active" : "")" @onclick='() => sub = "sites"'>Sites</button></li>
+    </ul>
+    @if (sub != "sites")
+    {
+        <div class="d-flex align-items-center gap-2">
+            <select class="form-select form-select-sm" style="min-width:180px" @bind="selectedSiteId" @bind:after="OnScopeChanged">
+                <option value="">— select a site —</option>
+                @foreach (RumSite s in sites)
+                {
+                    <option value="@s.Id">@s.Name</option>
+                }
+            </select>
+            <select class="form-select form-select-sm" style="width:auto" @bind="timeRangeMinutes" @bind:after="OnScopeChanged">
+                <option value="60">1h</option>
+                <option value="360">6h</option>
+                <option value="1440">24h</option>
+                <option value="10080">7d</option>
+                <option value="43200">30d</option>
+            </select>
+        </div>
+    }
+</div>
+
+@if (sub == "sites")
+{
+    <RumSitesAdmin TenantId="TenantId" OnSitesChanged="ReloadSitesAsync" />
+}
+else if (sites.Count == 0)
+{
+    <div class="text-center py-5 text-muted">
+        <span class="bi bi-browser-chrome display-6 d-block mb-2 opacity-25"></span>
+        No RUM sites yet. <button class="btn btn-link p-0 align-baseline" @onclick='() => sub = "sites"'>Create one</button> and embed its snippet to start collecting browser telemetry.
+    </div>
+}
+else if (string.IsNullOrEmpty(selectedSiteId))
+{
+    <div class="text-center py-5 text-muted">Select a site above to view its RUM data.</div>
+}
+else if (sub == "overview")
+{
+    <RumOverview TenantId="TenantId" SiteId="@SiteGuid" From="_from" To="_to" />
+}
+else
+{
+    <RumSessions TenantId="TenantId" SiteId="@SiteGuid" ClusterId="@SelectedClusterId" From="_from" To="_to" />
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<RumSite> sites = [];
+    private string sub = "overview";
+    private string selectedSiteId = "";
+    private int timeRangeMinutes = 1440;
+    private DateTime _from;
+    private DateTime _to;
+    private Guid _loadedTenant;
+
+    private Guid SiteGuid => Guid.TryParse(selectedSiteId, out Guid g) ? g : Guid.Empty;
+    private Guid? SelectedClusterId => sites.FirstOrDefault(s => s.Id == SiteGuid)?.ClusterId;
+
+    // Reload when the container is reused for a different tenant (activeTab persists across tenant nav).
+    protected override async Task OnParametersSetAsync()
+    {
+        if (TenantId == _loadedTenant) return;
+        _loadedTenant = TenantId;
+        selectedSiteId = "";
+        await ReloadSitesAsync();
+        SnapshotRange();
+    }
+
+    // Keeps the site picker in sync after the Sites sub-tab creates/deletes/rotates a site.
+    private async Task ReloadSitesAsync()
+    {
+        sites = await Sites.ListAsync(TenantId);
+        if (sites.Count == 0) selectedSiteId = "";
+        else if (!sites.Any(s => s.Id.ToString() == selectedSiteId)) selectedSiteId = sites[0].Id.ToString();
+    }
+
+    // Snapshot [from,to] on site/range change (not per render) so the child components' dedupe keys are
+    // stable and they don't refetch on every re-render.
+    private void OnScopeChanged() => SnapshotRange();
+
+    private void SnapshotRange()
+    {
+        _to = DateTime.UtcNow;
+        _from = _to.AddMinutes(-timeRangeMinutes);
+    }
+}

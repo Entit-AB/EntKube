@@ -1,0 +1,170 @@
+@using EntKube.Web.Services
+@inject PgRumService Rum
+@inject NavigationManager Nav
+
+@if (!detailOpen)
+{
+    @if (loading)
+    {
+        <div class="text-center py-5"><span class="spinner-border spinner-border-sm"></span></div>
+    }
+    else if (sessions.Count == 0)
+    {
+        <div class="text-center py-5 text-muted">
+            <span class="bi bi-person-workspace display-6 d-block mb-2 opacity-25"></span>
+            No sessions for this site in the selected range.
+        </div>
+    }
+    else
+    {
+        <table class="table table-sm small align-middle">
+            <thead><tr><th>Session</th><th>Started</th><th class="text-end">Views</th><th class="text-end">Errors</th><th>Last page</th><th></th></tr></thead>
+            <tbody>
+                @foreach (RumSessionSummary s in sessions)
+                {
+                    <tr>
+                        <td class="font-monospace">@Short(s.SessionId)</td>
+                        <td>@s.Started.ToLocalTime().ToString("MMM d HH:mm")</td>
+                        <td class="text-end">@s.Views</td>
+                        <td class="text-end @(s.Errors > 0 ? "text-danger fw-semibold" : "")">@s.Errors</td>
+                        <td class="font-monospace text-truncate" style="max-width:220px">@s.LastPath</td>
+                        <td class="text-end"><button class="btn btn-sm btn-link p-0" @onclick="() => OpenAsync(s)">Inspect</button></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+}
+else
+{
+    <div class="d-flex align-items-center gap-2 mb-3">
+        <button class="btn btn-sm btn-link p-0" @onclick="CloseDetail"><span class="bi bi-arrow-left me-1"></span>Sessions</button>
+        <span class="text-muted small">·</span>
+        <span class="font-monospace small">@selectedId</span>
+    </div>
+
+    @if (selected is null)
+    {
+        <div class="alert alert-warning small py-2"><span class="bi bi-exclamation-triangle me-1"></span>Couldn't load this session's detail. The telemetry store may be unavailable.</div>
+    }
+    else
+    {
+    <div class="card card-body mb-3">
+        <div class="fw-semibold small mb-2">Page views</div>
+        <table class="table table-sm small mb-0 align-middle">
+            <thead><tr><th>Time</th><th>Path</th><th class="text-end">Load</th><th class="text-end">LCP</th><th class="text-end">CLS</th><th class="text-end">INP</th></tr></thead>
+            <tbody>
+                @foreach (RumViewRow v in selected.Views)
+                {
+                    <tr><td>@v.Ts.ToLocalTime().ToString("HH:mm:ss")</td><td class="font-monospace">@v.Path</td><td class="text-end">@Ms(v.LoadMs)</td><td class="text-end">@Ms(v.LcpMs)</td><td class="text-end">@(v.Cls?.ToString("0.###") ?? "—")</td><td class="text-end">@Ms(v.InpMs)</td></tr>
+                }
+                @if (selected.Views.Count == 0) { <tr><td colspan="6" class="text-muted">—</td></tr> }
+            </tbody>
+        </table>
+    </div>
+
+    @if (selected.Errors.Count > 0)
+    {
+        <div class="card card-body mb-3">
+            <div class="fw-semibold small mb-2 text-danger">Errors (@selected.Errors.Count)</div>
+            <table class="table table-sm small mb-0 align-middle">
+                <thead><tr><th>Time</th><th>Path</th><th>Message</th><th>Source</th></tr></thead>
+                <tbody>
+                    @foreach (RumErrorRow e in selected.Errors)
+                    {
+                        <tr><td>@e.Ts.ToLocalTime().ToString("HH:mm:ss")</td><td class="font-monospace">@e.Path</td><td class="text-break">@e.Message</td><td class="font-monospace small text-muted">@e.Source</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    <div class="card card-body">
+        <div class="fw-semibold small mb-2">Requests (@selected.Resources.Count)</div>
+        <table class="table table-sm small mb-0 align-middle">
+            <thead><tr><th>Time</th><th>Resource</th><th>Kind</th><th class="text-end">Duration</th><th class="text-end">Status</th><th></th></tr></thead>
+            <tbody>
+                @foreach (RumResourceRow r in selected.Resources)
+                {
+                    <tr>
+                        <td>@r.Ts.ToLocalTime().ToString("HH:mm:ss")</td>
+                        <td class="font-monospace text-truncate" style="max-width:280px" title="@r.Name">@r.Name</td>
+                        <td>@r.Kind</td>
+                        <td class="text-end">@Ms(r.DurationMs)</td>
+                        <td class="text-end @(r.Status >= 400 ? "text-danger" : "")">@(r.Status?.ToString() ?? "—")</td>
+                        <td class="text-end">
+                            @if (!string.IsNullOrEmpty(r.TraceId) && ClusterId is not null)
+                            {
+                                <button class="btn btn-sm btn-link p-0" title="Open backend trace" @onclick="() => OpenTrace(r.TraceId!)">trace</button>
+                            }
+                        </td>
+                    </tr>
+                }
+                @if (selected.Resources.Count == 0) { <tr><td colspan="6" class="text-muted">—</td></tr> }
+            </tbody>
+        </table>
+    </div>
+    }
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+    [Parameter] public required Guid SiteId { get; set; }
+    [Parameter] public Guid? ClusterId { get; set; }
+    [Parameter] public DateTime From { get; set; }
+    [Parameter] public DateTime To { get; set; }
+
+    private bool loading = true;
+    private List<RumSessionSummary> sessions = [];
+    private RumSessionDetail? selected;
+    private bool detailOpen;
+    private string selectedId = "";
+    private string _lastKey = "";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        string key = $"{SiteId}|{From:o}|{To:o}";
+        if (key == _lastKey) return;
+        _lastKey = key;
+        selected = null;
+        detailOpen = false;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        StateHasChanged();
+        sessions = await Rum.GetSessionsAsync(TenantId, SiteId, From, To);
+        loading = false;
+    }
+
+    private async Task OpenAsync(RumSessionSummary s)
+    {
+        selectedId = s.SessionId;
+        detailOpen = true;
+        selected = await Rum.GetSessionDetailAsync(TenantId, SiteId, s.SessionId, From, To);
+    }
+
+    private void CloseDetail()
+    {
+        detailOpen = false;
+        selected = null;
+    }
+
+    // AJAX row → its backend distributed trace (the snippet injected a traceparent on same-origin fetches).
+    private void OpenTrace(string traceId)
+    {
+        if (ClusterId is null) return;
+        Nav.NavigateTo(Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["category"] = "ops",
+            ["tab"] = "traces",
+            ["cluster"] = ClusterId.Value.ToString(),
+            ["trace"] = traceId
+        }));
+    }
+
+    private static string Short(string id) => id.Length > 12 ? id[..12] : id;
+    private static string Ms(double? v) => v is null ? "—" : (v >= 1000 ? $"{v / 1000:0.##} s" : $"{v:0} ms");
+}

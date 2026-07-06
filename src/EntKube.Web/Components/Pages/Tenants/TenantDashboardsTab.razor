@@ -1,0 +1,76 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject DashboardService Dashboards
+
+@if (selected is not null)
+{
+    <DashboardView Dashboard="selected" TenantId="TenantId" OnClose="CloseAsync" />
+}
+else
+{
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h6 class="mb-0">Dashboards</h6>
+            <small class="text-muted">Composable panels over native metrics, traces, and logs.</small>
+        </div>
+        <div class="d-flex gap-2">
+            <input class="form-control form-control-sm" style="width:200px" @bind="newName" placeholder="New dashboard name" />
+            <button class="btn btn-sm btn-primary" @onclick="CreateAsync" disabled="@string.IsNullOrWhiteSpace(newName)">
+                <span class="bi bi-plus-lg me-1"></span>Create
+            </button>
+        </div>
+    </div>
+
+    @if (list.Count == 0)
+    {
+        <div class="text-muted small py-3">No dashboards yet. Name one above and create it, then add panels.</div>
+    }
+    else
+    {
+        <div class="list-group">
+            @foreach (Dashboard d in list)
+            {
+                <div class="list-group-item d-flex justify-content-between align-items-center">
+                    <button class="btn btn-link p-0 text-decoration-none" @onclick="() => Open(d)">
+                        <span class="bi bi-grid-1x2 me-2"></span>@d.Name
+                    </button>
+                    <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteAsync(d)">Delete</button>
+                </div>
+            }
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<Dashboard> list = [];
+    private Dashboard? selected;
+    private string newName = "";
+
+    protected override async Task OnInitializedAsync() => await Reload();
+
+    private async Task Reload() => list = await Dashboards.ListAsync(TenantId);
+
+    private async Task CreateAsync()
+    {
+        Dashboard d = await Dashboards.CreateAsync(TenantId, newName.Trim());
+        newName = "";
+        await Reload();
+        selected = d;
+    }
+
+    private void Open(Dashboard d) => selected = d;
+
+    private async Task CloseAsync()
+    {
+        selected = null;
+        await Reload();
+    }
+
+    private async Task DeleteAsync(Dashboard d)
+    {
+        await Dashboards.DeleteAsync(TenantId, d.Id);
+        await Reload();
+    }
+}

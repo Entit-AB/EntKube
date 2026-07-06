@@ -1,0 +1,86 @@
+@using EntKube.Web.Services
+
+@* ═══════════════════════════════════════════════════════════════════════════
+   MultiSeriesChart — overlays N named time-series as colored polylines on a
+   shared time + value axis, with a legend. Points are positioned by real
+   timestamp (not index) so series with different sampling still line up.
+   Server-rendered SVG, no JS. Mirrors MetricChart's invariant-culture coords.
+   ═══════════════════════════════════════════════════════════════════════════ *@
+
+<div class="multi-series-chart">
+    @if (drawable.Count > 0 && _maxVal > 0)
+    {
+        <svg viewBox="0 0 @W @H" preserveAspectRatio="none"
+             style="width:100%; height:@(HeightPx)px; display:block;">
+            @for (int i = 0; i < drawable.Count; i++)
+            {
+                <polyline points="@LinePoints(drawable[i])" fill="none"
+                          stroke="@ColorAt(i)" stroke-width="1.5"
+                          stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+            }
+        </svg>
+        <div class="d-flex flex-wrap gap-3 mt-2">
+            @for (int i = 0; i < drawable.Count; i++)
+            {
+                <span class="d-inline-flex align-items-center small">
+                    <span style="width:10px;height:10px;border-radius:2px;display:inline-block;margin-right:4px;background:@ColorAt(i);"></span>
+                    <span class="font-monospace">@drawable[i].Name</span>
+                    <span class="text-muted ms-1">@LastValue(drawable[i])</span>
+                </span>
+            }
+        </div>
+    }
+    else
+    {
+        <div class="text-center py-4 text-muted"><small>Insufficient data to chart.</small></div>
+    }
+</div>
+
+@code {
+    [Parameter] public List<MetricSeriesGroup> Series { get; set; } = [];
+    [Parameter] public int HeightPx { get; set; } = 220;
+
+    private const int W = 600;
+    private const int H = 200;
+    private const int Pad = 3;
+
+    private static readonly string[] Palette =
+        ["#4a90d9", "#f48771", "#7ab648", "#e0a458", "#9b7fd4", "#4bbfae", "#d46aa8", "#6c8ebf", "#c17f3a", "#5aa469"];
+
+    private List<MetricSeriesGroup> drawable = [];
+    private double _minTicks;
+    private double _spanTicks = 1;
+    private double _maxVal;
+
+    protected override void OnParametersSet()
+    {
+        drawable = Series.Where(s => s.Points.Count >= 2).ToList();
+        List<TimeSeriesDataPoint> all = drawable.SelectMany(s => s.Points).ToList();
+        if (all.Count == 0) { _maxVal = 0; return; }
+
+        _minTicks = all.Min(p => p.Timestamp.Ticks);
+        double maxTicks = all.Max(p => p.Timestamp.Ticks);
+        _spanTicks = Math.Max(1, maxTicks - _minTicks);
+        _maxVal = Math.Max(all.Max(p => p.Value), double.Epsilon);
+    }
+
+    private string ColorAt(int i) => Palette[i % Palette.Length];
+
+    private string LinePoints(MetricSeriesGroup s)
+    {
+        List<string> pts = [];
+        foreach (TimeSeriesDataPoint p in s.Points)
+        {
+            double x = Pad + (p.Timestamp.Ticks - _minTicks) / _spanTicks * (W - 2 * Pad);
+            double y = H - Pad - (p.Value / _maxVal) * (H - 2 * Pad);
+            pts.Add($"{x:F1},{y:F1}");
+        }
+        return string.Join(" ", pts);
+    }
+
+    private static string LastValue(MetricSeriesGroup s)
+    {
+        double v = s.Points[^1].Value;
+        return v >= 100 ? v.ToString("F0") : v.ToString("F2");
+    }
+}

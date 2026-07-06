@@ -1,0 +1,156 @@
+@using EntKube.Web.Services
+@inject PgMetricsService Metrics
+
+@if (!available && !isLoading)
+{
+    <div class="alert alert-light border text-muted small py-2">
+        <span class="bi bi-graph-up me-1"></span>
+        No native metrics for this cluster yet. Install the <strong>EntKube Telemetry Collector</strong> and
+        instrument your apps to emit OpenTelemetry metrics (OTLP) to populate this view.
+    </div>
+}
+else
+{
+    <div class="row g-2 align-items-end mb-3">
+        <div class="col-md-4">
+            <label class="form-label small text-muted mb-1">Metric</label>
+            <select class="form-select form-select-sm font-monospace" @bind="selectedMetric">
+                <option value="">— select a metric —</option>
+                @foreach (string m in metricNames)
+                {
+                    <option value="@m">@m</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label small text-muted mb-1">Service</label>
+            <select class="form-select form-select-sm" @bind="selectedService">
+                <option value="">All services</option>
+                @foreach (string s in services)
+                {
+                    <option value="@s">@s</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label small text-muted mb-1">Break down by</label>
+            <select class="form-select form-select-sm" @bind="breakdown">
+                <option value="">None (total)</option>
+                <option value="pod">Pod</option>
+                <option value="service">Service</option>
+                <option value="namespace">Namespace</option>
+            </select>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label small text-muted mb-1">Time range</label>
+            <select class="form-select form-select-sm" @bind="timeRangeMinutes">
+                <option value="15">Last 15 minutes</option>
+                <option value="60">Last 1 hour</option>
+                <option value="180">Last 3 hours</option>
+                <option value="720">Last 12 hours</option>
+                <option value="1440">Last 24 hours</option>
+            </select>
+        </div>
+        <div class="col-md-2">
+            <button class="btn btn-sm btn-primary w-100" @onclick="Load"
+                    disabled="@(isQuerying || string.IsNullOrEmpty(selectedMetric))">
+                @if (isQuerying) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                <span class="bi bi-graph-up me-1"></span>Chart
+            </button>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(queryError))
+    {
+        <div class="alert alert-warning small py-2"><span class="bi bi-exclamation-triangle me-1"></span>@queryError</div>
+    }
+
+    @if (grouped.Count > 0)
+    {
+        <div class="card card-body">
+            <div class="small text-muted mb-1 font-monospace">@selectedMetric — by @breakdown</div>
+            <MultiSeriesChart Series="grouped" HeightPx="240" />
+        </div>
+    }
+    else if (series.Count > 0)
+    {
+        <div class="card card-body">
+            <MetricChart Title="@selectedMetric" DataPoints="series" Color="#4a90d9" HeightPx="220" />
+        </div>
+    }
+    else if (charted && !isQuerying)
+    {
+        <div class="text-center py-4 text-muted">
+            <span class="bi bi-graph-up display-6 d-block mb-2 opacity-25"></span>
+            No data points for this metric in the selected range.
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public required Guid ClusterId { get; set; }
+
+    private bool available;
+    private bool isLoading = true;
+    private List<string> metricNames = [];
+    private List<string> services = [];
+    private string selectedMetric = "";
+    private string selectedService = "";
+    private string breakdown = "";
+    private int timeRangeMinutes = 60;
+
+    private List<TimeSeriesDataPoint> series = [];
+    private List<MetricSeriesGroup> grouped = [];
+    private bool isQuerying;
+    private bool charted;
+    private string? queryError;
+    private Guid _lastCluster;
+
+    // The metric-name/service lists depend only on the cluster, so load them once per cluster rather than
+    // re-running HasData + two DISTINCT scans over the partitioned metrics table on every parameter set.
+    protected override async Task OnParametersSetAsync()
+    {
+        if (ClusterId == _lastCluster) return;
+        _lastCluster = ClusterId;
+        series = []; grouped = []; charted = false; selectedMetric = "";
+
+        isLoading = true;
+        available = await Metrics.HasDataAsync(ClusterId);
+        if (available)
+        {
+            KubernetesOperationResult<List<string>> n = await Metrics.GetMetricNamesAsync(ClusterId);
+            metricNames = n.IsSuccess ? n.Data ?? [] : [];
+            KubernetesOperationResult<List<string>> s = await Metrics.GetServicesAsync(ClusterId);
+            services = s.IsSuccess ? s.Data ?? [] : [];
+        }
+        isLoading = false;
+    }
+
+    private async Task Load()
+    {
+        isQuerying = true;
+        queryError = null;
+        StateHasChanged();
+
+        DateTime to = DateTime.UtcNow;
+        DateTime from = to.AddMinutes(-timeRangeMinutes);
+        string? svc = string.IsNullOrEmpty(selectedService) ? null : selectedService;
+        series = []; grouped = [];
+
+        if (string.IsNullOrEmpty(breakdown))
+        {
+            KubernetesOperationResult<List<TimeSeriesDataPoint>> res = await Metrics.GetSeriesAsync(ClusterId, selectedMetric, svc, from, to);
+            if (res.IsSuccess && res.Data is not null) series = res.Data;
+            else queryError = res.Error;
+        }
+        else
+        {
+            KubernetesOperationResult<List<MetricSeriesGroup>> res = await Metrics.GetSeriesByAsync(ClusterId, selectedMetric, svc, breakdown, from, to);
+            if (res.IsSuccess && res.Data is not null) grouped = res.Data;
+            else queryError = res.Error;
+        }
+
+        charted = true;
+        isQuerying = false;
+    }
+}

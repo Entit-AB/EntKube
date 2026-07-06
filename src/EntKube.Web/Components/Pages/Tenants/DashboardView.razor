@@ -1,0 +1,224 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject DashboardService Dashboards
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <div class="d-flex align-items-center gap-2">
+        <button class="btn btn-sm btn-link p-0 me-1" @onclick="() => OnClose.InvokeAsync()"><span class="bi bi-arrow-left"></span></button>
+        <h6 class="mb-0">@Dashboard.Name</h6>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+        <select class="form-select form-select-sm" style="min-width:180px" @bind="selectedClusterId" @bind:after="StateHasChanged">
+            <option value="">— cluster —</option>
+            @foreach (var c in clusters) { <option value="@c.Id">@c.Name</option> }
+        </select>
+        <select class="form-select form-select-sm" style="width:auto" @bind="timeRangeMinutes" @bind:after="OnRangeChanged">
+            <option value="15">15m</option>
+            <option value="60">1h</option>
+            <option value="180">3h</option>
+            <option value="720">12h</option>
+            <option value="1440">24h</option>
+        </select>
+        <button class="btn btn-sm @(editMode ? "btn-success" : "btn-outline-secondary")" @onclick="() => editMode = !editMode">
+            <span class="bi bi-pencil me-1"></span>@(editMode ? "Done" : "Edit")
+        </button>
+    </div>
+</div>
+
+@if (editMode)
+{
+    <div class="mb-3 d-flex gap-2">
+        <button class="btn btn-sm btn-primary" @onclick="AddPanel"><span class="bi bi-plus-lg me-1"></span>Add panel</button>
+        <span class="text-muted small align-self-center">Configure each panel with the gear icon; changes save automatically.</span>
+    </div>
+}
+
+@if (editing is not null)
+{
+    <div class="card card-body mb-3">
+        <div class="row g-2">
+            <div class="col-md-3">
+                <label class="form-label small mb-1">Title (optional)</label>
+                <input class="form-control form-control-sm" @bind="editing.Title" placeholder="auto" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small mb-1">Type</label>
+                <select class="form-select form-select-sm" @bind="editing.Type">
+                    <option value="@DashboardPanelType.MetricSeries">Metric series</option>
+                    <option value="@DashboardPanelType.ServiceRed">Service RED</option>
+                    <option value="@DashboardPanelType.LogVolume">Log volume</option>
+                </select>
+            </div>
+            @if (editing.Type == DashboardPanelType.MetricSeries)
+            {
+                <div class="col-md-3">
+                    <label class="form-label small mb-1">Metric name</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="editing.Metric" placeholder="e.g. process.cpu.utilization" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small mb-1">Service (optional)</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="editing.Service" placeholder="all" />
+                </div>
+            }
+            else if (editing.Type == DashboardPanelType.ServiceRed)
+            {
+                <div class="col-md-3">
+                    <label class="form-label small mb-1">Service</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="editing.Service" placeholder="service.name" />
+                </div>
+            }
+            else
+            {
+                <div class="col-md-3">
+                    <label class="form-label small mb-1">Namespace</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="editing.Namespace" placeholder="required" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small mb-1">Body contains (optional)</label>
+                    <input class="form-control form-control-sm font-monospace" @bind="editing.MatchText" placeholder="substring" />
+                </div>
+            }
+            <div class="col-md-2">
+                <label class="form-label small mb-1">Width</label>
+                <select class="form-select form-select-sm" @bind="editing.Width">
+                    <option value="4">Third</option>
+                    <option value="6">Half</option>
+                    <option value="12">Full</option>
+                </select>
+            </div>
+            <div class="col-12 mt-1 d-flex gap-2">
+                <button class="btn btn-sm btn-primary" @onclick="DoneEditingAsync">Done</button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelEditing">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (string.IsNullOrEmpty(selectedClusterId))
+{
+    <div class="text-center py-5 text-muted"><span class="bi bi-hdd-rack display-6 d-block mb-2 opacity-25"></span>Select a cluster to render this dashboard.</div>
+}
+else if (panels.Count == 0)
+{
+    <div class="text-center py-5 text-muted"><span class="bi bi-grid-1x2 display-6 d-block mb-2 opacity-25"></span>No panels yet. Click <strong>Edit → Add panel</strong> to build this dashboard.</div>
+}
+else
+{
+    <div class="row g-3">
+        @foreach (var p in panels)
+        {
+            <div class="col-md-@p.Width">
+                <DashboardPanelCard Panel="p" ClusterId="@(Guid.Parse(selectedClusterId))" From="_from" To="_to"
+                                    Editable="editMode" OnRemove="RemovePanelAsync" OnEdit="EditPanel" />
+            </div>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public required Dashboard Dashboard { get; set; }
+    [Parameter] public required Guid TenantId { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private List<DashboardPanel> panels = [];
+    private List<ClusterOption> clusters = [];
+    private string selectedClusterId = "";
+    private int timeRangeMinutes = 60;
+    private bool editMode;
+    private DashboardPanel? editing;         // working copy shown in the editor form
+    private DashboardPanel? editingTarget;   // original panel being edited (null = adding new)
+    private Guid _loadedDashboard;
+    private DateTime _from;
+    private DateTime _to;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Dashboard.Id != _loadedDashboard)
+        {
+            _loadedDashboard = Dashboard.Id;
+            panels = DashboardService.ParsePanels(Dashboard);
+            editing = null;
+            editingTarget = null;
+        }
+        if (_to == default) SnapshotRange();
+        if (clusters.Count == 0)
+        {
+            using ApplicationDbContext db = DbFactory.CreateDbContext();
+            clusters = await db.KubernetesClusters.Where(c => c.TenantId == TenantId)
+                .OrderBy(c => c.Name).Select(c => new ClusterOption(c.Id.ToString(), c.Name)).ToListAsync();
+            if (clusters.Count > 0 && string.IsNullOrEmpty(selectedClusterId)) selectedClusterId = clusters[0].Id;
+        }
+    }
+
+    // Snapshot the [from, to] window on cluster/range change instead of deriving it from DateTime.UtcNow
+    // every render — otherwise the panel cards' dedupe key changes on every re-render (each keystroke while
+    // editing) and all panels refetch needlessly.
+    private void SnapshotRange()
+    {
+        _to = DateTime.UtcNow;
+        _from = _to.AddMinutes(-timeRangeMinutes);
+    }
+
+    private void OnRangeChanged()
+    {
+        SnapshotRange();
+        StateHasChanged();
+    }
+
+    private void AddPanel()
+    {
+        editingTarget = null;   // adding new — don't append to the dashboard until Done
+        editing = new DashboardPanel { Type = DashboardPanelType.MetricSeries };
+    }
+
+    // Edit a working copy so partial keystrokes don't mutate (or re-query) the live rendered panel.
+    private void EditPanel(DashboardPanel p)
+    {
+        editingTarget = p;
+        editing = Clone(p);
+    }
+
+    private async Task DoneEditingAsync()
+    {
+        if (editing is not null)
+        {
+            if (editingTarget is null)
+            {
+                panels.Add(editing);
+            }
+            else
+            {
+                int i = panels.IndexOf(editingTarget);
+                if (i >= 0) panels[i] = editing;
+            }
+        }
+        editing = null;
+        editingTarget = null;
+        await SaveAsync();
+    }
+
+    private void CancelEditing()
+    {
+        editing = null;
+        editingTarget = null;
+    }
+
+    private async Task RemovePanelAsync(DashboardPanel p)
+    {
+        panels.Remove(p);
+        if (editingTarget == p) { editing = null; editingTarget = null; }
+        await SaveAsync();
+    }
+
+    private static DashboardPanel Clone(DashboardPanel p) => new()
+    {
+        Id = p.Id, Title = p.Title, Type = p.Type, Metric = p.Metric,
+        Service = p.Service, Namespace = p.Namespace, MatchText = p.MatchText, Width = p.Width
+    };
+
+    private Task SaveAsync() => Dashboards.SavePanelsAsync(TenantId, Dashboard.Id, panels);
+
+    private record ClusterOption(string Id, string Name);
+}

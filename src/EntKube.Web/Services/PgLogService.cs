@@ -298,6 +298,40 @@ public class PgLogService(
 
     private Task<Guid?> ResolveTenantAsync(Guid clusterId, CancellationToken ct)
         => ResolveOrNull(clusterId, ct);
+
+    /// <summary>
+    /// Counts logs at/above <paramref name="minLevel"/> over a window, optionally scoped by namespace and
+    /// a case-sensitive body substring. Drives the LogErrorRate alert rule.
+    /// </summary>
+    public async Task<KubernetesOperationResult<long>> CountAsync(
+        Guid clusterId, string? ns, string? matchText, LogLevel minLevel, DateTime from, DateTime to, CancellationToken ct = default)
+    {
+        Guid? tenantId = await ResolveTenantAsync(clusterId, ct);
+        if (tenantId is null) return Fail<long>();
+
+        try
+        {
+            await using NpgsqlConnection conn = await Store.OpenConnectionAsync(ct);
+            await using NpgsqlCommand cmd = conn.CreateCommand();
+            List<string> where = ["tenant_id = @t", "cluster_id = @c", "ts >= @from", "ts < @to"];
+            cmd.Parameters.AddWithValue("t", tenantId.Value);
+            cmd.Parameters.AddWithValue("c", clusterId);
+            cmd.Parameters.AddWithValue("from", NpgsqlDbType.TimestampTz, from.ToUniversalTime());
+            cmd.Parameters.AddWithValue("to", NpgsqlDbType.TimestampTz, to.ToUniversalTime());
+            if (minLevel > LogLevel.None) { where.Add("severity >= @minLevel"); cmd.Parameters.AddWithValue("minLevel", (short)minLevel); }
+            if (!string.IsNullOrEmpty(ns)) { where.Add("namespace = @ns"); cmd.Parameters.AddWithValue("ns", ns); }
+            if (!string.IsNullOrEmpty(matchText)) { where.Add("strpos(body, @text) > 0"); cmd.Parameters.AddWithValue("text", matchText); }
+
+            cmd.CommandText = "SELECT count(*) FROM logs WHERE " + string.Join(" AND ", where);
+            object? result = await cmd.ExecuteScalarAsync(ct);
+            return KubernetesOperationResult<long>.Success(result is long l ? l : Convert.ToInt64(result));
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Log count failed (cluster {Cluster})", clusterId);
+            return Fail<long>(ex.Message);
+        }
+    }
 }
 
 /// <summary>One time bucket of the log-volume histogram: total rows and the error+fatal subcount.</summary>
