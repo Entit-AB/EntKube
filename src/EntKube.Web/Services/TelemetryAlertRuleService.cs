@@ -42,6 +42,7 @@ public class TelemetryAlertRuleService(IDbContextFactory<ApplicationDbContext> d
 
             existing.Name = rule.Name;
             existing.ClusterId = rule.ClusterId;
+            existing.SiteId = rule.SiteId;
             existing.Kind = rule.Kind;
             existing.Service = rule.Service;
             existing.Namespace = rule.Namespace;

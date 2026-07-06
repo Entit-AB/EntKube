@@ -46,6 +46,7 @@ public sealed class TelemetryAlertEvaluator(
 
         PgTraceService trace = scope.ServiceProvider.GetRequiredService<PgTraceService>();
         PgLogService log = scope.ServiceProvider.GetRequiredService<PgLogService>();
+        PgRumService rum = scope.ServiceProvider.GetRequiredService<PgRumService>();
         IncidentDispatcher dispatcher = scope.ServiceProvider.GetRequiredService<IncidentDispatcher>();
 
         DateTime now = DateTime.UtcNow;
@@ -69,7 +70,7 @@ public sealed class TelemetryAlertEvaluator(
             {
                 if (InMaintenance(rule.TenantId, clusterId)) continue;   // hold state during maintenance
 
-                Evaluation ev = await EvaluateRuleAsync(rule, clusterId, now, trace, log, ct);
+                Evaluation ev = await EvaluateRuleAsync(rule, clusterId, now, trace, log, rum, ct);
                 if (ev.Status == EvalStatus.Indeterminate) continue;     // transient failure / no data — hold state
 
                 string fingerprint = $"telemetry:{rule.Id:N}:{clusterId:N}";
@@ -134,6 +135,10 @@ public sealed class TelemetryAlertEvaluator(
     {
         if (rule.ClusterId is Guid cid) return [cid];
 
+        // RUM rules are site-scoped and must carry the (site's) cluster the incident is attributed to; never
+        // fan a RUM rule out across all clusters (that would raise a duplicate incident per cluster).
+        if (rule.Kind is TelemetryAlertKind.RumErrorRate or TelemetryAlertKind.RumLcpP75) return [];
+
         List<Guid> all = await db.KubernetesClusters
             .Where(c => c.TenantId == rule.TenantId).Select(c => c.Id).ToListAsync(ct);
         List<Guid> withData = [];
@@ -162,13 +167,34 @@ public sealed class TelemetryAlertEvaluator(
         => string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s[..max]);
 
     private static async Task<Evaluation> EvaluateRuleAsync(
-        TelemetryAlertRule rule, Guid clusterId, DateTime now, PgTraceService trace, PgLogService log, CancellationToken ct)
+        TelemetryAlertRule rule, Guid clusterId, DateTime now, PgTraceService trace, PgLogService log, PgRumService rum, CancellationToken ct)
     {
         DateTime from = now.AddMinutes(-Math.Max(1, rule.WindowMinutes));
         int w = rule.WindowMinutes;
 
         switch (rule.Kind)
         {
+            case TelemetryAlertKind.RumErrorRate:
+            {
+                if (rule.SiteId is not Guid errSite) return Evaluation.Clear;   // misconfigured rule can't fire
+                RumSiteOverview? ov = await rum.GetOverviewAsync(rule.TenantId, errSite, from, now, ct);
+                if (ov is null) return Evaluation.Unknown;                      // transient store failure — hold
+                if (ov.PageViews == 0) return Evaluation.Unknown;              // no traffic — can't judge
+                double perMin = ov.Errors / (double)Math.Max(1, w);
+                return Evaluation.From(perMin > rule.Threshold,
+                    $"browser errors {perMin:F1}/min > {rule.Threshold:F1}/min over {w}m",
+                    $"Browser JS error rate was {perMin:F1}/min ({ov.Errors} errors across {ov.Sessions} sessions) over the last {w} minutes.");
+            }
+            case TelemetryAlertKind.RumLcpP75:
+            {
+                if (rule.SiteId is not Guid lcpSite) return Evaluation.Clear;
+                RumSiteOverview? ov = await rum.GetOverviewAsync(rule.TenantId, lcpSite, from, now, ct);
+                if (ov is null || ov.LcpP75 is null) return Evaluation.Unknown;   // failure or no page views — hold
+                double p75 = ov.LcpP75.Value;
+                return Evaluation.From(p75 > rule.Threshold,
+                    $"LCP p75 {p75:F0}ms > {rule.Threshold:F0}ms over {w}m",
+                    $"Largest Contentful Paint p75 was {p75:F0}ms (threshold {rule.Threshold:F0}ms) over the last {w} minutes.");
+            }
             case TelemetryAlertKind.TraceLatencyP95:
             {
                 if (string.IsNullOrEmpty(rule.Service)) return Evaluation.Clear;   // misconfigured rule can't fire

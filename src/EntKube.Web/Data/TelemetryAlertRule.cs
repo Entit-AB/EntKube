@@ -8,7 +8,11 @@ public enum TelemetryAlertKind
     /// <summary>A service's p95 span latency (ms) over the window.</summary>
     TraceLatencyP95,
     /// <summary>Rate of Error+Fatal logs (optionally namespace/text-scoped) per minute over the window.</summary>
-    LogErrorRate
+    LogErrorRate,
+    /// <summary>Rate of browser JS errors per minute for a RUM site over the window.</summary>
+    RumErrorRate,
+    /// <summary>A RUM site's p75 Largest Contentful Paint (ms) over the window.</summary>
+    RumLcpP75
 }
 
 /// <summary>
@@ -21,8 +25,12 @@ public class TelemetryAlertRule
     public Guid Id { get; set; }
     public Guid TenantId { get; set; }
 
-    /// <summary>Target cluster, or null to evaluate against every cluster of the tenant.</summary>
+    /// <summary>Target cluster, or null to evaluate against every cluster of the tenant. For the RUM kinds
+    /// this is the cluster the incident is attributed to (derived from the site's cluster link).</summary>
     public Guid? ClusterId { get; set; }
+
+    /// <summary>The RUM site to evaluate, for the RUM kinds (required for those).</summary>
+    public Guid? SiteId { get; set; }
 
     public required string Name { get; set; }
     public TelemetryAlertKind Kind { get; set; }

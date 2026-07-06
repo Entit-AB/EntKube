@@ -2,6 +2,7 @@
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject TelemetryAlertRuleService Rules
+@inject RumSiteService RumSites
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 
 <div class="d-flex justify-content-between align-items-center mb-3">
@@ -28,36 +29,58 @@
                     <option value="@TelemetryAlertKind.TraceLatencyP95">Trace: service p95 latency (ms)</option>
                     <option value="@TelemetryAlertKind.TraceErrorRate">Trace: service error rate (%)</option>
                     <option value="@TelemetryAlertKind.LogErrorRate">Log: error rate (per min)</option>
+                    <option value="@TelemetryAlertKind.RumErrorRate">RUM: browser error rate (per min)</option>
+                    <option value="@TelemetryAlertKind.RumLcpP75">RUM: LCP p75 (ms)</option>
                 </select>
             </div>
-            <div class="col-md-4">
-                <label class="form-label small mb-1">Cluster</label>
-                <select class="form-select form-select-sm" @bind="clusterIdStr">
-                    <option value="">All clusters</option>
-                    @foreach (var c in clusters)
-                    {
-                        <option value="@c.Id">@c.Name</option>
-                    }
-                </select>
-            </div>
-
-            @if (editing.Kind is TelemetryAlertKind.TraceLatencyP95 or TelemetryAlertKind.TraceErrorRate)
+            @if (IsRum)
             {
                 <div class="col-md-4">
-                    <label class="form-label small mb-1">Service</label>
-                    <input class="form-control form-control-sm font-monospace" @bind="editing.Service" placeholder="service.name" />
+                    <label class="form-label small mb-1">RUM site</label>
+                    <select class="form-select form-select-sm" @bind="siteIdStr">
+                        <option value="">— select a site —</option>
+                        @foreach (RumSite s in rumSites)
+                        {
+                            <option value="@s.Id">@s.Name</option>
+                        }
+                    </select>
+                    @if (SelectedSiteNeedsCluster)
+                    {
+                        <div class="form-text text-warning">This site isn't linked to a cluster. RUM alerts need a cluster link — set one on the Sites tab.</div>
+                    }
                 </div>
             }
             else
             {
                 <div class="col-md-4">
-                    <label class="form-label small mb-1">Namespace (optional)</label>
-                    <input class="form-control form-control-sm font-monospace" @bind="editing.Namespace" placeholder="blank = all" />
+                    <label class="form-label small mb-1">Cluster</label>
+                    <select class="form-select form-select-sm" @bind="clusterIdStr">
+                        <option value="">All clusters</option>
+                        @foreach (var c in clusters)
+                        {
+                            <option value="@c.Id">@c.Name</option>
+                        }
+                    </select>
                 </div>
-                <div class="col-md-4">
-                    <label class="form-label small mb-1">Body contains (optional)</label>
-                    <input class="form-control form-control-sm font-monospace" @bind="editing.MatchText" placeholder="substring" />
-                </div>
+
+                @if (editing.Kind is TelemetryAlertKind.TraceLatencyP95 or TelemetryAlertKind.TraceErrorRate)
+                {
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">Service</label>
+                        <input class="form-control form-control-sm font-monospace" @bind="editing.Service" placeholder="service.name" />
+                    </div>
+                }
+                else if (editing.Kind == TelemetryAlertKind.LogErrorRate)
+                {
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">Namespace (optional)</label>
+                        <input class="form-control form-control-sm font-monospace" @bind="editing.Namespace" placeholder="blank = all" />
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">Body contains (optional)</label>
+                        <input class="form-control form-control-sm font-monospace" @bind="editing.MatchText" placeholder="substring" />
+                    </div>
+                }
             }
 
             <div class="col-md-3">
@@ -84,7 +107,7 @@
             </div>
 
             <div class="col-12 d-flex gap-2 mt-1">
-                <button class="btn btn-sm btn-primary" @onclick="SaveAsync" disabled="@(string.IsNullOrWhiteSpace(editing.Name))">Save</button>
+                <button class="btn btn-sm btn-primary" @onclick="SaveAsync" disabled="@(string.IsNullOrWhiteSpace(editing.Name) || SaveBlocked)">Save</button>
                 <button class="btn btn-sm btn-outline-secondary" @onclick="() => editing = null">Cancel</button>
             </div>
         </div>
@@ -132,14 +155,22 @@ else if (rules.Count > 0)
 
     private List<TelemetryAlertRule> rules = [];
     private List<ClusterOption> clusters = [];
+    private List<RumSite> rumSites = [];
     private TelemetryAlertRule? editing;
     private string clusterIdStr = "";
+    private string siteIdStr = "";
+
+    private bool IsRum => editing?.Kind is TelemetryAlertKind.RumErrorRate or TelemetryAlertKind.RumLcpP75;
+    private RumSite? SelectedSite => rumSites.FirstOrDefault(s => s.Id.ToString() == siteIdStr);
+    private bool SelectedSiteNeedsCluster => IsRum && SelectedSite is not null && SelectedSite.ClusterId is null;
+    private bool SaveBlocked => IsRum && (SelectedSite is null || SelectedSite.ClusterId is null);
 
     protected override async Task OnInitializedAsync()
     {
         using ApplicationDbContext db = DbFactory.CreateDbContext();
         clusters = await db.KubernetesClusters.Where(c => c.TenantId == TenantId)
             .OrderBy(c => c.Name).Select(c => new ClusterOption(c.Id, c.Name)).ToListAsync();
+        rumSites = await RumSites.ListAsync(TenantId);
         await Reload();
     }
 
@@ -151,13 +182,24 @@ else if (rules.Count > 0)
     {
         editing = r;
         clusterIdStr = r.ClusterId?.ToString() ?? "";
+        siteIdStr = r.SiteId?.ToString() ?? "";
     }
 
     private async Task SaveAsync()
     {
         if (editing is null) return;
         editing.TenantId = TenantId;
-        editing.ClusterId = string.IsNullOrEmpty(clusterIdStr) ? null : Guid.Parse(clusterIdStr);
+        if (IsRum)
+        {
+            if (SelectedSite?.ClusterId is not Guid siteCluster) return;   // guarded by SaveBlocked
+            editing.SiteId = SelectedSite.Id;
+            editing.ClusterId = siteCluster;   // the incident is attributed to the site's linked cluster
+        }
+        else
+        {
+            editing.SiteId = null;
+            editing.ClusterId = string.IsNullOrEmpty(clusterIdStr) ? null : Guid.Parse(clusterIdStr);
+        }
         await Rules.UpsertAsync(editing);
         editing = null;
         await Reload();
@@ -177,14 +219,14 @@ else if (rules.Count > 0)
 
     private string ThresholdUnit => editing?.Kind switch
     {
-        TelemetryAlertKind.TraceLatencyP95 => "ms",
+        TelemetryAlertKind.TraceLatencyP95 or TelemetryAlertKind.RumLcpP75 => "ms",
         TelemetryAlertKind.TraceErrorRate => "%",
         _ => "per min"
     };
 
     private static string UnitFor(TelemetryAlertKind k) => k switch
     {
-        TelemetryAlertKind.TraceLatencyP95 => "ms",
+        TelemetryAlertKind.TraceLatencyP95 or TelemetryAlertKind.RumLcpP75 => "ms",
         TelemetryAlertKind.TraceErrorRate => "%",
         _ => "/min"
     };
@@ -193,12 +235,17 @@ else if (rules.Count > 0)
     {
         TelemetryAlertKind.TraceLatencyP95 => "p95 latency",
         TelemetryAlertKind.TraceErrorRate => "error rate",
-        _ => "log error rate"
+        TelemetryAlertKind.LogErrorRate => "log error rate",
+        TelemetryAlertKind.RumErrorRate => "RUM error rate",
+        TelemetryAlertKind.RumLcpP75 => "RUM LCP p75",
+        _ => k.ToString()
     };
 
-    private static string Target(TelemetryAlertRule r) => r.Kind switch
+    private string Target(TelemetryAlertRule r) => r.Kind switch
     {
         TelemetryAlertKind.LogErrorRate => r.Namespace is null ? "all namespaces" : r.Namespace,
+        TelemetryAlertKind.RumErrorRate or TelemetryAlertKind.RumLcpP75 =>
+            rumSites.FirstOrDefault(s => s.Id == r.SiteId)?.Name ?? "(site)",
         _ => r.Service ?? "—"
     };
 
@@ -209,7 +256,7 @@ else if (rules.Count > 0)
 
     private static TelemetryAlertRule Clone(TelemetryAlertRule r) => new()
     {
-        Id = r.Id, TenantId = r.TenantId, ClusterId = r.ClusterId, Name = r.Name, Kind = r.Kind,
+        Id = r.Id, TenantId = r.TenantId, ClusterId = r.ClusterId, SiteId = r.SiteId, Name = r.Name, Kind = r.Kind,
         Service = r.Service, Namespace = r.Namespace, MatchText = r.MatchText, Threshold = r.Threshold,
         WindowMinutes = r.WindowMinutes, Severity = r.Severity, RunbookUrl = r.RunbookUrl, IsEnabled = r.IsEnabled
     };
