@@ -14,7 +14,7 @@
             <option value="">— cluster —</option>
             @foreach (var c in clusters) { <option value="@c.Id">@c.Name</option> }
         </select>
-        <select class="form-select form-select-sm" style="width:auto" @bind="timeRangeMinutes" @bind:after="StateHasChanged">
+        <select class="form-select form-select-sm" style="width:auto" @bind="timeRangeMinutes" @bind:after="OnRangeChanged">
             <option value="15">15m</option>
             <option value="60">1h</option>
             <option value="180">3h</option>
@@ -88,8 +88,9 @@
                     <option value="12">Full</option>
                 </select>
             </div>
-            <div class="col-12 mt-1">
+            <div class="col-12 mt-1 d-flex gap-2">
                 <button class="btn btn-sm btn-primary" @onclick="DoneEditingAsync">Done</button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelEditing">Cancel</button>
             </div>
         </div>
     </div>
@@ -109,7 +110,7 @@ else
         @foreach (var p in panels)
         {
             <div class="col-md-@p.Width">
-                <DashboardPanelCard Panel="p" ClusterId="@(Guid.Parse(selectedClusterId))" From="From" To="To"
+                <DashboardPanelCard Panel="p" ClusterId="@(Guid.Parse(selectedClusterId))" From="_from" To="_to"
                                     Editable="editMode" OnRemove="RemovePanelAsync" OnEdit="EditPanel" />
             </div>
         }
@@ -126,11 +127,11 @@ else
     private string selectedClusterId = "";
     private int timeRangeMinutes = 60;
     private bool editMode;
-    private DashboardPanel? editing;
+    private DashboardPanel? editing;         // working copy shown in the editor form
+    private DashboardPanel? editingTarget;   // original panel being edited (null = adding new)
     private Guid _loadedDashboard;
-
-    private DateTime To => DateTime.UtcNow;
-    private DateTime From => To.AddMinutes(-timeRangeMinutes);
+    private DateTime _from;
+    private DateTime _to;
 
     protected override async Task OnParametersSetAsync()
     {
@@ -139,7 +140,9 @@ else
             _loadedDashboard = Dashboard.Id;
             panels = DashboardService.ParsePanels(Dashboard);
             editing = null;
+            editingTarget = null;
         }
+        if (_to == default) SnapshotRange();
         if (clusters.Count == 0)
         {
             using ApplicationDbContext db = DbFactory.CreateDbContext();
@@ -149,27 +152,71 @@ else
         }
     }
 
-    private void AddPanel()
+    // Snapshot the [from, to] window on cluster/range change instead of deriving it from DateTime.UtcNow
+    // every render — otherwise the panel cards' dedupe key changes on every re-render (each keystroke while
+    // editing) and all panels refetch needlessly.
+    private void SnapshotRange()
     {
-        DashboardPanel p = new() { Type = DashboardPanelType.MetricSeries };
-        panels.Add(p);
-        editing = p;
+        _to = DateTime.UtcNow;
+        _from = _to.AddMinutes(-timeRangeMinutes);
     }
 
-    private void EditPanel(DashboardPanel p) => editing = p;
+    private void OnRangeChanged()
+    {
+        SnapshotRange();
+        StateHasChanged();
+    }
+
+    private void AddPanel()
+    {
+        editingTarget = null;   // adding new — don't append to the dashboard until Done
+        editing = new DashboardPanel { Type = DashboardPanelType.MetricSeries };
+    }
+
+    // Edit a working copy so partial keystrokes don't mutate (or re-query) the live rendered panel.
+    private void EditPanel(DashboardPanel p)
+    {
+        editingTarget = p;
+        editing = Clone(p);
+    }
 
     private async Task DoneEditingAsync()
     {
+        if (editing is not null)
+        {
+            if (editingTarget is null)
+            {
+                panels.Add(editing);
+            }
+            else
+            {
+                int i = panels.IndexOf(editingTarget);
+                if (i >= 0) panels[i] = editing;
+            }
+        }
         editing = null;
+        editingTarget = null;
         await SaveAsync();
+    }
+
+    private void CancelEditing()
+    {
+        editing = null;
+        editingTarget = null;
     }
 
     private async Task RemovePanelAsync(DashboardPanel p)
     {
         panels.Remove(p);
-        if (editing == p) editing = null;
+        if (editingTarget == p) { editing = null; editingTarget = null; }
         await SaveAsync();
     }
+
+    private static DashboardPanel Clone(DashboardPanel p) => new()
+    {
+        Id = p.Id, Title = p.Title, Type = p.Type, Metric = p.Metric,
+        Service = p.Service, Namespace = p.Namespace, MatchText = p.MatchText, Width = p.Width
+    };
 
     private Task SaveAsync() => Dashboards.SavePanelsAsync(TenantId, Dashboard.Id, panels);
 

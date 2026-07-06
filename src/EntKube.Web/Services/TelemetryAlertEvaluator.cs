@@ -49,25 +49,36 @@ public sealed class TelemetryAlertEvaluator(
         IncidentDispatcher dispatcher = scope.ServiceProvider.GetRequiredService<IncidentDispatcher>();
 
         DateTime now = DateTime.UtcNow;
+
+        // Active maintenance windows: hold incident state for covered (tenant, cluster) rather than
+        // advancing it in the DB and dropping the notification in the dispatcher — otherwise an alert that
+        // fires (or clears) during a window is recorded but never notified, even after the window ends.
+        List<MaintenanceWindow> windows = await db.MaintenanceWindows
+            .Where(w => w.StartsAt <= now && w.EndsAt >= now).ToListAsync(ct);
+        bool InMaintenance(Guid tenant, Guid cluster) =>
+            windows.Any(w => w.TenantId == tenant && (w.ClusterId == null || w.ClusterId == cluster));
+
         // Accumulate firing/resolved incidents per (tenant, cluster) to dispatch after the single save.
         Dictionary<(Guid Tenant, Guid Cluster), (List<AlertIncident> Firing, List<AlertIncident> Resolved)> byCluster = [];
 
         foreach (TelemetryAlertRule rule in rules)
         {
-            List<Guid> clusters = rule.ClusterId is Guid cid
-                ? [cid]
-                : await db.KubernetesClusters.Where(c => c.TenantId == rule.TenantId).Select(c => c.Id).ToListAsync(ct);
+            List<Guid> clusters = await ResolveClustersAsync(db, rule, trace, log, ct);
 
             foreach (Guid clusterId in clusters)
             {
+                if (InMaintenance(rule.TenantId, clusterId)) continue;   // hold state during maintenance
+
                 Evaluation ev = await EvaluateRuleAsync(rule, clusterId, now, trace, log, ct);
+                if (ev.Status == EvalStatus.Indeterminate) continue;     // transient failure / no data — hold state
+
                 string fingerprint = $"telemetry:{rule.Id:N}:{clusterId:N}";
                 AlertIncident? inc = await db.AlertIncidents
                     .FirstOrDefaultAsync(i => i.ClusterId == clusterId && i.Fingerprint == fingerprint, ct);
 
                 (List<AlertIncident> firing, List<AlertIncident> resolved) = Bucket(byCluster, rule.TenantId, clusterId);
 
-                if (ev.Firing)
+                if (ev.Status == EvalStatus.Firing)
                 {
                     if (inc is null)
                     {
@@ -83,8 +94,8 @@ public sealed class TelemetryAlertEvaluator(
                     else
                     {
                         // still firing — refresh fields, do not re-notify
-                        inc.Summary = ev.Summary; inc.Description = ev.Description;
-                        inc.Severity = rule.Severity; inc.UpdatedAt = now;
+                        inc.Summary = Truncate(ev.Summary, 500); inc.Description = Truncate(ev.Description, 2000);
+                        inc.Severity = Truncate(rule.Severity, 20); inc.UpdatedAt = now;
                     }
                 }
                 else if (inc is not null && inc.Status != IncidentStatus.Resolved)
@@ -115,7 +126,40 @@ public sealed class TelemetryAlertEvaluator(
         return b;
     }
 
-    private sealed record Evaluation(bool Firing, string Summary, string Description);
+    /// <summary>Clusters to evaluate a rule against: the pinned cluster, or (for a tenant-wide rule)
+    /// only the clusters that actually carry telemetry for this signal — idle clusters are skipped so
+    /// they don't cost an aggregate scan every cycle.</summary>
+    private static async Task<List<Guid>> ResolveClustersAsync(
+        ApplicationDbContext db, TelemetryAlertRule rule, PgTraceService trace, PgLogService log, CancellationToken ct)
+    {
+        if (rule.ClusterId is Guid cid) return [cid];
+
+        List<Guid> all = await db.KubernetesClusters
+            .Where(c => c.TenantId == rule.TenantId).Select(c => c.Id).ToListAsync(ct);
+        List<Guid> withData = [];
+        foreach (Guid c in all)
+            if (await HasSignalAsync(rule.Kind, c, trace, log, ct)) withData.Add(c);
+        return withData;
+    }
+
+    private static Task<bool> HasSignalAsync(
+        TelemetryAlertKind kind, Guid clusterId, PgTraceService trace, PgLogService log, CancellationToken ct)
+        => kind == TelemetryAlertKind.LogErrorRate ? log.HasDataAsync(clusterId, ct) : trace.HasDataAsync(clusterId, ct);
+
+    private enum EvalStatus { Firing, Clear, Indeterminate }
+
+    // Clear = data present and below threshold (safe to resolve). Indeterminate = query failed or no data
+    // to judge on (hold the current incident state rather than declaring an all-clear).
+    private sealed record Evaluation(EvalStatus Status, string Summary, string Description)
+    {
+        public static readonly Evaluation Clear = new(EvalStatus.Clear, "", "");
+        public static readonly Evaluation Unknown = new(EvalStatus.Indeterminate, "", "");
+        public static Evaluation From(bool firing, string summary, string description)
+            => new(firing ? EvalStatus.Firing : EvalStatus.Clear, summary, description);
+    }
+
+    private static string Truncate(string? s, int max)
+        => string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s[..max]);
 
     private static async Task<Evaluation> EvaluateRuleAsync(
         TelemetryAlertRule rule, Guid clusterId, DateTime now, PgTraceService trace, PgLogService log, CancellationToken ct)
@@ -127,36 +171,38 @@ public sealed class TelemetryAlertEvaluator(
         {
             case TelemetryAlertKind.TraceLatencyP95:
             {
-                if (string.IsNullOrEmpty(rule.Service)) return new(false, "", "");
+                if (string.IsNullOrEmpty(rule.Service)) return Evaluation.Clear;   // misconfigured rule can't fire
                 KubernetesOperationResult<ServiceStats> res = await trace.GetServiceStatsAsync(clusterId, rule.Service, from, now, ct);
-                if (!res.IsSuccess || res.Data is null || res.Data.Count == 0) return new(false, "", "");
+                if (!res.IsSuccess) return Evaluation.Unknown;                     // transient store failure — hold
+                if (res.Data is null || res.Data.Count == 0) return Evaluation.Unknown;   // no spans — can't judge; don't all-clear a down service
                 double p95 = res.Data.P95Ms;
-                return new(p95 > rule.Threshold,
+                return Evaluation.From(p95 > rule.Threshold,
                     $"{rule.Service} p95 latency {p95:F0}ms > {rule.Threshold:F0}ms over {w}m",
                     $"p95 latency for service '{rule.Service}' was {p95:F0}ms (threshold {rule.Threshold:F0}ms) over the last {w} minutes.");
             }
             case TelemetryAlertKind.TraceErrorRate:
             {
-                if (string.IsNullOrEmpty(rule.Service)) return new(false, "", "");
+                if (string.IsNullOrEmpty(rule.Service)) return Evaluation.Clear;   // misconfigured rule can't fire
                 KubernetesOperationResult<ServiceStats> res = await trace.GetServiceStatsAsync(clusterId, rule.Service, from, now, ct);
-                if (!res.IsSuccess || res.Data is null || res.Data.Count == 0) return new(false, "", "");
+                if (!res.IsSuccess) return Evaluation.Unknown;                     // transient store failure — hold
+                if (res.Data is null || res.Data.Count == 0) return Evaluation.Unknown;   // no spans — can't judge; don't all-clear a down service
                 double rate = res.Data.Errors * 100.0 / res.Data.Count;
-                return new(rate > rule.Threshold,
+                return Evaluation.From(rate > rule.Threshold,
                     $"{rule.Service} error rate {rate:F1}% > {rule.Threshold:F1}% over {w}m",
                     $"Error rate for '{rule.Service}' was {rate:F1}% ({res.Data.Errors}/{res.Data.Count} inbound spans) over the last {w} minutes.");
             }
             case TelemetryAlertKind.LogErrorRate:
             {
                 KubernetesOperationResult<long> res = await log.CountAsync(clusterId, rule.Namespace, rule.MatchText, LogLevel.Error, from, now, ct);
-                if (!res.IsSuccess) return new(false, "", "");
+                if (!res.IsSuccess) return Evaluation.Unknown;                     // transient store failure — hold
                 double perMin = res.Data / (double)Math.Max(1, w);
                 string ns = rule.Namespace is null ? "all namespaces" : $"namespace {rule.Namespace}";
-                return new(perMin > rule.Threshold,
+                return Evaluation.From(perMin > rule.Threshold,
                     $"error logs {perMin:F1}/min > {rule.Threshold:F1}/min ({ns})",
                     $"Error/fatal log rate was {perMin:F1}/min ({res.Data} lines) in {ns} over the last {w} minutes.");
             }
             default:
-                return new(false, "", "");
+                return Evaluation.Clear;
         }
     }
 
@@ -165,11 +211,13 @@ public sealed class TelemetryAlertEvaluator(
         {
             ClusterId = clusterId,
             Fingerprint = fingerprint,
-            AlertName = rule.Name,
-            Severity = rule.Severity,
-            Summary = ev.Summary,
-            Description = ev.Description,
-            RunbookUrl = rule.RunbookUrl ?? "",
+            // Truncate to the AlertIncident column caps so one over-long rule field can't throw and roll
+            // back the whole cycle's single SaveChanges (freezing alerting for every tenant).
+            AlertName = Truncate(rule.Name, 200),
+            Severity = Truncate(rule.Severity, 20),
+            Summary = Truncate(ev.Summary, 500),
+            Description = Truncate(ev.Description, 2000),
+            RunbookUrl = Truncate(rule.RunbookUrl, 500),
             LabelsJson = Labels(rule),
             StartsAt = now,
             Status = IncidentStatus.Active,
@@ -185,9 +233,9 @@ public sealed class TelemetryAlertEvaluator(
         inc.ResolvedAt = null;
         inc.AcknowledgedBy = null;
         inc.AcknowledgedAt = null;
-        inc.Severity = rule.Severity;
-        inc.Summary = ev.Summary;
-        inc.Description = ev.Description;
+        inc.Severity = Truncate(rule.Severity, 20);
+        inc.Summary = Truncate(ev.Summary, 500);
+        inc.Description = Truncate(ev.Description, 2000);
         inc.UpdatedAt = now;
     }
 

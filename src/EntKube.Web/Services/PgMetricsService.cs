@@ -48,8 +48,10 @@ public class PgMetricsService(TelemetryStore store, ClusterTenantResolver tenant
     }
 
     /// <summary>
-    /// Bucketed time series for a metric: avg(value) per date_bin bucket over [from, to], optionally
-    /// service-scoped. avg suits gauges; counters are charted as their reported value (rate() is a later refinement).
+    /// Bucketed time series for a metric over [from, to], optionally service-scoped. Each distinct series
+    /// (service/namespace/pod/labels) is collapsed to its per-bucket average, then summed across series, so a
+    /// metric emitted by N pods reports the total rather than a per-pod average that understates it. Cumulative
+    /// counters are still charted as their reported value (rate()/reset handling is a later refinement).
     /// </summary>
     public async Task<KubernetesOperationResult<List<TimeSeriesDataPoint>>> GetSeriesAsync(
         Guid clusterId, string name, string? service, DateTime from, DateTime to, int buckets = 60, CancellationToken ct = default)
@@ -65,10 +67,15 @@ public class PgMetricsService(TelemetryStore store, ClusterTenantResolver tenant
             await using NpgsqlConnection conn = await Store.OpenConnectionAsync(ct);
             await using NpgsqlCommand cmd = conn.CreateCommand();
             string svcClause = string.IsNullOrEmpty(service) ? "" : " AND service = @service";
+            // Collapse each series (service/namespace/pod/labels) to its per-bucket average first, then sum
+            // across series, so multi-pod metrics report the total instead of a per-pod average.
             cmd.CommandText =
-                "SELECT date_bin(@interval, ts, @from) AS b, avg(value) AS v FROM metrics " +
-                "WHERE tenant_id = @t AND cluster_id = @c AND name = @name AND ts >= @from AND ts < @to" + svcClause +
-                " GROUP BY b ORDER BY b";
+                "SELECT b, sum(sv) AS v FROM (" +
+                "  SELECT date_bin(@interval, ts, @from) AS b, service, namespace, pod, labels, avg(value) AS sv " +
+                "  FROM metrics " +
+                "  WHERE tenant_id = @t AND cluster_id = @c AND name = @name AND ts >= @from AND ts < @to" + svcClause +
+                "  GROUP BY b, service, namespace, pod, labels" +
+                ") s GROUP BY b ORDER BY b";
             cmd.Parameters.AddWithValue("t", tenantId.Value);
             cmd.Parameters.AddWithValue("c", clusterId);
             cmd.Parameters.AddWithValue("name", name);

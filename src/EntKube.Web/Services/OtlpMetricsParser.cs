@@ -61,7 +61,11 @@ public static class OtlpMetricsParser
                         double? value = ReadValue(dp);
                         if (value is null) continue;   // no numeric value (or NoRecordedValue flag)
 
-                        DateTime ts = OtlpJson.UnixNanoToUtc(OtlpJson.ReadUnixNano(dp, "timeUnixNano"));
+                        // Skip points without a real observation time — UnixNanoToUtc(0) would stamp them at
+                        // ingest wall-clock, collapsing late/backfilled data onto "now" as a false right-edge spike.
+                        long tsNano = OtlpJson.ReadUnixNano(dp, "timeUnixNano");
+                        if (tsNano == 0) continue;
+                        DateTime ts = OtlpJson.UnixNanoToUtc(tsNano);
 
                         Dictionary<string, string> dpAttrs = new(StringComparer.Ordinal);
                         if (dp.TryGetProperty("attributes", out JsonElement dpa)) OtlpJson.ReadAttributes(dpa, dpAttrs);
