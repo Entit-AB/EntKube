@@ -28,7 +28,8 @@ public sealed class TelemetryStore : IAsyncDisposable
     private const int PartitionLookaheadDays = 2;
 
     /// <summary>The RANGE-partitioned-by-time tables this store manages (partitions + retention).</summary>
-    private static readonly string[] PartitionedTables = ["logs", "spans", "metrics"];
+    private static readonly string[] PartitionedTables =
+        ["logs", "spans", "metrics", "rum_page_views", "rum_errors", "rum_resources"];
 
     /// <summary>True when a telemetry database is configured and usable.</summary>
     public bool IsEnabled => _dataSource is not null;
@@ -261,6 +262,63 @@ public sealed class TelemetryStore : IAsyncDisposable
         CREATE INDEX IF NOT EXISTS metrics_scope_name_ts ON metrics (tenant_id, cluster_id, name, ts DESC);
         -- Upgrade path for installs whose metrics table predates the kind column (propagates to partitions).
         ALTER TABLE metrics ADD COLUMN IF NOT EXISTS kind smallint NOT NULL DEFAULT 0;
+
+        -- Real User Monitoring (browser telemetry). Scoped by tenant_id + site_id (a RumSite). cluster_id
+        -- is intentionally absent — a front-end need not map to a cluster; AJAX rows carry trace_id instead,
+        -- which links into the spans table's trace waterfall.
+        CREATE TABLE IF NOT EXISTS rum_page_views (
+            ts          timestamptz NOT NULL,
+            tenant_id   uuid        NOT NULL,
+            site_id     uuid        NOT NULL,
+            session_id  text        NOT NULL,
+            view_id     text        NOT NULL,
+            path        text        NOT NULL,
+            referrer    text,
+            load_ms     double precision,
+            ttfb_ms     double precision,
+            lcp_ms      double precision,
+            cls         double precision,
+            inp_ms      double precision,
+            fcp_ms      double precision,
+            browser     text,
+            os          text,
+            device      text
+        ) PARTITION BY RANGE (ts);
+        CREATE INDEX IF NOT EXISTS rum_pv_ts_brin ON rum_page_views USING brin (ts) WITH (pages_per_range = 32);
+        CREATE INDEX IF NOT EXISTS rum_pv_scope_ts ON rum_page_views (tenant_id, site_id, ts DESC);
+        CREATE INDEX IF NOT EXISTS rum_pv_session ON rum_page_views (tenant_id, site_id, session_id);
+
+        CREATE TABLE IF NOT EXISTS rum_errors (
+            ts          timestamptz NOT NULL,
+            tenant_id   uuid        NOT NULL,
+            site_id     uuid        NOT NULL,
+            session_id  text        NOT NULL,
+            view_id     text        NOT NULL,
+            path        text,
+            message     text        NOT NULL,
+            stack       text,
+            source      text
+        ) PARTITION BY RANGE (ts);
+        CREATE INDEX IF NOT EXISTS rum_err_ts_brin ON rum_errors USING brin (ts) WITH (pages_per_range = 32);
+        CREATE INDEX IF NOT EXISTS rum_err_scope_ts ON rum_errors (tenant_id, site_id, ts DESC);
+        CREATE INDEX IF NOT EXISTS rum_err_session ON rum_errors (tenant_id, site_id, session_id);
+
+        CREATE TABLE IF NOT EXISTS rum_resources (
+            ts          timestamptz NOT NULL,
+            tenant_id   uuid        NOT NULL,
+            site_id     uuid        NOT NULL,
+            session_id  text        NOT NULL,
+            view_id     text        NOT NULL,
+            path        text,
+            name        text        NOT NULL,
+            kind        text,
+            duration_ms double precision,
+            status      integer,
+            trace_id    text
+        ) PARTITION BY RANGE (ts);
+        CREATE INDEX IF NOT EXISTS rum_res_ts_brin ON rum_resources USING brin (ts) WITH (pages_per_range = 32);
+        CREATE INDEX IF NOT EXISTS rum_res_scope_ts ON rum_resources (tenant_id, site_id, ts DESC);
+        CREATE INDEX IF NOT EXISTS rum_res_session ON rum_resources (tenant_id, site_id, session_id);
 
         -- Distinct (namespace, pod, container) seen per cluster, upserted on ingest, so the log-viewer
         -- dropdowns are a tiny index lookup instead of a DISTINCT scan over the huge partitioned logs.
@@ -541,6 +599,111 @@ public sealed class TelemetryStore : IAsyncDisposable
         return records.Count;
     }
 
+    /// <summary>Bulk-writes RUM page views via binary COPY. Tenant/site stamped from the resolved site.</summary>
+    public async Task<int> WriteRumPageViewsAsync(
+        Guid tenantId, Guid siteId, IReadOnlyList<RumPageViewRecord> records, CancellationToken ct = default)
+    {
+        if (_dataSource is null || records.Count == 0) return 0;
+        DateTime now = DateTime.UtcNow;
+
+        await using NpgsqlConnection conn = await _dataSource.OpenConnectionAsync(ct);
+        await using NpgsqlBinaryImporter writer = await conn.BeginBinaryImportAsync(
+            "COPY rum_page_views (ts, tenant_id, site_id, session_id, view_id, path, referrer, " +
+            "load_ms, ttfb_ms, lcp_ms, cls, inp_ms, fcp_ms, browser, os, device) FROM STDIN (FORMAT BINARY)", ct);
+
+        foreach (RumPageViewRecord r in records)
+        {
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(ClampTimestamp(r.Timestamp, now), NpgsqlDbType.TimestampTz, ct);
+            await writer.WriteAsync(tenantId, NpgsqlDbType.Uuid, ct);
+            await writer.WriteAsync(siteId, NpgsqlDbType.Uuid, ct);
+            await writer.WriteAsync(r.SessionId, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(r.ViewId, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(r.Path, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.Referrer, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.LoadMs, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, r.TtfbMs, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, r.LcpMs, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, r.Cls, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, r.InpMs, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, r.FcpMs, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, r.Browser, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.Os, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.Device, NpgsqlDbType.Text, ct);
+        }
+
+        await writer.CompleteAsync(ct);
+        return records.Count;
+    }
+
+    /// <summary>Bulk-writes RUM JS errors via binary COPY. Tenant/site stamped from the resolved site.</summary>
+    public async Task<int> WriteRumErrorsAsync(
+        Guid tenantId, Guid siteId, IReadOnlyList<RumErrorRecord> records, CancellationToken ct = default)
+    {
+        if (_dataSource is null || records.Count == 0) return 0;
+        DateTime now = DateTime.UtcNow;
+
+        await using NpgsqlConnection conn = await _dataSource.OpenConnectionAsync(ct);
+        await using NpgsqlBinaryImporter writer = await conn.BeginBinaryImportAsync(
+            "COPY rum_errors (ts, tenant_id, site_id, session_id, view_id, path, message, stack, source) " +
+            "FROM STDIN (FORMAT BINARY)", ct);
+
+        foreach (RumErrorRecord r in records)
+        {
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(ClampTimestamp(r.Timestamp, now), NpgsqlDbType.TimestampTz, ct);
+            await writer.WriteAsync(tenantId, NpgsqlDbType.Uuid, ct);
+            await writer.WriteAsync(siteId, NpgsqlDbType.Uuid, ct);
+            await writer.WriteAsync(r.SessionId, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(r.ViewId, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.Path, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(r.Message, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.Stack, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.Source, NpgsqlDbType.Text, ct);
+        }
+
+        await writer.CompleteAsync(ct);
+        return records.Count;
+    }
+
+    /// <summary>Bulk-writes RUM resource/AJAX timings via binary COPY. Tenant/site stamped from the site.</summary>
+    public async Task<int> WriteRumResourcesAsync(
+        Guid tenantId, Guid siteId, IReadOnlyList<RumResourceRecord> records, CancellationToken ct = default)
+    {
+        if (_dataSource is null || records.Count == 0) return 0;
+        DateTime now = DateTime.UtcNow;
+
+        await using NpgsqlConnection conn = await _dataSource.OpenConnectionAsync(ct);
+        await using NpgsqlBinaryImporter writer = await conn.BeginBinaryImportAsync(
+            "COPY rum_resources (ts, tenant_id, site_id, session_id, view_id, path, name, kind, duration_ms, status, trace_id) " +
+            "FROM STDIN (FORMAT BINARY)", ct);
+
+        foreach (RumResourceRecord r in records)
+        {
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(ClampTimestamp(r.Timestamp, now), NpgsqlDbType.TimestampTz, ct);
+            await writer.WriteAsync(tenantId, NpgsqlDbType.Uuid, ct);
+            await writer.WriteAsync(siteId, NpgsqlDbType.Uuid, ct);
+            await writer.WriteAsync(r.SessionId, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(r.ViewId, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.Path, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(r.Name, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.Kind, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.DurationMs, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, r.Status, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, r.TraceId, NpgsqlDbType.Text, ct);
+        }
+
+        await writer.CompleteAsync(ct);
+        return records.Count;
+    }
+
+    private static async Task WriteNullableAsync<T>(NpgsqlBinaryImporter writer, T? value, NpgsqlDbType type, CancellationToken ct)
+    {
+        if (value is null) await writer.WriteNullAsync(ct);
+        else await writer.WriteAsync(value, type, ct);
+    }
+
     // Clamps a timestamp into the partitioned range [now-(retention-1), now+lookahead] so a
     // pathological value (seconds-as-nanos giving 1970, far-future clock skew, stale backfill beyond
     // retention) can never land outside all partitions. Postgres binary COPY is atomic, so one such
@@ -625,3 +788,48 @@ public sealed record MetricIngestRecord(
     double Value,
     MetricKind Kind,
     string? LabelsJson);
+
+/// <summary>
+/// One browser page view + its Core Web Vitals. Tenant/site identity is stamped by the ingest endpoint
+/// from the resolved <see cref="RumSite"/>, never the payload. <paramref name="Timestamp"/> must be UTC.
+/// </summary>
+public sealed record RumPageViewRecord(
+    DateTime Timestamp,
+    string SessionId,
+    string ViewId,
+    string Path,
+    string? Referrer,
+    double? LoadMs,
+    double? TtfbMs,
+    double? LcpMs,
+    double? Cls,
+    double? InpMs,
+    double? FcpMs,
+    string? Browser,
+    string? Os,
+    string? Device);
+
+/// <summary>One browser JS error (window.onerror / unhandledrejection). UTC timestamp.</summary>
+public sealed record RumErrorRecord(
+    DateTime Timestamp,
+    string SessionId,
+    string ViewId,
+    string? Path,
+    string Message,
+    string? Stack,
+    string? Source);
+
+/// <summary>
+/// One browser resource / AJAX timing. <paramref name="TraceId"/> (when the fetch carried a W3C
+/// traceparent) links this row to the spans table's trace waterfall. UTC timestamp.
+/// </summary>
+public sealed record RumResourceRecord(
+    DateTime Timestamp,
+    string SessionId,
+    string ViewId,
+    string? Path,
+    string Name,
+    string? Kind,
+    double? DurationMs,
+    int? Status,
+    string? TraceId);

@@ -152,6 +152,8 @@ public class Program
         builder.Services.AddSingleton<TelemetryStore>();
         builder.Services.AddSingleton<IngestTokenService>();
         builder.Services.AddSingleton<IngestRateLimiter>();
+        // Real User Monitoring: resolves per-site public keys for the public browser ingest endpoint.
+        builder.Services.AddSingleton<RumSiteService>();
         builder.Services.AddScoped<ClusterTenantResolver>();
         builder.Services.AddScoped<PgLogService>();
         builder.Services.AddScoped<PgTraceService>();
@@ -494,7 +496,72 @@ public class Program
             return Results.Json(new { });
         }).DisableAntiforgery();
 
+        // Public RUM ingest — the browser snippet POSTs a compact JSON beacon (text/plain to avoid a CORS
+        // preflight, or application/json) to /ingest/rum/v1/{publicKey}. UNLIKE the OTLP endpoints there is
+        // no secret token (the key ships in client JS); abuse is bounded by the site's Origin allow-list,
+        // the per-site rate limiter, and sampling. 503 (off) / 401 (unknown/disabled key) / 403 (origin) /
+        // 429 (rate) / 413 (too large) / 400 (unparseable) / 204 (accepted, incl. sampled-out).
+        app.MapMethods("/ingest/rum/v1/{key}", ["OPTIONS"], async (
+            HttpContext ctx, string key, RumSiteService sites, CancellationToken ct) =>
+        {
+            // CORS preflight (fetch fallback). Beacons are "simple" requests and never reach here.
+            RumSiteInfo? site = await sites.ResolveAsync(key, ct);
+            string? origin = ctx.Request.Headers.Origin;
+            bool allowed = site is { IsEnabled: true } &&
+                (site.Origins.Count == 0 || (origin is not null &&
+                    site.Origins.Any(o => string.Equals(o, origin, StringComparison.OrdinalIgnoreCase))));
+            if (allowed && origin is not null)
+            {
+                SetRumCors(ctx, origin);
+                ctx.Response.Headers.AccessControlAllowMethods = "POST, OPTIONS";
+                ctx.Response.Headers.AccessControlAllowHeaders = "content-type";
+                ctx.Response.Headers.AccessControlMaxAge = "600";
+            }
+            return Results.NoContent();
+        }).DisableAntiforgery();
+
+        app.MapPost("/ingest/rum/v1/{key}", async (
+            HttpContext httpContext, string key, TelemetryStore telemetry, RumSiteService sites,
+            IngestRateLimiter rateLimiter, ILoggerFactory loggerFactory, CancellationToken ct) =>
+        {
+            ILogger log = loggerFactory.CreateLogger("RumIngest");
+            RumIngest.Result r = await RumIngest.ReadAsync(httpContext, key, telemetry, sites, rateLimiter, log, ct);
+            if (r.AllowOrigin is not null) SetRumCors(httpContext, r.AllowOrigin);
+            if (r.Error is not null) return r.Error;
+            if (r.Doc is null) return Results.NoContent();   // sampled out — accepted, not stored
+
+            using System.Text.Json.JsonDocument doc = r.Doc;
+            RumIngestParser.RumBatch batch;
+            try
+            {
+                batch = RumIngestParser.Parse(doc);
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Failed to parse RUM payload.");
+                return Results.BadRequest();
+            }
+            try
+            {
+                await telemetry.WriteRumPageViewsAsync(r.TenantId, r.SiteId, batch.PageViews, ct);
+                await telemetry.WriteRumErrorsAsync(r.TenantId, r.SiteId, batch.Errors, ct);
+                await telemetry.WriteRumResourcesAsync(r.TenantId, r.SiteId, batch.Resources, ct);
+            }
+            catch (Exception ex)
+            {
+                log.LogError(ex, "Failed to persist RUM batch.");
+                return Results.StatusCode(StatusCodes.Status500InternalServerError);
+            }
+            return Results.NoContent();
+        }).DisableAntiforgery();
+
         app.Run();
+    }
+
+    private static void SetRumCors(HttpContext ctx, string origin)
+    {
+        ctx.Response.Headers.AccessControlAllowOrigin = origin;
+        ctx.Response.Headers.Vary = "Origin";
     }
 
     /// <summary>

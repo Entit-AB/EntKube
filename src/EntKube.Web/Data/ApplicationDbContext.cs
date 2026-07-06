@@ -92,6 +92,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<AlertRoutingRule> AlertRoutingRules => Set<AlertRoutingRule>();
     public DbSet<TelemetryAlertRule> TelemetryAlertRules => Set<TelemetryAlertRule>();
     public DbSet<Dashboard> Dashboards => Set<Dashboard>();
+    public DbSet<RumSite> RumSites => Set<RumSite>();
     public DbSet<NotificationProviderConfig> NotificationProviderConfigs => Set<NotificationProviderConfig>();
     public DbSet<SecretExpiryNotificationConfig> SecretExpiryNotificationConfigs => Set<SecretExpiryNotificationConfig>();
     public DbSet<SecretExpiryNotification> SecretExpiryNotifications => Set<SecretExpiryNotification>();
@@ -1160,6 +1161,16 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithMany()
                 .HasForeignKey(b => b.AppDeploymentId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<RumSite>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => s.PublicKey).IsUnique();
+            entity.HasIndex(s => s.TenantId);
+            entity.Property(s => s.Name).HasMaxLength(200).IsRequired();
+            entity.Property(s => s.PublicKey).HasMaxLength(64).IsRequired();
+            entity.Property(s => s.AllowedOrigins).HasMaxLength(4000);
         });
 
         builder.Entity<AlertIncident>(entity =>
