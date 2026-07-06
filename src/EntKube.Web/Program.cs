@@ -516,9 +516,7 @@ public class Program
             // CORS preflight (fetch fallback). Beacons are "simple" requests and never reach here.
             RumSiteInfo? site = await sites.ResolveAsync(key, ct);
             string? origin = ctx.Request.Headers.Origin;
-            bool allowed = site is { IsEnabled: true } &&
-                (site.Origins.Count == 0 || (origin is not null &&
-                    site.Origins.Any(o => string.Equals(o, origin, StringComparison.OrdinalIgnoreCase))));
+            bool allowed = site is { IsEnabled: true } && RumIngest.OriginAllowed(site.Origins, origin);
             if (allowed && origin is not null)
             {
                 SetRumCors(ctx, origin);

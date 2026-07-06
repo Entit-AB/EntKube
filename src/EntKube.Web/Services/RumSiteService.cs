@@ -17,6 +17,7 @@ public sealed record RumSiteInfo(
 public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFactory)
 {
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(30);
+    private const int MaxCacheEntries = 10_000;   // bound the (incl. negative) cache against unknown-key sprays
     private readonly ConcurrentDictionary<string, (RumSiteInfo? Info, DateTime Expiry)> _cache = new(StringComparer.Ordinal);
 
     /// <summary>Resolves a public key to its site info, or null if unknown. Cached (positive and negative).</summary>
@@ -33,6 +34,15 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
         RumSiteInfo? info = site is null
             ? null
             : new RumSiteInfo(site.Id, site.TenantId, site.ClusterId, site.Origins, site.SampleRate, site.IsEnabled);
+
+        // Bound the dictionary: a spray of distinct unknown keys (each a negative-cache miss) can't grow it
+        // without limit. Purge expired entries when it gets large; clear outright if still over the cap.
+        if (_cache.Count >= MaxCacheEntries)
+        {
+            foreach (KeyValuePair<string, (RumSiteInfo? Info, DateTime Expiry)> kv in _cache)
+                if (kv.Value.Expiry <= now) _cache.TryRemove(kv.Key, out _);
+            if (_cache.Count >= MaxCacheEntries) _cache.Clear();
+        }
 
         _cache[publicKey] = (info, now + CacheTtl);
         return info;

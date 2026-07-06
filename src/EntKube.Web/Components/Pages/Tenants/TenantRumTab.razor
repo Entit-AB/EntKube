@@ -31,7 +31,7 @@
 
 @if (sub == "sites")
 {
-    <RumSitesAdmin TenantId="TenantId" />
+    <RumSitesAdmin TenantId="TenantId" OnSitesChanged="ReloadSitesAsync" />
 }
 else if (sites.Count == 0)
 {
@@ -62,15 +62,27 @@ else
     private int timeRangeMinutes = 1440;
     private DateTime _from;
     private DateTime _to;
+    private Guid _loadedTenant;
 
     private Guid SiteGuid => Guid.TryParse(selectedSiteId, out Guid g) ? g : Guid.Empty;
     private Guid? SelectedClusterId => sites.FirstOrDefault(s => s.Id == SiteGuid)?.ClusterId;
 
-    protected override async Task OnInitializedAsync()
+    // Reload when the container is reused for a different tenant (activeTab persists across tenant nav).
+    protected override async Task OnParametersSetAsync()
+    {
+        if (TenantId == _loadedTenant) return;
+        _loadedTenant = TenantId;
+        selectedSiteId = "";
+        await ReloadSitesAsync();
+        SnapshotRange();
+    }
+
+    // Keeps the site picker in sync after the Sites sub-tab creates/deletes/rotates a site.
+    private async Task ReloadSitesAsync()
     {
         sites = await Sites.ListAsync(TenantId);
-        if (sites.Count > 0) selectedSiteId = sites[0].Id.ToString();
-        SnapshotRange();
+        if (sites.Count == 0) selectedSiteId = "";
+        else if (!sites.Any(s => s.Id.ToString() == selectedSiteId)) selectedSiteId = sites[0].Id.ToString();
     }
 
     // Snapshot [from,to] on site/range change (not per render) so the child components' dedupe keys are

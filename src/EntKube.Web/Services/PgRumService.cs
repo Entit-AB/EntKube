@@ -141,7 +141,12 @@ public class PgRumService(TelemetryStore store, ILogger<PgRumService> logger)
         return rows;
     }
 
-    public async Task<RumSessionDetail> GetSessionDetailAsync(Guid tenantId, Guid siteId, string sessionId, CancellationToken ct = default)
+    // Bounded to the same [from, to] window the session was listed from: prunes partitions (the rum_*_session
+    // indexes are per-partition, so an unbounded query would probe every partition) and avoids merging a
+    // reused/collided client session_id from another day into this session. Returns null on failure so the UI
+    // can tell a query error apart from a genuinely empty session.
+    public async Task<RumSessionDetail?> GetSessionDetailAsync(
+        Guid tenantId, Guid siteId, string sessionId, DateTime from, DateTime to, CancellationToken ct = default)
     {
         List<RumViewRow> views = [];
         List<RumErrorRow> errors = [];
@@ -152,31 +157,35 @@ public class PgRumService(TelemetryStore store, ILogger<PgRumService> logger)
 
             await using (NpgsqlCommand cmd = conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT ts, path, load_ms, lcp_ms, cls, inp_ms FROM rum_page_views WHERE tenant_id = @t AND site_id = @s AND session_id = @sess ORDER BY ts";
-                AddSession(cmd, tenantId, siteId, sessionId);
+                cmd.CommandText = "SELECT ts, path, load_ms, lcp_ms, cls, inp_ms FROM rum_page_views WHERE tenant_id = @t AND site_id = @s AND session_id = @sess AND ts >= @from AND ts < @to ORDER BY ts";
+                AddSession(cmd, tenantId, siteId, sessionId, from, to);
                 await using NpgsqlDataReader r = await cmd.ExecuteReaderAsync(ct);
                 while (await r.ReadAsync(ct))
                     views.Add(new RumViewRow(r.GetDateTime(0), r.GetString(1), Dbl(r, 2), Dbl(r, 3), Dbl(r, 4), Dbl(r, 5)));
             }
             await using (NpgsqlCommand cmd = conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT ts, path, message, source FROM rum_errors WHERE tenant_id = @t AND site_id = @s AND session_id = @sess ORDER BY ts";
-                AddSession(cmd, tenantId, siteId, sessionId);
+                cmd.CommandText = "SELECT ts, path, message, source FROM rum_errors WHERE tenant_id = @t AND site_id = @s AND session_id = @sess AND ts >= @from AND ts < @to ORDER BY ts";
+                AddSession(cmd, tenantId, siteId, sessionId, from, to);
                 await using NpgsqlDataReader r = await cmd.ExecuteReaderAsync(ct);
                 while (await r.ReadAsync(ct))
                     errors.Add(new RumErrorRow(r.GetDateTime(0), r.IsDBNull(1) ? null : r.GetString(1), r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3)));
             }
             await using (NpgsqlCommand cmd = conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT ts, path, name, kind, duration_ms, status, trace_id FROM rum_resources WHERE tenant_id = @t AND site_id = @s AND session_id = @sess ORDER BY ts";
-                AddSession(cmd, tenantId, siteId, sessionId);
+                cmd.CommandText = "SELECT ts, path, name, kind, duration_ms, status, trace_id FROM rum_resources WHERE tenant_id = @t AND site_id = @s AND session_id = @sess AND ts >= @from AND ts < @to ORDER BY ts";
+                AddSession(cmd, tenantId, siteId, sessionId, from, to);
                 await using NpgsqlDataReader r = await cmd.ExecuteReaderAsync(ct);
                 while (await r.ReadAsync(ct))
                     resources.Add(new RumResourceRow(r.GetDateTime(0), r.IsDBNull(1) ? null : r.GetString(1), r.GetString(2),
                         r.IsDBNull(3) ? null : r.GetString(3), Dbl(r, 4), r.IsDBNull(5) ? null : r.GetInt32(5), r.IsDBNull(6) ? null : r.GetString(6)));
             }
         }
-        catch (Exception ex) { logger.LogWarning(ex, "RUM session detail failed (site {Site}, session {Session})", siteId, sessionId); }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "RUM session detail failed (site {Site}, session {Session})", siteId, sessionId);
+            return null;
+        }
         return new RumSessionDetail(views, errors, resources);
     }
 
@@ -188,11 +197,13 @@ public class PgRumService(TelemetryStore store, ILogger<PgRumService> logger)
         cmd.Parameters.AddWithValue("to", NpgsqlDbType.TimestampTz, to.ToUniversalTime());
     }
 
-    private static void AddSession(NpgsqlCommand cmd, Guid tenantId, Guid siteId, string sessionId)
+    private static void AddSession(NpgsqlCommand cmd, Guid tenantId, Guid siteId, string sessionId, DateTime from, DateTime to)
     {
         cmd.Parameters.AddWithValue("t", tenantId);
         cmd.Parameters.AddWithValue("s", siteId);
         cmd.Parameters.AddWithValue("sess", sessionId);
+        cmd.Parameters.AddWithValue("from", NpgsqlDbType.TimestampTz, from.ToUniversalTime());
+        cmd.Parameters.AddWithValue("to", NpgsqlDbType.TimestampTz, to.ToUniversalTime());
     }
 
     private async Task<long> ScalarLongAsync(NpgsqlConnection conn, string sql, Guid tenantId, Guid siteId, DateTime from, DateTime to, CancellationToken ct)

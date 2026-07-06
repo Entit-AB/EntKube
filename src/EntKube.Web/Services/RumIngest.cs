@@ -16,7 +16,22 @@ public static class RumIngest
     // Browser beacons are small; well below the OTLP cap. Bounds the DECOMPRESSED payload (zip-bomb guard).
     public const int MaxDecompressedBytes = 2 * 1024 * 1024;
 
+    // Always-on per-IP backstop for this public, secretless endpoint — independent of the config-driven
+    // per-site limiter (which defaults to unlimited), so an unknown-key spray is throttled before it can
+    // cost a DB lookup, and no single client can flood the shared store even when the operator sets no limit.
+    public const int MaxRequestsPerIpPerMinute = 1200;
+
     public sealed record Result(IResult? Error, JsonDocument? Doc, Guid TenantId, Guid SiteId, string? AllowOrigin);
+
+    /// <summary>Whether a request Origin passes a site's allow-list, normalizing a trailing slash and case
+    /// on both sides. An empty allow-list means unrestricted (documented on <see cref="Data.RumSite"/>).</summary>
+    public static bool OriginAllowed(IReadOnlyList<string> allowed, string? origin)
+    {
+        if (allowed.Count == 0) return true;
+        if (string.IsNullOrEmpty(origin)) return false;
+        string o = origin.TrimEnd('/');
+        return allowed.Any(a => string.Equals(a.TrimEnd('/'), o, StringComparison.OrdinalIgnoreCase));
+    }
 
     public static async Task<Result> ReadAsync(
         HttpContext ctx, string publicKey, TelemetryStore telemetry, RumSiteService sites,
@@ -25,14 +40,19 @@ public static class RumIngest
         if (!telemetry.IsEnabled)
             return Fail(Results.StatusCode(StatusCodes.Status503ServiceUnavailable));
 
+        // Per-IP throttle FIRST, before the key is resolved, so a fresh-key-per-request spray can't cost a
+        // DB lookup + cache entry each time.
+        string ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        if (!rateLimiter.TryAcquire("rum-ip:" + ip, MaxRequestsPerIpPerMinute))
+            return Fail(Results.StatusCode(StatusCodes.Status429TooManyRequests));
+
         RumSiteInfo? site = await sites.ResolveAsync(publicKey, ct);
         if (site is null || !site.IsEnabled)
             return Fail(Results.Unauthorized());
 
         // Origin allow-list — the primary abuse guard for a public, secretless endpoint.
         string? origin = ctx.Request.Headers.Origin;
-        if (site.Origins.Count > 0 &&
-            (origin is null || !site.Origins.Any(o => string.Equals(o, origin, StringComparison.OrdinalIgnoreCase))))
+        if (!OriginAllowed(site.Origins, origin))
             return Fail(Results.StatusCode(StatusCodes.Status403Forbidden));
 
         string? allowOrigin = origin;   // echoed back as Access-Control-Allow-Origin

@@ -5,7 +5,13 @@
 {
     <div class="text-center py-5"><span class="spinner-border spinner-border-sm"></span></div>
 }
-else if (overview is null || overview.PageViews == 0)
+else if (overview is null)
+{
+    <div class="alert alert-warning small py-2">
+        <span class="bi bi-exclamation-triangle me-1"></span>Couldn't load RUM data for this site. The telemetry store may be unavailable.
+    </div>
+}
+else if (overview.PageViews == 0)
 {
     <div class="text-center py-5 text-muted">
         <span class="bi bi-browser-chrome display-6 d-block mb-2 opacity-25"></span>

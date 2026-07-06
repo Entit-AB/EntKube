@@ -97,22 +97,24 @@ public static class RumSnippet
       push("resources", { t: now(), name: trim(url, 500), kind: kind, dur: Math.round(dur), status: status || null, trace: trace, path: path() });
     }
 
-    if (window.fetch) {
-      var origFetch = window.fetch;
+    // Capture the native fetch up front so our own beacon fallback (and the wrapper) never re-enter the wrapper.
+    var nativeFetch = window.fetch ? window.fetch.bind(window) : null;
+    if (nativeFetch) {
       window.fetch = function (input, init) {
-        var url = (typeof input === "string") ? input : (input && input.url) || "";
+        // input may be a string, URL object (.href) or Request (.url) — resolve to a URL string for all.
+        var url = (typeof input === "string") ? input : (input ? (input.url || input.href || "") : "");
         var trace = null;
-        if (isSameOrigin(url)) {
+        if (url && isSameOrigin(url)) {   // only same-origin — never inject a header on a cross-origin request
           trace = hex(32);
           try {
             init = init || {};
-            var h = new Headers(init.headers || (typeof input !== "string" && input.headers) || {});
+            var h = new Headers((init && init.headers) || (typeof input !== "string" && input && input.headers) || {});
             h.set("traceparent", "00-" + trace + "-" + hex(16) + "-01");
             init.headers = h;
           } catch (e) { trace = null; }
         }
         var start = now();
-        return origFetch.call(this, input, init).then(function (res) {
+        return nativeFetch(input, init).then(function (res) {
           record(url, "fetch", now() - start, res && res.status, trace); return res;
         }, function (err) { record(url, "fetch", now() - start, 0, trace); throw err; });
       };
@@ -121,13 +123,24 @@ public static class RumSnippet
     if (window.XMLHttpRequest) {
       var Open = XMLHttpRequest.prototype.open;
       var Send = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.open = function (method, url) { this._ek = { url: String(url || ""), start: 0 }; return Open.apply(this, arguments); };
+      XMLHttpRequest.prototype.open = function (method, url) {
+        this._ek = { url: String(url || ""), start: 0 };
+        // Attach loadend ONCE per object (reads the current _ek), else reusing an XHR stacks listeners
+        // that emit duplicate, stale-duration rows.
+        if (!this._ekBound) {
+          this._ekBound = true;
+          this.addEventListener("loadend", function () {
+            var m = this._ek;
+            if (m) record(m.url, "xhr", now() - m.start, this.status, m.trace || null);
+          });
+        }
+        return Open.apply(this, arguments);
+      };
       XMLHttpRequest.prototype.send = function () {
-        var xhr = this, m = xhr._ek;
+        var m = this._ek;
         if (m) {
-          if (isSameOrigin(m.url)) { m.trace = hex(32); try { xhr.setRequestHeader("traceparent", "00-" + m.trace + "-" + hex(16) + "-01"); } catch (e) {} }
+          if (m.url && isSameOrigin(m.url)) { m.trace = hex(32); try { this.setRequestHeader("traceparent", "00-" + m.trace + "-" + hex(16) + "-01"); } catch (e) {} }
           m.start = now();
-          xhr.addEventListener("loadend", function () { record(m.url, "xhr", now() - m.start, xhr.status, m.trace || null); });
         }
         return Send.apply(this, arguments);
       };
@@ -151,11 +164,16 @@ public static class RumSnippet
       var body = JSON.stringify(payload);
       var ok = false;
       try { if (navigator.sendBeacon) ok = navigator.sendBeacon(endpoint, new Blob([body], { type: "text/plain" })); } catch (e) {}
-      if (!ok) { try { fetch(endpoint, { method: "POST", body: body, headers: { "Content-Type": "text/plain" }, keepalive: true, mode: "cors" }); } catch (e) {} }
+      // Fallback uses the NATIVE fetch, not window.fetch — otherwise the ingest POST records itself as a
+      // resource and re-arms the flush timer, looping on browsers without sendBeacon.
+      if (!ok && nativeFetch) { try { nativeFetch(endpoint, { method: "POST", body: body, headers: { "Content-Type": "text/plain" }, keepalive: true, mode: "cors" }); } catch (e) {} }
     }
 
     addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") send(true); });
     addEventListener("pagehide", function () { send(true); });
+    // A bfcache-restored page is a fresh visit: reset the one-shot page-view latch and start a new view id,
+    // else its vitals/errors never produce a page-view row.
+    addEventListener("pageshow", function (e) { if (e && e.persisted) { flushed = false; vid = rid(); } });
   } catch (e) { /* never break the host page */ }
 })();
 """;

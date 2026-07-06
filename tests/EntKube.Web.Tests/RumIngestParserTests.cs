@@ -123,6 +123,24 @@ public class RumIngestParserTests
     }
 
     [Fact]
+    public void Out_of_range_epoch_does_not_throw_and_does_not_drop_the_batch()
+    {
+        DateTime before = DateTime.UtcNow;
+        // A pathological/attacker `t` (far outside DateTimeOffset's range) must not throw and abort the whole beacon.
+        RumIngestParser.RumBatch b = Parse("""
+        { "session": "s", "view": "v",
+          "views": [ { "t": 99999999999999999, "path": "/bad" }, { "t": 1751797200000, "path": "/good" } ] }
+        """);
+        DateTime after = DateTime.UtcNow;
+
+        b.PageViews.Should().HaveCount(2);
+        b.PageViews[0].Path.Should().Be("/bad");
+        b.PageViews[0].Timestamp.Should().BeOnOrAfter(before).And.BeOnOrBefore(after);   // clamped to now
+        b.PageViews[1].Path.Should().Be("/good");
+        b.PageViews[1].Timestamp.Should().Be(DateTimeOffset.FromUnixTimeMilliseconds(1751797200000).UtcDateTime);
+    }
+
+    [Fact]
     public void Empty_or_non_object_root_yields_empty_batch()
     {
         RumIngestParser.RumBatch b = Parse("[]");

@@ -105,6 +105,7 @@ else if (sites.Count > 0)
 
 @code {
     [Parameter] public required Guid TenantId { get; set; }
+    [Parameter] public EventCallback OnSitesChanged { get; set; }
 
     private List<RumSite> sites = [];
     private List<ClusterOption> clusters = [];
@@ -122,6 +123,13 @@ else if (sites.Count > 0)
     }
 
     private async Task Reload() => sites = await Sites.ListAsync(TenantId);
+
+    // Reload our list AND tell the parent container so its site picker stays in sync after a mutation.
+    private async Task ReloadAndNotify()
+    {
+        await Reload();
+        await OnSitesChanged.InvokeAsync();
+    }
 
     private void StartNew()
     {
@@ -147,27 +155,27 @@ else if (sites.Count > 0)
         else
             await Sites.UpdateAsync(TenantId, editing.Id, editing.Name, clusterId, editing.AllowedOrigins, editing.SampleRate, editing.IsEnabled);
         editing = null;
-        await Reload();
+        await ReloadAndNotify();
     }
 
     private async Task ToggleAsync(RumSite s, bool enabled)
     {
         await Sites.UpdateAsync(TenantId, s.Id, s.Name, s.ClusterId, s.AllowedOrigins, s.SampleRate, enabled);
-        await Reload();
+        await ReloadAndNotify();
     }
 
     private async Task RotateAsync(RumSite s)
     {
         await Sites.RotateKeyAsync(TenantId, s.Id);
         expandedId = s.Id;   // reveal the new embed
-        await Reload();
+        await ReloadAndNotify();
     }
 
     private async Task DeleteAsync(RumSite s)
     {
         await Sites.DeleteAsync(TenantId, s.Id);
         if (expandedId == s.Id) expandedId = null;
-        await Reload();
+        await ReloadAndNotify();
     }
 
     private void ToggleEmbed(Guid id) => expandedId = expandedId == id ? null : id;

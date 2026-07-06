@@ -100,11 +100,18 @@ public static class RumIngestParser
         }
     }
 
-    // Event time as UTC from epoch-millis "t"; missing/non-positive → now (beacons are near-real-time).
+    // DateTimeOffset.FromUnixTimeMilliseconds's valid range; outside it throws (which would abort the batch).
+    private const long MinEpochMs = -62135596800000L;
+    private const long MaxEpochMs = 253402300799999L;
+
+    // Event time as UTC from epoch-millis "t"; missing/non-positive/out-of-range → now (beacons are
+    // near-real-time). Guarding the range keeps one bad "t" from throwing and discarding the whole beacon.
     private static DateTime Ts(JsonElement e)
     {
         double? ms = Num(e, "t");
-        return ms is > 0 ? DateTimeOffset.FromUnixTimeMilliseconds((long)ms.Value).UtcDateTime : DateTime.UtcNow;
+        if (ms is not > 0) return DateTime.UtcNow;
+        long v = (long)ms.Value;
+        return v is >= MinEpochMs and <= MaxEpochMs ? DateTimeOffset.FromUnixTimeMilliseconds(v).UtcDateTime : DateTime.UtcNow;
     }
 
     private static string? Str(JsonElement e, string prop)

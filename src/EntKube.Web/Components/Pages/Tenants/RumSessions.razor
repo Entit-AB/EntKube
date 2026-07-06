@@ -2,7 +2,7 @@
 @inject PgRumService Rum
 @inject NavigationManager Nav
 
-@if (selected is null)
+@if (!detailOpen)
 {
     @if (loading)
     {
@@ -38,11 +38,17 @@
 else
 {
     <div class="d-flex align-items-center gap-2 mb-3">
-        <button class="btn btn-sm btn-link p-0" @onclick="() => selected = null"><span class="bi bi-arrow-left me-1"></span>Sessions</button>
+        <button class="btn btn-sm btn-link p-0" @onclick="CloseDetail"><span class="bi bi-arrow-left me-1"></span>Sessions</button>
         <span class="text-muted small">·</span>
         <span class="font-monospace small">@selectedId</span>
     </div>
 
+    @if (selected is null)
+    {
+        <div class="alert alert-warning small py-2"><span class="bi bi-exclamation-triangle me-1"></span>Couldn't load this session's detail. The telemetry store may be unavailable.</div>
+    }
+    else
+    {
     <div class="card card-body mb-3">
         <div class="fw-semibold small mb-2">Page views</div>
         <table class="table table-sm small mb-0 align-middle">
@@ -98,6 +104,7 @@ else
             </tbody>
         </table>
     </div>
+    }
 }
 
 @code {
@@ -110,6 +117,7 @@ else
     private bool loading = true;
     private List<RumSessionSummary> sessions = [];
     private RumSessionDetail? selected;
+    private bool detailOpen;
     private string selectedId = "";
     private string _lastKey = "";
 
@@ -119,6 +127,7 @@ else
         if (key == _lastKey) return;
         _lastKey = key;
         selected = null;
+        detailOpen = false;
         await LoadAsync();
     }
 
@@ -133,7 +142,14 @@ else
     private async Task OpenAsync(RumSessionSummary s)
     {
         selectedId = s.SessionId;
-        selected = await Rum.GetSessionDetailAsync(TenantId, SiteId, s.SessionId);
+        detailOpen = true;
+        selected = await Rum.GetSessionDetailAsync(TenantId, SiteId, s.SessionId, From, To);
+    }
+
+    private void CloseDetail()
+    {
+        detailOpen = false;
+        selected = null;
     }
 
     // AJAX row → its backend distributed trace (the snippet injected a traceparent on same-origin fetches).
