@@ -90,6 +90,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<OnCallSchedule> OnCallSchedules => Set<OnCallSchedule>();
     public DbSet<OnCallShift> OnCallShifts => Set<OnCallShift>();
     public DbSet<AlertRoutingRule> AlertRoutingRules => Set<AlertRoutingRule>();
+    public DbSet<TelemetryAlertRule> TelemetryAlertRules => Set<TelemetryAlertRule>();
     public DbSet<NotificationProviderConfig> NotificationProviderConfigs => Set<NotificationProviderConfig>();
     public DbSet<SecretExpiryNotificationConfig> SecretExpiryNotificationConfigs => Set<SecretExpiryNotificationConfig>();
     public DbSet<SecretExpiryNotification> SecretExpiryNotifications => Set<SecretExpiryNotification>();

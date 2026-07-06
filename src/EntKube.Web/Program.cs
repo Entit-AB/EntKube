@@ -155,6 +155,10 @@ public class Program
         builder.Services.AddScoped<ClusterTenantResolver>();
         builder.Services.AddScoped<PgLogService>();
         builder.Services.AddScoped<PgTraceService>();
+        // Native telemetry alerting: rules evaluated over logs/spans → incidents via the existing pipeline.
+        builder.Services.AddScoped<TelemetryAlertRuleService>();
+        builder.Services.AddScoped<IncidentDispatcher>();
+        builder.Services.AddHostedService<TelemetryAlertEvaluator>();
         // Backend-agnostic log facade: routes each cluster to the native store (when it has data)
         // or Loki. The log viewers inject this instead of LokiService.
         builder.Services.AddScoped<LogQueryService>();

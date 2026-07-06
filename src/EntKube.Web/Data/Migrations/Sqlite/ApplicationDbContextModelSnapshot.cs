@@ -1665,6 +1665,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(100)
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime?>("KubernetesCreatedAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<DateTime>("LastUpdatedAt")
                         .HasColumnType("TEXT");
 
@@ -3761,6 +3764,61 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("TenantId");
 
                     b.ToTable("StorageLinks");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TelemetryAlertRule", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("ClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("MatchText")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Namespace")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RunbookUrl")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Service")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Severity")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<double>("Threshold")
+                        .HasColumnType("REAL");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("WindowMinutes")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("TelemetryAlertRules");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Tenant", b =>
