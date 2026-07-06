@@ -146,6 +146,19 @@ public class Program
         builder.Services.AddScoped<KubernetesOperationsService>();
         builder.Services.AddScoped<NodeManagementService>();
         builder.Services.AddScoped<PrometheusService>();
+        // Native telemetry store: a dedicated, isolated Postgres database ("TelemetryConnection")
+        // for logs/traces, kept separate from the operational ApplicationDbContext so log volume
+        // can never threaten the control-plane DB. Disabled cleanly when no TelemetryConnection is set.
+        builder.Services.AddSingleton<TelemetryStore>();
+        builder.Services.AddSingleton<IngestTokenService>();
+        builder.Services.AddSingleton<IngestRateLimiter>();
+        builder.Services.AddScoped<ClusterTenantResolver>();
+        builder.Services.AddScoped<PgLogService>();
+        builder.Services.AddScoped<PgTraceService>();
+        // Backend-agnostic log facade: routes each cluster to the native store (when it has data)
+        // or Loki. The log viewers inject this instead of LokiService.
+        builder.Services.AddScoped<LogQueryService>();
+        builder.Services.AddHostedService<TelemetryMaintenanceService>();
         builder.Services.AddScoped<ComponentLifecycleService>();
         builder.Services.AddScoped<ExternalRouteService>();
         builder.Services.AddScoped<AppRouteService>();
@@ -371,6 +384,78 @@ public class Program
             string result = await webhookService.HandleAsync(tenantSlug, body, signature, ct);
             return Results.Ok(result);
         });
+
+        // OTLP/JSON ingest — the OpenTelemetry Collector's otlphttp exporter (encoding: json) pushes
+        // logs to /v1/logs and traces to /v1/traces. Authenticated by a per-cluster HMAC ingest token
+        // (Bearer / X-EntKube-Ingest-Key), NOT user identity; the token binds (tenantId, clusterId)
+        // which are stamped onto every row. OtlpIngest.ReadAsync handles token/gzip/size-cap/parse and
+        // returns 503 (telemetry off), 401 (bad token), 413 (too large), or 400 (unparseable). The
+        // collector retries on 5xx and drops on 4xx.
+        app.MapPost("/ingest/otlp/v1/logs", async (
+            HttpContext httpContext, TelemetryStore telemetry, IngestTokenService tokens,
+            IngestRateLimiter rateLimiter, ILoggerFactory loggerFactory, CancellationToken ct) =>
+        {
+            ILogger log = loggerFactory.CreateLogger("OtlpIngest");
+            OtlpIngest.Result r = await OtlpIngest.ReadAsync(httpContext, telemetry, tokens, rateLimiter, log, ct);
+            if (r.Error is not null) return r.Error;
+
+            using System.Text.Json.JsonDocument doc = r.Doc!;
+            List<LogIngestRecord> records;
+            try
+            {
+                records = OtlpLogsParser.Parse(doc);
+            }
+            catch (Exception ex)
+            {
+                // Malformed payload — 400 so the collector DROPS it, never a 500 (which it retries forever).
+                log.LogWarning(ex, "Failed to parse OTLP logs payload.");
+                return Results.BadRequest();
+            }
+            try
+            {
+                await telemetry.WriteLogsAsync(r.TenantId, r.ClusterId, records, ct);
+            }
+            catch (Exception ex)
+            {
+                // Timestamps are clamped into the partitioned range on write, so the atomic-COPY "no
+                // partition" wedge can't happen; a failure here is a genuine DB/transient issue. Return
+                // 500 so the collector retries (it buffers) rather than dropping the batch.
+                log.LogError(ex, "Failed to persist OTLP logs batch.");
+                return Results.StatusCode(StatusCodes.Status500InternalServerError);
+            }
+            return Results.Json(new { });
+        }).DisableAntiforgery();
+
+        app.MapPost("/ingest/otlp/v1/traces", async (
+            HttpContext httpContext, TelemetryStore telemetry, IngestTokenService tokens,
+            IngestRateLimiter rateLimiter, ILoggerFactory loggerFactory, CancellationToken ct) =>
+        {
+            ILogger log = loggerFactory.CreateLogger("OtlpIngest");
+            OtlpIngest.Result r = await OtlpIngest.ReadAsync(httpContext, telemetry, tokens, rateLimiter, log, ct);
+            if (r.Error is not null) return r.Error;
+
+            using System.Text.Json.JsonDocument doc = r.Doc!;
+            List<SpanIngestRecord> spans;
+            try
+            {
+                spans = OtlpTracesParser.Parse(doc);
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Failed to parse OTLP traces payload.");
+                return Results.BadRequest();
+            }
+            try
+            {
+                await telemetry.WriteSpansAsync(r.TenantId, r.ClusterId, spans, ct);
+            }
+            catch (Exception ex)
+            {
+                log.LogError(ex, "Failed to persist OTLP traces batch.");
+                return Results.StatusCode(StatusCodes.Status500InternalServerError);
+            }
+            return Results.Json(new { });
+        }).DisableAntiforgery();
 
         app.Run();
     }

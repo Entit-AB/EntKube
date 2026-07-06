@@ -1,12 +1,14 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
-@inject LokiService LokiService
+@inject LogQueryService Logs
+@inject NavigationManager Nav
+@implements IAsyncDisposable
 
 @if (!lokiAvailable && !isLoading)
 {
     <div class="alert alert-light border text-muted small py-2">
         <span class="bi bi-journal-x me-1"></span>
-        Loki is not installed or configured on this cluster. Deploy a Loki component to enable log browsing.
+        No log backend is available for this cluster. Deploy the EntKube telemetry collector (or a Loki component) to enable log browsing.
     </div>
 }
 else
@@ -62,10 +64,24 @@ else
                 <option value="1000">1000</option>
             </select>
         </div>
-        <div class="col-12 col-md-9">
+        <div class="col-12 col-md-3">
             <label class="form-label small text-muted mb-1">Filter text</label>
             <input class="form-control form-control-sm font-monospace" @bind="textFilter"
-                   placeholder="e.g. error, connection refused" />
+                   placeholder="e.g. error, refused" />
+        </div>
+        <div class="col-6 col-md-3">
+            <label class="form-label small text-muted mb-1">Attribute key</label>
+            <input class="form-control form-control-sm font-monospace" @bind="attrKey"
+                   placeholder="e.g. http.status_code" />
+        </div>
+        <div class="col-6 col-md-3">
+            <label class="form-label small text-muted mb-1">Attribute value</label>
+            <input class="form-control form-control-sm font-monospace" @bind="attrValue"
+                   placeholder="exact (blank = has key)" />
+            @if (!string.IsNullOrEmpty(attrKey))
+            {
+                <div class="form-text small"><span class="bi bi-info-circle me-1"></span>Native store only — no effect on Loki clusters.</div>
+            }
         </div>
         <div class="col-12 col-md-3">
             <button class="btn btn-sm btn-primary w-100" @onclick="Search"
@@ -84,41 +100,75 @@ else
     }
 
     @* ── Log output ── *@
-    @if (allEntries.Count > 0)
+    @* Render the results shell whenever a query has run — so the level dropdown stays available even
+       when the current filter yields zero rows (otherwise it vanishes and the filter can't be cleared). *@
+    @if (hasQueried && !isQuerying)
     {
         <div class="d-flex justify-content-between align-items-center mb-2">
             <span class="text-muted small">@allEntries.Count entries · @queried.ToLocalTime().ToString("HH:mm:ss")</span>
             <div class="d-flex gap-2 align-items-center">
-                <select class="form-select form-select-sm" style="width:auto" @bind="levelFilter">
+                @* Level change re-queries so the filter is applied server-side within the line limit,
+                   not just to the already-fetched slice. *@
+                <select class="form-select form-select-sm" style="width:auto" @bind="levelFilter" @bind:after="Search">
                     <option value="">All levels</option>
                     <option value="Error">Error + Fatal</option>
                     <option value="Warn">Warn+</option>
                     <option value="Info">Info+</option>
                 </select>
-                <button class="btn btn-sm btn-outline-secondary" @onclick="() => allEntries = []">
+                <button class="btn btn-sm @(follow ? "btn-success" : "btn-outline-secondary")" @onclick="ToggleFollow"
+                        title="Live-tail new log lines">
+                    <span class="bi @(follow ? "bi-pause-fill" : "bi-play-fill") me-1"></span>@(follow ? "Following" : "Follow")
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => { allEntries = []; histogram = []; hasQueried = false; }">
                     <span class="bi bi-x-lg"></span>
                 </button>
             </div>
         </div>
 
-        <div class="border rounded font-monospace" style="background:#1e1e1e;max-height:500px;overflow-y:auto">
-            @foreach (LokiLogEntry entry in FilteredEntries)
-            {
-                <div class="px-3 py-0" style="line-height:1.4;border-bottom:1px solid #2d2d2d">
-                    <span style="color:#888;font-size:0.72rem;user-select:none">
-                        @entry.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")
-                    </span>
-                    <span class="ms-2" style="@LineStyle(entry.DetectedLevel); font-size:0.8rem; white-space:pre-wrap; word-break:break-all">@entry.Line</span>
-                </div>
-            }
-        </div>
-    }
-    else if (hasQueried && !isQuerying)
-    {
-        <div class="text-center py-4 text-muted">
-            <span class="bi bi-journal display-4 d-block mb-2"></span>
-            No logs found for the selected criteria.
-        </div>
+        @* Log-volume histogram: one bar per time bucket, height ∝ count, error+fatal portion in red. *@
+        @if (histogram.Count > 0)
+        {
+            <div class="d-flex align-items-end gap-1 mb-2 px-1" style="height:44px">
+                @{ long maxTotal = histogram.Max(b => b.Total); }
+                @foreach (LogHistogramBucket b in histogram)
+                {
+                    int barPx = maxTotal > 0 ? (int)Math.Round(b.Total * 40.0 / maxTotal) : 0;
+                    int errPx = b.Total > 0 ? (int)Math.Round(b.Errors * (double)barPx / b.Total) : 0;
+                    <div style="flex:1 1 0;display:flex;flex-direction:column;justify-content:flex-end;height:44px"
+                         title="@b.Start.ToLocalTime().ToString("HH:mm:ss") · @b.Total logs (@b.Errors err)">
+                        <div style="background:#f48771;height:@(errPx)px"></div>
+                        <div style="background:#4a90d9;height:@(barPx - errPx)px"></div>
+                    </div>
+                }
+            </div>
+        }
+
+        @if (allEntries.Count > 0)
+        {
+            <div class="border rounded font-monospace" style="background:#1e1e1e;max-height:500px;overflow-y:auto">
+                @foreach (LokiLogEntry entry in FilteredEntries)
+                {
+                    <div class="px-3 py-0" style="line-height:1.4;border-bottom:1px solid #2d2d2d">
+                        <span style="color:#888;font-size:0.72rem;user-select:none">
+                            @entry.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")
+                        </span>
+                        <span class="ms-2" style="@LineStyle(entry.DetectedLevel); font-size:0.8rem; white-space:pre-wrap; word-break:break-all">@entry.Line</span>
+                        @if (entry.TraceId is not null)
+                        {
+                            <a class="ms-2 badge bg-primary text-decoration-none align-middle" style="font-size:.58rem;cursor:pointer"
+                               @onclick="() => OpenTrace(entry.TraceId)" title="Open trace @entry.TraceId">trace</a>
+                        }
+                    </div>
+                }
+            </div>
+        }
+        else
+        {
+            <div class="text-center py-4 text-muted">
+                <span class="bi bi-journal display-4 d-block mb-2"></span>
+                No logs found for the selected criteria.
+            </div>
+        }
     }
 }
 
@@ -130,9 +180,15 @@ else
     private List<string> namespaces = [];
     private List<string> pods = [];
     private List<LokiLogEntry> allEntries = [];
+    private List<LogHistogramBucket> histogram = [];
+    private bool follow;
+    private CancellationTokenSource? followCts;
+    private DateTime lastTs = DateTime.MinValue;
     private string selectedNamespace = "";
     private string selectedPod = "";
     private string textFilter = "";
+    private string attrKey = "";
+    private string attrValue = "";
     private string levelFilter = "";
     private int timeRangeMinutes = 60;
     private int limit = 200;
@@ -155,12 +211,12 @@ else
     protected override async Task OnParametersSetAsync()
     {
         isLoading = true;
-        lokiAvailable = await LokiService.IsAvailableAsync(ClusterId);
+        lokiAvailable = await Logs.IsAvailableAsync(ClusterId);
 
         loadError = null;
         if (lokiAvailable)
         {
-            KubernetesOperationResult<List<string>> nsResult = await LokiService.GetNamespacesAsync(ClusterId);
+            KubernetesOperationResult<List<string>> nsResult = await Logs.GetNamespacesAsync(ClusterId);
             if (nsResult.IsSuccess)
                 namespaces = nsResult.Data ?? [];
             else
@@ -184,7 +240,7 @@ else
         if (string.IsNullOrEmpty(selectedNamespace)) return;
 
         KubernetesOperationResult<List<string>> podResult =
-            await LokiService.GetPodsAsync(ClusterId, selectedNamespace);
+            await Logs.GetPodsAsync(ClusterId, selectedNamespace);
         if (podResult.IsSuccess) pods = podResult.Data ?? [];
     }
 
@@ -198,15 +254,9 @@ else
 
         DateTime to   = DateTime.UtcNow;
         DateTime from = to.AddMinutes(-timeRangeMinutes);
+        LogQueryFilter filter = BuildFilter();
 
-        KubernetesOperationResult<List<LokiLogStream>> result =
-            await LokiService.QueryRangeAsync(
-                ClusterId, selectedNamespace,
-                string.IsNullOrEmpty(selectedPod) ? null : selectedPod,
-                null,
-                string.IsNullOrEmpty(textFilter) ? null : textFilter,
-                from, to, limit);
-
+        KubernetesOperationResult<List<LokiLogStream>> result = await Logs.QueryAsync(ClusterId, filter, from, to, limit);
         if (result.IsSuccess && result.Data is not null)
         {
             allEntries = result.Data
@@ -219,10 +269,104 @@ else
             queryError = result.Error;
         }
 
+        // Volume histogram over the same filters (native store only; empty otherwise → strip hidden).
+        KubernetesOperationResult<List<LogHistogramBucket>> hist = await Logs.GetHistogramAsync(ClusterId, filter, from, to);
+        histogram = hist.IsSuccess && hist.Data is not null ? hist.Data : [];
+
+        if (allEntries.Count > 0) lastTs = allEntries.Max(e => e.Timestamp);
         queried = DateTime.UtcNow;
         hasQueried = true;
         isQuerying = false;
     }
+
+    private LogQueryFilter BuildFilter() => new()
+    {
+        Namespaces = [selectedNamespace],
+        Pod = string.IsNullOrEmpty(selectedPod) ? null : selectedPod,
+        Text = string.IsNullOrEmpty(textFilter) ? null : textFilter,
+        MinLevel = MinLevel,
+        AttrKey = string.IsNullOrEmpty(attrKey) ? null : attrKey.Trim(),
+        AttrValue = string.IsNullOrEmpty(attrValue) ? null : attrValue.Trim()
+    };
+
+    // ── Live tail: poll for logs newer than the cursor (lastTs) and append. ──
+    private async Task ToggleFollow()
+    {
+        follow = !follow;
+        if (follow)
+        {
+            if (!hasQueried) await Search();
+            lastTs = allEntries.Count > 0 ? allEntries.Max(e => e.Timestamp) : DateTime.UtcNow;
+            followCts = new CancellationTokenSource();
+            _ = FollowLoopAsync(followCts.Token);
+        }
+        else
+        {
+            followCts?.Cancel();
+            followCts?.Dispose();
+            followCts = null;
+        }
+    }
+
+    private async Task FollowLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            using PeriodicTimer timer = new(TimeSpan.FromSeconds(3));
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                DateTime now = DateTime.UtcNow;
+                // Query just past the cursor; a 1s overlap tolerates clock skew, de-duped by ts.
+                KubernetesOperationResult<List<LokiLogStream>> result =
+                    await Logs.QueryAsync(ClusterId, BuildFilter(), lastTs.AddSeconds(-1), now, limit, ct);
+                if (!result.IsSuccess || result.Data is null) continue;
+
+                List<LokiLogEntry> newer = result.Data
+                    .SelectMany(s => s.Entries).Where(e => e.Timestamp > lastTs)
+                    .OrderBy(e => e.Timestamp).ToList();
+                if (newer.Count == 0) continue;
+
+                allEntries.AddRange(newer);
+                if (allEntries.Count > 2000)
+                    allEntries = allEntries.Skip(allEntries.Count - 2000).ToList();
+                lastTs = newer[^1].Timestamp;
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { /* stopped */ }
+        catch (Exception ex) { queryError = ex.Message; }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (followCts is not null)
+        {
+            await followCts.CancelAsync();
+            followCts.Dispose();
+        }
+    }
+
+    // Cross-links a log line to its distributed trace: opens the Traces tab with this trace preselected.
+    private void OpenTrace(string? traceId)
+    {
+        if (string.IsNullOrEmpty(traceId)) return;
+        Nav.NavigateTo(Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["category"] = "ops",
+            ["tab"] = "traces",
+            ["cluster"] = ClusterId.ToString(),
+            ["trace"] = traceId
+        }));
+    }
+
+    // Maps the level dropdown to a minimum severity pushed into the query.
+    private LogLevel MinLevel => levelFilter switch
+    {
+        "Error" => LogLevel.Error,
+        "Warn"  => LogLevel.Warn,
+        "Info"  => LogLevel.Info,
+        _ => LogLevel.None
+    };
 
     private static string LineStyle(LogLevel level) => level switch
     {

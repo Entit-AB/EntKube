@@ -1,0 +1,392 @@
+@using EntKube.Web.Services
+@inject PgTraceService Traces
+@inject PgLogService Logs
+
+@if (!available && !isLoading)
+{
+    <div class="alert alert-light border text-muted small py-2">
+        <span class="bi bi-diagram-3 me-1"></span>
+        No traces for this cluster yet. Install the <strong>EntKube Telemetry Collector</strong> and instrument
+        your apps with OpenTelemetry (send OTLP traces) to populate this view.
+    </div>
+}
+else
+{
+    @* ── Filters ── *@
+    <div class="row g-2 align-items-end mb-3">
+        <div class="col-md-3">
+            <label class="form-label small text-muted mb-1">Service</label>
+            <select class="form-select form-select-sm" @bind="selectedService">
+                <option value="">All services</option>
+                @foreach (string s in services)
+                {
+                    <option value="@s">@s</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label small text-muted mb-1">Time range</label>
+            <select class="form-select form-select-sm" @bind="timeRangeMinutes">
+                <option value="15">Last 15 minutes</option>
+                <option value="60">Last 1 hour</option>
+                <option value="180">Last 3 hours</option>
+                <option value="720">Last 12 hours</option>
+                <option value="1440">Last 24 hours</option>
+            </select>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label small text-muted mb-1">Min duration (ms)</label>
+            <input type="number" min="0" class="form-control form-control-sm" @bind="minDurationMs" />
+        </div>
+        <div class="col-md-2 d-flex align-items-center pb-1">
+            <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="errOnly" @bind="errorsOnly" />
+                <label class="form-check-label small" for="errOnly">Errors only</label>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <button class="btn btn-sm btn-primary w-100" @onclick="Search" disabled="@isQuerying">
+                @if (isQuerying) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                <span class="bi bi-search me-1"></span>Search traces
+            </button>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(queryError))
+    {
+        <div class="alert alert-warning small py-2"><span class="bi bi-exclamation-triangle me-1"></span>@queryError</div>
+    }
+
+    @* ── Service RED overview (when a single service is selected) ── *@
+    @if (!string.IsNullOrEmpty(selectedService) && red.Count > 0)
+    {
+        <div class="card card-body py-2 mb-3">
+            <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
+                <div>
+                    <div class="text-muted small text-uppercase" style="letter-spacing:.03em">Requests</div>
+                    <div class="fs-5">@RedTotal.ToString("N0")</div>
+                </div>
+                <div>
+                    <div class="text-muted small text-uppercase" style="letter-spacing:.03em">Error rate</div>
+                    <div class="fs-5 @(RedErrorRate >= 5 ? "text-danger" : "")">@RedErrorRate.ToString("0.0")%</div>
+                </div>
+                <div>
+                    <div class="text-muted small text-uppercase" style="letter-spacing:.03em">Avg latency</div>
+                    <div class="fs-5">@FormatMs(RedAvgMs)</div>
+                </div>
+                <div>
+                    <div class="text-muted small text-uppercase" style="letter-spacing:.03em">Peak p95</div>
+                    <div class="fs-5">@FormatMs(RedPeakP95)</div>
+                </div>
+                <div class="flex-grow-1" style="min-width:200px">
+                    <div class="text-muted small text-uppercase mb-1" style="letter-spacing:.03em">Request volume</div>
+                    <div class="d-flex align-items-end gap-1" style="height:32px">
+                        @{ long maxReq = red.Count > 0 ? red.Max(b => b.Count) : 0; }
+                        @foreach (RedBucket b in red)
+                        {
+                            int barPx = maxReq > 0 ? (int)Math.Round(b.Count * 28.0 / maxReq) : 0;
+                            int errPx = b.Count > 0 ? (int)Math.Round(b.Errors * (double)barPx / b.Count) : 0;
+                            string tip = $"{b.Start.ToLocalTime():HH:mm} · {b.Count} req ({b.Errors} err) · p95 {FormatMs(b.P95Ms)}";
+                            <div style="flex:1 1 0;display:flex;flex-direction:column;justify-content:flex-end;height:32px" title="@tip">
+                                <div style="background:#f48771;height:@(errPx)px"></div>
+                                <div style="background:#4a90d9;height:@(barPx - errPx)px"></div>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* ── Service map (caller→callee dependencies) ── *@
+    @if (serviceMap.Count > 0)
+    {
+        <details class="mb-3">
+            <summary class="small text-muted" style="cursor:pointer">
+                <span class="bi bi-diagram-2 me-1"></span>Service map (@serviceMap.Count dependencies)
+            </summary>
+            <div class="table-responsive mt-2">
+                <table class="table table-sm small mb-0 align-middle">
+                    <thead>
+                        <tr>
+                            <th>From</th><th></th><th>To</th>
+                            <th class="text-end">Calls</th><th class="text-end">Errors</th><th class="text-end">Avg</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (ServiceEdge e in serviceMap)
+                        {
+                            <tr>
+                                <td class="fw-semibold">@e.From</td>
+                                <td class="text-muted">→</td>
+                                <td class="fw-semibold">@e.To</td>
+                                <td class="text-end">@e.Calls.ToString("N0")</td>
+                                <td class="text-end @(e.Errors > 0 ? "text-danger" : "text-muted")">@e.Errors.ToString("N0")</td>
+                                <td class="text-end">@FormatMs(e.AvgMs)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </details>
+    }
+
+    <div class="row g-3">
+        @* ── Trace list ── *@
+        <div class="@(selectedTraceId is null ? "col-12" : "col-lg-5")">
+            @if (hasQueried && traces.Count == 0 && !isQuerying)
+            {
+                <div class="text-center py-4 text-muted">
+                    <span class="bi bi-diagram-3 display-6 d-block mb-2 opacity-25"></span>
+                    No traces match the selected criteria.
+                </div>
+            }
+            else if (traces.Count > 0)
+            {
+                <div class="list-group">
+                    @foreach (TraceSummary t in traces)
+                    {
+                        <button class="list-group-item list-group-item-action py-2 @(t.TraceId == selectedTraceId ? "active" : "")"
+                                @onclick="() => SelectTrace(t.TraceId)">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span class="text-truncate me-2">
+                                    <span class="fw-semibold">@t.RootService</span>
+                                    <span class="@(t.TraceId == selectedTraceId ? "" : "text-muted")">@t.RootName</span>
+                                </span>
+                                <span class="badge @(t.ErrorCount > 0 ? "bg-danger" : "bg-secondary") ms-1">@FormatMs(t.DurationMs)</span>
+                            </div>
+                            <div class="small @(t.TraceId == selectedTraceId ? "" : "text-muted")">
+                                @t.Start.ToLocalTime().ToString("HH:mm:ss") · @t.SpanCount spans
+                                @if (t.ErrorCount > 0) { <span> · @t.ErrorCount error@(t.ErrorCount == 1 ? "" : "s")</span> }
+                            </div>
+                        </button>
+                    }
+                </div>
+            }
+        </div>
+
+        @* ── Selected trace: waterfall + correlated logs ── *@
+        @if (selectedTraceId is not null)
+        {
+            <div class="col-lg-7">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="small text-muted font-monospace text-truncate">trace @selectedTraceId</span>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => selectedTraceId = null">
+                        <span class="bi bi-x-lg"></span>
+                    </button>
+                </div>
+
+                @if (isLoadingTrace)
+                {
+                    <div class="text-center py-4"><span class="spinner-border spinner-border-sm"></span></div>
+                }
+                else if (spans.Count > 0)
+                {
+                    DateTime traceStart = spans.Min(s => s.Start);
+                    double totalMs = Math.Max(1, spans.Max(s => (s.Start - traceStart).TotalMilliseconds + s.DurationMs));
+                    <div class="border rounded p-2 mb-3" style="overflow-x:auto">
+                        @foreach (SpanRecord s in spans)
+                        {
+                            var inv = System.Globalization.CultureInfo.InvariantCulture;
+                            string leftPct = ((s.Start - traceStart).TotalMilliseconds / totalMs * 100).ToString("0.##", inv);
+                            string widthPct = Math.Max(0.5, s.DurationMs / totalMs * 100).ToString("0.##", inv);
+                            string barColor = s.StatusCode == 2 ? "#f48771" : ServiceColor(s.Service);
+                            string errSuffix = s.StatusCode == 2 ? " · ERROR" : "";
+                            string spanTip = $"{s.Service} · {s.Name} · {FormatMs(s.DurationMs)}{errSuffix}";
+                            int depth = spanDepths.GetValueOrDefault(s.SpanId);
+                            <div class="d-flex align-items-center" style="height:22px;font-size:.75rem">
+                                <div class="text-truncate" style="width:38%;padding-left:@(depth * 12)px">
+                                    <span class="text-muted">@s.Service</span> @s.Name
+                                </div>
+                                <div style="position:relative;flex:1 1 0;height:14px;background:#f1f3f5;border-radius:3px">
+                                    <div style="position:absolute;left:@(leftPct)%;width:@(widthPct)%;height:14px;border-radius:3px;background:@barColor"
+                                         title="@spanTip"></div>
+                                </div>
+                                <div class="text-muted text-end ps-2" style="width:70px">@FormatMs(s.DurationMs)</div>
+                            </div>
+                        }
+                    </div>
+
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <span class="small text-muted"><span class="bi bi-journal-text me-1"></span>Logs for this trace</span>
+                    </div>
+                    @if (traceLogs.Count > 0)
+                    {
+                        <div class="border rounded font-monospace" style="background:#1e1e1e;max-height:280px;overflow-y:auto">
+                            @foreach (LokiLogEntry e in traceLogs)
+                            {
+                                <div class="px-2 py-0" style="line-height:1.4;border-bottom:1px solid #2d2d2d">
+                                    <span style="color:#888;font-size:.72rem;user-select:none">@e.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")</span>
+                                    <span class="ms-2" style="@LineStyle(e.DetectedLevel);font-size:.78rem;white-space:pre-wrap;word-break:break-all">@e.Line</span>
+                                </div>
+                            }
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="text-muted small py-2">No logs carry this trace id (apps must propagate trace context into their logs).</div>
+                    }
+                }
+            </div>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid ClusterId { get; set; }
+    /// <summary>Deep-link: a trace id to auto-open once on load (from a log line's trace badge).</summary>
+    [Parameter] public string? PresetTraceId { get; set; }
+    private string? _handledPreset;
+    private Guid _lastCluster;
+
+    private bool available;
+    private bool isLoading = true;
+    private List<string> services = [];
+
+    private string selectedService = "";
+    private int timeRangeMinutes = 60;
+    private int minDurationMs = 0;
+    private bool errorsOnly = false;
+
+    private List<TraceSummary> traces = [];
+    private List<RedBucket> red = [];
+    private List<ServiceEdge> serviceMap = [];
+    private bool isQuerying;
+    private bool hasQueried;
+    private string? queryError;
+
+    private string? selectedTraceId;
+    private List<SpanRecord> spans = [];
+    private Dictionary<string, int> spanDepths = [];
+    private List<LokiLogEntry> traceLogs = [];
+    private bool isLoadingTrace;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // Reset the view when the cluster changes, but preserve state on preset-only re-renders.
+        if (ClusterId != _lastCluster)
+        {
+            _lastCluster = ClusterId;
+            _handledPreset = null;   // allow the same preset trace to re-open on a different cluster
+            selectedTraceId = null;
+            traces = [];
+            red = [];
+            hasQueried = false;
+            queryError = null;
+        }
+
+        isLoading = true;
+        available = await Traces.HasDataAsync(ClusterId);
+        if (available)
+        {
+            KubernetesOperationResult<List<string>> s = await Traces.GetServicesAsync(ClusterId);
+            services = s.IsSuccess ? s.Data ?? [] : [];
+        }
+        isLoading = false;
+
+        // Deep-link from a log line: auto-open the preset trace once (per distinct value).
+        if (available && !string.IsNullOrEmpty(PresetTraceId) && PresetTraceId != _handledPreset)
+        {
+            _handledPreset = PresetTraceId;
+            await SelectTrace(PresetTraceId);
+        }
+    }
+
+    private async Task Search()
+    {
+        isQuerying = true;
+        queryError = null;
+        selectedTraceId = null;
+        StateHasChanged();
+
+        DateTime to = DateTime.UtcNow;
+        DateTime from = to.AddMinutes(-timeRangeMinutes);
+        string? service = string.IsNullOrEmpty(selectedService) ? null : selectedService;
+
+        KubernetesOperationResult<List<TraceSummary>> result =
+            await Traces.ListTracesAsync(ClusterId, service, from, to, minDurationMs, errorsOnly);
+        if (result.IsSuccess && result.Data is not null) traces = result.Data;
+        else queryError = result.Error;
+
+        red = [];
+        if (service is not null)
+        {
+            KubernetesOperationResult<List<RedBucket>> r = await Traces.GetServiceRedAsync(ClusterId, service, from, to);
+            if (r.IsSuccess && r.Data is not null) red = r.Data;
+        }
+
+        KubernetesOperationResult<List<ServiceEdge>> m = await Traces.GetServiceMapAsync(ClusterId, from, to);
+        serviceMap = m.IsSuccess && m.Data is not null ? m.Data : [];
+
+        hasQueried = true;
+        isQuerying = false;
+    }
+
+    private async Task SelectTrace(string traceId)
+    {
+        selectedTraceId = traceId;
+        isLoadingTrace = true;
+        spans = [];
+        traceLogs = [];
+        StateHasChanged();
+
+        KubernetesOperationResult<List<SpanRecord>> t = await Traces.GetTraceAsync(ClusterId, traceId);
+        if (t.IsSuccess && t.Data is not null) spans = t.Data;
+        spanDepths = ComputeDepths(spans);   // once, up front — not per span during render
+
+        KubernetesOperationResult<List<LokiLogStream>> l = await Logs.QueryByTraceAsync(ClusterId, traceId);
+        if (l.IsSuccess && l.Data is not null)
+            traceLogs = l.Data.SelectMany(s => s.Entries).OrderBy(e => e.Timestamp).ToList();
+
+        isLoadingTrace = false;
+    }
+
+    // ── RED summary (approximated from the returned buckets) ──
+    private long RedTotal => red.Sum(b => b.Count);
+    private double RedErrorRate => RedTotal > 0 ? red.Sum(b => b.Errors) * 100.0 / RedTotal : 0;
+    private double RedAvgMs => RedTotal > 0 ? red.Sum(b => b.AvgMs * b.Count) / RedTotal : 0;
+    private double RedPeakP95 => red.Count > 0 ? red.Max(b => b.P95Ms) : 0;
+
+    // Precompute each span's tree depth once (for waterfall indentation). Duplicate span_ids are
+    // tolerated (an at-least-once ingest can double-write a span) — ToDictionary would throw; the
+    // cycle guard bounds the parent walk.
+    private static Dictionary<string, int> ComputeDepths(List<SpanRecord> spans)
+    {
+        Dictionary<string, SpanRecord> byId = new();
+        foreach (SpanRecord s in spans) byId[s.SpanId] = s;
+
+        Dictionary<string, int> depths = new();
+        foreach (SpanRecord s in spans)
+        {
+            int d = 0;
+            SpanRecord cur = s;
+            HashSet<string> seen = [];
+            while (cur.ParentSpanId is not null && seen.Add(cur.SpanId)
+                   && byId.TryGetValue(cur.ParentSpanId, out SpanRecord? p) && d < 20)
+            {
+                d++;
+                cur = p;
+            }
+            depths[s.SpanId] = d;
+        }
+        return depths;
+    }
+
+    private static readonly string[] Palette =
+        ["#4a90d9", "#50b83c", "#9c6ade", "#e3a008", "#00a5a5", "#d9822b", "#3b5bdb", "#c2255c"];
+
+    private static string ServiceColor(string service) =>
+        Palette[(uint)service.GetHashCode() % Palette.Length];
+
+    private static string FormatMs(double ms) =>
+        ms >= 1000 ? $"{ms / 1000:0.##} s" : $"{ms:0.#} ms";
+
+    private static string LineStyle(LogLevel level) => level switch
+    {
+        LogLevel.Fatal or LogLevel.Error => "color:#f48771",
+        LogLevel.Warn => "color:#cca700",
+        LogLevel.Info => "color:#9cdcfe",
+        LogLevel.Debug => "color:#808080",
+        _ => "color:#d4d4d4"
+    };
+}
