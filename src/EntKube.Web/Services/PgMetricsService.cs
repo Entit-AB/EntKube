@@ -48,10 +48,11 @@ public class PgMetricsService(TelemetryStore store, ClusterTenantResolver tenant
     }
 
     /// <summary>
-    /// Bucketed time series for a metric over [from, to], optionally service-scoped. Each distinct series
-    /// (service/namespace/pod/labels) is collapsed to its per-bucket average, then summed across series, so a
-    /// metric emitted by N pods reports the total rather than a per-pod average that understates it. Cumulative
-    /// counters are still charted as their reported value (rate()/reset handling is a later refinement).
+    /// Bucketed time series for a metric over [from, to], optionally service-scoped, charted per its
+    /// stored <see cref="MetricKind"/>: a gauge collapses each series (service/namespace/pod/labels) to its
+    /// per-bucket average then sums across series (a metric from N pods reports the total, not a per-pod
+    /// average); a cumulative counter is differenced into a reset-aware per-second rate summed across
+    /// series; a delta sum's increments are summed into a per-second rate.
     /// </summary>
     public async Task<KubernetesOperationResult<List<TimeSeriesDataPoint>>> GetSeriesAsync(
         Guid clusterId, string name, string? service, DateTime from, DateTime to, int buckets = 60, CancellationToken ct = default)
@@ -61,27 +62,49 @@ public class PgMetricsService(TelemetryStore store, ClusterTenantResolver tenant
 
         double bucketSecs = Math.Max(1, Math.Ceiling((to - from).TotalSeconds / Math.Max(1, buckets)));
         TimeSpan interval = TimeSpan.FromSeconds(bucketSecs);
+        string svcClause = string.IsNullOrEmpty(service) ? "" : " AND service = @service";
 
         try
         {
             await using NpgsqlConnection conn = await Store.OpenConnectionAsync(ct);
+            MetricKind kind = await GetKindAsync(conn, tenantId.Value, clusterId, name, svcClause, service, from, to, ct);
+
             await using NpgsqlCommand cmd = conn.CreateCommand();
-            string svcClause = string.IsNullOrEmpty(service) ? "" : " AND service = @service";
-            // Collapse each series (service/namespace/pod/labels) to its per-bucket average first, then sum
-            // across series, so multi-pod metrics report the total instead of a per-pod average.
-            cmd.CommandText =
-                "SELECT b, sum(sv) AS v FROM (" +
-                "  SELECT date_bin(@interval, ts, @from) AS b, service, namespace, pod, labels, avg(value) AS sv " +
-                "  FROM metrics " +
-                "  WHERE tenant_id = @t AND cluster_id = @c AND name = @name AND ts >= @from AND ts < @to" + svcClause +
-                "  GROUP BY b, service, namespace, pod, labels" +
-                ") s GROUP BY b ORDER BY b";
+            cmd.CommandText = kind switch
+            {
+                // Cumulative counter → reset-aware per-second rate: difference consecutive samples per series
+                // (a drop means the counter reset, so count the post-reset value as the increase), then sum.
+                MetricKind.Counter =>
+                    "SELECT b, sum(increase) / @bucketsecs AS v FROM (" +
+                    "  SELECT date_bin(@interval, ts, @from) AS b," +
+                    "    CASE WHEN prev IS NULL THEN 0 WHEN value < prev THEN value ELSE value - prev END AS increase " +
+                    "  FROM (" +
+                    "    SELECT ts, value, lag(value) OVER (PARTITION BY service, namespace, pod, labels ORDER BY ts) AS prev " +
+                    "    FROM metrics " +
+                    "    WHERE tenant_id = @t AND cluster_id = @c AND name = @name AND ts >= @from AND ts < @to" + svcClause +
+                    "  ) d" +
+                    ") e GROUP BY b ORDER BY b",
+                // Delta sum → each point is already an increment; sum them into a per-second rate.
+                MetricKind.DeltaSum =>
+                    "SELECT date_bin(@interval, ts, @from) AS b, sum(value) / @bucketsecs AS v FROM metrics " +
+                    "WHERE tenant_id = @t AND cluster_id = @c AND name = @name AND ts >= @from AND ts < @to" + svcClause +
+                    " GROUP BY b ORDER BY b",
+                // Gauge → per-series average per bucket, summed across series.
+                _ =>
+                    "SELECT b, sum(sv) AS v FROM (" +
+                    "  SELECT date_bin(@interval, ts, @from) AS b, service, namespace, pod, labels, avg(value) AS sv " +
+                    "  FROM metrics " +
+                    "  WHERE tenant_id = @t AND cluster_id = @c AND name = @name AND ts >= @from AND ts < @to" + svcClause +
+                    "  GROUP BY b, service, namespace, pod, labels" +
+                    ") s GROUP BY b ORDER BY b"
+            };
             cmd.Parameters.AddWithValue("t", tenantId.Value);
             cmd.Parameters.AddWithValue("c", clusterId);
             cmd.Parameters.AddWithValue("name", name);
             cmd.Parameters.AddWithValue("from", NpgsqlDbType.TimestampTz, from.ToUniversalTime());
             cmd.Parameters.AddWithValue("to", NpgsqlDbType.TimestampTz, to.ToUniversalTime());
             cmd.Parameters.AddWithValue("interval", interval);
+            cmd.Parameters.AddWithValue("bucketsecs", bucketSecs);
             if (!string.IsNullOrEmpty(service)) cmd.Parameters.AddWithValue("service", service);
 
             List<TimeSeriesDataPoint> series = [];
@@ -95,5 +118,25 @@ public class PgMetricsService(TelemetryStore store, ClusterTenantResolver tenant
             Logger.LogWarning(ex, "Metric series failed (cluster {Cluster}, metric {Name})", clusterId, name);
             return Fail<List<TimeSeriesDataPoint>>(ex.Message);
         }
+    }
+
+    // The metric's aggregation kind (from the most recent sample in range) decides how the series is charted.
+    private static async Task<MetricKind> GetKindAsync(
+        NpgsqlConnection conn, Guid tenantId, Guid clusterId, string name, string svcClause, string? service,
+        DateTime from, DateTime to, CancellationToken ct)
+    {
+        await using NpgsqlCommand cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "SELECT kind FROM metrics WHERE tenant_id = @t AND cluster_id = @c AND name = @name " +
+            "AND ts >= @from AND ts < @to" + svcClause + " ORDER BY ts DESC LIMIT 1";
+        cmd.Parameters.AddWithValue("t", tenantId);
+        cmd.Parameters.AddWithValue("c", clusterId);
+        cmd.Parameters.AddWithValue("name", name);
+        cmd.Parameters.AddWithValue("from", NpgsqlDbType.TimestampTz, from.ToUniversalTime());
+        cmd.Parameters.AddWithValue("to", NpgsqlDbType.TimestampTz, to.ToUniversalTime());
+        if (!string.IsNullOrEmpty(service)) cmd.Parameters.AddWithValue("service", service);
+
+        object? result = await cmd.ExecuteScalarAsync(ct);
+        return result is short s && Enum.IsDefined((MetricKind)s) ? (MetricKind)s : MetricKind.Gauge;
     }
 }

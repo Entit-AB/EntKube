@@ -254,10 +254,13 @@ public sealed class TelemetryStore : IAsyncDisposable
             namespace   text,
             pod         text,
             value       double precision NOT NULL,
+            kind        smallint    NOT NULL DEFAULT 0,   -- MetricKind: 0 gauge, 1 cumulative counter, 2 delta sum
             labels      jsonb
         ) PARTITION BY RANGE (ts);
         CREATE INDEX IF NOT EXISTS metrics_ts_brin ON metrics USING brin (ts) WITH (pages_per_range = 32);
         CREATE INDEX IF NOT EXISTS metrics_scope_name_ts ON metrics (tenant_id, cluster_id, name, ts DESC);
+        -- Upgrade path for installs whose metrics table predates the kind column (propagates to partitions).
+        ALTER TABLE metrics ADD COLUMN IF NOT EXISTS kind smallint NOT NULL DEFAULT 0;
 
         -- Distinct (namespace, pod, container) seen per cluster, upserted on ingest, so the log-viewer
         -- dropdowns are a tiny index lookup instead of a DISTINCT scan over the huge partitioned logs.
@@ -509,7 +512,7 @@ public sealed class TelemetryStore : IAsyncDisposable
 
         await using NpgsqlConnection conn = await _dataSource.OpenConnectionAsync(ct);
         await using NpgsqlBinaryImporter writer = await conn.BeginBinaryImportAsync(
-            "COPY metrics (ts, tenant_id, cluster_id, name, service, namespace, pod, value, labels) " +
+            "COPY metrics (ts, tenant_id, cluster_id, name, service, namespace, pod, value, kind, labels) " +
             "FROM STDIN (FORMAT BINARY)", ct);
 
         foreach (MetricIngestRecord m in records)
@@ -528,6 +531,7 @@ public sealed class TelemetryStore : IAsyncDisposable
             else await writer.WriteAsync(m.Pod, NpgsqlDbType.Text, ct);
 
             await writer.WriteAsync(m.Value, NpgsqlDbType.Double, ct);
+            await writer.WriteAsync((short)m.Kind, NpgsqlDbType.Smallint, ct);
 
             if (m.LabelsJson is null) await writer.WriteNullAsync(ct);
             else await writer.WriteAsync(m.LabelsJson, NpgsqlDbType.Jsonb, ct);
@@ -592,9 +596,25 @@ public sealed record SpanIngestRecord(
     string? AttributesJson);
 
 /// <summary>
+/// How a metric aggregates over time, captured at ingest so the query layer can chart each correctly:
+/// a gauge is instantaneous, a cumulative counter must be differenced into a rate (with reset handling),
+/// and a delta sum already carries the per-interval increment. Stored as the <c>kind</c> smallint.
+/// </summary>
+public enum MetricKind : short
+{
+    /// <summary>Instantaneous value (OTLP gauge, or a non-monotonic sum).</summary>
+    Gauge = 0,
+    /// <summary>Monotonic cumulative sum — chart as a reset-aware per-second rate.</summary>
+    Counter = 1,
+    /// <summary>Delta-temporality sum — each point is the increment since the last export.</summary>
+    DeltaSum = 2
+}
+
+/// <summary>
 /// One numeric metric data point ready to write. <paramref name="Timestamp"/> must be UTC;
-/// <paramref name="Value"/> is the point value (gauge / sum). <paramref name="LabelsJson"/> is the
-/// data point's attributes as a JSON object string (or null).
+/// <paramref name="Value"/> is the point value (gauge / sum). <paramref name="Kind"/> drives how the
+/// series is aggregated for charting. <paramref name="LabelsJson"/> is the data point's attributes as a
+/// JSON object string (or null).
 /// </summary>
 public sealed record MetricIngestRecord(
     DateTime Timestamp,
@@ -603,4 +623,5 @@ public sealed record MetricIngestRecord(
     string? Namespace,
     string? Pod,
     double Value,
+    MetricKind Kind,
     string? LabelsJson);
