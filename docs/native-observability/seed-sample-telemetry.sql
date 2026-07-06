@@ -40,4 +40,12 @@ INSERT INTO logs (ts, tenant_id, cluster_id, namespace, pod, container, severity
  (now() - interval '10 seconds', :tenant, :cluster, 'shop', 'frontend-abc', 'frontend', 2, 'rendered checkout page',                  NULL,       NULL),
  (now() - interval '5 seconds',  :tenant, :cluster, 'shop', 'pg-0',         'postgres', 3, 'slow query 480ms on orders',              NULL,       NULL);
 
-\echo '>> Seeded 5 spans (2 traces) + 4 logs. Open the tenant Logs and Traces tabs for this cluster.'
+-- Label dropdowns read the log_streams table (normally upserted on ingest); the direct INSERTs above
+-- bypass that, so seed the distinct streams too or the namespace/pod/container pickers stay empty.
+INSERT INTO log_streams (tenant_id, cluster_id, namespace, pod, container) VALUES
+ (:tenant, :cluster, 'shop', 'api-def',      'api'),
+ (:tenant, :cluster, 'shop', 'frontend-abc', 'frontend'),
+ (:tenant, :cluster, 'shop', 'pg-0',         'postgres')
+ON CONFLICT (tenant_id, cluster_id, namespace, pod, container) DO UPDATE SET last_seen = now();
+
+\echo '>> Seeded 5 spans (2 traces) + 4 logs + 3 log_streams. Open the tenant Logs and Traces tabs for this cluster.'
