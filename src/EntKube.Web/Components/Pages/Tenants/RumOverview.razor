@@ -1,0 +1,136 @@
+@using EntKube.Web.Services
+@inject PgRumService Rum
+
+@if (loading)
+{
+    <div class="text-center py-5"><span class="spinner-border spinner-border-sm"></span></div>
+}
+else if (overview is null || overview.PageViews == 0)
+{
+    <div class="text-center py-5 text-muted">
+        <span class="bi bi-browser-chrome display-6 d-block mb-2 opacity-25"></span>
+        No page views for this site in the selected range. Embed the snippet and browse the site to populate this view.
+    </div>
+}
+else
+{
+    <div class="row g-2 mb-3">
+        <div class="col-6 col-md-3"><div class="card card-body py-2"><div class="small text-muted">Page views</div><div class="fs-5 fw-semibold">@overview.PageViews.ToString("N0")</div></div></div>
+        <div class="col-6 col-md-3"><div class="card card-body py-2"><div class="small text-muted">Sessions</div><div class="fs-5 fw-semibold">@overview.Sessions.ToString("N0")</div></div></div>
+        <div class="col-6 col-md-3"><div class="card card-body py-2"><div class="small text-muted">JS errors</div><div class="fs-5 fw-semibold @(overview.Errors > 0 ? "text-danger" : "")">@overview.Errors.ToString("N0")</div></div></div>
+        <div class="col-6 col-md-3"><div class="card card-body py-2"><div class="small text-muted">Errors / session</div><div class="fs-5 fw-semibold">@ErrPerSession</div></div></div>
+    </div>
+
+    <div class="row g-2 mb-3">
+        @foreach (Vital v in Vitals())
+        {
+            <div class="col-6 col-md-3">
+                <div class="card card-body py-2">
+                    <div class="small text-muted">@v.Label <span class="text-muted">p75</span></div>
+                    <div class="fs-5 fw-semibold @Band(v)">@VitalValue(v)</div>
+                    <div class="small @Band(v)">@BandLabel(v)</div>
+                </div>
+            </div>
+        }
+    </div>
+
+    <div class="card card-body mb-3">
+        <div class="small text-muted mb-1">Page-view volume</div>
+        @if (series.Count >= 2) { <MetricChart DataPoints="series" Color="#4a90d9" HeightPx="160" /> }
+        else { <div class="text-muted small py-3 text-center">Not enough points to chart.</div> }
+    </div>
+
+    <div class="row g-3">
+        <div class="col-md-6">
+            <div class="card card-body">
+                <div class="fw-semibold small mb-2">Top pages</div>
+                <table class="table table-sm small mb-0 align-middle">
+                    <thead><tr><th>Path</th><th class="text-end">Views</th><th class="text-end">LCP p75</th></tr></thead>
+                    <tbody>
+                        @foreach (RumTopPage p in topPages)
+                        {
+                            <tr><td class="font-monospace text-truncate" style="max-width:260px">@p.Path</td><td class="text-end">@p.Views.ToString("N0")</td><td class="text-end">@Ms(p.LcpP75)</td></tr>
+                        }
+                        @if (topPages.Count == 0) { <tr><td colspan="3" class="text-muted">—</td></tr> }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card card-body">
+                <div class="fw-semibold small mb-2">Top errors</div>
+                <table class="table table-sm small mb-0 align-middle">
+                    <thead><tr><th>Message</th><th class="text-end">Count</th></tr></thead>
+                    <tbody>
+                        @foreach (RumTopError e in topErrors)
+                        {
+                            <tr><td class="font-monospace text-truncate" style="max-width:300px" title="@e.Message">@e.Message</td><td class="text-end">@e.Count.ToString("N0")</td></tr>
+                        }
+                        @if (topErrors.Count == 0) { <tr><td colspan="2" class="text-muted">No errors 🎉</td></tr> }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+    [Parameter] public required Guid SiteId { get; set; }
+    [Parameter] public DateTime From { get; set; }
+    [Parameter] public DateTime To { get; set; }
+
+    private bool loading = true;
+    private RumSiteOverview? overview;
+    private List<TimeSeriesDataPoint> series = [];
+    private List<RumTopPage> topPages = [];
+    private List<RumTopError> topErrors = [];
+    private string _lastKey = "";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        string key = $"{SiteId}|{From:o}|{To:o}";
+        if (key == _lastKey) return;
+        _lastKey = key;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        StateHasChanged();
+        overview = await Rum.GetOverviewAsync(TenantId, SiteId, From, To);
+        series = await Rum.GetPageViewSeriesAsync(TenantId, SiteId, From, To);
+        topPages = await Rum.GetTopPagesAsync(TenantId, SiteId, From, To);
+        topErrors = await Rum.GetTopErrorsAsync(TenantId, SiteId, From, To);
+        loading = false;
+    }
+
+    private string ErrPerSession => overview is { Sessions: > 0 } ? ((double)overview.Errors / overview.Sessions).ToString("0.00") : "0";
+
+    private static string Ms(double? v) => v is null ? "—" : (v >= 1000 ? $"{v / 1000:0.##} s" : $"{v:0} ms");
+
+    // Core Web Vitals with good / needs-improvement / poor thresholds (web.dev).
+    private readonly record struct Vital(string Label, double? Value, string Unit, double Good, double Poor);
+
+    private List<Vital> Vitals() => overview is null ? [] :
+    [
+        new("LCP", overview.LcpP75, "ms", 2500, 4000),
+        new("INP", overview.InpP75, "ms", 200, 500),
+        new("CLS", overview.ClsP75, "", 0.1, 0.25),
+        new("FCP", overview.FcpP75, "ms", 1800, 3000)
+    ];
+
+    private static string Band(Vital v) => v.Value is null ? "text-muted"
+        : (v.Value <= v.Good ? "text-success" : (v.Value <= v.Poor ? "text-warning" : "text-danger"));
+
+    private static string BandLabel(Vital v) => v.Value is null ? "no data"
+        : (v.Value <= v.Good ? "good" : (v.Value <= v.Poor ? "needs work" : "poor"));
+
+    private static string VitalValue(Vital v)
+    {
+        if (v.Value is null) return "—";
+        if (v.Unit == "") return v.Value.Value.ToString("0.###");
+        return v.Value >= 1000 ? $"{v.Value / 1000:0.##} s" : $"{v.Value:0} {v.Unit}";
+    }
+}

@@ -154,6 +154,7 @@ public class Program
         builder.Services.AddSingleton<IngestRateLimiter>();
         // Real User Monitoring: resolves per-site public keys for the public browser ingest endpoint.
         builder.Services.AddSingleton<RumSiteService>();
+        builder.Services.AddScoped<PgRumService>();
         builder.Services.AddScoped<ClusterTenantResolver>();
         builder.Services.AddScoped<PgLogService>();
         builder.Services.AddScoped<PgTraceService>();
