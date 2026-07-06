@@ -1254,6 +1254,245 @@ public class KubernetesOperationsService(
         return await ApplyRawYamlAsync(kubeconfig, yaml, ct);
     }
 
+    // ──────── Raw L4 (TCP/UDP) routes (dedicated Istio L4 gateway) ────────
+
+    /// <summary>
+    /// Applies a raw L4 route (TCP or UDP): (re)generates the dedicated L4 Gateway (auto-provisions
+    /// its own LoadBalancer + external IP, one listener per port), disables forced mTLS to the backend
+    /// for TCP, then applies the TCPRoute/UDPRoute. On success returns the resolved external endpoint
+    /// (LoadBalancer address:port).
+    /// </summary>
+    public async Task<KubernetesOperationResult<string>> ApplyL4RouteAsync(
+        Guid l4RouteId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        AppL4Route? route = await db.AppL4Routes
+            .Include(r => r.AppDeployment)
+                .ThenInclude(d => d.Cluster)
+            .FirstOrDefaultAsync(r => r.Id == l4RouteId, ct);
+
+        if (route is null)
+            return KubernetesOperationResult<string>.Failure("L4 route not found.");
+
+        if (!route.IsManaged)
+            return KubernetesOperationResult<string>.Failure(
+                "This route is observed only. Enable management to let EntKube apply it.");
+
+        if (string.IsNullOrWhiteSpace(route.AppDeployment?.Cluster?.Kubeconfig))
+            return KubernetesOperationResult<string>.Failure(
+                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
+
+        Guid clusterId = route.AppDeployment.ClusterId;
+        string kubeconfig = route.AppDeployment.Cluster.Kubeconfig;
+        string backendNs = route.AppDeployment.Namespace;
+        string proto = route.Protocol.ToString().ToUpperInvariant();
+
+        List<ClusterComponent> components = await db.ClusterComponents
+            .Where(c => c.ClusterId == clusterId)
+            .ToListAsync(ct);
+
+        if (ExternalRouteService.ResolveGatewayClass(components) != "istio")
+            return KubernetesOperationResult<string>.Failure(
+                "L4 (TCP/UDP) routes require an Istio ingress gateway on this cluster.");
+
+        (_, string gwNamespace) = ExternalRouteService.ResolveL4Gateway(components);
+
+        // Preflight: the TCPRoute/UDPRoute CRD ships only in the experimental channel of Gateway API.
+        // Without it kubectl apply fails obscurely — surface a clear, actionable error instead.
+        string crdName = AppL4RouteService.RouteCrdName(route.Protocol);
+        if (!await CrdInstalledAsync(kubeconfig, crdName, ct))
+            return KubernetesOperationResult<string>.Failure(
+                $"The {AppL4RouteService.RouteKind(route.Protocol)} CRD ({crdName}) is not installed on this cluster. " +
+                "Install the experimental channel of the Gateway API CRDs to enable L4 routing.");
+
+        // Apply the dedicated L4 Gateway first so the listener exists before the route attaches.
+        KubernetesOperationResult<string> gatewayResult = await ApplyL4GatewayForClusterAsync(clusterId, kubeconfig, db, null, ct);
+        if (!gatewayResult.IsSuccess)
+            return gatewayResult;
+
+        // TCP only: the ingress gateway would otherwise force mTLS to the backend, breaking
+        // sidecar-less pods. PERMISSIVE in the backend ns + a DestinationRule (tls DISABLE) in the
+        // gateway's root config namespace let the gateway reach the pod plainly. Istio mTLS does not
+        // apply to UDP, so this step is skipped for UDP routes.
+        if (route.Protocol == L4Protocol.Tcp)
+        {
+            string peerAuthYaml =
+                $"apiVersion: security.istio.io/v1beta1\n" +
+                $"kind: PeerAuthentication\n" +
+                $"metadata:\n" +
+                $"  name: entkube-permissive\n" +
+                $"  namespace: {backendNs}\n" +
+                $"spec:\n" +
+                $"  mtls:\n" +
+                $"    mode: PERMISSIVE\n";
+            await ApplyRawYamlAsync(kubeconfig, peerAuthYaml, ct);
+
+            string destinationRuleYaml =
+                $"apiVersion: networking.istio.io/v1beta1\n" +
+                $"kind: DestinationRule\n" +
+                $"metadata:\n" +
+                $"  name: entkube-disable-mtls-{route.ServiceName}\n" +
+                $"  namespace: {gwNamespace}\n" +
+                $"spec:\n" +
+                $"  host: {route.ServiceName}.{backendNs}.svc.cluster.local\n" +
+                $"  trafficPolicy:\n" +
+                $"    tls:\n" +
+                $"      mode: DISABLE\n";
+            await ApplyRawYamlAsync(kubeconfig, destinationRuleYaml, ct);
+        }
+
+        string yaml = AppL4RouteService.GenerateRouteYaml(route, backendNs);
+        KubernetesOperationResult<string> result = await ApplyRawYamlAsync(kubeconfig, yaml, ct);
+        if (!result.IsSuccess)
+            return result;
+
+        route.ClusterAppliedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        string? address = await GetL4GatewayAddressAsync(kubeconfig, gwNamespace, ct);
+        string endpoint = address is not null
+            ? $"{address}:{route.ExternalPort}/{proto}"
+            : $"(LoadBalancer address pending):{route.ExternalPort}/{proto}";
+        return KubernetesOperationResult<string>.Success($"{proto} route applied. External endpoint: {endpoint}");
+    }
+
+    /// <summary>
+    /// Deletes the TCPRoute/UDPRoute for a route from its cluster and regenerates the dedicated L4
+    /// Gateway without this route's listener (removing the Gateway entirely — and releasing its
+    /// LoadBalancer — when no L4 routes remain). Call before removing the route from the database.
+    /// </summary>
+    public async Task<KubernetesOperationResult<string>> DeleteL4RouteFromClusterAsync(
+        Guid l4RouteId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        AppL4Route? route = await db.AppL4Routes
+            .Include(r => r.AppDeployment)
+                .ThenInclude(d => d.Cluster)
+            .FirstOrDefaultAsync(r => r.Id == l4RouteId, ct);
+
+        if (route is null)
+            return KubernetesOperationResult<string>.Failure("L4 route not found.");
+
+        if (string.IsNullOrWhiteSpace(route.AppDeployment?.Cluster?.Kubeconfig))
+            return KubernetesOperationResult<string>.Failure("Cluster has no kubeconfig configured.");
+
+        string kubeconfig = route.AppDeployment.Cluster.Kubeconfig;
+        string ns = route.AppDeployment.Namespace;
+        Guid clusterId = route.AppDeployment.ClusterId;
+
+        await DeleteResourceAsync(
+            kubeconfig, AppL4RouteService.RouteResourceType(route.Protocol),
+            AppL4RouteService.RouteResourceName(route), ns, ct);
+
+        // Regenerate the gateway from the remaining routes (this one excluded — it is still in the DB).
+        return await ApplyL4GatewayForClusterAsync(clusterId, kubeconfig, db, l4RouteId, ct);
+    }
+
+    /// <summary>
+    /// Regenerates and applies the dedicated L4 Gateway for a cluster from all enabled, managed L4
+    /// routes (optionally excluding one being deleted). When no ports remain the Gateway is deleted so
+    /// its auto-provisioned LoadBalancer is released.
+    /// </summary>
+    private async Task<KubernetesOperationResult<string>> ApplyL4GatewayForClusterAsync(
+        Guid clusterId, string kubeconfig, ApplicationDbContext db, Guid? excludeRouteId, CancellationToken ct)
+    {
+        List<ClusterComponent> components = await db.ClusterComponents
+            .Where(c => c.ClusterId == clusterId)
+            .ToListAsync(ct);
+
+        (_, string gwNamespace) = ExternalRouteService.ResolveL4Gateway(components);
+        string gatewayClass = ExternalRouteService.ResolveGatewayClass(components);
+
+        List<AppL4Route> routes = await db.AppL4Routes
+            .Where(r => r.IsEnabled && r.IsManaged
+                     && r.AppDeployment.ClusterId == clusterId
+                     && (excludeRouteId == null || r.Id != excludeRouteId))
+            .ToListAsync(ct);
+
+        string yaml = ExternalRouteService.GenerateL4GatewayYaml(gwNamespace, routes, gatewayClass);
+        if (string.IsNullOrEmpty(yaml))
+        {
+            // No L4 ports left — remove the dedicated gateway so its LoadBalancer is freed.
+            await DeleteResourceAsync(kubeconfig, "gateway.gateway.networking.k8s.io",
+                ExternalRouteService.L4GatewayName, gwNamespace, ct);
+            return KubernetesOperationResult<string>.Success("No L4 routes remain — dedicated L4 gateway removed.");
+        }
+
+        return await ApplyRawYamlAsync(kubeconfig, yaml, ct);
+    }
+
+    /// <summary>Returns the dedicated L4 gateway's external address (LoadBalancer IP/hostname), or null if not yet assigned.</summary>
+    public async Task<string?> GetL4EndpointAddressAsync(Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        KubernetesCluster? cluster = await db.KubernetesClusters
+            .Include(c => c.Components)
+            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+
+        if (string.IsNullOrWhiteSpace(cluster?.Kubeconfig)) return null;
+
+        (_, string gwNamespace) = ExternalRouteService.ResolveL4Gateway(cluster.Components);
+        return await GetL4GatewayAddressAsync(cluster.Kubeconfig, gwNamespace, ct);
+    }
+
+    private async Task<string?> GetL4GatewayAddressAsync(string kubeconfig, string gwNamespace, CancellationToken ct)
+    {
+        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
+        try
+        {
+            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+            HelmExecutionResult result = await RunCliAsync(
+                "kubectl",
+                $"get gateway {ExternalRouteService.L4GatewayName} --namespace {gwNamespace} " +
+                $"--kubeconfig {tempKubeconfig} -o jsonpath={{.status.addresses[0].value}}",
+                ct);
+            string addr = result.Output.Trim();
+            return result.Success && !string.IsNullOrEmpty(addr) ? addr : null;
+        }
+        finally
+        {
+            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+        }
+    }
+
+    private async Task<bool> CrdInstalledAsync(string kubeconfig, string crdName, CancellationToken ct)
+    {
+        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
+        try
+        {
+            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+            HelmExecutionResult result = await RunCliAsync(
+                "kubectl",
+                $"get crd {crdName} --kubeconfig {tempKubeconfig} --ignore-not-found -o name",
+                ct);
+            return result.Success && result.Output.Contains(crdName);
+        }
+        finally
+        {
+            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+        }
+    }
+
+    private async Task DeleteResourceAsync(string kubeconfig, string kind, string name, string ns, CancellationToken ct)
+    {
+        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
+        try
+        {
+            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+            await RunCliAsync(
+                "kubectl",
+                $"delete {kind} {name} --namespace {ns} --kubeconfig {tempKubeconfig} --ignore-not-found",
+                ct);
+        }
+        finally
+        {
+            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+        }
+    }
+
     private async Task<KubernetesOperationResult<string>> ApplyRawYamlAsync(
         string kubeconfig, string yaml, CancellationToken ct)
     {

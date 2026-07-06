@@ -339,6 +339,9 @@ else
         <i class="bi bi-info-circle me-1"></i>
         Path changes update the routing configuration. Your platform team will apply the updated HTTPRoute to the cluster.
     </div>
+
+    @* Read-only view of any raw TCP/UDP ports exposed for this app. *@
+    <AppL4RoutesPanel App="App" IsPortalView="true" />
 }
 
 @code {

@@ -82,6 +82,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<AppRbacRule> AppRbacRules => Set<AppRbacRule>();
     public DbSet<AppRoute> AppRoutes => Set<AppRoute>();
     public DbSet<AppDeploymentRoute> AppDeploymentRoutes => Set<AppDeploymentRoute>();
+    public DbSet<AppL4Route> AppL4Routes => Set<AppL4Route>();
     public DbSet<AppAllowedDatabase> AppAllowedDatabases => Set<AppAllowedDatabase>();
     public DbSet<AppAllowedCache> AppAllowedCaches => Set<AppAllowedCache>();
     public DbSet<AppAllowedStorage> AppAllowedStorages => Set<AppAllowedStorage>();
@@ -1629,6 +1630,26 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
 
             entity.HasOne(r => r.AppDeployment)
                 .WithMany(d => d.Routes)
+                .HasForeignKey(r => r.AppDeploymentId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // AppL4Route — raw TCP/UDP port exposure through the dedicated Istio L4 gateway.
+        // Cascades from AppDeployment only (single cascade path App → AppDeployment → AppL4Route);
+        // AppId is a plain scoping column so the unique index can enforce per-cluster port ownership.
+
+        builder.Entity<AppL4Route>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.Property(r => r.Protocol).HasConversion<string>().HasMaxLength(10);
+            entity.Property(r => r.ServiceName).HasMaxLength(200).IsRequired();
+            entity.Property(r => r.GatewayName).HasMaxLength(200);
+            entity.Property(r => r.GatewayNamespace).HasMaxLength(63);
+            entity.Property(r => r.IsManaged).HasDefaultValue(true);
+            entity.HasIndex(r => r.AppId);
+
+            entity.HasOne(r => r.AppDeployment)
+                .WithMany()
                 .HasForeignKey(r => r.AppDeploymentId)
                 .OnDelete(DeleteBehavior.Cascade);
         });

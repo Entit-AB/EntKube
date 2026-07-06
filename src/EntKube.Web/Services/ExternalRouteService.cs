@@ -526,6 +526,81 @@ public class ExternalRouteService(
     /// <summary>Derives the TLS secret name from a hostname (used in both the Gateway listener and Certificate).</summary>
     public static string ToCertSecretName(string hostname) => ToListenerName(hostname) + "-tls";
 
+    // ── Raw L4 TCP/UDP (dedicated gateway) ──
+
+    /// <summary>
+    /// Name of the dedicated per-cluster Gateway that carries raw TCP/UDP listeners. Kept distinct
+    /// from the HTTP <c>default-gateway</c> so it can be provisioned with its own LoadBalancer.
+    /// </summary>
+    public const string L4GatewayName = "entkube-l4-gateway";
+
+    /// <summary>
+    /// Resolves the (name, namespace) of the dedicated L4 Gateway. The namespace tracks the
+    /// installed ingress controller's namespace (istio-system for Istio) so the auto-provisioned
+    /// gateway Deployment/Service lands beside the ingress it belongs to.
+    /// </summary>
+    public static (string Name, string Namespace) ResolveL4Gateway(IEnumerable<ClusterComponent> components)
+    {
+        (_, string ns) = ResolveGateway(components);
+        return (L4GatewayName, ns);
+    }
+
+    /// <summary>Listener/section name for a protocol+port (e.g. TCP 5432 → "tcp-5432", UDP 53 → "udp-53").</summary>
+    public static string L4ListenerName(L4Protocol protocol, int port)
+        => $"{protocol.ToString().ToLowerInvariant()}-{port}";
+
+    /// <summary>
+    /// Generates the dedicated L4 Gateway with one listener per enabled route (protocol: TCP or UDP).
+    /// Unlike the HTTP gateway this omits <c>addresses</c>, so Istio's Gateway API controller
+    /// auto-provisions a LoadBalancer Service that opens exactly these ports (its own external IP).
+    /// TCP and UDP on the same port number produce two distinct listeners. Regenerate wholesale on
+    /// every route change. Returns an empty string when there are no ports to expose.
+    /// </summary>
+    public static string GenerateL4GatewayYaml(
+        string gatewayNamespace,
+        IEnumerable<AppL4Route> routes,
+        string gatewayClass = "istio")
+    {
+        // Distinct (protocol, port) pairs across all enabled routes — one listener each.
+        var listenerSpecs = routes
+            .Where(r => r.IsEnabled)
+            .Select(r => (r.Protocol, r.ExternalPort))
+            .Distinct()
+            .OrderBy(x => x.Protocol)
+            .ThenBy(x => x.ExternalPort)
+            .ToList();
+
+        if (listenerSpecs.Count == 0) return "";
+
+        string listeners = string.Join("\n", listenerSpecs.Select(spec =>
+        {
+            string proto = spec.Protocol == L4Protocol.Udp ? "UDP" : "TCP";
+            string kind = spec.Protocol == L4Protocol.Udp ? "UDPRoute" : "TCPRoute";
+            return
+                $"    - name: {L4ListenerName(spec.Protocol, spec.ExternalPort)}\n" +
+                $"      port: {spec.ExternalPort}\n" +
+                $"      protocol: {proto}\n" +
+                $"      allowedRoutes:\n" +
+                $"        kinds:\n" +
+                $"          - kind: {kind}\n" +
+                $"        namespaces:\n" +
+                $"          from: All";
+        }));
+
+        return
+            $"apiVersion: gateway.networking.k8s.io/v1\n" +
+            $"kind: Gateway\n" +
+            $"metadata:\n" +
+            $"  name: {L4GatewayName}\n" +
+            $"  namespace: {gatewayNamespace}\n" +
+            $"  annotations:\n" +
+            $"    app.kubernetes.io/managed-by: entkube\n" +
+            $"spec:\n" +
+            $"  gatewayClassName: {gatewayClass}\n" +
+            $"  listeners:\n" +
+            listeners;
+    }
+
     // ── Private helpers ──
 
     /// <summary>
