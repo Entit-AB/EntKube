@@ -6,7 +6,8 @@ namespace EntKube.Web.Services;
 /// <summary>
 /// Queries the native RUM tables (rum_page_views / rum_errors / rum_resources) for the RUM dashboards.
 /// Scoped by tenant_id + site_id (a <see cref="Data.RumSite"/>) — RUM is site-scoped, not cluster-scoped,
-/// so this does NOT go through the cluster→tenant resolver. Web Vitals are reported at p75 (the web standard).
+/// so this does NOT go through the cluster→tenant resolver. Web Vitals are reported at p75 (the conventional
+/// RUM percentile) over the snippet's client-side approximations, so treat them as indicative not CrUX-exact.
 /// </summary>
 public class PgRumService(TelemetryStore store, ILogger<PgRumService> logger)
 {

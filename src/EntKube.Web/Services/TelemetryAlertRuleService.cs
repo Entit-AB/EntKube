@@ -82,7 +82,7 @@ public class TelemetryAlertRuleService(IDbContextFactory<ApplicationDbContext> d
     /// touches incidents for currently-enabled rules, so without this an incident firing at the moment a rule
     /// is silenced would linger Active on the board forever with no all-clear.
     /// </summary>
-    private static async Task ResolveOpenIncidentsAsync(ApplicationDbContext db, Guid ruleId, CancellationToken ct)
+    internal static async Task ResolveOpenIncidentsAsync(ApplicationDbContext db, Guid ruleId, CancellationToken ct)
     {
         string prefix = $"telemetry:{ruleId:N}:";
         DateTime now = DateTime.UtcNow;

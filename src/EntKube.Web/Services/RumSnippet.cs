@@ -66,6 +66,9 @@ public static class RumSnippet
       } catch (e) {}
     }
 
+    // Lightweight Core Web Vitals approximations (LCP=last observed, CLS=total sum, INP=max interaction,
+    // FCP=paint). Good for trending; may differ slightly from Chrome/CrUX's exact session-window/percentile
+    // definitions — treat the p75s as indicative rather than CrUX-identical.
     observe("largest-contentful-paint", function (es) { var l = es[es.length - 1]; if (l) vitals.lcp = Math.round(l.startTime); });
     observe("layout-shift", function (es) { for (var i = 0; i < es.length; i++) { if (!es[i].hadRecentInput) vitals.cls += es[i].value; } });
     observe("paint", function (es) { for (var i = 0; i < es.length; i++) { if (es[i].name === "first-contentful-paint") vitals.fcp = Math.round(es[i].startTime); } });
@@ -156,17 +159,35 @@ public static class RumSnippet
       return { t: now(), path: path(), load: nt.load, ttfb: nt.ttfb, lcp: vitals.lcp, cls: Math.round(vitals.cls * 1000) / 1000, inp: vitals.inp, fcp: vitals.fcp };
     }
 
-    function send(final) {
-      if (final && !flushed) { q.views.push(buildPageView()); flushed = true; }
-      if (!q.views.length && !q.errors.length && !q.resources.length) return;
-      var payload = { session: sid, view: vid, path: path(), referrer: document.referrer || null, ua: ua, views: q.views, errors: q.errors, resources: q.resources };
-      q = { views: [], errors: [], resources: [] };
-      var body = JSON.stringify(payload);
+    var MAX_BODY = 60000;   // stay under the ~64KB sendBeacon / fetch-keepalive per-request cap
+
+    function post(body) {
       var ok = false;
       try { if (navigator.sendBeacon) ok = navigator.sendBeacon(endpoint, new Blob([body], { type: "text/plain" })); } catch (e) {}
       // Fallback uses the NATIVE fetch, not window.fetch — otherwise the ingest POST records itself as a
       // resource and re-arms the flush timer, looping on browsers without sendBeacon.
       if (!ok && nativeFetch) { try { nativeFetch(endpoint, { method: "POST", body: body, headers: { "Content-Type": "text/plain" }, keepalive: true, mode: "cors" }); } catch (e) {} }
+    }
+
+    // Split a too-large batch (e.g. an error storm with big stacks) so no single beacon exceeds the cap and
+    // gets silently dropped; recurse until each chunk fits or is a single event.
+    function ship(views, errors, resources) {
+      if (!views.length && !errors.length && !resources.length) return;
+      var body = JSON.stringify({ session: sid, view: vid, path: path(), referrer: document.referrer || null, ua: ua, views: views, errors: errors, resources: resources });
+      if (body.length > MAX_BODY && (views.length + errors.length + resources.length) > 1) {
+        var hv = Math.ceil(views.length / 2), he = Math.ceil(errors.length / 2), hr = Math.ceil(resources.length / 2);
+        ship(views.slice(0, hv), errors.slice(0, he), resources.slice(0, hr));
+        ship(views.slice(hv), errors.slice(he), resources.slice(hr));
+        return;
+      }
+      post(body);
+    }
+
+    function send(final) {
+      if (final && !flushed) { q.views.push(buildPageView()); flushed = true; }
+      var views = q.views, errors = q.errors, resources = q.resources;
+      q = { views: [], errors: [], resources: [] };
+      ship(views, errors, resources);
     }
 
     addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") send(true); });

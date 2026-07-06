@@ -65,7 +65,16 @@ else if (sites.Count > 0)
                 {
                     <tr class="@(s.IsEnabled ? "" : "text-muted")">
                         <td class="fw-semibold">@s.Name</td>
-                        <td class="font-monospace text-truncate" style="max-width:260px">@OriginsSummary(s)</td>
+                        <td class="text-truncate" style="max-width:260px">
+                            @if (s.Origins.Count == 0)
+                            {
+                                <span class="badge bg-warning text-dark" title="This site accepts beacons from any origin">any origin</span>
+                            }
+                            else
+                            {
+                                <span class="font-monospace">@OriginsSummary(s)</span>
+                            }
+                        </td>
                         <td class="text-end">@s.SampleRate.ToString("0.##")</td>
                         <td>
                             <div class="form-check form-switch mb-0">

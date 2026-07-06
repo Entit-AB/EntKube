@@ -14,9 +14,11 @@ public sealed record RumSiteInfo(
 /// unknown keys) so the public ingest endpoint doesn't hit the DB on every browser beacon, and provides the
 /// admin CRUD for <see cref="RumSite"/>s. Singleton; cache is per management-plane instance.
 /// </summary>
-public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFactory, IConfiguration config)
 {
-    private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(30);
+    // Lower Rum:SiteCacheTtlSeconds for faster propagation of a disable/rotate across instances (at the cost
+    // of more resolve DB hits); the default trades ~30s of staleness for far fewer lookups.
+    private readonly TimeSpan _cacheTtl = TimeSpan.FromSeconds(Math.Max(1, config.GetValue<int?>("Rum:SiteCacheTtlSeconds") ?? 30));
     private const int MaxCacheEntries = 10_000;   // bound the (incl. negative) cache against unknown-key sprays
     private readonly ConcurrentDictionary<string, (RumSiteInfo? Info, DateTime Expiry)> _cache = new(StringComparer.Ordinal);
 
@@ -44,7 +46,7 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
             if (_cache.Count >= MaxCacheEntries) _cache.Clear();
         }
 
-        _cache[publicKey] = (info, now + CacheTtl);
+        _cache[publicKey] = (info, now + _cacheTtl);
         return info;
     }
 
@@ -112,6 +114,17 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
     public async Task DeleteAsync(Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        // Clean up RUM alert rules bound to this site (there's no FK cascade), resolving any incidents they
+        // raised — otherwise a deleted site leaves orphaned rules evaluating against a gone site and, worse,
+        // any incident open at deletion time would linger forever.
+        List<Guid> ruleIds = await db.TelemetryAlertRules
+            .Where(r => r.TenantId == tenantId && r.SiteId == id).Select(r => r.Id).ToListAsync(ct);
+        foreach (Guid ruleId in ruleIds)
+            await TelemetryAlertRuleService.ResolveOpenIncidentsAsync(db, ruleId, ct);
+        if (ruleIds.Count > 0)
+            await db.TelemetryAlertRules.Where(r => r.TenantId == tenantId && r.SiteId == id).ExecuteDeleteAsync(ct);
+
         await db.RumSites.Where(s => s.Id == id && s.TenantId == tenantId).ExecuteDeleteAsync(ct);
         InvalidateCache();
     }
