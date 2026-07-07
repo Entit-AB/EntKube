@@ -239,6 +239,9 @@ else
     /// <summary>Optional namespace scope (customer portal). When set, every span query is restricted to
     /// these namespaces so a customer only sees their own apps' traces. Null = cluster-wide (tenant view).</summary>
     [Parameter] public IReadOnlyList<string>? Namespaces { get; set; }
+    /// <summary>Optional deployment scope: a "^(workload1|workload2)-" pod regex that narrows within the
+    /// namespace to one deployment's pods. Null = all deployments in the namespace scope.</summary>
+    [Parameter] public string? PodPattern { get; set; }
     private string? _handledPreset;
     private Guid _lastCluster;
 
@@ -282,7 +285,7 @@ else
         available = await Traces.HasDataAsync(ClusterId);
         if (available)
         {
-            KubernetesOperationResult<List<string>> s = await Traces.GetServicesAsync(ClusterId, namespaces: Namespaces);
+            KubernetesOperationResult<List<string>> s = await Traces.GetServicesAsync(ClusterId, namespaces: Namespaces, podPattern: PodPattern);
             services = s.IsSuccess ? s.Data ?? [] : [];
         }
         isLoading = false;
@@ -307,18 +310,18 @@ else
         string? service = string.IsNullOrEmpty(selectedService) ? null : selectedService;
 
         KubernetesOperationResult<List<TraceSummary>> result =
-            await Traces.ListTracesAsync(ClusterId, service, from, to, minDurationMs, errorsOnly, namespaces: Namespaces);
+            await Traces.ListTracesAsync(ClusterId, service, from, to, minDurationMs, errorsOnly, namespaces: Namespaces, podPattern: PodPattern);
         if (result.IsSuccess && result.Data is not null) traces = result.Data;
         else queryError = result.Error;
 
         red = [];
         if (service is not null)
         {
-            KubernetesOperationResult<List<RedBucket>> r = await Traces.GetServiceRedAsync(ClusterId, service, from, to, namespaces: Namespaces);
+            KubernetesOperationResult<List<RedBucket>> r = await Traces.GetServiceRedAsync(ClusterId, service, from, to, namespaces: Namespaces, podPattern: PodPattern);
             if (r.IsSuccess && r.Data is not null) red = r.Data;
         }
 
-        KubernetesOperationResult<List<ServiceEdge>> m = await Traces.GetServiceMapAsync(ClusterId, from, to, namespaces: Namespaces);
+        KubernetesOperationResult<List<ServiceEdge>> m = await Traces.GetServiceMapAsync(ClusterId, from, to, namespaces: Namespaces, podPattern: PodPattern);
         serviceMap = m.IsSuccess && m.Data is not null ? m.Data : [];
 
         hasQueried = true;
