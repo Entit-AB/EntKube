@@ -752,6 +752,69 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("AppRoutes");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.AppServicePort", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("AppDeploymentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AppProtocol")
+                        .HasMaxLength(30)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("EnvironmentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Namespace")
+                        .HasMaxLength(63)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Port")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PortName")
+                        .HasMaxLength(63)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Protocol")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ServiceName")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("TargetPort")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EnvironmentId");
+
+                    b.HasIndex("AppId", "EnvironmentId");
+
+                    b.ToTable("AppServicePorts");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ApplicationUser", b =>
                 {
                     b.Property<string>("Id")
@@ -1455,6 +1518,79 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("CnpgDatabases");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ConnectivityRule", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AppProtocol")
+                        .HasMaxLength(30)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Direction")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("EnvironmentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("PeerAppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PeerCidr")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PeerNamespace")
+                        .HasMaxLength(63)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PeerSelector")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PeerType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("Port")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Protocol")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EnvironmentId");
+
+                    b.HasIndex("PeerAppId");
+
+                    b.HasIndex("AppId", "EnvironmentId");
+
+                    b.ToTable("ConnectivityRules");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Customer", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1896,6 +2032,54 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .IsUnique();
 
                     b.ToTable("Environments");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ExternalDependency", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("EnvironmentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Port")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Protocol")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Tls")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EnvironmentId");
+
+                    b.HasIndex("AppId", "EnvironmentId");
+
+                    b.ToTable("ExternalDependencies");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ExternalRoute", b =>
@@ -4831,6 +5015,25 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("App");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.AppServicePort", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany("ServicePorts")
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Environment", "Environment")
+                        .WithMany()
+                        .HasForeignKey("EnvironmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("Environment");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.AuditEvent", b =>
                 {
                     b.HasOne("EntKube.Web.Data.AppDeployment", "Deployment")
@@ -4994,6 +5197,32 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .IsRequired();
 
                     b.Navigation("CnpgCluster");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ConnectivityRule", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany("ConnectivityRules")
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Environment", "Environment")
+                        .WithMany()
+                        .HasForeignKey("EnvironmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.App", "PeerApp")
+                        .WithMany()
+                        .HasForeignKey("PeerAppId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("App");
+
+                    b.Navigation("Environment");
+
+                    b.Navigation("PeerApp");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Customer", b =>
@@ -5185,6 +5414,25 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .IsRequired();
 
                     b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ExternalDependency", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany("ExternalDependencies")
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Environment", "Environment")
+                        .WithMany()
+                        .HasForeignKey("EnvironmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("Environment");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ExternalRoute", b =>
@@ -6247,7 +6495,11 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Navigation("AppEnvironments");
 
+                    b.Navigation("ConnectivityRules");
+
                     b.Navigation("Deployments");
+
+                    b.Navigation("ExternalDependencies");
 
                     b.Navigation("NetworkPolicies");
 
@@ -6258,6 +6510,8 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Routes");
 
                     b.Navigation("Secrets");
+
+                    b.Navigation("ServicePorts");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppDeployment", b =>
