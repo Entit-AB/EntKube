@@ -238,9 +238,21 @@ public sealed class TelemetryStore : IAsyncDisposable
         CREATE INDEX IF NOT EXISTS spans_ts_brin
             ON spans USING brin (ts) WITH (pages_per_range = 32);
 
-        -- Fetch a whole trace by id (and correlate a log's trace_id → its spans).
-        CREATE INDEX IF NOT EXISTS spans_scope_trace
-            ON spans (tenant_id, cluster_id, trace_id);
+        -- Trace search over a time window, "all services" (GROUP BY trace_id in the window).
+        -- Leads with the always-present tenant+cluster equality so a shared multi-tenant table
+        -- uses a tight index range scan instead of the coarse BRIN (which returns page ranges
+        -- spanning every tenant/cluster in that time span).
+        CREATE INDEX IF NOT EXISTS spans_scope_ts
+            ON spans (tenant_id, cluster_id, ts DESC);
+
+        -- Fetch a whole trace by id (waterfall / log correlation) AND back the service-map
+        -- self-join's parent probe (p.trace_id = c.trace_id AND p.span_id = c.parent_span_id).
+        -- Including span_id makes the parent lookup an exact index probe instead of scanning
+        -- every span in the trace. The (tenant_id, cluster_id, trace_id) prefix still serves
+        -- the by-trace fetch, so this supersedes the old spans_scope_trace index.
+        CREATE INDEX IF NOT EXISTS spans_scope_trace_span
+            ON spans (tenant_id, cluster_id, trace_id, span_id);
+        DROP INDEX IF EXISTS spans_scope_trace;
 
         -- Service-scoped trace listing + RED aggregates (rate/errors/duration) over time.
         CREATE INDEX IF NOT EXISTS spans_scope_service_ts
