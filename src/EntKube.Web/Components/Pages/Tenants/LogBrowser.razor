@@ -256,7 +256,13 @@ else
         DateTime from = to.AddMinutes(-timeRangeMinutes);
         LogQueryFilter filter = BuildFilter();
 
-        KubernetesOperationResult<List<LokiLogStream>> result = await Logs.QueryAsync(ClusterId, filter, from, to, limit);
+        // The log page and the volume histogram are independent queries over the same filters —
+        // issue them concurrently so the search waits on the slower, not the sum.
+        Task<KubernetesOperationResult<List<LokiLogStream>>> resultTask = Logs.QueryAsync(ClusterId, filter, from, to, limit);
+        Task<KubernetesOperationResult<List<LogHistogramBucket>>> histTask = Logs.GetHistogramAsync(ClusterId, filter, from, to);
+        await Task.WhenAll(resultTask, histTask);
+
+        KubernetesOperationResult<List<LokiLogStream>> result = resultTask.Result;
         if (result.IsSuccess && result.Data is not null)
         {
             allEntries = result.Data
@@ -269,9 +275,7 @@ else
             queryError = result.Error;
         }
 
-        // Volume histogram over the same filters (native store only; empty otherwise → strip hidden).
-        KubernetesOperationResult<List<LogHistogramBucket>> hist = await Logs.GetHistogramAsync(ClusterId, filter, from, to);
-        histogram = hist.IsSuccess && hist.Data is not null ? hist.Data : [];
+        histogram = histTask.Result.IsSuccess && histTask.Result.Data is not null ? histTask.Result.Data : [];
 
         if (allEntries.Count > 0) lastTs = allEntries.Max(e => e.Timestamp);
         queried = DateTime.UtcNow;

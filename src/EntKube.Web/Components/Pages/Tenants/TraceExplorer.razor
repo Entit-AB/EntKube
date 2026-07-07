@@ -282,12 +282,13 @@ else
         }
 
         isLoading = true;
-        available = await Traces.HasDataAsync(ClusterId);
-        if (available)
-        {
-            KubernetesOperationResult<List<string>> s = await Traces.GetServicesAsync(ClusterId, namespaces: Namespaces, podPattern: PodPattern);
-            services = s.IsSuccess ? s.Data ?? [] : [];
-        }
+        // Presence probe and the service dropdown are independent — run them concurrently.
+        Task<bool> hasTask = Traces.HasDataAsync(ClusterId);
+        Task<KubernetesOperationResult<List<string>>> svcTask =
+            Traces.GetServicesAsync(ClusterId, namespaces: Namespaces, podPattern: PodPattern);
+        await Task.WhenAll(hasTask, svcTask);
+        available = hasTask.Result;
+        services = available && svcTask.Result.IsSuccess ? svcTask.Result.Data ?? [] : [];
         isLoading = false;
 
         // Deep-link from a log line: auto-open the preset trace once (per distinct value).

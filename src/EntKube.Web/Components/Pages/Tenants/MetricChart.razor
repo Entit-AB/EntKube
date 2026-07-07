@@ -1,8 +1,10 @@
 @using EntKube.Web.Services
 
 @* ═══════════════════════════════════════════════════════════════════════════
-   MetricChart — renders a time-series as an SVG area chart with gradient fill.
-   Purely server-rendered, no JS dependencies. Responsive via viewBox.
+   MetricChart — a time-series as an SVG area chart with gradient fill.
+   Purely server-rendered, no JS. With ShowAxes it grows a value scale (y) and
+   a start/end time axis (x) plus faint gridlines — for full-size panels.
+   Without it, it stays a compact sparkline (the default, for dashboard tiles).
    ═══════════════════════════════════════════════════════════════════════════ *@
 
 <div class="metric-chart-container">
@@ -19,22 +21,51 @@
 
     @if (DataPoints.Count >= 2)
     {
-        <svg viewBox="0 0 @Width @Height" preserveAspectRatio="none"
-             style="width: 100%; height: @(HeightPx)px; display: block;">
-            <defs>
-                <linearGradient id="@GradientId" x1="0%" y1="0%" x2="0%" y2="100%">
-                    <stop offset="0%" style="stop-color: @Color; stop-opacity: 0.3;" />
-                    <stop offset="100%" style="stop-color: @Color; stop-opacity: 0.02;" />
-                </linearGradient>
-            </defs>
+        <div style="@(ShowAxes ? $"display:grid;grid-template-columns:auto 1fr;grid-template-rows:{HeightPx}px auto;column-gap:6px;" : "")">
+            @if (ShowAxes)
+            {
+                <div class="chart-axis-y" style="grid-column:1;grid-row:1;">
+                    <span>@AxisLabel(MaxVal)</span>
+                    <span>@AxisLabel(MaxVal / 2)</span>
+                    <span>0</span>
+                </div>
+            }
+            <div style="@(ShowAxes ? "grid-column:2;grid-row:1;min-width:0;" : "")">
+                <svg viewBox="0 0 @Width @Height" preserveAspectRatio="none"
+                     style="width: 100%; height: @(HeightPx)px; display: block;">
+                    <defs>
+                        <linearGradient id="@GradientId" x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" style="stop-color: @Color; stop-opacity: 0.3;" />
+                            <stop offset="100%" style="stop-color: @Color; stop-opacity: 0.02;" />
+                        </linearGradient>
+                    </defs>
 
-            @* Area fill below the line *@
-            <path d="@AreaPath" fill="url(#@GradientId)" />
+                    @if (ShowAxes)
+                    {
+                        @* Recessive baseline / mid / top gridlines (non-scaling so they stay hairline). *@
+                        @foreach (double gy in GridLines)
+                        {
+                            <line x1="0" y1="@gy.ToString("F1", Inv)" x2="@Width" y2="@gy.ToString("F1", Inv)"
+                                  stroke="currentColor" stroke-opacity="0.12" stroke-width="1" vector-effect="non-scaling-stroke" />
+                        }
+                    }
 
-            @* The line itself *@
-            <polyline points="@LinePath" fill="none" stroke="@Color" stroke-width="1.5"
-                      stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
+                    @* Area fill below the line *@
+                    <path d="@AreaPath" fill="url(#@GradientId)" />
+
+                    @* The line itself *@
+                    <polyline points="@LinePath" fill="none" stroke="@Color" stroke-width="1.5"
+                              stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+                </svg>
+            </div>
+            @if (ShowAxes)
+            {
+                <div class="chart-axis-x" style="grid-column:2;grid-row:2;">
+                    <span>@TimeLabel(DataPoints[0].Timestamp)</span>
+                    <span>@TimeLabel(DataPoints[^1].Timestamp)</span>
+                </div>
+            }
+        </div>
     }
     else
     {
@@ -51,12 +82,36 @@
     [Parameter] public string? Unit { get; set; }
     [Parameter] public int HeightPx { get; set; } = 60;
     [Parameter] public double? MaxValue { get; set; }
+    /// <summary>Show a value (y) scale, a start/end time (x) axis, and gridlines. Off = bare sparkline.</summary>
+    [Parameter] public bool ShowAxes { get; set; }
 
     private const int Width = 300;
     private const int Height = 80;
     private const int Padding = 2;
 
+    private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+    private double[] GridLines => [Padding, Height / 2.0, Height - Padding];
+
     private string GradientId => $"grad-{Title?.GetHashCode():x}";
+
+    // The value the top of the plot represents — an explicit MaxValue, else the data peak (never ≤ 0).
+    private double MaxVal
+    {
+        get
+        {
+            double m = MaxValue ?? (DataPoints.Count > 0 ? DataPoints.Max(d => d.Value) : 0);
+            return m <= 0 ? 1 : m;
+        }
+    }
+
+    // Axis tick label: compact number + unit ("%" with no space, others spaced).
+    private string AxisLabel(double v)
+    {
+        string s = v >= 100 ? v.ToString("F0") : v >= 10 ? v.ToString("F1") : v.ToString("F2");
+        return string.IsNullOrEmpty(Unit) ? s : Unit == "%" ? s + "%" : $"{s} {Unit}";
+    }
+
+    private static string TimeLabel(DateTime t) => t.ToLocalTime().ToString("HH:mm");
 
     private string CurrentValue
     {
@@ -82,20 +137,14 @@
                 return "";
             }
 
-            double minVal = 0;
-            double maxVal = MaxValue ?? DataPoints.Max(d => d.Value);
-            if (maxVal <= minVal)
-            {
-                maxVal = minVal + 1;
-            }
-
+            double maxVal = MaxVal;
             double xStep = (double)(Width - 2 * Padding) / (DataPoints.Count - 1);
 
             List<string> points = [];
             for (int i = 0; i < DataPoints.Count; i++)
             {
                 double x = Padding + i * xStep;
-                double y = Height - Padding - ((DataPoints[i].Value - minVal) / (maxVal - minVal) * (Height - 2 * Padding));
+                double y = Height - Padding - (DataPoints[i].Value / maxVal * (Height - 2 * Padding));
                 points.Add($"{x:F1},{y:F1}");
             }
 
@@ -112,23 +161,17 @@
                 return "";
             }
 
-            double minVal = 0;
-            double maxVal = MaxValue ?? DataPoints.Max(d => d.Value);
-            if (maxVal <= minVal)
-            {
-                maxVal = minVal + 1;
-            }
-
+            double maxVal = MaxVal;
             double xStep = (double)(Width - 2 * Padding) / (DataPoints.Count - 1);
 
             // Start at the bottom-left corner.
             List<string> pathParts = [$"M {Padding:F1},{Height - Padding:F1}"];
 
-            // Line to first data point.
+            // Line to each data point.
             for (int i = 0; i < DataPoints.Count; i++)
             {
                 double x = Padding + i * xStep;
-                double y = Height - Padding - ((DataPoints[i].Value - minVal) / (maxVal - minVal) * (Height - 2 * Padding));
+                double y = Height - Padding - (DataPoints[i].Value / maxVal * (Height - 2 * Padding));
                 pathParts.Add($"L {x:F1},{y:F1}");
             }
 

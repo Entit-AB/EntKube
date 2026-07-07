@@ -53,10 +53,14 @@ public class PgMetricsService(TelemetryStore store, ClusterTenantResolver tenant
             await using NpgsqlConnection conn = await Store.OpenConnectionAsync(ct);
             await using NpgsqlCommand cmd = conn.CreateCommand();
             // column is an internal literal (name/service), never user input.
-            cmd.CommandText = $"SELECT DISTINCT {column} AS v FROM metrics WHERE tenant_id = @t AND cluster_id = @c AND {column} IS NOT NULL"
+            // Bound to the last 24h (the explorers' max chartable range) so the DISTINCT walks
+            // recent partitions via the BRIN instead of scanning the full retention window.
+            // A metric/service idle longer than that can't be charted in any available range anyway.
+            cmd.CommandText = $"SELECT DISTINCT {column} AS v FROM metrics WHERE tenant_id = @t AND cluster_id = @c AND ts >= @since AND {column} IS NOT NULL"
                 + NsClause(namespaces) + PodClause(podPattern) + " ORDER BY v";
             cmd.Parameters.AddWithValue("t", tenantId.Value);
             cmd.Parameters.AddWithValue("c", clusterId);
+            cmd.Parameters.AddWithValue("since", DateTime.UtcNow.AddHours(-24));
             BindNs(cmd, namespaces);
             BindPod(cmd, podPattern);
 
