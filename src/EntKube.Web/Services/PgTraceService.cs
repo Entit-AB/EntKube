@@ -16,9 +16,22 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
     public Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
         => HasAnyAsync("spans", clusterId, ct);
 
+    // Builds "AND namespace = ANY(@ns)" and binds @ns when a namespace scope is supplied.
+    // The customer portal passes the namespaces of a customer's app deployments so spans in
+    // other namespaces (other customers) are never returned; tenant-side callers pass null
+    // for cluster-wide scope. Returns "" (no clause) when the scope is null/empty.
+    // Call at most once per command — it binds @ns; reuse the returned string if the SQL
+    // references the filter in more than one place.
+    private static string NsScope(NpgsqlCommand cmd, IReadOnlyList<string>? namespaces, string column = "namespace")
+    {
+        if (namespaces is null || namespaces.Count == 0) return "";
+        cmd.Parameters.AddWithValue("ns", namespaces.ToArray());
+        return $" AND {column} = ANY(@ns)";
+    }
+
     /// <summary>Distinct service names seen in the store, for the trace-search service dropdown.</summary>
     public async Task<KubernetesOperationResult<List<string>>> GetServicesAsync(
-        Guid clusterId, CancellationToken ct = default)
+        Guid clusterId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null)
     {
         Guid? tenantId = await ResolveOrNull(clusterId, ct);
         if (tenantId is null) return Fail<List<string>>();
@@ -27,7 +40,8 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
         {
             await using NpgsqlConnection conn = await Store.OpenConnectionAsync(ct);
             await using NpgsqlCommand cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT DISTINCT service FROM spans WHERE tenant_id = @t AND cluster_id = @c ORDER BY service";
+            cmd.CommandText = "SELECT DISTINCT service FROM spans WHERE tenant_id = @t AND cluster_id = @c"
+                + NsScope(cmd, namespaces) + " ORDER BY service";
             cmd.Parameters.AddWithValue("t", tenantId.Value);
             cmd.Parameters.AddWithValue("c", clusterId);
 
@@ -51,7 +65,8 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
     /// </summary>
     public async Task<KubernetesOperationResult<List<TraceSummary>>> ListTracesAsync(
         Guid clusterId, string? service, DateTime from, DateTime to,
-        double minDurationMs = 0, bool errorsOnly = false, int limit = 50, CancellationToken ct = default)
+        double minDurationMs = 0, bool errorsOnly = false, int limit = 50, CancellationToken ct = default,
+        IReadOnlyList<string>? namespaces = null)
     {
         Guid? tenantId = await ResolveOrNull(clusterId, ct);
         if (tenantId is null) return Fail<List<TraceSummary>>();
@@ -67,13 +82,17 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
             cmd.Parameters.AddWithValue("minDur", minDurationMs);
             cmd.Parameters.AddWithValue("limit", limit);
 
+            // Namespace scope (customer isolation): applied to BOTH the service subquery and the
+            // outer scan so only the customer's spans are considered. Built once (binds @ns once).
+            string nsScope = NsScope(cmd, namespaces);
+
             // Restrict to traces that involve the chosen service (any span), then summarize each trace.
             string serviceFilter = "";
             if (!string.IsNullOrEmpty(service))
             {
                 serviceFilter =
                     " AND trace_id IN (SELECT trace_id FROM spans WHERE tenant_id = @t AND cluster_id = @c " +
-                    "AND ts >= @from AND ts < @to AND service = @service)";
+                    "AND ts >= @from AND ts < @to" + nsScope + " AND service = @service)";
                 cmd.Parameters.AddWithValue("service", service);
             }
             string errorsHaving = errorsOnly ? " AND count(*) FILTER (WHERE status_code = 2) > 0" : "";
@@ -90,7 +109,7 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
                 "(array_agg(service ORDER BY (parent_span_id IS NULL) DESC, ts))[1] AS root_service, " +
                 "(array_agg(name ORDER BY (parent_span_id IS NULL) DESC, ts))[1] AS root_name " +
                 "FROM spans WHERE tenant_id = @t AND cluster_id = @c AND ts >= @from AND ts < @to" +
-                serviceFilter +
+                nsScope + serviceFilter +
                 " GROUP BY trace_id HAVING " + durationExpr + " >= @minDur" + errorsHaving +
                 " ORDER BY start DESC LIMIT @limit";
 
@@ -116,7 +135,7 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
 
     /// <summary>All spans of a trace, ordered by start time — the input to the waterfall view.</summary>
     public async Task<KubernetesOperationResult<List<SpanRecord>>> GetTraceAsync(
-        Guid clusterId, string traceId, CancellationToken ct = default)
+        Guid clusterId, string traceId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null)
     {
         Guid? tenantId = await ResolveOrNull(clusterId, ct);
         if (tenantId is null) return Fail<List<SpanRecord>>();
@@ -125,9 +144,12 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
         {
             await using NpgsqlConnection conn = await Store.OpenConnectionAsync(ct);
             await using NpgsqlCommand cmd = conn.CreateCommand();
+            // Namespace scope keeps a customer's waterfall to their own spans even if a trace
+            // happens to cross a namespace boundary — no other customer's spans are returned.
             cmd.CommandText =
                 "SELECT ts, span_id, parent_span_id, name, service, kind, duration_ms, status_code, attributes " +
-                "FROM spans WHERE tenant_id = @t AND cluster_id = @c AND trace_id = @trace ORDER BY ts";
+                "FROM spans WHERE tenant_id = @t AND cluster_id = @c AND trace_id = @trace"
+                + NsScope(cmd, namespaces) + " ORDER BY ts";
             cmd.Parameters.AddWithValue("t", tenantId.Value);
             cmd.Parameters.AddWithValue("c", clusterId);
             cmd.Parameters.AddWithValue("trace", traceId);
@@ -159,7 +181,8 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
     /// measured over inbound spans (SERVER=2, CONSUMER=5) — the requests the service actually handles.
     /// </summary>
     public async Task<KubernetesOperationResult<List<RedBucket>>> GetServiceRedAsync(
-        Guid clusterId, string service, DateTime from, DateTime to, int buckets = 48, CancellationToken ct = default)
+        Guid clusterId, string service, DateTime from, DateTime to, int buckets = 48, CancellationToken ct = default,
+        IReadOnlyList<string>? namespaces = null)
     {
         Guid? tenantId = await ResolveOrNull(clusterId, ct);
         if (tenantId is null) return Fail<List<RedBucket>>();
@@ -179,7 +202,8 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
                 // Inbound requests (SERVER/CONSUMER) OR trace-entry spans (no parent) — so services
                 // instrumented without an explicit SpanKind still surface RED instead of a blank chart.
                 "FROM spans WHERE tenant_id = @t AND cluster_id = @c AND service = @service " +
-                "AND ts >= @from AND ts < @to AND (kind IN (2, 5) OR parent_span_id IS NULL) GROUP BY b ORDER BY b";
+                "AND ts >= @from AND ts < @to AND (kind IN (2, 5) OR parent_span_id IS NULL)"
+                + NsScope(cmd, namespaces) + " GROUP BY b ORDER BY b";
             cmd.Parameters.AddWithValue("t", tenantId.Value);
             cmd.Parameters.AddWithValue("c", clusterId);
             cmd.Parameters.AddWithValue("service", service);
@@ -212,7 +236,8 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
     /// dependency overview.
     /// </summary>
     public async Task<KubernetesOperationResult<List<ServiceEdge>>> GetServiceMapAsync(
-        Guid clusterId, DateTime from, DateTime to, CancellationToken ct = default)
+        Guid clusterId, DateTime from, DateTime to, CancellationToken ct = default,
+        IReadOnlyList<string>? namespaces = null)
     {
         Guid? tenantId = await ResolveOrNull(clusterId, ct);
         if (tenantId is null) return Fail<List<ServiceEdge>>();
@@ -221,6 +246,10 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
         {
             await using NpgsqlConnection conn = await Store.OpenConnectionAsync(ct);
             await using NpgsqlCommand cmd = conn.CreateCommand();
+            // Namespace scope: require BOTH ends of an edge to be in the customer's namespaces so
+            // the map never reveals a service outside their apps. (Built once, binds @ns once.)
+            string nsScope = namespaces is { Count: > 0 } ? " AND c.namespace = ANY(@ns) AND p.namespace = ANY(@ns)" : "";
+            if (namespaces is { Count: > 0 }) cmd.Parameters.AddWithValue("ns", namespaces.ToArray());
             // Self-join child span → its parent (same trace) on span_id; keep cross-service edges.
             cmd.CommandText =
                 "SELECT p.service AS from_service, c.service AS to_service, count(*) AS calls, " +
@@ -228,7 +257,7 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
                 "FROM spans c JOIN spans p ON p.tenant_id = c.tenant_id AND p.cluster_id = c.cluster_id " +
                 "AND p.trace_id = c.trace_id AND p.span_id = c.parent_span_id " +
                 "WHERE c.tenant_id = @t AND c.cluster_id = @c AND c.ts >= @from AND c.ts < @to " +
-                "AND p.service <> c.service " +
+                "AND p.service <> c.service" + nsScope + " " +
                 "GROUP BY p.service, c.service ORDER BY calls DESC";
             cmd.Parameters.AddWithValue("t", tenantId.Value);
             cmd.Parameters.AddWithValue("c", clusterId);

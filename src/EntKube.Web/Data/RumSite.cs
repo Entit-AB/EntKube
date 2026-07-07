@@ -17,6 +17,11 @@ public class RumSite
     /// <summary>Optional cluster this front-end's API calls hit — used to resolve AJAX → trace links.</summary>
     public Guid? ClusterId { get; set; }
 
+    /// <summary>Optional owning application. When set, the site (and its RUM data) is scoped to this app's
+    /// customer, so the customer portal only surfaces sites for apps the signed-in customer can access.
+    /// Null = tenant-level site with no app owner (admin-managed, hidden from the customer portal).</summary>
+    public Guid? AppId { get; set; }
+
     public string Name { get; set; } = "";
 
     /// <summary>Public (non-secret) site identifier placed in the browser snippet and the ingest URL.</summary>

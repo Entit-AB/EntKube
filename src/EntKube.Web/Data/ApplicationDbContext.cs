@@ -1172,6 +1172,9 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasKey(s => s.Id);
             entity.HasIndex(s => s.PublicKey).IsUnique();
             entity.HasIndex(s => s.TenantId);
+            // Indexed for the customer-portal site lookup (sites for a customer's apps). No FK/navigation,
+            // matching ClusterId — the column is a soft association, not a cascade-owning relationship.
+            entity.HasIndex(s => s.AppId);
             entity.Property(s => s.Name).HasMaxLength(200).IsRequired();
             entity.Property(s => s.PublicKey).HasMaxLength(64).IsRequired();
             entity.Property(s => s.AllowedOrigins).HasMaxLength(4000);

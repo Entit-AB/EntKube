@@ -19,11 +19,22 @@
 {
     <div class="card card-body mb-3">
         <div class="row g-2">
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <label class="form-label small mb-1">Name</label>
                 <input class="form-control form-control-sm" @bind="editing.Name" placeholder="e.g. Storefront (prod)" />
             </div>
-            <div class="col-md-4">
+            <div class="col-md-3">
+                <label class="form-label small mb-1">App owner (scopes it to the customer)</label>
+                <select class="form-select form-select-sm" @bind="appIdStr">
+                    <option value="">None (admin-only)</option>
+                    @foreach (AppOption a in apps)
+                    {
+                        <option value="@a.Id">@a.Label</option>
+                    }
+                </select>
+                <div class="form-text">Only sites with an app owner appear in that app's customer portal.</div>
+            </div>
+            <div class="col-md-3">
                 <label class="form-label small mb-1">Cluster (optional — for AJAX → trace links)</label>
                 <select class="form-select form-select-sm" @bind="clusterIdStr">
                     <option value="">None</option>
@@ -33,7 +44,7 @@
                     }
                 </select>
             </div>
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <label class="form-label small mb-1">Sample rate (0–1)</label>
                 <input type="number" step="0.05" min="0" max="1" class="form-control form-control-sm" @bind="editing.SampleRate" />
             </div>
@@ -118,9 +129,11 @@ else if (sites.Count > 0)
 
     private List<RumSite> sites = [];
     private List<ClusterOption> clusters = [];
+    private List<AppOption> apps = [];
     private RumSite? editing;
     private bool editingIsNew;
     private string clusterIdStr = "";
+    private string appIdStr = "";
     private Guid? expandedId;
 
     protected override async Task OnInitializedAsync()
@@ -128,6 +141,13 @@ else if (sites.Count > 0)
         using ApplicationDbContext db = DbFactory.CreateDbContext();
         clusters = await db.KubernetesClusters.Where(c => c.TenantId == TenantId)
             .OrderBy(c => c.Name).Select(c => new ClusterOption(c.Id, c.Name)).ToListAsync();
+        // Apps of this tenant, labelled "Customer / App" so operators can tell same-named apps apart.
+        apps = await db.Apps
+            .Where(a => db.Customers.Any(c => c.Id == a.CustomerId && c.TenantId == TenantId))
+            .OrderBy(a => a.Name)
+            .Select(a => new AppOption(a.Id,
+                (db.Customers.Where(c => c.Id == a.CustomerId).Select(c => c.Name).FirstOrDefault() ?? "?") + " / " + a.Name))
+            .ToListAsync();
         await Reload();
     }
 
@@ -144,6 +164,7 @@ else if (sites.Count > 0)
     {
         editingIsNew = true;
         clusterIdStr = "";
+        appIdStr = "";
         editing = new RumSite { Name = "", SampleRate = 1.0, AllowedOrigins = "" };
     }
 
@@ -151,25 +172,28 @@ else if (sites.Count > 0)
     {
         editingIsNew = false;
         clusterIdStr = s.ClusterId?.ToString() ?? "";
+        appIdStr = s.AppId?.ToString() ?? "";
         // Edit a copy so a cancelled edit doesn't mutate the rendered row.
-        editing = new RumSite { Id = s.Id, Name = s.Name, ClusterId = s.ClusterId, AllowedOrigins = s.AllowedOrigins, SampleRate = s.SampleRate, IsEnabled = s.IsEnabled };
+        editing = new RumSite { Id = s.Id, Name = s.Name, ClusterId = s.ClusterId, AppId = s.AppId, AllowedOrigins = s.AllowedOrigins, SampleRate = s.SampleRate, IsEnabled = s.IsEnabled };
     }
 
     private async Task SaveAsync()
     {
         if (editing is null) return;
         Guid? clusterId = string.IsNullOrEmpty(clusterIdStr) ? null : Guid.Parse(clusterIdStr);
+        Guid? appId = string.IsNullOrEmpty(appIdStr) ? null : Guid.Parse(appIdStr);
         if (editingIsNew)
-            await Sites.CreateAsync(TenantId, editing.Name, clusterId, editing.AllowedOrigins, editing.SampleRate);
+            await Sites.CreateAsync(TenantId, editing.Name, clusterId, editing.AllowedOrigins, editing.SampleRate, appId: appId);
         else
-            await Sites.UpdateAsync(TenantId, editing.Id, editing.Name, clusterId, editing.AllowedOrigins, editing.SampleRate, editing.IsEnabled);
+            await Sites.UpdateAsync(TenantId, editing.Id, editing.Name, clusterId, editing.AllowedOrigins, editing.SampleRate, editing.IsEnabled, appId: appId);
         editing = null;
         await ReloadAndNotify();
     }
 
+    // Preserve the app owner (and cluster) when only toggling enabled — UpdateAsync would otherwise reset AppId.
     private async Task ToggleAsync(RumSite s, bool enabled)
     {
-        await Sites.UpdateAsync(TenantId, s.Id, s.Name, s.ClusterId, s.AllowedOrigins, s.SampleRate, enabled);
+        await Sites.UpdateAsync(TenantId, s.Id, s.Name, s.ClusterId, s.AllowedOrigins, s.SampleRate, enabled, appId: s.AppId);
         await ReloadAndNotify();
     }
 
@@ -210,4 +234,5 @@ else if (sites.Count > 0)
     }
 
     private record ClusterOption(Guid Id, string Name);
+    private record AppOption(Guid Id, string Label);
 }

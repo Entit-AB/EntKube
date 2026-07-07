@@ -1352,6 +1352,23 @@ public static class ComponentCatalog
             DefaultValues = """
                 mode: daemonset
 
+                # Pin a stable, predictable resource/Service name. Without this the chart
+                # derives "<release>-opentelemetry-collector", so the in-cluster OTLP
+                # Service would be otel-collector-opentelemetry-collector — awkward to
+                # reference. Fixing it to "otel-collector" gives a clean OTLP endpoint
+                # (otel-collector.<ns>.svc:4317/:4318) for the eBPF tracer and for any
+                # app you instrument directly.
+                fullnameOverride: otel-collector
+
+                # CRITICAL: in daemonset mode the chart does NOT create a Service by
+                # default (serviceEnabled helper: daemonset + unset => false), so nothing
+                # would expose the OTLP receiver as a stable ClusterIP. Force it on so the
+                # otlp (4317) / otlp-http (4318) ports are reachable at otel-collector.<ns>
+                # for the eBPF tracer and instrumented apps. (Each pod also keeps its
+                # hostPort 4317/4318 for node-local delivery.)
+                service:
+                  enabled: true
+
                 image:
                   repository: otel/opentelemetry-collector-contrib
                 command:
@@ -1379,6 +1396,13 @@ public static class ComponentCatalog
 
                 config:
                   extensions:
+                    # Liveness/readiness endpoint. The chart ships this by default and wires its
+                    # probes to port 13133, but because we override service.extensions below (and Helm
+                    # REPLACES lists rather than appending), we must re-declare it here and include it
+                    # in service.extensions — otherwise the chart's NOTES.txt guard aborts the install
+                    # with "requires the health_check extension ... to be included in the extension list".
+                    health_check:
+                      endpoint: ${env:MY_POD_IP}:13133
                     # Bearer auth for the exporter. Token is replaced at install by the vault-stored
                     # per-cluster ingest token (see the "Ingest Token" form field).
                     bearertokenauth:
@@ -1428,7 +1452,7 @@ public static class ComponentCatalog
                         authenticator: bearertokenauth
 
                   service:
-                    extensions: [bearertokenauth]
+                    extensions: [health_check, bearertokenauth]
                     pipelines:
                       logs:
                         receivers: [filelog, otlp]
@@ -1444,6 +1468,88 @@ public static class ComponentCatalog
                         receivers: [otlp]
                         processors: [k8sattributes, batch]
                         exporters: [otlphttp/entkube]
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "otel-ebpf",
+            DisplayName = "EntKube Trace Auto-Instrumentation (eBPF)",
+            Description = "Zero-code distributed tracing. Runs the OpenTelemetry eBPF Instrumentation (OBI) — the vendor-neutral, Apache-2.0 upstream of Grafana Beyla, donated to OpenTelemetry — as a privileged DaemonSet that uses eBPF to synthesize HTTP/gRPC/SQL spans and RED metrics for EVERY workload on the node without touching application code or requiring a service mesh. Exports OTLP to the EntKube Telemetry Collector, which enriches and forwards to the native store, so the Traces and Metrics views populate automatically. Requires the EntKube Telemetry Collector. Linux kernel 5.8+ (5.17+ for network-level distributed-trace context propagation); note eBPF-only traces are best-effort across TLS/L7/multi-node hops — pair with SDK instrumentation on boundary services for guaranteed end-to-end context.",
+            Icon = "bi-diagram-3-fill",
+            Category = "Monitoring",
+            HelmRepoUrl = "https://open-telemetry.github.io/opentelemetry-helm-charts",
+            HelmChartName = "opentelemetry-ebpf-instrumentation",
+            // Version intentionally unpinned (OBI is v0.x beta with a shifting config
+            // surface — the Helm chart tracks it). Pin the image via the field below for
+            // reproducibility. The chart provisions the DaemonSet securityContext
+            // (CAP_BPF/PERFMON/SYS_PTRACE/NET_RAW), hostPID, ServiceAccount + RBAC, and
+            // the K8s metadata cache — the fragile eBPF plumbing we would otherwise hand-roll.
+            DefaultNamespace = "monitoring",
+            DefaultReleaseName = "otel-ebpf",
+            // DaemonSet rollout (one pod per node) — give --wait headroom.
+            InstallTimeout = "15m0s",
+            // Ships spans to the collector's in-cluster OTLP receiver, so the collector must
+            // exist first. It carries the EntKube ingest token; OBI needs no token itself.
+            Dependencies = ["otel-collector"],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "image-tag", Label = "OBI Version",
+                    YamlPath = "image.tag", Type = FormFieldType.Text,
+                    DefaultValue = "", Placeholder = "e.g. v0.8.0 (blank = chart default)",
+                    HelpText = "opentelemetry-ebpf-instrumentation image tag. Leave blank for the chart's tested default; pin an explicit tag for reproducibility (OBI is v0.x beta — avoid 'main')."
+                },
+                new ComponentFormField
+                {
+                    Key = "traces-endpoint", Label = "Collector OTLP Endpoint",
+                    YamlPath = "config.data.otel_traces_export.endpoint", Type = FormFieldType.Text,
+                    DefaultValue = "http://otel-collector.monitoring:4317",
+                    Placeholder = "http://otel-collector.monitoring:4317",
+                    HelpText = "OTLP gRPC endpoint of the EntKube Telemetry Collector (the collector's Service, pinned to name 'otel-collector'). Change only if the collector runs in another namespace. Metrics are sent to the same host:port."
+                }
+            ],
+            // OBI config lives under the chart's config.data block. CRITICAL: the chart's
+            // OWN default config.data sets otel_traces_export.endpoint=http://${HOST_IP}:4317
+            // (per-node host IP). Because config.data is a map-merge, we MUST override those
+            // exact export paths here — the EntKube collector is a ClusterIP Service, not a
+            // hostPort, so the chart default would silently ship spans into the void. The
+            // chart already defaults securityContext.privileged=true, RBAC, and ServiceAccount.
+            DefaultValues = """
+                # Enable the in-cluster K8s metadata cache (decorates spans/metrics with
+                # namespace/pod/deployment). Chart default is 0 (disabled).
+                k8sCache:
+                  replicas: 1
+
+                config:
+                  data:
+                    # Auto-discover and instrument EVERY workload in EVERY namespace. OBI
+                    # excludes itself and apps already carrying an OTel SDK.
+                    discovery:
+                      instrument:
+                        - k8s_namespace: "*"
+                      exclude_otel_instrumented_services: true
+                    # Decorate telemetry with Kubernetes resource attributes.
+                    attributes:
+                      kubernetes:
+                        enable: true
+                    # All protocol instrumentations (http, grpc, sql, redis, kafka, ...).
+                    instrumentations:
+                      - "*"
+                    # eBPF context propagation so spans link into connected distributed
+                    # traces where the kernel allows it (network-level path needs 5.17+).
+                    ebpf:
+                      context_propagation: all
+                    # Override the chart's ${HOST_IP} defaults → the EntKube collector's
+                    # OTLP gRPC receiver. The collector enriches (k8sattributes) and forwards
+                    # to the EntKube native store. Both signals go to :4317 (gRPC).
+                    otel_traces_export:
+                      endpoint: http://otel-collector.monitoring:4317
+                      protocol: grpc
+                    otel_metrics_export:
+                      endpoint: http://otel-collector.monitoring:4317
+                      protocol: grpc
                 """
         },
 

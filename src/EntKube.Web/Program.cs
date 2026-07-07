@@ -281,6 +281,7 @@ public class Program
             await EnsureDeploymentRouteClusterAppliedAtAsync(db, app.Logger);
             await EnsureDeploymentRouteRewritePathAsync(db, app.Logger);
             await EnsureNotificationChannelFiltersAsync(db, app.Logger);
+            await EnsureRumSiteAppIdAsync(db, app.Logger);
             await EnsureClusterKubeconfigsMigratedAsync(db, scope.ServiceProvider, app.Logger);
 
             RoleManager<IdentityRole> roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
@@ -647,6 +648,31 @@ public class Program
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Schema repair for AppDeploymentRoutes.RewritePath skipped or failed.");
+        }
+    }
+
+    // Adds RumSites.AppId (nullable) so RUM sites can be owned by an app and scoped to that app's
+    // customer in the portal. Idempotent per provider; a nullable column needs no default/backfill.
+    private static async Task EnsureRumSiteAppIdAsync(DbContext db, ILogger logger)
+    {
+        try
+        {
+            string? provider = db.Database.ProviderName;
+            string? sql = null;
+            if (provider == "Npgsql.EntityFrameworkCore.PostgreSQL")
+                sql = "ALTER TABLE \"RumSites\" ADD COLUMN IF NOT EXISTS \"AppId\" uuid NULL";
+            else if (provider == "Microsoft.EntityFrameworkCore.SqlServer")
+                sql = "IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'RumSites') AND name = N'AppId')" +
+                      " ALTER TABLE [RumSites] ADD [AppId] uniqueidentifier NULL";
+            else if (provider == "Microsoft.EntityFrameworkCore.Sqlite")
+                sql = "ALTER TABLE \"RumSites\" ADD COLUMN \"AppId\" TEXT NULL";
+
+            if (sql is not null)
+                await db.Database.ExecuteSqlRawAsync(sql);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Schema repair for RumSites.AppId skipped or failed.");
         }
     }
 

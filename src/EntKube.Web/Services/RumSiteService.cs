@@ -58,8 +58,25 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
         return await db.RumSites.Where(s => s.TenantId == tenantId).OrderBy(s => s.Name).ToListAsync(ct);
     }
 
+    /// <summary>
+    /// Sites owned by any of the given apps — the customer-portal scope. A customer only ever passes the
+    /// ids of apps they can access, and sites with a null <see cref="RumSite.AppId"/> (admin-managed,
+    /// unowned) are intentionally excluded so they never surface in the portal.
+    /// </summary>
+    public async Task<List<RumSite>> ListForAppsAsync(
+        Guid tenantId, IReadOnlyCollection<Guid> appIds, CancellationToken ct = default)
+    {
+        if (appIds.Count == 0) return [];
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.RumSites
+            .Where(s => s.TenantId == tenantId && s.AppId != null && appIds.Contains(s.AppId.Value))
+            .OrderBy(s => s.Name)
+            .ToListAsync(ct);
+    }
+
     public async Task<RumSite> CreateAsync(
-        Guid tenantId, string name, Guid? clusterId, string allowedOrigins, double sampleRate, CancellationToken ct = default)
+        Guid tenantId, string name, Guid? clusterId, string allowedOrigins, double sampleRate,
+        CancellationToken ct = default, Guid? appId = null)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         DateTime now = DateTime.UtcNow;
@@ -68,6 +85,7 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
             Id = Guid.NewGuid(),
             TenantId = tenantId,
             ClusterId = clusterId,
+            AppId = appId,
             Name = name.Trim(),
             PublicKey = NewPublicKey(),
             AllowedOrigins = allowedOrigins,
@@ -83,13 +101,14 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
 
     public async Task UpdateAsync(
         Guid tenantId, Guid id, string name, Guid? clusterId, string allowedOrigins, double sampleRate, bool isEnabled,
-        CancellationToken ct = default)
+        CancellationToken ct = default, Guid? appId = null)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         RumSite? site = await db.RumSites.FirstOrDefaultAsync(s => s.Id == id && s.TenantId == tenantId, ct);
         if (site is null) return;
         site.Name = name.Trim();
         site.ClusterId = clusterId;
+        site.AppId = appId;
         site.AllowedOrigins = allowedOrigins;
         site.SampleRate = Math.Clamp(sampleRate, 0, 1);
         site.IsEnabled = isEnabled;
