@@ -86,6 +86,9 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<AppAllowedDatabase> AppAllowedDatabases => Set<AppAllowedDatabase>();
     public DbSet<AppAllowedCache> AppAllowedCaches => Set<AppAllowedCache>();
     public DbSet<AppAllowedStorage> AppAllowedStorages => Set<AppAllowedStorage>();
+    public DbSet<AppServicePort> AppServicePorts => Set<AppServicePort>();
+    public DbSet<ConnectivityRule> ConnectivityRules => Set<ConnectivityRule>();
+    public DbSet<ExternalDependency> ExternalDependencies => Set<ExternalDependency>();
     public DbSet<KyvernoPolicy> KyvernoPolicies => Set<KyvernoPolicy>();
     public DbSet<KedaScaler> KedaScalers => Set<KedaScaler>();
     public DbSet<OnCallSchedule> OnCallSchedules => Set<OnCallSchedule>();
@@ -1652,6 +1655,82 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithMany()
                 .HasForeignKey(r => r.AppDeploymentId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ── Connectivity model (least-privilege graph) ──
+        // All three are scoped per app + environment and cascade from App
+        // (single cascade path), restricted on Environment — mirroring AppNetworkPolicy.
+
+        // AppServicePort — a typed row per port an app exposes in an environment.
+        builder.Entity<AppServicePort>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => new { p.AppId, p.EnvironmentId });
+            entity.Property(p => p.ServiceName).HasMaxLength(253).IsRequired();
+            entity.Property(p => p.Namespace).HasMaxLength(63);
+            entity.Property(p => p.PortName).HasMaxLength(63);
+            entity.Property(p => p.AppProtocol).HasMaxLength(30);
+            entity.Property(p => p.Protocol).HasConversion<string>().HasMaxLength(10);
+            entity.Property(p => p.Source).HasConversion<string>().HasMaxLength(20);
+
+            entity.HasOne(p => p.App)
+                .WithMany(a => a.ServicePorts)
+                .HasForeignKey(p => p.AppId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(p => p.Environment)
+                .WithMany()
+                .HasForeignKey(p => p.EnvironmentId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // ConnectivityRule — a directed least-privilege edge (this app ↔ a peer).
+        builder.Entity<ConnectivityRule>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => new { r.AppId, r.EnvironmentId });
+            entity.Property(r => r.Direction).HasConversion<string>().HasMaxLength(10);
+            entity.Property(r => r.PeerType).HasConversion<string>().HasMaxLength(20);
+            entity.Property(r => r.Source).HasConversion<string>().HasMaxLength(20);
+            entity.Property(r => r.Protocol).HasConversion<string>().HasMaxLength(10);
+            entity.Property(r => r.PeerNamespace).HasMaxLength(63);
+            entity.Property(r => r.PeerCidr).HasMaxLength(64);
+            entity.Property(r => r.AppProtocol).HasMaxLength(30);
+
+            entity.HasOne(r => r.App)
+                .WithMany(a => a.ConnectivityRules)
+                .HasForeignKey(r => r.AppId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(r => r.Environment)
+                .WithMany()
+                .HasForeignKey(r => r.EnvironmentId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(r => r.PeerApp)
+                .WithMany()
+                .HasForeignKey(r => r.PeerAppId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // ExternalDependency — an off-cluster egress target (FQDN + port).
+        builder.Entity<ExternalDependency>(entity =>
+        {
+            entity.HasKey(d => d.Id);
+            entity.HasIndex(d => new { d.AppId, d.EnvironmentId });
+            entity.Property(d => d.Host).HasMaxLength(253).IsRequired();
+            entity.Property(d => d.Protocol).HasConversion<string>().HasMaxLength(10);
+            entity.Property(d => d.Source).HasConversion<string>().HasMaxLength(20);
+
+            entity.HasOne(d => d.App)
+                .WithMany(a => a.ExternalDependencies)
+                .HasForeignKey(d => d.AppId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(d => d.Environment)
+                .WithMany()
+                .HasForeignKey(d => d.EnvironmentId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         // AppAllowedDatabase — governance allowlist for which databases an app may bind to

@@ -243,6 +243,11 @@ public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory, Va
             return false;
         }
 
+        // Connectivity rules where OTHER apps reference this app as a peer are held by a
+        // Restrict FK (ConnectivityRule.PeerApp), so they must be cleared first or the
+        // delete fails. Rules this app owns cascade with it.
+        await db.ConnectivityRules.Where(r => r.PeerAppId == id).ExecuteDeleteAsync(ct);
+
         db.Apps.Remove(app);
         await db.SaveChangesAsync(ct);
         return true;

@@ -1,0 +1,760 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject ConnectivityGraphService ConnectivityService
+@inject ToastService Toast
+
+@* ═══════════════════════════════════════════════════════════════════
+   ConnectivityTab — least-privilege connectivity for this app in this
+   environment. Combines:
+     • a pre-apply analyzer (issues predicted before anything is applied),
+     • a topology view (inferred + declared edges),
+     • authoring of declared intent (rules + external egress).
+   Nothing here applies to a cluster — Phase 3 adds policy generation.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+    <div>
+        <h5 class="mb-0"><i class="bi bi-diagram-3 me-2 text-primary"></i>Connectivity</h5>
+        <small class="text-muted">
+            Predicted least-privilege topology for this environment — and the issues to fix before you apply.
+            Derived from your config; nothing here is applied.
+        </small>
+    </div>
+    <button class="btn btn-sm btn-outline-secondary" @onclick="Reload" disabled="@loading">
+        @if (loading) { <span class="spinner-border spinner-border-sm me-1"></span> }
+        else { <i class="bi bi-arrow-clockwise me-1"></i> }
+        Refresh
+    </button>
+</div>
+
+@if (loading && graph is null)
+{
+    <div class="text-center text-muted py-5">
+        <span class="spinner-border spinner-border-sm me-2"></span>Analyzing connectivity…
+    </div>
+}
+else if (graph is null)
+{
+    <div class="alert alert-danger">Failed to build the connectivity graph.</div>
+}
+else
+{
+    @* ── Issues panel ── *@
+    <div class="card shadow-sm mb-3">
+        <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+            <span class="fw-semibold"><i class="bi bi-clipboard2-check me-1 text-primary"></i>Predicted issues</span>
+            <div>
+                @if (ErrorCount > 0) { <span class="badge bg-danger me-1">@ErrorCount error@(ErrorCount == 1 ? "" : "s")</span> }
+                @if (WarnCount > 0) { <span class="badge bg-warning text-dark me-1">@WarnCount warning@(WarnCount == 1 ? "" : "s")</span> }
+                @if (InfoCount > 0) { <span class="badge bg-secondary">@InfoCount suggestion@(InfoCount == 1 ? "" : "s")</span> }
+            </div>
+        </div>
+        <div class="card-body p-2">
+            @if (findings is null || findings.Count == 0)
+            {
+                <div class="text-success small px-2 py-1">
+                    <i class="bi bi-check-circle me-1"></i>No issues predicted. This app's connectivity looks consistent.
+                </div>
+            }
+            else
+            {
+                @foreach (ConnectivityFinding f in findings)
+                {
+                    <div class="d-flex align-items-start border rounded px-2 py-2 mb-1 @SeverityBorder(f.Severity)">
+                        <i class="bi @SeverityIcon(f.Severity) me-2 mt-1 @SeverityText(f.Severity)"></i>
+                        <div class="flex-grow-1">
+                            <div class="fw-medium">
+                                @f.Title
+                                <span class="badge bg-light text-dark border ms-1">@f.Category</span>
+                            </div>
+                            <div class="small text-muted">@f.Detail</div>
+                            @if (!string.IsNullOrEmpty(f.SuggestedFix))
+                            {
+                                <div class="small mt-1"><i class="bi bi-wrench-adjustable me-1 text-primary"></i>@f.SuggestedFix</div>
+                            }
+                        </div>
+                    </div>
+                }
+            }
+        </div>
+    </div>
+
+    @* ── Topology ── *@
+    @if (graph.Namespaces.Count > 0)
+    {
+        <div class="mb-2 small text-muted">
+            <i class="bi bi-box me-1"></i>Namespaces:
+            @foreach (string ns in graph.Namespaces)
+            {
+                <span class="badge bg-light text-dark border me-1">@ns</span>
+            }
+        </div>
+    }
+
+    <div class="row g-3">
+        <div class="col-lg-4">
+            <div class="card h-100 shadow-sm">
+                <div class="card-header bg-white py-2">
+                    <span class="fw-semibold"><i class="bi bi-box-arrow-in-right me-1 text-success"></i>Inbound</span>
+                    <span class="text-muted small ms-1">who reaches this app</span>
+                </div>
+                <div class="card-body p-2">
+                    @if (graph.Ingress.Count == 0)
+                    {
+                        <div class="text-muted small p-2">No inbound access modelled.</div>
+                    }
+                    else
+                    {
+                        @foreach (ConnectivityEdge e in graph.Ingress)
+                        {
+                            @EdgeRow(e)
+                        }
+                    }
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-4">
+            <div class="card h-100 shadow-sm border-primary">
+                <div class="card-header bg-primary-subtle py-2">
+                    <span class="fw-semibold"><i class="bi bi-hdd-network me-1 text-primary"></i>@(AppName ?? "This app")</span>
+                    <span class="text-muted small ms-1">exposed ports</span>
+                </div>
+                <div class="card-body p-2">
+                    @if (graph.ExposedPorts.Count == 0)
+                    {
+                        <div class="text-muted small p-2">
+                            No exposed ports found. If this app has a Service, make sure its manifest is
+                            attached to a deployment in this environment.
+                        </div>
+                    }
+                    else
+                    {
+                        @foreach (ServicePortNode p in graph.ExposedPorts)
+                        {
+                            <div class="d-flex align-items-center justify-content-between border rounded px-2 py-1 mb-1">
+                                <div class="text-truncate">
+                                    <i class="bi bi-hdd-network me-1 text-primary"></i>
+                                    <span class="fw-medium">@p.ServiceName</span>
+                                    <span class="text-muted">:@p.Port</span>
+                                    <span class="badge bg-light text-dark border ms-1">@p.Protocol</span>
+                                    @if (!string.IsNullOrEmpty(p.AppProtocol))
+                                    {
+                                        <span class="badge bg-info-subtle text-info-emphasis border ms-1">@p.AppProtocol</span>
+                                    }
+                                    @if (p.TargetPort is int tp)
+                                    {
+                                        <div class="small text-muted ms-4">→ container :@tp @(p.PortName is null ? "" : $"({p.PortName})")</div>
+                                    }
+                                </div>
+                                @SourceBadge(p.Source)
+                            </div>
+                        }
+                    }
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-4">
+            <div class="card h-100 shadow-sm">
+                <div class="card-header bg-white py-2">
+                    <span class="fw-semibold"><i class="bi bi-box-arrow-right me-1 text-warning"></i>Outbound</span>
+                    <span class="text-muted small ms-1">what this app reaches</span>
+                </div>
+                <div class="card-body p-2">
+                    @if (graph.InternalEgress.Count == 0 && graph.ExternalEgress.Count == 0)
+                    {
+                        <div class="text-muted small p-2">No outbound dependencies modelled.</div>
+                    }
+                    @if (graph.InternalEgress.Count > 0)
+                    {
+                        <div class="text-uppercase text-muted small fw-semibold mt-1 mb-1 ms-1">In-cluster</div>
+                        @foreach (ConnectivityEdge e in graph.InternalEgress)
+                        {
+                            @EdgeRow(e)
+                        }
+                    }
+                    @if (graph.ExternalEgress.Count > 0)
+                    {
+                        <div class="text-uppercase text-muted small fw-semibold mt-2 mb-1 ms-1">
+                            <i class="bi bi-globe me-1"></i>Internet / external
+                        </div>
+                        @foreach (ConnectivityEdge e in graph.ExternalEgress)
+                        {
+                            @EdgeRow(e)
+                        }
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+
+    @* ── Authoring: declared intent ── *@
+    <div class="card shadow-sm mt-3">
+        <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between"
+             role="button" @onclick="() => showAuthoring = !showAuthoring">
+            <span class="fw-semibold">
+                <i class="bi @(showAuthoring ? "bi-chevron-down" : "bi-chevron-right") me-1"></i>
+                <i class="bi bi-pencil-square me-1 text-primary"></i>Declared connectivity
+            </span>
+            <span class="text-muted small">explicit least-privilege intent the analyzer checks against</span>
+        </div>
+        @if (showAuthoring)
+        {
+            <div class="card-body">
+                @* ── Add connectivity rule ── *@
+                <h6 class="small fw-semibold text-uppercase text-muted mb-2">Connectivity rules</h6>
+                <div class="row g-2 align-items-end mb-2">
+                    <div class="col-auto">
+                        <label class="form-label small mb-0">Direction</label>
+                        <select class="form-select form-select-sm" @bind="newRule.Direction">
+                            @foreach (ConnectivityDirection d in Enum.GetValues<ConnectivityDirection>())
+                            {
+                                <option value="@d">@d</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-auto">
+                        <label class="form-label small mb-0">Peer type</label>
+                        <select class="form-select form-select-sm" @bind="newRule.PeerType">
+                            @foreach (ConnectivityPeerType t in PeerTypeChoices)
+                            {
+                                <option value="@t">@t</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-auto">
+                        <label class="form-label small mb-0">Peer</label>
+                        @switch (newRule.PeerType)
+                        {
+                            case ConnectivityPeerType.App:
+                                <select class="form-select form-select-sm" @bind="newRule.PeerAppId">
+                                    <option value="">Select app…</option>
+                                    @if (peerApps is not null)
+                                    {
+                                        @foreach (Data.App a in peerApps)
+                                        {
+                                            <option value="@a.Id">@a.Name</option>
+                                        }
+                                    }
+                                </select>
+                                break;
+                            case ConnectivityPeerType.Namespace:
+                                <input class="form-control form-control-sm" placeholder="namespace" @bind="newRule.PeerNamespace" />
+                                break;
+                            case ConnectivityPeerType.Selector:
+                                <input class="form-control form-control-sm" placeholder='{"app":"api"}' @bind="newRule.PeerSelector" />
+                                break;
+                            case ConnectivityPeerType.Cidr:
+                                <input class="form-control form-control-sm" placeholder="10.0.0.0/16" @bind="newRule.PeerCidr" />
+                                break;
+                            default:
+                                <input class="form-control form-control-sm" value="ingress gateway" disabled />
+                                break;
+                        }
+                    </div>
+                    <div class="col-auto" style="max-width:6rem">
+                        <label class="form-label small mb-0">Port</label>
+                        <input type="number" class="form-control form-control-sm" placeholder="any" @bind="newRulePort" />
+                    </div>
+                    <div class="col-auto">
+                        <label class="form-label small mb-0">Proto</label>
+                        <select class="form-select form-select-sm" @bind="newRule.Protocol">
+                            @foreach (L4Protocol p in Enum.GetValues<L4Protocol>())
+                            {
+                                <option value="@p">@p.ToString().ToUpperInvariant()</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col">
+                        <label class="form-label small mb-0">Description</label>
+                        <input class="form-control form-control-sm" placeholder="why" @bind="newRule.Description" />
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-sm btn-primary" @onclick="AddRule" disabled="@savingRule">
+                            @if (savingRule) { <span class="spinner-border spinner-border-sm"></span> } else { <i class="bi bi-plus-lg"></i> }
+                            Add
+                        </button>
+                    </div>
+                </div>
+
+                @if (rules is { Count: > 0 })
+                {
+                    <div class="table-responsive mb-3">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead class="text-muted small">
+                                <tr><th>Dir</th><th>Peer</th><th>Port</th><th>Description</th><th></th></tr>
+                            </thead>
+                            <tbody>
+                                @foreach (ConnectivityRule r in rules)
+                                {
+                                    <tr>
+                                        <td><span class="badge bg-light text-dark border">@r.Direction</span></td>
+                                        <td class="small">@RulePeerLabel(r) <span class="text-muted">(@r.PeerType)</span></td>
+                                        <td class="small">@(r.Port?.ToString() ?? "any")/@r.Protocol.ToString().ToUpperInvariant()</td>
+                                        <td class="small text-muted">@r.Description</td>
+                                        <td class="text-end">
+                                            <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteRule(r.Id)" title="Delete">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+                else
+                {
+                    <div class="text-muted small mb-3">No declared rules yet — inferred edges above still apply.</div>
+                }
+
+                @* ── Add external dependency ── *@
+                <h6 class="small fw-semibold text-uppercase text-muted mb-2"><i class="bi bi-globe me-1"></i>Internet egress</h6>
+                <div class="row g-2 align-items-end mb-2">
+                    <div class="col">
+                        <label class="form-label small mb-0">Host (FQDN)</label>
+                        <input class="form-control form-control-sm" placeholder="api.stripe.com" @bind="newDep.Host" />
+                    </div>
+                    <div class="col-auto" style="max-width:6rem">
+                        <label class="form-label small mb-0">Port</label>
+                        <input type="number" class="form-control form-control-sm" @bind="newDep.Port" />
+                    </div>
+                    <div class="col-auto">
+                        <label class="form-label small mb-0">Proto</label>
+                        <select class="form-select form-select-sm" @bind="newDep.Protocol">
+                            @foreach (L4Protocol p in Enum.GetValues<L4Protocol>())
+                            {
+                                <option value="@p">@p.ToString().ToUpperInvariant()</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-auto">
+                        <div class="form-check mt-4">
+                            <input class="form-check-input" type="checkbox" id="depTls" @bind="newDep.Tls" />
+                            <label class="form-check-label small" for="depTls">TLS</label>
+                        </div>
+                    </div>
+                    <div class="col">
+                        <label class="form-label small mb-0">Description</label>
+                        <input class="form-control form-control-sm" placeholder="why" @bind="newDep.Description" />
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-sm btn-primary" @onclick="AddDep" disabled="@savingDep">
+                            @if (savingDep) { <span class="spinner-border spinner-border-sm"></span> } else { <i class="bi bi-plus-lg"></i> }
+                            Add
+                        </button>
+                    </div>
+                </div>
+
+                @if (deps is { Count: > 0 })
+                {
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead class="text-muted small">
+                                <tr><th>Host</th><th>Port</th><th>Description</th><th></th></tr>
+                            </thead>
+                            <tbody>
+                                @foreach (ExternalDependency d in deps)
+                                {
+                                    <tr>
+                                        <td class="small"><i class="bi bi-cloud-arrow-up me-1 text-muted"></i>@d.Host @(d.Tls ? "🔒" : "")</td>
+                                        <td class="small">@d.Port/@d.Protocol.ToString().ToUpperInvariant()</td>
+                                        <td class="small text-muted">@d.Description</td>
+                                        <td class="text-end">
+                                            <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteDep(d.Id)" title="Delete">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+                else
+                {
+                    <div class="text-muted small">No declared internet egress yet.</div>
+                }
+            </div>
+        }
+    </div>
+
+    @* ── Generated enforcement (NetworkPolicy) ── *@
+    <div class="card shadow-sm mt-3">
+        <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+            <span class="fw-semibold"><i class="bi bi-shield-lock me-1 text-primary"></i>Generated enforcement (NetworkPolicy)</span>
+            <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-outline-secondary" @onclick="GeneratePolicies" disabled="@generating">
+                    @if (generating) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                    else { <i class="bi bi-eye me-1"></i> }
+                    Preview policies
+                </button>
+                @if (!IsReadOnly)
+                {
+                    <button class="btn btn-sm btn-success" @onclick="ApplyPolicies"
+                            disabled="@(applying || policyPlans is null || policyPlans.Count == 0)">
+                        @if (applying) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        else { <i class="bi bi-cloud-upload me-1"></i> }
+                        Apply to clusters
+                    </button>
+                }
+            </div>
+        </div>
+        @if (policyPlans is not null)
+        {
+            <div class="card-body">
+                @if (policyPlans.Count == 0)
+                {
+                    <div class="text-muted small">No deployments found for this app in this environment — nothing to generate.</div>
+                }
+                else
+                {
+                    <div class="small text-muted mb-2">
+                        Default-deny baseline + DNS allow + least-privilege allow rules derived from the graph above,
+                        plus Istio ServiceEntry for internet egress where a mesh is present.
+                        NetworkPolicies target the whole namespace (<code>podSelector: {}</code>).
+                    </div>
+                    @foreach (ConnectivityPolicyPlan plan in policyPlans)
+                    {
+                        <div class="mb-3">
+                            <div class="fw-medium small mb-1">
+                                <i class="bi bi-hdd-network me-1"></i><code>@plan.ClusterName</code>
+                                <i class="bi bi-box ms-2 me-1"></i>namespace <code>@plan.Namespace</code>
+                                @if (plan.HasIstio)
+                                {
+                                    <span class="badge bg-success-subtle text-success-emphasis border ms-2" title="Istio mesh detected — ServiceEntry egress available"><i class="bi bi-diagram-3 me-1"></i>Istio</span>
+                                }
+                                else
+                                {
+                                    <span class="badge bg-secondary-subtle text-secondary-emphasis border ms-2" title="No Istio mesh detected on this cluster">No mesh</span>
+                                }
+                            </div>
+                            <ul class="list-unstyled small mb-2">
+                                @foreach (GeneratedPolicy p in plan.Policies)
+                                {
+                                    <li>
+                                        <i class="bi @DocIcon(p.Kind) me-1"></i>
+                                        <span class="badge bg-light text-dark border me-1">@p.Kind</span>
+                                        <code>@p.Name</code> — <span class="text-muted">@p.Summary</span>
+                                    </li>
+                                }
+                            </ul>
+                            @if (plan.Warnings.Count > 0)
+                            {
+                                <div class="alert alert-warning py-2 px-2 small mb-2">
+                                    <i class="bi bi-exclamation-triangle me-1"></i><strong>Can't be enforced here:</strong>
+                                    <ul class="mb-0 mt-1">
+                                        @foreach (string w in plan.Warnings)
+                                        {
+                                            <li>@w</li>
+                                        }
+                                    </ul>
+                                </div>
+                            }
+                            @if (plan.Notes.Count > 0)
+                            {
+                                <div class="alert alert-info py-2 px-2 small mb-2">
+                                    <i class="bi bi-info-circle me-1"></i>
+                                    <ul class="mb-0 mt-1">
+                                        @foreach (string n in plan.Notes)
+                                        {
+                                            <li>@n</li>
+                                        }
+                                    </ul>
+                                </div>
+                            }
+                            <pre class="bg-body-secondary border rounded p-2 small mb-0" style="max-height:22rem;overflow:auto"><code>@plan.CombinedYaml</code></pre>
+                        </div>
+                    }
+                }
+
+                @if (applyResults is not null)
+                {
+                    <div class="mt-2">
+                        <div class="fw-medium small mb-1">Apply results</div>
+                        @foreach ((string target, bool ok, string output) in applyResults)
+                        {
+                            <div class="small @(ok ? "text-success" : "text-danger")">
+                                <i class="bi @(ok ? "bi-check-circle" : "bi-x-circle") me-1"></i>@target
+                                @if (!string.IsNullOrWhiteSpace(output))
+                                {
+                                    <pre class="bg-body-secondary border rounded p-2 small mt-1 mb-0" style="max-height:10rem;overflow:auto"><code>@output</code></pre>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        }
+    </div>
+
+    <div class="text-muted small mt-3">
+        <i class="bi bi-lightbulb me-1"></i>
+        <strong>Inferred</strong> edges come from your manifests, bindings, and routes.
+        <strong>Declared</strong> edges are intent you author above. Enforcement generates L3/L4 NetworkPolicy,
+        Istio ServiceEntry for internet egress, and L7 Istio AuthorizationPolicy — the last two where a mesh is present.
+    </div>
+}
+
+@code {
+    [Parameter] public Guid AppId { get; set; }
+    [Parameter] public Guid EnvironmentId { get; set; }
+    [Parameter] public Guid? TenantId { get; set; }
+    [Parameter] public string? AppName { get; set; }
+
+    /// <summary>Portal (customer) view can preview policies but not apply them to clusters.</summary>
+    [Parameter] public bool IsReadOnly { get; set; }
+
+    private ConnectivityGraph? graph;
+    private List<ConnectivityFinding>? findings;
+    private List<ConnectivityRule>? rules;
+    private List<ExternalDependency>? deps;
+    private List<Data.App>? peerApps;
+    private List<ConnectivityPolicyPlan>? policyPlans;
+    private List<(string Target, bool Success, string Output)>? applyResults;
+    private bool loading;
+    private bool showAuthoring;
+    private bool savingRule;
+    private bool savingDep;
+    private bool generating;
+    private bool applying;
+    private (Guid app, Guid env) loadedFor;
+
+    private ConnectivityRule newRule = NewRule();
+    private int? newRulePort;
+    private ExternalDependency newDep = NewDep();
+
+    private int ErrorCount => findings?.Count(f => f.Severity == FindingSeverity.Error) ?? 0;
+    private int WarnCount => findings?.Count(f => f.Severity == FindingSeverity.Warning) ?? 0;
+    private int InfoCount => findings?.Count(f => f.Severity == FindingSeverity.Info) ?? 0;
+
+    // Only peer types that make sense to author by hand (External is via the egress form).
+    private static readonly ConnectivityPeerType[] PeerTypeChoices =
+    [
+        ConnectivityPeerType.App,
+        ConnectivityPeerType.Namespace,
+        ConnectivityPeerType.Selector,
+        ConnectivityPeerType.Cidr,
+        ConnectivityPeerType.Ingress
+    ];
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor != (AppId, EnvironmentId))
+        {
+            await Reload();
+        }
+    }
+
+    private async Task Reload()
+    {
+        loading = true;
+        try
+        {
+            graph = await ConnectivityService.BuildGraphAsync(AppId, EnvironmentId);
+            findings = await ConnectivityService.AnalyzeAsync(graph, AppId, EnvironmentId);
+            rules = await ConnectivityService.GetRulesAsync(AppId, EnvironmentId);
+            deps = await ConnectivityService.GetExternalDependenciesAsync(AppId, EnvironmentId);
+            peerApps = await ConnectivityService.GetCandidatePeerAppsAsync(AppId);
+            policyPlans = null;
+            applyResults = null;
+            loadedFor = (AppId, EnvironmentId);
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task AddRule()
+    {
+        savingRule = true;
+        try
+        {
+            newRule.AppId = AppId;
+            newRule.EnvironmentId = EnvironmentId;
+            newRule.Port = newRulePort;
+            if (newRule.PeerAppId == Guid.Empty) { newRule.PeerAppId = null; }
+            await ConnectivityService.AddRuleAsync(newRule);
+            newRule = NewRule();
+            newRulePort = null;
+            Toast.Success("Connectivity rule added.");
+            await Reload();
+        }
+        catch (Exception ex)
+        {
+            Toast.Error(ex.Message);
+        }
+        finally
+        {
+            savingRule = false;
+        }
+    }
+
+    private async Task DeleteRule(Guid id)
+    {
+        await ConnectivityService.DeleteRuleAsync(id);
+        Toast.Info("Rule removed.");
+        await Reload();
+    }
+
+    private async Task AddDep()
+    {
+        savingDep = true;
+        try
+        {
+            newDep.AppId = AppId;
+            newDep.EnvironmentId = EnvironmentId;
+            await ConnectivityService.AddExternalDependencyAsync(newDep);
+            newDep = NewDep();
+            Toast.Success("Internet egress added.");
+            await Reload();
+        }
+        catch (Exception ex)
+        {
+            Toast.Error(ex.Message);
+        }
+        finally
+        {
+            savingDep = false;
+        }
+    }
+
+    private async Task DeleteDep(Guid id)
+    {
+        await ConnectivityService.DeleteExternalDependencyAsync(id);
+        Toast.Info("Internet egress removed.");
+        await Reload();
+    }
+
+    private async Task GeneratePolicies()
+    {
+        generating = true;
+        applyResults = null;
+        try
+        {
+            policyPlans = await ConnectivityService.GenerateNetworkPoliciesAsync(AppId, EnvironmentId);
+        }
+        catch (Exception ex)
+        {
+            Toast.Error(ex.Message);
+        }
+        finally
+        {
+            generating = false;
+        }
+    }
+
+    private async Task ApplyPolicies()
+    {
+        applying = true;
+        try
+        {
+            applyResults = await ConnectivityService.ApplyNetworkPoliciesAsync(AppId, EnvironmentId);
+            bool allOk = applyResults.All(r => r.Success);
+            if (allOk) { Toast.Success("NetworkPolicies applied."); }
+            else { Toast.Warning("Some targets failed — see results."); }
+        }
+        catch (Exception ex)
+        {
+            Toast.Error(ex.Message);
+        }
+        finally
+        {
+            applying = false;
+        }
+    }
+
+    private static ConnectivityRule NewRule() => new()
+    {
+        AppId = Guid.Empty,
+        Direction = ConnectivityDirection.Egress,
+        PeerType = ConnectivityPeerType.App,
+        Protocol = L4Protocol.Tcp
+    };
+
+    private static ExternalDependency NewDep() => new()
+    {
+        Host = "",
+        Port = 443,
+        Protocol = L4Protocol.Tcp,
+        Tls = true
+    };
+
+    private string RulePeerLabel(ConnectivityRule r) => r.PeerType switch
+    {
+        ConnectivityPeerType.App => r.PeerApp?.Name ?? "app",
+        ConnectivityPeerType.Namespace => $"ns/{r.PeerNamespace}",
+        ConnectivityPeerType.Selector => r.PeerSelector ?? "selector",
+        ConnectivityPeerType.Cidr => r.PeerCidr ?? "cidr",
+        ConnectivityPeerType.Ingress => "ingress gateway",
+        _ => r.PeerType.ToString()
+    };
+
+    private static string DocIcon(string kind) => kind switch
+    {
+        "ServiceEntry" => "bi-cloud-arrow-up text-info",
+        "AuthorizationPolicy" => "bi-shield-lock text-primary",
+        _ => "bi-file-earmark-check text-success"
+    };
+
+    private static string SeverityBorder(FindingSeverity s) => s switch
+    {
+        FindingSeverity.Error => "border-danger",
+        FindingSeverity.Warning => "border-warning",
+        _ => "border-secondary-subtle"
+    };
+
+    private static string SeverityText(FindingSeverity s) => s switch
+    {
+        FindingSeverity.Error => "text-danger",
+        FindingSeverity.Warning => "text-warning",
+        _ => "text-secondary"
+    };
+
+    private static string SeverityIcon(FindingSeverity s) => s switch
+    {
+        FindingSeverity.Error => "bi-x-octagon-fill",
+        FindingSeverity.Warning => "bi-exclamation-triangle-fill",
+        _ => "bi-info-circle-fill"
+    };
+
+    private RenderFragment SourceBadge(ConnectivitySource source) => __builder =>
+    {
+        if (source == ConnectivitySource.Declared)
+        {
+            <span class="badge bg-primary-subtle text-primary-emphasis border" title="Explicitly declared intent">Declared</span>
+        }
+        else
+        {
+            <span class="badge bg-secondary-subtle text-secondary-emphasis border" title="Inferred from existing config">Inferred</span>
+        }
+    };
+
+    private RenderFragment EdgeRow(ConnectivityEdge e) => __builder =>
+    {
+        <div class="d-flex align-items-center justify-content-between border rounded px-2 py-1 mb-1 @(e.IsEnabled ? "" : "opacity-50")">
+            <div class="text-truncate">
+                <i class="bi @e.Icon me-1 text-muted"></i>
+                <span class="fw-medium">@e.PeerLabel</span>
+                @if (e.Port is int port)
+                {
+                    <span class="text-muted"> :@port</span>
+                    <span class="badge bg-light text-dark border ms-1">@e.Protocol</span>
+                }
+                @if (!string.IsNullOrEmpty(e.AppProtocol))
+                {
+                    <span class="badge bg-info-subtle text-info-emphasis border ms-1">@e.AppProtocol</span>
+                }
+                <div class="small text-muted ms-4">
+                    @e.PeerKind
+                    @if (!string.IsNullOrEmpty(e.Target)) { <span> · @e.Target</span> }
+                    @if (!string.IsNullOrEmpty(e.Detail)) { <span> · @e.Detail</span> }
+                    @if (!e.IsEnabled) { <span class="text-warning"> · disabled</span> }
+                </div>
+            </div>
+            @SourceBadge(e.Source)
+        </div>
+    };
+}

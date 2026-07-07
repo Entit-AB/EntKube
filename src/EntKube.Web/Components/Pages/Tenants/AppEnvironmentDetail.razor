@@ -88,6 +88,15 @@
             </button>
         </li>
     }
+    <li class="nav-item" role="presentation">
+        <button class="nav-link @(section == "connectivity" ? "active" : "")"
+                role="tab"
+                aria-selected="@(section == "connectivity")"
+                tabindex="@(section == "connectivity" ? 0 : -1)"
+                @onclick='() => section = "connectivity"'>
+            <i class="bi bi-diagram-3 me-1"></i>Connectivity
+        </button>
+    </li>
     @if (!IsPortalView)
     {
         <li class="nav-item" role="presentation">
@@ -1034,6 +1043,15 @@
     {
         <GovernanceTab AppId="App.Id" TenantId="TenantId" EnvironmentId="Environment.Id" />
     }
+}
+
+
+@* ══════════════════════════════════════════════════════
+   Connectivity tab — read-only least-privilege topology (inferred + declared)
+   ══════════════════════════════════════════════════════ *@
+@if (section == "connectivity")
+{
+    <ConnectivityTab AppId="App.Id" EnvironmentId="Environment.Id" TenantId="TenantId" AppName="App.Name" IsReadOnly="IsPortalView" />
 }
 
 

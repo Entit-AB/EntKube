@@ -36,4 +36,9 @@ public class App
     public ICollection<AppAllowedDatabase> AllowedDatabases { get; set; } = [];
     public ICollection<AppAllowedCache> AllowedCaches { get; set; } = [];
     public ICollection<AppAllowedStorage> AllowedStorages { get; set; } = [];
+
+    // Connectivity model — least-privilege graph (exposed ports, edges, egress).
+    public ICollection<AppServicePort> ServicePorts { get; set; } = [];
+    public ICollection<ConnectivityRule> ConnectivityRules { get; set; } = [];
+    public ICollection<ExternalDependency> ExternalDependencies { get; set; } = [];
 }

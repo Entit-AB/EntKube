@@ -172,6 +172,7 @@ public class Program
         builder.Services.AddScoped<ExternalRouteService>();
         builder.Services.AddScoped<AppRouteService>();
         builder.Services.AddScoped<AppL4RouteService>();
+        builder.Services.AddScoped<ConnectivityGraphService>();
         builder.Services.AddScoped<DatabaseService>();
         builder.Services.AddScoped<CnpgService>();
         builder.Services.AddScoped<MongoService>();
