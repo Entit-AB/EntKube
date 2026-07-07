@@ -191,10 +191,116 @@ public sealed class TelemetryStore : IAsyncDisposable
             await sc.ExecuteNonQueryAsync(ct);
         }
 
+        // Indexes added to already-large tables are built CONCURRENTLY per partition so the
+        // build never takes the write lock that a plain CREATE INDEX on the partitioned parent
+        // would — that lock blocks OTLP ingest (COPY) for the whole build. Runs after the
+        // partition step so a freshly-created partition also gets its index this cycle.
+        await EnsureConcurrentIndexesAsync(conn, ct);
+
         if (EnableTextSearchIndex)
             await EnsureTextSearchIndexAsync(conn, ct);
 
         _logger.LogInformation("Telemetry schema ensured (retention {RetentionDays}d).", RetentionDays);
+    }
+
+    // Indexes that must NOT be built inline on the partitioned parent because their tables are
+    // already large in production — a non-concurrent CREATE INDEX locks writes for the whole
+    // build and starves ingest. (Name, parent table, index definition after the name.)
+    private static readonly (string Name, string Table, string Def)[] ConcurrentIndexes =
+    [
+        ("logs_scope_trace",       "logs",  "(tenant_id, cluster_id, trace_id) WHERE trace_id IS NOT NULL"),
+        ("spans_scope_ts",         "spans", "(tenant_id, cluster_id, ts DESC)"),
+        ("spans_scope_trace_span", "spans", "(tenant_id, cluster_id, trace_id, span_id)"),
+    ];
+
+    /// <summary>
+    /// Builds the <see cref="ConcurrentIndexes"/> one partition at a time with CREATE INDEX
+    /// CONCURRENTLY, which does not take a write lock — so ingest keeps flowing during the build.
+    /// Idempotent and self-healing: skips indexes already present as a partitioned parent (an
+    /// older deploy that built them inline), skips partitions already indexed, and drops a
+    /// leftover invalid index from an interrupted concurrent build before retrying. Best-effort
+    /// per statement so a slow or failing partition never blocks the rest or the schema ensure.
+    /// </summary>
+    private async Task EnsureConcurrentIndexesAsync(NpgsqlConnection conn, CancellationToken ct)
+    {
+        foreach ((string name, string table, string def) in ConcurrentIndexes)
+        {
+            // A valid partitioned parent index of this name already covers every partition.
+            if (await ParentIndexExistsAsync(conn, name, ct))
+                continue;
+
+            foreach (string part in await GetPartitionsAsync(conn, table, ct))
+            {
+                string child = $"{name}_{part[(table.Length + 1)..]}";
+                try
+                {
+                    // Self-heal a leftover invalid index from an interrupted concurrent build
+                    // (CONCURRENTLY leaves an invalid index behind, and IF NOT EXISTS would then
+                    // never rebuild it).
+                    if (await IsInvalidIndexAsync(conn, child, ct))
+                        await ExecDdlAsync(conn, $"DROP INDEX IF EXISTS {child}", ct);
+
+                    await ExecDdlAsync(conn, $"CREATE INDEX CONCURRENTLY IF NOT EXISTS {child} ON {part} {def}", ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;   // host shutting down
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Concurrent telemetry index build failed ({Child}); will retry next cycle.", child);
+                }
+            }
+        }
+    }
+
+    // Runs a single DDL statement with the extended schema timeout. Not wrapped in a transaction,
+    // so CREATE INDEX CONCURRENTLY (which cannot run inside one) is valid on the pooled connection.
+    private async Task ExecDdlAsync(NpgsqlConnection conn, string sql, CancellationToken ct)
+    {
+        await using NpgsqlCommand cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.CommandTimeout = _schemaCommandTimeoutSeconds;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // True when an index named <name> exists (regular 'i' or partitioned-parent 'I'). Used to
+    // skip a concurrent per-partition build when an older deploy already made a parent index.
+    private static async Task<bool> ParentIndexExistsAsync(NpgsqlConnection conn, string name, CancellationToken ct)
+    {
+        await using NpgsqlCommand cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT 1 FROM pg_class WHERE relname = @n AND relkind IN ('i','I') LIMIT 1";
+        cmd.Parameters.AddWithValue("n", name);
+        return await cmd.ExecuteScalarAsync(ct) is not null;
+    }
+
+    private static async Task<bool> IsInvalidIndexAsync(NpgsqlConnection conn, string name, CancellationToken ct)
+    {
+        await using NpgsqlCommand cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "SELECT 1 FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname = @n AND NOT i.indisvalid LIMIT 1";
+        cmd.Parameters.AddWithValue("n", name);
+        return await cmd.ExecuteScalarAsync(ct) is not null;
+    }
+
+    // Child partitions of <table> named exactly <table>_<8 digits> (same shape as retention drop).
+    private static async Task<List<string>> GetPartitionsAsync(NpgsqlConnection conn, string table, CancellationToken ct)
+    {
+        List<string> partitions = [];
+        await using NpgsqlCommand cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT c.relname
+            FROM pg_inherits i
+            JOIN pg_class c ON c.oid = i.inhrelid
+            JOIN pg_class p ON p.oid = i.inhparent
+            WHERE p.relname = @table AND c.relname ~ ('^' || @table || '_[0-9]{8}$');
+            """;
+        cmd.Parameters.AddWithValue("table", table);
+        await using NpgsqlDataReader r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+            partitions.Add(r.GetString(0));
+        return partitions;
     }
 
     /// <summary>
@@ -271,13 +377,10 @@ public sealed class TelemetryStore : IAsyncDisposable
 
         CREATE INDEX IF NOT EXISTS logs_scope_ts
             ON logs (tenant_id, cluster_id, ts DESC);
-
-        -- Correlate a trace's spans to its logs (QueryByTraceAsync). Most log rows carry no
-        -- trace_id, so a PARTIAL index over the non-null minority stays tiny and makes the
-        -- lookup an exact index probe instead of scanning the cluster's logs across every
-        -- partition in the retention window.
-        CREATE INDEX IF NOT EXISTS logs_scope_trace
-            ON logs (tenant_id, cluster_id, trace_id) WHERE trace_id IS NOT NULL;
+        -- logs_scope_trace (trace→log correlation) is built CONCURRENTLY per partition in
+        -- EnsureConcurrentIndexesAsync: it was added to an already-large table, and an inline
+        -- CREATE INDEX on the partitioned parent locks writes for the whole build, starving
+        -- ingest. Concurrent per-partition builds never take that write lock.
 
         CREATE TABLE IF NOT EXISTS spans (
             ts             timestamptz NOT NULL,
@@ -298,21 +401,9 @@ public sealed class TelemetryStore : IAsyncDisposable
 
         CREATE INDEX IF NOT EXISTS spans_ts_brin
             ON spans USING brin (ts) WITH (pages_per_range = 32);
-
-        -- Trace search over a time window, "all services" (GROUP BY trace_id in the window).
-        -- Leads with the always-present tenant+cluster equality so a shared multi-tenant table
-        -- uses a tight index range scan instead of the coarse BRIN (which returns page ranges
-        -- spanning every tenant/cluster in that time span).
-        CREATE INDEX IF NOT EXISTS spans_scope_ts
-            ON spans (tenant_id, cluster_id, ts DESC);
-
-        -- Fetch a whole trace by id (waterfall / log correlation) AND back the service-map
-        -- self-join's parent probe (p.trace_id = c.trace_id AND p.span_id = c.parent_span_id).
-        -- Including span_id makes the parent lookup an exact index probe instead of scanning
-        -- every span in the trace. The (tenant_id, cluster_id, trace_id) prefix still serves
-        -- the by-trace fetch, so this supersedes the old spans_scope_trace index.
-        CREATE INDEX IF NOT EXISTS spans_scope_trace_span
-            ON spans (tenant_id, cluster_id, trace_id, span_id);
+        -- spans_scope_ts and spans_scope_trace_span (trace search) are built CONCURRENTLY per
+        -- partition in EnsureConcurrentIndexesAsync — added to an already-large table, so an
+        -- inline build on the partitioned parent would lock writes and starve ingest.
         DROP INDEX IF EXISTS spans_scope_trace;
 
         -- Service-scoped trace listing + RED aggregates (rate/errors/duration) over time.
