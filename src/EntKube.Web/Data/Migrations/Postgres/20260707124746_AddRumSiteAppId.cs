@@ -1,4 +1,3 @@
-﻿using System;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -11,28 +10,22 @@ namespace EntKube.Web.Data.Migrations.Postgres
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.AddColumn<Guid>(
-                name: "AppId",
-                table: "RumSites",
-                type: "uuid",
-                nullable: true);
-
-            migrationBuilder.CreateIndex(
-                name: "IX_RumSites_AppId",
-                table: "RumSites",
-                column: "AppId");
+            // RumSites.AppId (from the RUM deployment-scoping work) reached some
+            // environments out-of-band, before this migration existed — its model
+            // change never had a migration committed. Guard the operations with
+            // IF [NOT] EXISTS so the migration is idempotent across every database
+            // state (column already present, or not).
+            migrationBuilder.Sql(
+                @"ALTER TABLE ""RumSites"" ADD COLUMN IF NOT EXISTS ""AppId"" uuid;");
+            migrationBuilder.Sql(
+                @"CREATE INDEX IF NOT EXISTS ""IX_RumSites_AppId"" ON ""RumSites"" (""AppId"");");
         }
 
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropIndex(
-                name: "IX_RumSites_AppId",
-                table: "RumSites");
-
-            migrationBuilder.DropColumn(
-                name: "AppId",
-                table: "RumSites");
+            migrationBuilder.Sql(@"DROP INDEX IF EXISTS ""IX_RumSites_AppId"";");
+            migrationBuilder.Sql(@"ALTER TABLE ""RumSites"" DROP COLUMN IF EXISTS ""AppId"";");
         }
     }
 }
