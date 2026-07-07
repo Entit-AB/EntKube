@@ -51,10 +51,13 @@ public class PgTraceService(TelemetryStore store, ClusterTenantResolver tenants,
         {
             await using NpgsqlConnection conn = await Store.OpenConnectionAsync(ct);
             await using NpgsqlCommand cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT DISTINCT service FROM spans WHERE tenant_id = @t AND cluster_id = @c"
+            // Bound to the last 24h (the trace search's max range) so the DISTINCT rides the
+            // ts filter over recent partitions instead of scanning the full retention window.
+            cmd.CommandText = "SELECT DISTINCT service FROM spans WHERE tenant_id = @t AND cluster_id = @c AND ts >= @since"
                 + NsScope(cmd, namespaces) + PodScope(cmd, podPattern) + " ORDER BY service";
             cmd.Parameters.AddWithValue("t", tenantId.Value);
             cmd.Parameters.AddWithValue("c", clusterId);
+            cmd.Parameters.AddWithValue("since", DateTime.UtcNow.AddHours(-24));
 
             List<string> services = [];
             await using NpgsqlDataReader r = await cmd.ExecuteReaderAsync(ct);

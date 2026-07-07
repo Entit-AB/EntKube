@@ -194,3 +194,25 @@ h1:focus {
     from { opacity: 0; transform: translateY(-0.4rem); }
     to { opacity: 1; transform: translateY(0); }
 }
+
+/* Native chart axes (MetricChart / MultiSeriesChart) — recessive value & time labels. */
+.chart-axis-y {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-items: flex-end;
+    font-size: 0.66rem;
+    line-height: 1;
+    color: var(--bs-secondary-color, #6c757d);
+    padding: 1px 0;
+    white-space: nowrap;
+}
+
+.chart-axis-x {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.66rem;
+    line-height: 1;
+    color: var(--bs-secondary-color, #6c757d);
+    padding-top: 3px;
+}

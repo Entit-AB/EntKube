@@ -48,18 +48,24 @@ else
                 <div class="@(p.Multi ? "col-12 col-xl-6" : "col-6 col-md-4 col-xl-3")">
                     <div class="card h-100">
                         <div class="card-body p-2">
-                            <div class="small text-muted mb-1">@p.Title @(p.Unit is null ? "" : $"({p.Unit})")</div>
+                            <div class="small mb-1 d-flex justify-content-between align-items-baseline">
+                                <span class="text-muted">@p.Title @(p.Unit is null ? "" : $"({p.Unit})")</span>
+                                @if (!p.Multi && PointsFor(p.Key).Count > 0)
+                                {
+                                    <span class="fw-semibold">@LatestLabel(p)</span>
+                                }
+                            </div>
                             @if (isLoading && !results.ContainsKey(p.Key))
                             {
                                 <div class="text-center py-4"><span class="spinner-border spinner-border-sm text-secondary"></span></div>
                             }
                             else if (p.Multi)
                             {
-                                <MultiSeriesChart Series="@GroupsFor(p.Key)" HeightPx="200" />
+                                <MultiSeriesChart Series="@GroupsFor(p.Key)" Unit="@p.Unit" HeightPx="200" />
                             }
                             else
                             {
-                                <MetricChart Title="@null" DataPoints="@PointsFor(p.Key)" Color="@p.Color" Unit="@p.Unit" MaxValue="@p.Max" HeightPx="110" />
+                                <MetricChart Title="@null" DataPoints="@PointsFor(p.Key)" Color="@p.Color" Unit="@p.Unit" MaxValue="@p.Max" HeightPx="110" ShowAxes="true" />
                             }
                         </div>
                     </div>
@@ -159,6 +165,16 @@ else
 
         queriedAt = DateTime.UtcNow;
         isLoading = false;
+    }
+
+    // Latest value of a single-series panel, formatted with its unit — shown in the panel header.
+    private string LatestLabel(Panel p)
+    {
+        List<TimeSeriesDataPoint> pts = PointsFor(p.Key);
+        if (pts.Count == 0) return "";
+        double v = pts[^1].Value;
+        string s = v >= 100 ? v.ToString("F0") : v >= 10 ? v.ToString("F1") : v.ToString("F2");
+        return p.Unit == "%" ? s + "%" : p.Unit is null ? s : $"{s} {p.Unit}";
     }
 
     // Single-series panel: the query aggregates to one series (take it), else empty.

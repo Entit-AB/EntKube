@@ -2,23 +2,42 @@
 
 @* ═══════════════════════════════════════════════════════════════════════════
    MultiSeriesChart — overlays N named time-series as colored polylines on a
-   shared time + value axis, with a legend. Points are positioned by real
-   timestamp (not index) so series with different sampling still line up.
-   Server-rendered SVG, no JS. Mirrors MetricChart's invariant-culture coords.
+   shared time + value axis, with a value (y) scale, a start/end time (x) axis,
+   faint gridlines, and a legend. Points are positioned by real timestamp (not
+   index) so series with different sampling still line up. Server-rendered SVG,
+   no JS. Mirrors MetricChart's invariant-culture coords.
    ═══════════════════════════════════════════════════════════════════════════ *@
 
 <div class="multi-series-chart">
     @if (drawable.Count > 0 && _maxVal > 0)
     {
-        <svg viewBox="0 0 @W @H" preserveAspectRatio="none"
-             style="width:100%; height:@(HeightPx)px; display:block;">
-            @for (int i = 0; i < drawable.Count; i++)
-            {
-                <polyline points="@LinePoints(drawable[i])" fill="none"
-                          stroke="@ColorAt(i)" stroke-width="1.5"
-                          stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
-            }
-        </svg>
+        <div style="display:grid;grid-template-columns:auto 1fr;grid-template-rows:@(HeightPx)px auto;column-gap:6px;">
+            <div class="chart-axis-y" style="grid-column:1;grid-row:1;">
+                <span>@AxisLabel(_maxVal)</span>
+                <span>@AxisLabel(_maxVal / 2)</span>
+                <span>0</span>
+            </div>
+            <div style="grid-column:2;grid-row:1;min-width:0;">
+                <svg viewBox="0 0 @W @H" preserveAspectRatio="none"
+                     style="width:100%; height:@(HeightPx)px; display:block;">
+                    @foreach (double gy in GridLines)
+                    {
+                        <line x1="0" y1="@gy.ToString("F1", Inv)" x2="@W" y2="@gy.ToString("F1", Inv)"
+                              stroke="currentColor" stroke-opacity="0.12" stroke-width="1" vector-effect="non-scaling-stroke" />
+                    }
+                    @for (int i = 0; i < drawable.Count; i++)
+                    {
+                        <polyline points="@LinePoints(drawable[i])" fill="none"
+                                  stroke="@ColorAt(i)" stroke-width="1.5"
+                                  stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+                    }
+                </svg>
+            </div>
+            <div class="chart-axis-x" style="grid-column:2;grid-row:2;">
+                <span>@TimeLabel(_minTime)</span>
+                <span>@TimeLabel(_maxTime)</span>
+            </div>
+        </div>
         <div class="d-flex flex-wrap gap-3 mt-2">
             @for (int i = 0; i < drawable.Count; i++)
             {
@@ -39,10 +58,15 @@
 @code {
     [Parameter] public List<MetricSeriesGroup> Series { get; set; } = [];
     [Parameter] public int HeightPx { get; set; } = 220;
+    /// <summary>Optional unit appended to the value-axis labels (e.g. "cores", "MiB", "%").</summary>
+    [Parameter] public string? Unit { get; set; }
 
     private const int W = 600;
     private const int H = 200;
     private const int Pad = 3;
+
+    private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+    private double[] GridLines => [Pad, H / 2.0, H - Pad];
 
     private static readonly string[] Palette =
         ["#4a90d9", "#f48771", "#7ab648", "#e0a458", "#9b7fd4", "#4bbfae", "#d46aa8", "#6c8ebf", "#c17f3a", "#5aa469"];
@@ -51,6 +75,8 @@
     private double _minTicks;
     private double _spanTicks = 1;
     private double _maxVal;
+    private DateTime _minTime;
+    private DateTime _maxTime;
 
     protected override void OnParametersSet()
     {
@@ -58,13 +84,22 @@
         List<TimeSeriesDataPoint> all = drawable.SelectMany(s => s.Points).ToList();
         if (all.Count == 0) { _maxVal = 0; return; }
 
-        _minTicks = all.Min(p => p.Timestamp.Ticks);
-        double maxTicks = all.Max(p => p.Timestamp.Ticks);
-        _spanTicks = Math.Max(1, maxTicks - _minTicks);
+        _minTime = all.Min(p => p.Timestamp);
+        _maxTime = all.Max(p => p.Timestamp);
+        _minTicks = _minTime.Ticks;
+        _spanTicks = Math.Max(1, _maxTime.Ticks - _minTicks);
         _maxVal = Math.Max(all.Max(p => p.Value), double.Epsilon);
     }
 
     private string ColorAt(int i) => Palette[i % Palette.Length];
+
+    private string AxisLabel(double v)
+    {
+        string s = v >= 100 ? v.ToString("F0") : v >= 10 ? v.ToString("F1") : v.ToString("F2");
+        return string.IsNullOrEmpty(Unit) ? s : Unit == "%" ? s + "%" : $"{s} {Unit}";
+    }
+
+    private static string TimeLabel(DateTime t) => t.ToLocalTime().ToString("HH:mm");
 
     private string LinePoints(MetricSeriesGroup s)
     {

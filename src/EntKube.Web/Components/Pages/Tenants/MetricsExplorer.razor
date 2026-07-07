@@ -75,7 +75,7 @@ else
     else if (series.Count > 0)
     {
         <div class="card card-body">
-            <MetricChart Title="@selectedMetric" DataPoints="series" Color="#4a90d9" HeightPx="220" />
+            <MetricChart Title="@selectedMetric" DataPoints="series" Color="#4a90d9" HeightPx="220" ShowAxes="true" />
         </div>
     }
     else if (charted && !isQuerying)
@@ -124,10 +124,16 @@ else
         available = await Metrics.HasDataAsync(ClusterId);
         if (available)
         {
-            KubernetesOperationResult<List<string>> n = await Metrics.GetMetricNamesAsync(ClusterId, namespaces: Namespaces, podPattern: PodPattern);
-            metricNames = n.IsSuccess ? n.Data ?? [] : [];
-            KubernetesOperationResult<List<string>> s = await Metrics.GetServicesAsync(ClusterId, namespaces: Namespaces, podPattern: PodPattern);
-            services = s.IsSuccess ? s.Data ?? [] : [];
+            // The name and service dropdowns are independent DISTINCT queries — run them
+            // concurrently so the load waits on the slower, not the sum.
+            Task<KubernetesOperationResult<List<string>>> namesTask =
+                Metrics.GetMetricNamesAsync(ClusterId, namespaces: Namespaces, podPattern: PodPattern);
+            Task<KubernetesOperationResult<List<string>>> servicesTask =
+                Metrics.GetServicesAsync(ClusterId, namespaces: Namespaces, podPattern: PodPattern);
+            await Task.WhenAll(namesTask, servicesTask);
+
+            metricNames = namesTask.Result.IsSuccess ? namesTask.Result.Data ?? [] : [];
+            services = servicesTask.Result.IsSuccess ? servicesTask.Result.Data ?? [] : [];
         }
         isLoading = false;
     }
