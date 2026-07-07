@@ -60,12 +60,18 @@ public sealed class TelemetryStore : IAsyncDisposable
     /// </summary>
     private readonly IReadOnlyDictionary<Guid, int> _tenantRetentionDays;
 
+    // Per-statement timeout (seconds) for schema DDL. Building an index on an already-large
+    // telemetry table can take far longer than the default 30s; without this headroom the
+    // build times out, rolls back, and retries forever — starving ingest. Default 1 hour.
+    private readonly int _schemaCommandTimeoutSeconds;
+
     public TelemetryStore(IConfiguration config, ILogger<TelemetryStore> logger)
     {
         _logger = logger;
         RetentionDays = config.GetValue<int?>("Telemetry:RetentionDays") ?? 14;
         EnableTextSearchIndex = config.GetValue<bool>("Telemetry:EnableTextSearchIndex");
         EnableUnloggedTables = config.GetValue<bool>("Telemetry:UnloggedTables");
+        _schemaCommandTimeoutSeconds = config.GetValue<int?>("Telemetry:SchemaCommandTimeoutSeconds") ?? 3600;
         _tenantRetentionDays = ReadTenantRetention(config);
 
         string? conn = config.GetConnectionString("TelemetryConnection");
@@ -77,6 +83,27 @@ public sealed class TelemetryStore : IAsyncDisposable
         }
 
         _dataSource = new NpgsqlDataSourceBuilder(conn).Build();
+    }
+
+    // Splits a DDL script into individual statements. Line comments are stripped first because a
+    // few of them contain ';' (e.g. "…map to a cluster; AJAX rows carry…") which would otherwise
+    // split a statement mid-way. The telemetry DDL has no string literals or dollar-quoted bodies,
+    // so a plain split on ';' after comment removal is safe.
+    private static IEnumerable<string> SplitSqlStatements(string sql)
+    {
+        StringBuilder noComments = new(sql.Length);
+        foreach (string line in sql.Split('\n'))
+        {
+            int c = line.IndexOf("--", StringComparison.Ordinal);
+            noComments.Append(c >= 0 ? line[..c] : line).Append('\n');
+        }
+
+        foreach (string part in noComments.ToString().Split(';'))
+        {
+            string trimmed = part.Trim();
+            if (trimmed.Length > 0)
+                yield return trimmed;
+        }
     }
 
     // Reads Telemetry:TenantRetentionDays ({ "<tenantGuid>": <days> }) into a validated map.
@@ -115,12 +142,34 @@ public sealed class TelemetryStore : IAsyncDisposable
 
         await using NpgsqlConnection conn = await _dataSource.OpenConnectionAsync(ct);
 
-        await using (NpgsqlCommand cmd = conn.CreateCommand())
+        string schemaSql = EnableUnloggedTables
+            ? CreateTableSql.Replace("CREATE TABLE IF NOT EXISTS", "CREATE UNLOGGED TABLE IF NOT EXISTS")
+            : CreateTableSql;
+
+        // Execute the schema DDL one statement at a time with an extended timeout. A single
+        // bundled command runs in one transaction with the default 30s timeout, so a slow
+        // CREATE INDEX on an already-large table times out, rolls back every statement, and
+        // retries each maintenance cycle — locking the tables and starving OTLP ingest. Run
+        // per-statement so each index completes once and commits (then IF NOT EXISTS skips it);
+        // a slow or failing statement is logged and the remaining ones still run.
+        foreach (string statement in SplitSqlStatements(schemaSql))
         {
-            cmd.CommandText = EnableUnloggedTables
-                ? CreateTableSql.Replace("CREATE TABLE IF NOT EXISTS", "CREATE UNLOGGED TABLE IF NOT EXISTS")
-                : CreateTableSql;
-            await cmd.ExecuteNonQueryAsync(ct);
+            try
+            {
+                await using NpgsqlCommand cmd = conn.CreateCommand();
+                cmd.CommandText = statement;
+                cmd.CommandTimeout = _schemaCommandTimeoutSeconds;
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;   // host shutting down — stop, don't swallow
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Telemetry schema statement failed (will retry next cycle): {Statement}",
+                    statement.Length > 120 ? statement[..120] + "…" : statement);
+            }
         }
 
         DateTime now = DateTime.UtcNow;
@@ -162,10 +211,13 @@ public sealed class TelemetryStore : IAsyncDisposable
                 ext.CommandText = "CREATE EXTENSION IF NOT EXISTS pg_trgm;";
                 await ext.ExecuteNonQueryAsync(ct);
             }
+            // These GIN builds can also exceed the default 30s on a large table — give them the
+            // same extended timeout as the rest of the schema DDL.
             await using (NpgsqlCommand idx = conn.CreateCommand())
             {
                 idx.CommandText =
                     "CREATE INDEX IF NOT EXISTS logs_body_trgm ON logs USING gin (body gin_trgm_ops);";
+                idx.CommandTimeout = _schemaCommandTimeoutSeconds;
                 await idx.ExecuteNonQueryAsync(ct);
             }
             // GIN on the JSONB attributes accelerates the structured-field filter (@> containment
@@ -173,11 +225,13 @@ public sealed class TelemetryStore : IAsyncDisposable
             await using (NpgsqlCommand la = conn.CreateCommand())
             {
                 la.CommandText = "CREATE INDEX IF NOT EXISTS logs_attrs_gin ON logs USING gin (attributes);";
+                la.CommandTimeout = _schemaCommandTimeoutSeconds;
                 await la.ExecuteNonQueryAsync(ct);
             }
             await using (NpgsqlCommand sa = conn.CreateCommand())
             {
                 sa.CommandText = "CREATE INDEX IF NOT EXISTS spans_attrs_gin ON spans USING gin (attributes);";
+                sa.CommandTimeout = _schemaCommandTimeoutSeconds;
                 await sa.ExecuteNonQueryAsync(ct);
             }
             _logger.LogInformation("Telemetry search indexes (pg_trgm body + JSONB attributes) ensured.");
@@ -217,6 +271,13 @@ public sealed class TelemetryStore : IAsyncDisposable
 
         CREATE INDEX IF NOT EXISTS logs_scope_ts
             ON logs (tenant_id, cluster_id, ts DESC);
+
+        -- Correlate a trace's spans to its logs (QueryByTraceAsync). Most log rows carry no
+        -- trace_id, so a PARTIAL index over the non-null minority stays tiny and makes the
+        -- lookup an exact index probe instead of scanning the cluster's logs across every
+        -- partition in the retention window.
+        CREATE INDEX IF NOT EXISTS logs_scope_trace
+            ON logs (tenant_id, cluster_id, trace_id) WHERE trace_id IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS spans (
             ts             timestamptz NOT NULL,
