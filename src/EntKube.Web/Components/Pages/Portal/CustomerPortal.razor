@@ -574,6 +574,10 @@ else
     private Customer? selectedCustomer;
     private KeycloakRealm? selectedIdentityRealm;
 
+    // Deep-link target from the top-nav Portal mega menu (?customer={id}).
+    [SupplyParameterFromQuery(Name = "customer")] private Guid? CustomerParam { get; set; }
+    private Guid? appliedCustomerParam;
+
     private sealed record SecretsNav(Data.App App, string Scope);
     private SecretsNav? selectedSecrets;
 
@@ -677,6 +681,23 @@ else
         // Load only the customers this user has access to.
         customers = await CustomerAccessService.GetAccessibleCustomersAsync(currentUserId);
         loading = false;
+    }
+
+    // Honour ?customer={id} deep-links (from the top-nav Portal mega menu),
+    // including subsequent navigations while already on the portal page.
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loading || customers is null || CustomerParam == appliedCustomerParam)
+            return;
+
+        appliedCustomerParam = CustomerParam;
+
+        if (CustomerParam is Guid id && id != selectedCustomer?.Id)
+        {
+            Customer? match = customers.FirstOrDefault(c => c.Id == id);
+            if (match is not null)
+                await SelectCustomer(match);
+        }
     }
 
     private async Task SelectCustomer(Customer customer)

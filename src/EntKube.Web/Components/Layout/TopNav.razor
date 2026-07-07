@@ -1,0 +1,204 @@
+@implements IDisposable
+
+@inject NavigationManager NavigationManager
+@inject AuthenticationStateProvider AuthStateProvider
+@inject EntKube.Web.Services.UserAccessService UserAccessService
+@inject EntKube.Web.Services.CustomerAccessService CustomerAccessService
+@inject IConfiguration Configuration
+
+@* ═══════════════════════════════════════════════════════════════════
+   TopNav — global navigation bar (replaces the old left sidebar).
+   Tenants / Portal open wide "mega" panels that deep-link straight into
+   a tenant section (?section=…) or a portal customer (?customer=…) to
+   cut clicks. Dropdowns are Bootstrap's JS behaviour (data-bs-toggle),
+   so they work on every page regardless of Blazor render mode.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<nav class="entit-topnav navbar navbar-expand-lg navbar-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="">
+            <img src="brand/entit-kube-reversed.svg" alt="Entit Kube" height="24" />
+        </a>
+
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse"
+                data-bs-target="#topnav-collapse" aria-controls="topnav-collapse"
+                aria-expanded="false" aria-label="Toggle navigation">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+
+        <div class="collapse navbar-collapse" id="topnav-collapse">
+            <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                <li class="nav-item">
+                    <a class="nav-link @(IsActive("", exact: true))" href="">
+                        <i class="bi bi-house-door me-1"></i>Home
+                    </a>
+                </li>
+
+                @if (tenants.Count > 0)
+                {
+                    <li class="nav-item dropdown position-static">
+                        <a class="nav-link dropdown-toggle @(IsActive("tenants"))" href="#" role="button"
+                           data-bs-toggle="dropdown" aria-expanded="false">Tenants</a>
+                        <div class="dropdown-menu entit-mega">
+                            <div class="mega-grid">
+                                @foreach (Data.Tenant t in tenants)
+                                {
+                                    <div class="mega-col">
+                                        <a class="mega-title" href="@($"tenants/{t.Slug}")">
+                                            <i class="bi bi-building"></i> @t.Name
+                                        </a>
+                                        <a class="mega-link" href="@($"tenants/{t.Slug}?section=customers")">
+                                            <i class="bi bi-people"></i> Customers
+                                        </a>
+                                        <a class="mega-link" href="@($"tenants/{t.Slug}?section=overview")">
+                                            <i class="bi bi-speedometer2"></i> Monitoring
+                                        </a>
+                                        <a class="mega-link" href="@($"tenants/{t.Slug}?section=vault")">
+                                            <i class="bi bi-safe2"></i> Vault
+                                        </a>
+                                        <a class="mega-link" href="@($"tenants/{t.Slug}?section=blueprints")">
+                                            <i class="bi bi-diagram-2-fill"></i> Blueprints
+                                        </a>
+                                    </div>
+                                }
+                            </div>
+                            <div class="mega-foot">
+                                @if (isAdmin)
+                                {
+                                    <a href="tenants"><i class="bi bi-plus-lg"></i> New tenant</a>
+                                }
+                                <a class="ms-auto" href="tenants">All tenants <i class="bi bi-arrow-right"></i></a>
+                            </div>
+                        </div>
+                    </li>
+                }
+
+                <li class="nav-item dropdown position-static">
+                    <a class="nav-link dropdown-toggle @(IsActive("portal"))" href="#" role="button"
+                       data-bs-toggle="dropdown" aria-expanded="false">Portal</a>
+                    <div class="dropdown-menu entit-mega">
+                        @if (customers.Count == 0)
+                        {
+                            <div class="mega-empty">
+                                No customers yet — <a href="portal">open the portal</a>.
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="mega-grid">
+                                @foreach (IGrouping<Guid, Data.Customer> group in customers
+                                    .GroupBy(c => c.TenantId)
+                                    .OrderBy(g => g.First().Tenant?.Name))
+                                {
+                                    <div class="mega-col">
+                                        <div class="mega-group">@(group.First().Tenant?.Name ?? "Tenant")</div>
+                                        @foreach (Data.Customer c in group.OrderBy(c => c.Name))
+                                        {
+                                            <a class="mega-link" href="@($"portal?customer={c.Id}")">
+                                                <i class="bi bi-box-seam"></i> @c.Name
+                                            </a>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                            <div class="mega-foot">
+                                <a class="ms-auto" href="portal">Open portal <i class="bi bi-arrow-right"></i></a>
+                            </div>
+                        }
+                    </div>
+                </li>
+
+                <AuthorizeView Roles="Admin">
+                    <Authorized>
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle @(IsActive("admin"))" href="#" role="button"
+                               data-bs-toggle="dropdown" aria-expanded="false">Admin</a>
+                            <ul class="dropdown-menu">
+                                <li><a class="dropdown-item" href="admin/users"><i class="bi bi-people me-2"></i>Users</a></li>
+                                <li><a class="dropdown-item" href="admin/roles"><i class="bi bi-shield-lock me-2"></i>Roles</a></li>
+                                <li><a class="dropdown-item" href="admin/backup"><i class="bi bi-arrow-repeat me-2"></i>Backup</a></li>
+                                <li><a class="dropdown-item" href="admin/notifications"><i class="bi bi-bell me-2"></i>Notifications</a></li>
+                            </ul>
+                        </li>
+                    </Authorized>
+                </AuthorizeView>
+            </ul>
+
+            <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                <AuthorizeView>
+                    <Authorized>
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" role="button"
+                               data-bs-toggle="dropdown" aria-expanded="false">
+                                <i class="bi bi-person-circle me-1"></i>@context.User.Identity?.Name
+                            </a>
+                            <ul class="dropdown-menu dropdown-menu-end">
+                                <li><a class="dropdown-item" href="Account/Manage"><i class="bi bi-gear me-2"></i>Account</a></li>
+                                <li><hr class="dropdown-divider" /></li>
+                                <li>
+                                    <form action="Account/Logout" method="post">
+                                        <AntiforgeryToken />
+                                        <input type="hidden" name="ReturnUrl" value="@currentUrl" />
+                                        <button type="submit" class="dropdown-item"><i class="bi bi-box-arrow-right me-2"></i>Logout</button>
+                                    </form>
+                                </li>
+                            </ul>
+                        </li>
+                    </Authorized>
+                    <NotAuthorized>
+                        @if (allowRegistration)
+                        {
+                            <li class="nav-item"><a class="nav-link" href="Account/Register">Register</a></li>
+                        }
+                        <li class="nav-item"><a class="nav-link" href="Account/Login">Login</a></li>
+                    </NotAuthorized>
+                </AuthorizeView>
+            </ul>
+        </div>
+    </div>
+</nav>
+
+@code {
+    private string? currentUrl;
+    private bool isAdmin;
+    private bool allowRegistration = true;
+    private List<Data.Tenant> tenants = [];
+    private List<Data.Customer> customers = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        currentUrl = NavigationManager.ToBaseRelativePath(NavigationManager.Uri);
+        NavigationManager.LocationChanged += OnLocationChanged;
+
+        allowRegistration = Configuration.GetValue<bool>("Auth:AllowRegistration", true);
+
+        AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        System.Security.Claims.ClaimsPrincipal user = authState.User;
+        if (user.Identity?.IsAuthenticated != true)
+            return;
+
+        string? userId = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        if (userId is null)
+            return;
+
+        isAdmin = await UserAccessService.IsGlobalAdminAsync(userId);
+        tenants = await UserAccessService.GetAccessibleTenantsAsync(userId);
+        customers = await CustomerAccessService.GetAccessibleCustomersAsync(userId);
+    }
+
+    // "active" highlight — a link is active when the current path is (or starts with) its prefix.
+    private string IsActive(string prefix, bool exact = false)
+    {
+        string path = (currentUrl ?? string.Empty).Split('?')[0].Trim('/');
+        bool match = exact ? path.Length == 0 : path == prefix || path.StartsWith(prefix + "/");
+        return match ? "active" : string.Empty;
+    }
+
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs e)
+    {
+        currentUrl = NavigationManager.ToBaseRelativePath(e.Location);
+        StateHasChanged();
+    }
+
+    public void Dispose() => NavigationManager.LocationChanged -= OnLocationChanged;
+}

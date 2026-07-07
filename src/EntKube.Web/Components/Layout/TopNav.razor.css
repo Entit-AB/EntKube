@@ -1,0 +1,208 @@
+/* Global top navigation — Entit brand (navy bar, accent-blue actions). */
+.entit-topnav {
+    position: sticky;
+    top: 0;
+    z-index: 1030;
+    background-image: linear-gradient(90deg, #2C3A5A 0%, #232E47 100%);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    padding-top: 0.4rem;
+    padding-bottom: 0.4rem;
+    min-height: 3.5rem;
+}
+
+/* Full-width mega panels anchor to the bar, not the individual item. */
+.entit-topnav .container-fluid {
+    position: relative;
+}
+
+.navbar-brand {
+    display: inline-flex;
+    align-items: center;
+    padding-top: 0;
+    padding-bottom: 0;
+    margin-right: 1.25rem;
+}
+
+.navbar-brand img {
+    display: block;
+}
+
+.navbar-nav .nav-link {
+    color: rgba(255, 255, 255, 0.82);
+    font-size: 0.95rem;
+    padding-left: 0.85rem;
+    padding-right: 0.85rem;
+    border-radius: 6px;
+    transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.navbar-nav .nav-link:hover,
+.navbar-nav .nav-link:focus {
+    color: #fff;
+    background-color: rgba(143, 166, 255, 0.14);
+}
+
+.navbar-nav .nav-link.active,
+.navbar-nav .show > .nav-link {
+    color: #fff;
+    background-color: rgba(143, 166, 255, 0.20);
+}
+
+/* ── Mega menu panel ─────────────────────────────────────────────── */
+.entit-mega {
+    left: 0;
+    right: 0;
+    width: 100%;
+    margin-top: 0.4rem;
+    padding: 20px 24px 16px;
+    border: 1px solid var(--entit-border, #E6E9F1);
+    border-radius: 12px;
+    box-shadow: 0 16px 40px rgba(35, 46, 71, 0.18);
+    color: var(--entit-text, #232E47);
+}
+
+.mega-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px 28px;
+}
+
+.mega-col {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.mega-title {
+    font-family: var(--entit-heading, "Space Grotesk"), system-ui, sans-serif;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    color: var(--entit-text, #232E47);
+    text-decoration: none;
+    padding: 4px 8px;
+    border-radius: 6px;
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mega-title:hover {
+    color: var(--entit-accent, #3A63F0);
+    background-color: var(--entit-muted, #F4F6FA);
+}
+
+.mega-title i {
+    color: var(--entit-accent, #3A63F0);
+    margin-right: 4px;
+}
+
+.mega-group {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--entit-text-muted, #5B6478);
+    padding: 4px 8px 2px;
+}
+
+.mega-link {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    color: var(--entit-text-muted, #5B6478);
+    text-decoration: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mega-link i {
+    color: var(--entit-accent-light, #8FA6FF);
+    flex: none;
+}
+
+.mega-link:hover {
+    color: var(--entit-accent, #3A63F0);
+    background-color: var(--entit-muted, #F4F6FA);
+}
+
+.mega-link:hover i {
+    color: var(--entit-accent, #3A63F0);
+}
+
+.mega-foot {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--entit-border, #E6E9F1);
+}
+
+.mega-foot a {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--entit-accent, #3A63F0);
+    text-decoration: none;
+}
+
+.mega-foot a:hover {
+    color: var(--entit-accent-hover, #2E4EBE);
+}
+
+.mega-empty {
+    padding: 6px 4px;
+    color: var(--entit-text-muted, #5B6478);
+    font-size: 0.9rem;
+}
+
+/* ── Plain dropdowns (Admin, user) ───────────────────────────────── */
+.dropdown-menu {
+    border-color: var(--entit-border, #E6E9F1);
+    box-shadow: 0 10px 30px rgba(35, 46, 71, 0.14);
+}
+
+.dropdown-item {
+    display: flex;
+    align-items: center;
+}
+
+.dropdown-item:active {
+    background-color: var(--entit-accent, #3A63F0);
+}
+
+.dropdown-item:hover,
+.dropdown-item:focus {
+    background-color: var(--entit-muted, #F4F6FA);
+    color: var(--entit-accent, #3A63F0);
+}
+
+.dropdown-menu form {
+    margin: 0;
+}
+
+/* ── Collapsed (mobile) ──────────────────────────────────────────── */
+@media (max-width: 991.98px) {
+    .entit-mega {
+        position: static;
+        width: auto;
+        box-shadow: none;
+        border: none;
+        padding: 8px 8px 4px;
+        margin-top: 0.25rem;
+    }
+
+    .mega-grid {
+        grid-template-columns: 1fr;
+        gap: 6px 0;
+    }
+
+    .navbar-collapse {
+        max-height: 80vh;
+        overflow-y: auto;
+    }
+}
