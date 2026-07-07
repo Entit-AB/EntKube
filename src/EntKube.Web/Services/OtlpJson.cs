@@ -10,6 +10,14 @@ namespace EntKube.Web.Services;
 /// </summary>
 public static class OtlpJson
 {
+    /// <summary>
+    /// Removes NUL (U+0000) from a string. Postgres <c>text</c> can't store a 0x00 byte and <c>jsonb</c>
+    /// rejects a <c></c> escape, so any NUL in eBPF-derived data (OBI reads raw kernel buffers where
+    /// a string field may carry an embedded/uninitialised NUL) would fail the whole COPY batch. Stripping
+    /// it is lossless for our purposes — NUL is never meaningful in a span name, label, or log line.
+    /// </summary>
+    public static string StripNul(string s) => s.IndexOf('\0') < 0 ? s : s.Replace("\0", "");
+
     /// <summary>Reads an OTLP <c>KeyValue[]</c> attributes array into a flat key→string map.</summary>
     public static void ReadAttributes(JsonElement attrs, Dictionary<string, string> into)
     {
@@ -19,8 +27,9 @@ public static class OtlpJson
             if (!kv.TryGetProperty("key", out JsonElement keyEl)) continue;
             string? key = keyEl.GetString();
             if (string.IsNullOrEmpty(key)) continue;
+            // Strip NUL from both key and value so the serialized attributes JSON never carries .
             if (kv.TryGetProperty("value", out JsonElement val))
-                into[key] = AnyValueToString(val);
+                into[StripNul(key)] = StripNul(AnyValueToString(val));
         }
     }
 

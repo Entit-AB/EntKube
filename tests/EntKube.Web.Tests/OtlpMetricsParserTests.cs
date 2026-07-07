@@ -5,9 +5,10 @@ using FluentAssertions;
 namespace EntKube.Web.Tests;
 
 /// <summary>
-/// Tests for <see cref="OtlpMetricsParser"/>: gauge/sum passthrough, sum kind classification, and the
+/// Tests for <see cref="OtlpMetricsParser"/>: gauge/sum passthrough, sum kind classification, the
 /// histogram → <c>name_count</c>/<c>name_sum</c> expansion (the RED metrics OBI/apps emit as histograms,
-/// which were previously dropped — leaving only <c>target_info</c> in the metrics view).
+/// which were previously dropped — leaving only <c>target_info</c> in the metrics view), and NUL
+/// scrubbing of attribute values (eBPF data can carry a NUL that Postgres jsonb rejects).
 /// </summary>
 public class OtlpMetricsParserTests
 {
@@ -103,6 +104,27 @@ public class OtlpMetricsParserTests
         List<MetricIngestRecord> records = Parse(delta);
         records.Should().OnlyContain(r => r.Kind == MetricKind.DeltaSum);
         records.Select(r => r.Name).Should().BeEquivalentTo("rpc.server.duration_count", "rpc.server.duration_sum");
+    }
+
+    [Fact]
+    public void Strips_nul_from_attribute_values_so_jsonb_accepts_them()
+    {
+        // eBPF/OBI can emit a NUL in an attribute value. The JSON carries it as the escape 
+        // (a real 0x00 after decode); left in, the serialized labels would make Postgres jsonb reject
+        // the COPY batch (SqlState 22P05). "\\u0000" below is the literal escape in the JSON text.
+        string withNul =
+            "{\"resourceMetrics\":[{" +
+            "\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"svc\"}}]}," +
+            "\"scopeMetrics\":[{\"metrics\":[{\"name\":\"op.count\",\"sum\":{\"aggregationTemporality\":2," +
+            "\"isMonotonic\":true,\"dataPoints\":[{\"asInt\":\"1\",\"timeUnixNano\":\"1751797200000000000\"," +
+            "\"attributes\":[{\"key\":\"messaging.destination.name\",\"value\":{\"stringValue\":\"q\\u0000junk\"}}]}]}}]}]}]}";
+
+        List<MetricIngestRecord> records = Parse(withNul);
+        records.Should().ContainSingle();
+        records[0].LabelsJson.Should().NotBeNull();
+        records[0].LabelsJson!.Should().NotContain("\\u0000");   // no jsonb-breaking escape
+        records[0].LabelsJson!.Should().NotContain("\0");        // no raw NUL byte
+        records[0].LabelsJson!.Should().Contain("qjunk");        // NUL removed, surrounding text preserved
     }
 
     [Fact]
