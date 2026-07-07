@@ -1,0 +1,181 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject PrometheusService Prometheus
+
+@* Unified infrastructure metrics — curated PromQL run LIVE against the cluster's existing
+   kube-prometheus-stack Prometheus (PrometheusService.GetMetricRangeAsync) and rendered natively.
+   No Grafana, no ingestion into the telemetry store: node/pod/container metrics stay in Prometheus
+   and are queried on demand. Node/kube-state panels are empty if those exporters aren't scraped. *@
+
+<div class="d-flex align-items-center gap-3 mb-3 flex-wrap">
+    <div class="d-flex align-items-center gap-2">
+        <label class="form-label small text-muted mb-0 text-nowrap">Time range</label>
+        <select class="form-select form-select-sm" style="min-width:150px" @bind="rangeMinutes" @bind:after="LoadAsync">
+            <option value="15">Last 15 minutes</option>
+            <option value="60">Last 1 hour</option>
+            <option value="180">Last 3 hours</option>
+            <option value="720">Last 12 hours</option>
+            <option value="1440">Last 24 hours</option>
+        </select>
+    </div>
+    <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync" disabled="@isLoading">
+        @if (isLoading) { <span class="spinner-border spinner-border-sm me-1"></span> }
+        <span class="bi bi-arrow-clockwise me-1"></span>Refresh
+    </button>
+    @if (queriedAt != default)
+    {
+        <span class="text-muted small ms-auto">Queried @queriedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+    }
+</div>
+
+@if (resolveError is not null)
+{
+    <div class="alert alert-warning small py-2">
+        <span class="bi bi-exclamation-triangle me-1"></span>
+        Couldn't reach Prometheus for this cluster: @resolveError
+        <div class="mt-1">Infrastructure metrics are read live from the cluster's <strong>kube-prometheus-stack</strong>
+        component — install it from the components catalog if it isn't present (no Grafana required).</div>
+    </div>
+}
+else
+{
+    @foreach (PanelSection sec in Sections)
+    {
+        <h6 class="text-muted small mt-3 mb-2"><span class="bi @sec.Icon me-1"></span>@sec.Title</h6>
+        <div class="row g-3 mb-2">
+            @foreach (Panel p in sec.Panels)
+            {
+                <div class="@(p.Multi ? "col-12 col-xl-6" : "col-6 col-md-4 col-xl-3")">
+                    <div class="card h-100">
+                        <div class="card-body p-2">
+                            <div class="small text-muted mb-1">@p.Title @(p.Unit is null ? "" : $"({p.Unit})")</div>
+                            @if (isLoading && !results.ContainsKey(p.Key))
+                            {
+                                <div class="text-center py-4"><span class="spinner-border spinner-border-sm text-secondary"></span></div>
+                            }
+                            else if (p.Multi)
+                            {
+                                <MultiSeriesChart Series="@GroupsFor(p.Key)" HeightPx="200" />
+                            }
+                            else
+                            {
+                                <MetricChart Title="@null" DataPoints="@PointsFor(p.Key)" Color="@p.Color" Unit="@p.Unit" MaxValue="@p.Max" HeightPx="110" />
+                            }
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public required Guid ClusterId { get; set; }
+
+    private int rangeMinutes = 60;
+    private bool isLoading;
+    private string? resolveError;
+    private DateTime queriedAt;
+    private Guid _loadedCluster;
+
+    // key -> raw range-query series (one entry per panel).
+    private readonly Dictionary<string, List<PrometheusTimeSeries>> results = new(StringComparer.Ordinal);
+
+    private sealed record Panel(string Key, string Title, string? Unit, bool Multi,
+        string Query = "", string? SeriesLabel = null, string Color = "#0d6efd", double? Max = null);
+    private sealed record PanelSection(string Title, string Icon, Panel[] Panels);
+
+    // Curated PromQL. `node_*` needs node-exporter, `kube_*` needs kube-state-metrics, `container_*` is
+    // cAdvisor/kubelet (always present). Panels whose source isn't scraped simply render empty.
+    private static readonly PanelSection[] Sections =
+    [
+        new("Nodes", "bi-hdd-rack",
+        [
+            new("node-cpu", "CPU utilization", "%", false,
+                Query: "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)", Color: "#0d6efd", Max: 100),
+            new("node-mem", "Memory utilization", "%", false,
+                Query: "100 * (1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes))", Color: "#6f42c1", Max: 100),
+            new("node-disk", "Disk utilization (/)", "%", false,
+                Query: "100 - (avg(node_filesystem_avail_bytes{mountpoint=\"/\",fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{mountpoint=\"/\"}) * 100)", Color: "#d63384", Max: 100),
+            new("node-cpu-by", "CPU by node", "cores", true, SeriesLabel: "instance",
+                Query: "sum by (instance) (rate(node_cpu_seconds_total{mode!=\"idle\"}[5m]))"),
+        ]),
+        new("Workloads", "bi-boxes",
+        [
+            new("ns-cpu", "CPU by namespace", "cores", true, SeriesLabel: "namespace",
+                Query: "sum by (namespace) (rate(container_cpu_usage_seconds_total{container!=\"\",namespace!=\"\"}[5m]))"),
+            new("ns-mem", "Memory by namespace", "MiB", true, SeriesLabel: "namespace",
+                Query: "sum by (namespace) (container_memory_working_set_bytes{container!=\"\",namespace!=\"\"}) / 1048576"),
+            new("pods-running", "Running pods", null, false,
+                Query: "sum(kube_pod_status_phase{phase=\"Running\"})", Color: "#198754"),
+            new("pods-notready", "Pods not running", null, false,
+                Query: "sum(kube_pod_status_phase{phase!=\"Running\"})", Color: "#fd7e14"),
+            new("restarts", "Container restarts (1h)", null, false,
+                Query: "sum(increase(kube_pod_container_status_restarts_total[1h]))", Color: "#dc3545"),
+        ]),
+        new("Network", "bi-diagram-2",
+        [
+            new("net-rx", "Receive by namespace", "KiB/s", true, SeriesLabel: "namespace",
+                Query: "sum by (namespace) (rate(container_network_receive_bytes_total{namespace!=\"\"}[5m])) / 1024"),
+            new("net-tx", "Transmit by namespace", "KiB/s", true, SeriesLabel: "namespace",
+                Query: "sum by (namespace) (rate(container_network_transmit_bytes_total{namespace!=\"\"}[5m])) / 1024"),
+        ]),
+    ];
+
+    private static IEnumerable<Panel> AllPanels => Sections.SelectMany(s => s.Panels);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (ClusterId == _loadedCluster) return;
+        _loadedCluster = ClusterId;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        isLoading = true;
+        resolveError = null;
+        StateHasChanged();
+
+        TimeSpan window = TimeSpan.FromMinutes(rangeMinutes);
+
+        // Fan out all panel queries concurrently — one Prometheus range query each.
+        Dictionary<string, Task<KubernetesOperationResult<List<PrometheusTimeSeries>>>> tasks =
+            AllPanels.ToDictionary(p => p.Key, p => Prometheus.GetMetricRangeAsync(ClusterId, p.Query, window));
+        await Task.WhenAll(tasks.Values);
+
+        results.Clear();
+        foreach ((string key, Task<KubernetesOperationResult<List<PrometheusTimeSeries>>> t) in tasks)
+        {
+            KubernetesOperationResult<List<PrometheusTimeSeries>> r = t.Result;
+            if (r.IsSuccess && r.Data is not null)
+                results[key] = r.Data;
+            else if (resolveError is null && !string.IsNullOrEmpty(r.Error))
+                resolveError = r.Error;   // a resolve/connection failure hits every panel the same way
+        }
+
+        // Only surface the banner when nothing came back at all (a single empty panel isn't an error).
+        if (results.Count > 0) resolveError = null;
+
+        queriedAt = DateTime.UtcNow;
+        isLoading = false;
+    }
+
+    // Single-series panel: the query aggregates to one series (take it), else empty.
+    private List<TimeSeriesDataPoint> PointsFor(string key) =>
+        results.TryGetValue(key, out List<PrometheusTimeSeries>? s) && s.Count > 0 ? s[0].DataPoints : [];
+
+    // Multi-series panel: one line per distinct label value, capped so the legend stays legible.
+    private List<MetricSeriesGroup> GroupsFor(string key)
+    {
+        if (!results.TryGetValue(key, out List<PrometheusTimeSeries>? series)) return [];
+        string label = AllPanels.First(p => p.Key == key).SeriesLabel ?? "";
+        return series
+            .OrderByDescending(ts => ts.DataPoints.Count == 0 ? 0 : ts.DataPoints[^1].Value)
+            .Take(12)
+            .Select(ts => new MetricSeriesGroup(
+                ts.Labels.TryGetValue(label, out string? v) && !string.IsNullOrEmpty(v) ? v : "(none)",
+                ts.DataPoints))
+            .ToList();
+    }
+}

@@ -6,8 +6,10 @@ namespace EntKube.Web.Services;
 /// <summary>
 /// Parses an OTLP/JSON <c>ExportMetricsServiceRequest</c> (collector <c>otlphttp</c> exporter,
 /// <c>encoding: json</c>, POSTed to <c>/v1/metrics</c>) into flat numeric <see cref="MetricIngestRecord"/>
-/// data points. Handles gauge and sum metrics (one row per data point). Histogram / summary /
-/// exponential-histogram are skipped in v1 (their bucket structure needs a richer model).
+/// data points. Gauge and sum → one row per point. Histogram and exponential-histogram → two rows per
+/// point, <c>&lt;name&gt;_count</c> and <c>&lt;name&gt;_sum</c> (Prometheus-style), so request rate and
+/// average (rate(_sum)/rate(_count)) chart without storing bucket structure — the RED p95/p99 come from
+/// the span-derived Traces view. Summary is still skipped (rare; deprecated in OTel).
 /// </summary>
 public static class OtlpMetricsParser
 {
@@ -45,9 +47,11 @@ public static class OtlpMetricsParser
                     string name = metric.TryGetProperty("name", out JsonElement nm) ? OtlpJson.Str(nm) ?? "" : "";
                     if (string.IsNullOrEmpty(name)) continue;
 
-                    // gauge / sum carry a dataPoints array; other types are skipped in v1.
+                    // gauge / sum carry numeric dataPoints; histogram / exponentialHistogram carry
+                    // count+sum dataPoints (expanded to name_count / name_sum). Summary is skipped.
                     JsonElement dataPoints;
                     MetricKind kind;
+                    bool isHistogram = false;
                     if (metric.TryGetProperty("gauge", out JsonElement g) && g.TryGetProperty("dataPoints", out JsonElement gdp))
                     {
                         dataPoints = gdp;
@@ -58,6 +62,18 @@ public static class OtlpMetricsParser
                         dataPoints = sdp;
                         kind = ClassifySum(s);
                     }
+                    else if (metric.TryGetProperty("histogram", out JsonElement h) && h.TryGetProperty("dataPoints", out JsonElement hdp))
+                    {
+                        dataPoints = hdp;
+                        kind = ClassifyHistogram(h);
+                        isHistogram = true;
+                    }
+                    else if (metric.TryGetProperty("exponentialHistogram", out JsonElement eh) && eh.TryGetProperty("dataPoints", out JsonElement ehdp))
+                    {
+                        dataPoints = ehdp;
+                        kind = ClassifyHistogram(eh);
+                        isHistogram = true;
+                    }
                     else
                         continue;
 
@@ -65,9 +81,6 @@ public static class OtlpMetricsParser
 
                     foreach (JsonElement dp in dataPoints.EnumerateArray())
                     {
-                        double? value = ReadValue(dp);
-                        if (value is null) continue;   // no numeric value (or NoRecordedValue flag)
-
                         // Skip points without a real observation time — UnixNanoToUtc(0) would stamp them at
                         // ingest wall-clock, collapsing late/backfilled data onto "now" as a false right-edge spike.
                         long tsNano = OtlpJson.ReadUnixNano(dp, "timeUnixNano");
@@ -78,7 +91,23 @@ public static class OtlpMetricsParser
                         if (dp.TryGetProperty("attributes", out JsonElement dpa)) OtlpJson.ReadAttributes(dpa, dpAttrs);
                         string? labels = dpAttrs.Count > 0 ? JsonSerializer.Serialize(dpAttrs) : null;
 
-                        records.Add(new MetricIngestRecord(ts, name, service, ns, pod, value.Value, kind, labels));
+                        if (isHistogram)
+                        {
+                            // Expand to two Prometheus-style series. count is always present; sum is optional.
+                            // Both are monotonic under the histogram's temporality, so they share its kind.
+                            double? count = ReadUnsigned(dp, "count");
+                            if (count is not null)
+                                records.Add(new MetricIngestRecord(ts, name + "_count", service, ns, pod, count.Value, kind, labels));
+                            double? sum = ReadNumber(dp, "sum");
+                            if (sum is not null)
+                                records.Add(new MetricIngestRecord(ts, name + "_sum", service, ns, pod, sum.Value, kind, labels));
+                        }
+                        else
+                        {
+                            double? value = ReadValue(dp);
+                            if (value is null) continue;   // no numeric value (or NoRecordedValue flag)
+                            records.Add(new MetricIngestRecord(ts, name, service, ns, pod, value.Value, kind, labels));
+                        }
                     }
                 }
             }
@@ -94,6 +123,28 @@ public static class OtlpMetricsParser
     {
         if (ReadTemporality(sum) == DeltaTemporality) return MetricKind.DeltaSum;
         return ReadBool(sum, "isMonotonic") ? MetricKind.Counter : MetricKind.Gauge;
+    }
+
+    // Histogram count/sum are monotonic: a delta histogram carries per-interval increments (DeltaSum);
+    // a cumulative one accumulates and must be rate()'d (Counter). Same temporality read as sums.
+    private static MetricKind ClassifyHistogram(JsonElement hist)
+        => ReadTemporality(hist) == DeltaTemporality ? MetricKind.DeltaSum : MetricKind.Counter;
+
+    // HistogramDataPoint.count is a fixed64 → JSON string (usually) or number. sum is an optional double.
+    private static double? ReadUnsigned(JsonElement dp, string prop)
+    {
+        if (!dp.TryGetProperty(prop, out JsonElement v)) return null;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out double n)) return n;
+        if (v.ValueKind == JsonValueKind.String && double.TryParse(v.GetString(), CultureInfo.InvariantCulture, out double s)) return s;
+        return null;
+    }
+
+    private static double? ReadNumber(JsonElement dp, string prop)
+    {
+        if (!dp.TryGetProperty(prop, out JsonElement v)) return null;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out double n)) return n;
+        if (v.ValueKind == JsonValueKind.String && double.TryParse(v.GetString(), CultureInfo.InvariantCulture, out double s)) return s;
+        return null;
     }
 
     private const int DeltaTemporality = 1;   // AGGREGATION_TEMPORALITY_DELTA

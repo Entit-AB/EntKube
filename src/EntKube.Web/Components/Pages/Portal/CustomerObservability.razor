@@ -37,10 +37,23 @@ else
         {
             <div class="col-md-4">
                 <label class="form-label small text-muted mb-1">Cluster</label>
-                <select class="form-select form-select-sm" @bind="selectedClusterId" @bind:after="StateHasChanged">
+                <select class="form-select form-select-sm" @bind="selectedClusterId" @bind:after="OnClusterChanged">
                     @foreach (ClusterRow c in ClustersForApp)
                     {
                         <option value="@c.Id">@c.Name</option>
+                    }
+                </select>
+            </div>
+        }
+        @if (selectedAppId is not null && selectedClusterId is not null && DeploymentsForAppCluster.Count > 1)
+        {
+            <div class="col-md-4">
+                <label class="form-label small text-muted mb-1">Deployment</label>
+                <select class="form-select form-select-sm" @bind="selectedDeploymentIdStr" @bind:after="OnDeploymentChanged">
+                    <option value="">All deployments</option>
+                    @foreach (DeploymentRow d in DeploymentsForAppCluster)
+                    {
+                        <option value="@d.Id">@d.Name</option>
                     }
                 </select>
             </div>
@@ -115,13 +128,24 @@ else
                 This app's deployment has no known namespace yet — sync it to enable trace and metric scoping.
             </div>
         }
-        else if (tab == "traces")
+        else
         {
-            <TraceExplorer @key="@ScopeKey" ClusterId="selectedClusterId.Value" Namespaces="Namespaces" />
-        }
-        else if (tab == "metrics")
-        {
-            <MetricsExplorer @key="@ScopeKey" ClusterId="selectedClusterId.Value" Namespaces="Namespaces" />
+            @if (selectedDeploymentId is not null && podPattern is null)
+            {
+                <div class="alert alert-info small py-2">
+                    <span class="bi bi-info-circle me-1"></span>
+                    This deployment's workloads aren't known yet (sync it to enable pod-level scoping) —
+                    showing all deployments in the namespace.
+                </div>
+            }
+            @if (tab == "traces")
+            {
+                <TraceExplorer @key="@ScopeKey" ClusterId="selectedClusterId.Value" Namespaces="Namespaces" PodPattern="@podPattern" />
+            }
+            else if (tab == "metrics")
+            {
+                <MetricsExplorer @key="@ScopeKey" ClusterId="selectedClusterId.Value" Namespaces="Namespaces" PodPattern="@podPattern" />
+            }
         }
     }
 }
@@ -136,7 +160,15 @@ else
 
     private Guid? selectedAppId;
     private Guid? selectedClusterId;
+    private Guid? selectedDeploymentId;
+    private string? podPattern;          // "^(workload…)-" regex for the chosen deployment (null = all)
     private string tab = "traces";
+
+    private string selectedDeploymentIdStr
+    {
+        get => selectedDeploymentId?.ToString() ?? "";
+        set => selectedDeploymentId = Guid.TryParse(value, out Guid g) ? g : null;
+    }
 
     // RUM sub-state.
     private List<RumSite> sites = [];
@@ -164,6 +196,14 @@ else
                 .Select(id => new ClusterRow(id, clusterNames.TryGetValue(id, out string? n) ? n : id.ToString()))
                 .OrderBy(c => c.Name).ToList();
 
+    // Deployments of the selected app on the selected cluster (for the deployment picker).
+    private List<DeploymentRow> DeploymentsForAppCluster =>
+        (selectedAppId is null || selectedClusterId is null)
+            ? []
+            : deployments
+                .Where(d => d.AppId == selectedAppId && d.ClusterId == selectedClusterId)
+                .OrderBy(d => d.Name).ToList();
+
     // The isolation key: distinct namespaces of the selected app on the selected cluster. A namespace
     // belongs to one customer, so scoping span/metric queries to these is a hard tenant boundary.
     private IReadOnlyList<string> Namespaces =>
@@ -174,8 +214,9 @@ else
                             && !string.IsNullOrWhiteSpace(d.Namespace))
                 .Select(d => d.Namespace).Distinct().ToList();
 
-    // Recreate the hosted explorer whenever the scope changes so it reloads for the new app/cluster/namespaces.
-    private string ScopeKey => $"{selectedClusterId}:{string.Join(',', Namespaces)}";
+    // Recreate the hosted explorer whenever the scope changes so it reloads for the new
+    // app/cluster/namespaces/deployment.
+    private string ScopeKey => $"{selectedClusterId}:{string.Join(',', Namespaces)}:{selectedDeploymentId}";
 
     protected override async Task OnParametersSetAsync()
     {
@@ -189,10 +230,13 @@ else
 
         List<Guid> appIds = Customer.Apps.Select(a => a.Id).ToList();
 
+        selectedDeploymentId = null;
+        podPattern = null;
+
         using ApplicationDbContext db = DbFactory.CreateDbContext();
         deployments = await db.AppDeployments
             .Where(d => appIds.Contains(d.AppId))
-            .Select(d => new DeploymentRow(d.AppId, d.ClusterId, d.Namespace))
+            .Select(d => new DeploymentRow(d.Id, d.AppId, d.ClusterId, d.Namespace, d.Name))
             .ToListAsync();
 
         appsWithData = Customer.Apps
@@ -210,9 +254,26 @@ else
     private async Task OnAppChanged()
     {
         selectedClusterId = ClustersForApp.Count > 0 ? ClustersForApp[0].Id : null;
+        selectedDeploymentId = null;
+        podPattern = null;
         selectedSiteIdRaw = null;
         sites = [];
         if (tab == "rum") await LoadSitesAsync();
+    }
+
+    // Switching cluster invalidates the deployment selection (deployments are per-cluster).
+    private void OnClusterChanged()
+    {
+        selectedDeploymentId = null;
+        podPattern = null;
+    }
+
+    // Resolve the chosen deployment to a pod-name regex; null (unknown workloads) → namespace-only scope.
+    private async Task OnDeploymentChanged()
+    {
+        if (selectedDeploymentId is not Guid depId) { podPattern = null; return; }
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        podPattern = await DeploymentPodScope.PodRegexAsync(db, depId);
     }
 
     private async Task OnRumTab()
@@ -229,7 +290,7 @@ else
             selectedSiteIdRaw = sites[0].Id;
     }
 
-    private record DeploymentRow(Guid AppId, Guid ClusterId, string Namespace);
+    private record DeploymentRow(Guid Id, Guid AppId, Guid ClusterId, string Namespace, string Name);
     private record AppRow(Guid Id, string Name);
     private record ClusterRow(Guid Id, string Name);
 }

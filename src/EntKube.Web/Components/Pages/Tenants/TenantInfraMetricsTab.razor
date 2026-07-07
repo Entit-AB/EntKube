@@ -1,0 +1,62 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+@* Cluster picker — InfrastructureMetrics queries one cluster's Prometheus. *@
+<div class="d-flex align-items-center gap-3 mb-4">
+    <div class="d-flex align-items-center gap-2">
+        <label class="form-label small text-muted mb-0 text-nowrap">Cluster</label>
+        <select class="form-select form-select-sm" style="min-width:220px"
+                @bind="selectedClusterId" @bind:after="StateHasChanged">
+            <option value="">— select a cluster —</option>
+            @foreach (ClusterOption opt in clusterOptions)
+            {
+                <option value="@opt.Id">@opt.Name</option>
+            }
+        </select>
+    </div>
+</div>
+
+@if (string.IsNullOrEmpty(selectedClusterId))
+{
+    @if (clusterOptions.Count == 0 && !isLoading)
+    {
+        <EmptyState Icon="bi-hdd-rack" Title="No clusters"
+                    Message="No clusters are registered for this tenant." />
+    }
+    else if (!isLoading)
+    {
+        <div class="text-center py-5 text-muted">
+            <span class="bi bi-hdd-network display-4 d-block mb-2 opacity-25"></span>
+            Select a cluster above to view its infrastructure metrics.
+        </div>
+    }
+}
+else
+{
+    <InfrastructureMetrics ClusterId="@(Guid.Parse(selectedClusterId))" />
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<ClusterOption> clusterOptions = [];
+    private string selectedClusterId = "";
+    private bool isLoading = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        clusterOptions = await db.KubernetesClusters
+            .Where(c => c.TenantId == TenantId)
+            .OrderBy(c => c.Name)
+            .Select(c => new ClusterOption(c.Id.ToString(), c.Name))
+            .ToListAsync();
+
+        if (clusterOptions.Count > 0) selectedClusterId = clusterOptions[0].Id;
+        isLoading = false;
+    }
+
+    private record ClusterOption(string Id, string Name);
+}

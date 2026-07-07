@@ -442,6 +442,17 @@ public sealed class TelemetryStore : IAsyncDisposable
     /// (resolved from the ingest token) so those columns are never taken from untrusted payload.
     /// Returns the number of rows written (0 when the store is disabled or the batch is empty).
     /// </summary>
+    // Postgres text can't store a NUL byte and jsonb rejects a  escape — either fails the whole
+    // COPY batch. eBPF-derived telemetry (OBI) can carry embedded NULs in names/labels/lines, so scrub
+    // free-text and JSON fields on the way in. (Attribute JSON is already NUL-stripped at parse time;
+    // CleanJson is the belt-and-suspenders net and also covers non-attribute free text.)
+    private static string Clean(string s) => OtlpJson.StripNul(s);
+    private static string CleanJson(string s) =>
+        s.Contains("\\u0000", StringComparison.OrdinalIgnoreCase)
+            ? System.Text.RegularExpressions.Regex.Replace(OtlpJson.StripNul(s), @"\\u0000", "",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            : OtlpJson.StripNul(s);
+
     public async Task<int> WriteLogsAsync(
         Guid tenantId, Guid clusterId, IReadOnlyList<LogIngestRecord> records, CancellationToken ct = default)
     {
@@ -462,17 +473,17 @@ public sealed class TelemetryStore : IAsyncDisposable
             await writer.WriteAsync(ts, NpgsqlDbType.TimestampTz, ct);
             await writer.WriteAsync(tenantId, NpgsqlDbType.Uuid, ct);
             await writer.WriteAsync(clusterId, NpgsqlDbType.Uuid, ct);
-            await writer.WriteAsync(r.Namespace, NpgsqlDbType.Text, ct);
-            await writer.WriteAsync(r.Pod, NpgsqlDbType.Text, ct);
-            await writer.WriteAsync(r.Container, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(Clean(r.Namespace), NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(Clean(r.Pod), NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(Clean(r.Container), NpgsqlDbType.Text, ct);
             await writer.WriteAsync(r.Severity, NpgsqlDbType.Smallint, ct);
-            await writer.WriteAsync(r.Body, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(Clean(r.Body), NpgsqlDbType.Text, ct);
 
             if (r.TraceId is null) await writer.WriteNullAsync(ct);
-            else await writer.WriteAsync(r.TraceId, NpgsqlDbType.Text, ct);
+            else await writer.WriteAsync(Clean(r.TraceId), NpgsqlDbType.Text, ct);
 
             if (r.AttributesJson is null) await writer.WriteNullAsync(ct);
-            else await writer.WriteAsync(r.AttributesJson, NpgsqlDbType.Jsonb, ct);
+            else await writer.WriteAsync(CleanJson(r.AttributesJson), NpgsqlDbType.Jsonb, ct);
         }
 
             await writer.CompleteAsync(ct);
@@ -487,27 +498,43 @@ public sealed class TelemetryStore : IAsyncDisposable
     private static async Task UpsertStreamsAsync(
         NpgsqlConnection conn, Guid tenantId, Guid clusterId, IReadOnlyList<LogIngestRecord> records, CancellationToken ct)
     {
-        HashSet<(string Ns, string Pod, string Container)> streams = [];
-        foreach (LogIngestRecord r in records) streams.Add((r.Namespace, r.Pod, r.Container));
+        // Distinct, NUL-scrubbed streams ORDERED deterministically: concurrent batches then acquire the
+        // log_streams row locks in the same order and can't deadlock (40P01) on overlapping upserts.
+        // Clean() here too — this INSERT binds the raw record values (the COPY path's scrub doesn't apply).
+        List<(string Ns, string Pod, string Container)> streams = records
+            .Select(r => (Clean(r.Namespace), Clean(r.Pod), Clean(r.Container)))
+            .Distinct()
+            .OrderBy(s => s.Item1, StringComparer.Ordinal)
+            .ThenBy(s => s.Item2, StringComparer.Ordinal)
+            .ThenBy(s => s.Item3, StringComparer.Ordinal)
+            .ToList();
         if (streams.Count == 0) return;
 
         StringBuilder sb = new("INSERT INTO log_streams (tenant_id, cluster_id, namespace, pod, container) VALUES ");
         await using NpgsqlCommand cmd = conn.CreateCommand();
         cmd.Parameters.AddWithValue("t", tenantId);
         cmd.Parameters.AddWithValue("c", clusterId);
-        int i = 0;
-        foreach ((string ns, string pod, string container) in streams)
+        for (int i = 0; i < streams.Count; i++)
         {
             if (i > 0) sb.Append(", ");
             sb.Append($"(@t, @c, @ns{i}, @pod{i}, @con{i})");
-            cmd.Parameters.AddWithValue($"ns{i}", ns);
-            cmd.Parameters.AddWithValue($"pod{i}", pod);
-            cmd.Parameters.AddWithValue($"con{i}", container);
-            i++;
+            cmd.Parameters.AddWithValue($"ns{i}", streams[i].Ns);
+            cmd.Parameters.AddWithValue($"pod{i}", streams[i].Pod);
+            cmd.Parameters.AddWithValue($"con{i}", streams[i].Container);
         }
         sb.Append(" ON CONFLICT (tenant_id, cluster_id, namespace, pod, container) DO UPDATE SET last_seen = now()");
         cmd.CommandText = sb.ToString();
-        await cmd.ExecuteNonQueryAsync(ct);
+
+        // Ordering makes deadlocks unlikely, but a concurrent conflicting upsert can still raise one — it's
+        // transient and the statement is idempotent, so retry a few times before surfacing it.
+        for (int attempt = 0; ; attempt++)
+        {
+            try { await cmd.ExecuteNonQueryAsync(ct); return; }
+            catch (PostgresException ex) when (ex.SqlState is "40P01" or "40001" && attempt < 3)
+            {
+                await Task.Delay(20 * (attempt + 1), ct);
+            }
+        }
     }
 
     /// <summary>
@@ -534,26 +561,26 @@ public sealed class TelemetryStore : IAsyncDisposable
             await writer.WriteAsync(ts, NpgsqlDbType.TimestampTz, ct);
             await writer.WriteAsync(tenantId, NpgsqlDbType.Uuid, ct);
             await writer.WriteAsync(clusterId, NpgsqlDbType.Uuid, ct);
-            await writer.WriteAsync(s.TraceId, NpgsqlDbType.Text, ct);
-            await writer.WriteAsync(s.SpanId, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(Clean(s.TraceId), NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(Clean(s.SpanId), NpgsqlDbType.Text, ct);
 
             if (s.ParentSpanId is null) await writer.WriteNullAsync(ct);
-            else await writer.WriteAsync(s.ParentSpanId, NpgsqlDbType.Text, ct);
+            else await writer.WriteAsync(Clean(s.ParentSpanId), NpgsqlDbType.Text, ct);
 
-            await writer.WriteAsync(s.Name, NpgsqlDbType.Text, ct);
-            await writer.WriteAsync(s.Service, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(Clean(s.Name), NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(Clean(s.Service), NpgsqlDbType.Text, ct);
             await writer.WriteAsync(s.Kind, NpgsqlDbType.Smallint, ct);
             await writer.WriteAsync(s.DurationMs, NpgsqlDbType.Double, ct);
             await writer.WriteAsync(s.StatusCode, NpgsqlDbType.Smallint, ct);
 
             if (s.Namespace is null) await writer.WriteNullAsync(ct);
-            else await writer.WriteAsync(s.Namespace, NpgsqlDbType.Text, ct);
+            else await writer.WriteAsync(Clean(s.Namespace), NpgsqlDbType.Text, ct);
 
             if (s.Pod is null) await writer.WriteNullAsync(ct);
-            else await writer.WriteAsync(s.Pod, NpgsqlDbType.Text, ct);
+            else await writer.WriteAsync(Clean(s.Pod), NpgsqlDbType.Text, ct);
 
             if (s.AttributesJson is null) await writer.WriteNullAsync(ct);
-            else await writer.WriteAsync(s.AttributesJson, NpgsqlDbType.Jsonb, ct);
+            else await writer.WriteAsync(CleanJson(s.AttributesJson), NpgsqlDbType.Jsonb, ct);
         }
 
         await writer.CompleteAsync(ct);
@@ -579,20 +606,20 @@ public sealed class TelemetryStore : IAsyncDisposable
             await writer.WriteAsync(ClampTimestamp(m.Timestamp, now), NpgsqlDbType.TimestampTz, ct);
             await writer.WriteAsync(tenantId, NpgsqlDbType.Uuid, ct);
             await writer.WriteAsync(clusterId, NpgsqlDbType.Uuid, ct);
-            await writer.WriteAsync(m.Name, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(Clean(m.Name), NpgsqlDbType.Text, ct);
 
             if (m.Service is null) await writer.WriteNullAsync(ct);
-            else await writer.WriteAsync(m.Service, NpgsqlDbType.Text, ct);
+            else await writer.WriteAsync(Clean(m.Service), NpgsqlDbType.Text, ct);
             if (m.Namespace is null) await writer.WriteNullAsync(ct);
-            else await writer.WriteAsync(m.Namespace, NpgsqlDbType.Text, ct);
+            else await writer.WriteAsync(Clean(m.Namespace), NpgsqlDbType.Text, ct);
             if (m.Pod is null) await writer.WriteNullAsync(ct);
-            else await writer.WriteAsync(m.Pod, NpgsqlDbType.Text, ct);
+            else await writer.WriteAsync(Clean(m.Pod), NpgsqlDbType.Text, ct);
 
             await writer.WriteAsync(m.Value, NpgsqlDbType.Double, ct);
             await writer.WriteAsync((short)m.Kind, NpgsqlDbType.Smallint, ct);
 
             if (m.LabelsJson is null) await writer.WriteNullAsync(ct);
-            else await writer.WriteAsync(m.LabelsJson, NpgsqlDbType.Jsonb, ct);
+            else await writer.WriteAsync(CleanJson(m.LabelsJson), NpgsqlDbType.Jsonb, ct);
         }
 
         await writer.CompleteAsync(ct);
