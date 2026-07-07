@@ -127,6 +127,15 @@ else
                         @onclick="ToggleLogsPanel">
                     <span class="bi bi-journal-text me-1"></span>Logs
                 </button>
+                @* APM/traces/metrics/RUM expose deeper request-level telemetry than the Viewer-level
+                   status + logs, so this panel is Operator+ (a Viewer keeps status and logs only). *@
+                @if (currentAccessRole >= CustomerAccessRole.Operator)
+                {
+                    <button class="btn btn-sm @(showObservabilityPanel ? "btn-primary" : "btn-outline-secondary")"
+                            @onclick="ToggleObservabilityPanel">
+                        <span class="bi bi-graph-up me-1"></span>Traces &amp; Metrics
+                    </button>
+                }
                 <button class="btn btn-sm btn-outline-secondary" @onclick="() => showNotifications = true">
                     <span class="bi bi-bell me-1"></span>Notifications
                 </button>
@@ -185,6 +194,22 @@ else
                 <div class="card-body p-3">
                     <CustomerLogBrowser Customer="selectedCustomer"
                                         OnNavigateToDeployment="NavigateToDeploymentFromLogs" />
+                </div>
+            </div>
+        }
+
+        @* ── Traces / Metrics / RUM panel (toggled) ── *@
+        @* Operator+ only (defense in depth — the toggle button is already role-gated above). *@
+        @if (showObservabilityPanel && currentAccessRole >= CustomerAccessRole.Operator)
+        {
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-white d-flex align-items-center gap-2 py-2">
+                    <span class="bi bi-graph-up text-primary"></span>
+                    <strong>Traces, Metrics &amp; RUM — @selectedCustomer.Name</strong>
+                    <button class="btn-close btn-sm ms-auto" aria-label="Close observability panel" @onclick="() => showObservabilityPanel = false"></button>
+                </div>
+                <div class="card-body p-3">
+                    <CustomerObservability Customer="selectedCustomer" />
                 </div>
             </div>
         }
@@ -597,21 +622,28 @@ else
     private List<Data.Environment> tenantEnvironments = [];
     private List<KubernetesCluster> tenantClusters = [];
 
-    // Monitoring / Logs panel toggles in Level 2 (mutually exclusive)
+    // Monitoring / Logs / Observability panel toggles in Level 2 (mutually exclusive)
     private bool showMonitoringPanel;
     private bool showLogsPanel;
+    private bool showObservabilityPanel;
     private bool showNotifications;
 
     private void ToggleMonitoringPanel()
     {
         showMonitoringPanel = !showMonitoringPanel;
-        if (showMonitoringPanel) showLogsPanel = false;
+        if (showMonitoringPanel) { showLogsPanel = false; showObservabilityPanel = false; }
     }
 
     private void ToggleLogsPanel()
     {
         showLogsPanel = !showLogsPanel;
-        if (showLogsPanel) showMonitoringPanel = false;
+        if (showLogsPanel) { showMonitoringPanel = false; showObservabilityPanel = false; }
+    }
+
+    private void ToggleObservabilityPanel()
+    {
+        showObservabilityPanel = !showObservabilityPanel;
+        if (showObservabilityPanel) { showMonitoringPanel = false; showLogsPanel = false; }
     }
 
     private List<AppDeployment> AllCustomerDeployments =>
@@ -653,6 +685,7 @@ else
         loadingCustomer = true;
         showMonitoringPanel = false;
         showLogsPanel = false;
+        showObservabilityPanel = false;
         showNotifications = false;
         StateHasChanged();
 

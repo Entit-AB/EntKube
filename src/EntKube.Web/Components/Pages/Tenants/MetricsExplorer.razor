@@ -89,6 +89,9 @@ else
 
 @code {
     [Parameter] public required Guid ClusterId { get; set; }
+    /// <summary>Optional namespace scope (customer portal). When set, metric queries are restricted to
+    /// these namespaces so a customer only sees their own apps' metrics. Null = cluster-wide (tenant view).</summary>
+    [Parameter] public IReadOnlyList<string>? Namespaces { get; set; }
 
     private bool available;
     private bool isLoading = true;
@@ -118,9 +121,9 @@ else
         available = await Metrics.HasDataAsync(ClusterId);
         if (available)
         {
-            KubernetesOperationResult<List<string>> n = await Metrics.GetMetricNamesAsync(ClusterId);
+            KubernetesOperationResult<List<string>> n = await Metrics.GetMetricNamesAsync(ClusterId, namespaces: Namespaces);
             metricNames = n.IsSuccess ? n.Data ?? [] : [];
-            KubernetesOperationResult<List<string>> s = await Metrics.GetServicesAsync(ClusterId);
+            KubernetesOperationResult<List<string>> s = await Metrics.GetServicesAsync(ClusterId, namespaces: Namespaces);
             services = s.IsSuccess ? s.Data ?? [] : [];
         }
         isLoading = false;
@@ -139,13 +142,13 @@ else
 
         if (string.IsNullOrEmpty(breakdown))
         {
-            KubernetesOperationResult<List<TimeSeriesDataPoint>> res = await Metrics.GetSeriesAsync(ClusterId, selectedMetric, svc, from, to);
+            KubernetesOperationResult<List<TimeSeriesDataPoint>> res = await Metrics.GetSeriesAsync(ClusterId, selectedMetric, svc, from, to, namespaces: Namespaces);
             if (res.IsSuccess && res.Data is not null) series = res.Data;
             else queryError = res.Error;
         }
         else
         {
-            KubernetesOperationResult<List<MetricSeriesGroup>> res = await Metrics.GetSeriesByAsync(ClusterId, selectedMetric, svc, breakdown, from, to);
+            KubernetesOperationResult<List<MetricSeriesGroup>> res = await Metrics.GetSeriesByAsync(ClusterId, selectedMetric, svc, breakdown, from, to, namespaces: Namespaces);
             if (res.IsSuccess && res.Data is not null) grouped = res.Data;
             else queryError = res.Error;
         }

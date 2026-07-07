@@ -90,9 +90,30 @@ string isn't set.
 3. **Traces**: point an instrumented app's OTLP exporter at the in-cluster collector
    (`otel-collector.monitoring:4317`), or generate some with
    `telemetrygen traces --otlp-endpoint <collector>:4317 --otlp-insecure --traces 20`.
+   - **Zero-code option**: install the *EntKube Trace Auto-Instrumentation (eBPF)* component
+     (`otel-ebpf`) on the cluster. It runs OpenTelemetry eBPF Instrumentation (OBI) as a
+     privileged DaemonSet that synthesizes HTTP/gRPC spans + RED metrics for every workload
+     and ships them to the collector — no app changes, no mesh. Requires kernel 5.8+ (5.17+
+     for cross-service context propagation) and a `monitoring` namespace that permits
+     privileged pods.
 4. Watch rows land (`SELECT count(*) FROM logs;` / `FROM spans;`) and appear in the UI.
 
 ---
+
+## Customer portal access
+
+Customers see telemetry for **their own apps only** in the customer portal (`/portal`), scoped by
+the namespaces of each app's deployments (a namespace belongs to exactly one customer). Panels:
+
+- **Logs** and **Monitoring** (status/SLA/incidents) — available to any customer user (Viewer+).
+- **Traces & Metrics** (APM traces, RED metrics, service map) and **RUM** — gated to
+  **Operator+** on the customer, since they expose deeper request-level telemetry. A Viewer keeps
+  status + logs only. (Threshold is `CustomerAccessRole.Operator` in `CustomerPortal.razor`.)
+
+**RUM requires an App owner.** A RUM site only appears in the customer portal when it is assigned
+an **App owner** (its `AppId`). Set it in the tenant **RUM sites** admin (App owner dropdown) when
+creating or editing the site — the owning app determines which customer sees it. Sites with no app
+owner are admin-managed and never surface in the portal.
 
 ## Verification checklist
 
@@ -113,8 +134,11 @@ string isn't set.
 | Ingest returns **503** | `TelemetryConnection` not configured. |
 | Ingest returns **413** | Batch decompresses > 64 MiB — lower collector batch size. |
 | Logs land but **dropdowns empty** on a Loki cluster | That's the Loki OTLP label mapping (`loki` entry `limits_config.otlp_config`), unrelated to the native store. |
-| **Traces tab** says "no traces" | No spans for the cluster yet — instrument an app or seed (Path A). |
+| **Traces tab** says "no traces" | No spans for the cluster yet — instrument an app, install the `otel-ebpf` component, or seed (Path A). |
 | Text/attribute search slow | Set `Telemetry:EnableTextSearchIndex: true` (builds pg_trgm + JSONB GIN indexes; costs ingest throughput). |
+| Customer can't see **Traces & Metrics** button in the portal | Their `CustomerAccessRole` is Viewer — grant **Operator+** on that customer. |
+| A **RUM site** doesn't appear in the customer portal | The site has no **App owner** — set it in the tenant RUM sites admin (App owner dropdown). |
+| Customer portal traces/metrics **empty** for an app | The app's deployment has no synced namespace yet (scoping needs it), or no telemetry for that namespace. |
 
 Notes: timestamps are clamped into the partition range on write (a stray/1970/future ts can't wedge
 the batch); a malformed payload returns 400 (dropped) so the collector never retry-loops.

@@ -236,6 +236,9 @@ else
     [Parameter] public required Guid ClusterId { get; set; }
     /// <summary>Deep-link: a trace id to auto-open once on load (from a log line's trace badge).</summary>
     [Parameter] public string? PresetTraceId { get; set; }
+    /// <summary>Optional namespace scope (customer portal). When set, every span query is restricted to
+    /// these namespaces so a customer only sees their own apps' traces. Null = cluster-wide (tenant view).</summary>
+    [Parameter] public IReadOnlyList<string>? Namespaces { get; set; }
     private string? _handledPreset;
     private Guid _lastCluster;
 
@@ -279,7 +282,7 @@ else
         available = await Traces.HasDataAsync(ClusterId);
         if (available)
         {
-            KubernetesOperationResult<List<string>> s = await Traces.GetServicesAsync(ClusterId);
+            KubernetesOperationResult<List<string>> s = await Traces.GetServicesAsync(ClusterId, namespaces: Namespaces);
             services = s.IsSuccess ? s.Data ?? [] : [];
         }
         isLoading = false;
@@ -304,18 +307,18 @@ else
         string? service = string.IsNullOrEmpty(selectedService) ? null : selectedService;
 
         KubernetesOperationResult<List<TraceSummary>> result =
-            await Traces.ListTracesAsync(ClusterId, service, from, to, minDurationMs, errorsOnly);
+            await Traces.ListTracesAsync(ClusterId, service, from, to, minDurationMs, errorsOnly, namespaces: Namespaces);
         if (result.IsSuccess && result.Data is not null) traces = result.Data;
         else queryError = result.Error;
 
         red = [];
         if (service is not null)
         {
-            KubernetesOperationResult<List<RedBucket>> r = await Traces.GetServiceRedAsync(ClusterId, service, from, to);
+            KubernetesOperationResult<List<RedBucket>> r = await Traces.GetServiceRedAsync(ClusterId, service, from, to, namespaces: Namespaces);
             if (r.IsSuccess && r.Data is not null) red = r.Data;
         }
 
-        KubernetesOperationResult<List<ServiceEdge>> m = await Traces.GetServiceMapAsync(ClusterId, from, to);
+        KubernetesOperationResult<List<ServiceEdge>> m = await Traces.GetServiceMapAsync(ClusterId, from, to, namespaces: Namespaces);
         serviceMap = m.IsSuccess && m.Data is not null ? m.Data : [];
 
         hasQueried = true;
@@ -330,7 +333,7 @@ else
         traceLogs = [];
         StateHasChanged();
 
-        KubernetesOperationResult<List<SpanRecord>> t = await Traces.GetTraceAsync(ClusterId, traceId);
+        KubernetesOperationResult<List<SpanRecord>> t = await Traces.GetTraceAsync(ClusterId, traceId, namespaces: Namespaces);
         if (t.IsSuccess && t.Data is not null) spans = t.Data;
         spanDepths = ComputeDepths(spans);   // once, up front — not per span during render
 

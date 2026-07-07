@@ -1,0 +1,235 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Components.Pages.Tenants
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject RumSiteService Sites
+
+@* Customer-facing observability: traces (APM), metrics, and RUM for ONE of the customer's apps.
+   Isolation: an app's telemetry scope is the set of namespaces its deployments live in — and a
+   namespace belongs to exactly one customer — so every span/metric query is namespace-scoped and
+   RUM is limited to sites owned by the customer's apps. Nothing here can reach another customer. *@
+
+@if (Customer is null)
+{
+    <EmptyState Icon="bi-people" Title="Select a customer"
+                Message="Choose a customer above to view their application telemetry." />
+}
+else if (appsWithData.Count == 0)
+{
+    <EmptyState Icon="bi-graph-up" Title="No deployed apps"
+                Message="This customer has no app deployments to pull telemetry from yet." />
+}
+else
+{
+    <div class="row g-2 mb-3 align-items-end">
+        <div class="col-md-4">
+            <label class="form-label small text-muted mb-1">Application</label>
+            <select class="form-select form-select-sm" @bind="selectedAppId" @bind:after="OnAppChanged">
+                <option value="">— select app —</option>
+                @foreach (AppRow a in appsWithData)
+                {
+                    <option value="@a.Id">@a.Name</option>
+                }
+            </select>
+        </div>
+        @if (selectedAppId is not null && ClustersForApp.Count > 1)
+        {
+            <div class="col-md-4">
+                <label class="form-label small text-muted mb-1">Cluster</label>
+                <select class="form-select form-select-sm" @bind="selectedClusterId" @bind:after="StateHasChanged">
+                    @foreach (ClusterRow c in ClustersForApp)
+                    {
+                        <option value="@c.Id">@c.Name</option>
+                    }
+                </select>
+            </div>
+        }
+    </div>
+
+    @if (selectedAppId is null)
+    {
+        <div class="text-muted small">
+            <span class="bi bi-info-circle me-1"></span>
+            Pick an application to view its traces, metrics, and real-user monitoring.
+        </div>
+    }
+    else if (selectedClusterId is null)
+    {
+        <div class="text-muted small">
+            <span class="bi bi-info-circle me-1"></span>
+            This app has no synced deployment on a cluster yet, so there's no telemetry scope to show.
+        </div>
+    }
+    else
+    {
+        <ul class="nav nav-tabs mb-3" role="tablist">
+            <li class="nav-item"><button class="nav-link @(tab == "traces" ? "active" : "")" @onclick='() => tab = "traces"'><span class="bi bi-diagram-3 me-1"></span>Traces</button></li>
+            <li class="nav-item"><button class="nav-link @(tab == "metrics" ? "active" : "")" @onclick='() => tab = "metrics"'><span class="bi bi-graph-up-arrow me-1"></span>Metrics</button></li>
+            <li class="nav-item"><button class="nav-link @(tab == "rum" ? "active" : "")" @onclick='() => OnRumTab()'><span class="bi bi-browser-chrome me-1"></span>RUM</button></li>
+        </ul>
+
+        @* Traces/metrics require a non-empty namespace scope: an empty scope would mean cluster-wide
+           (every customer) — so they are gated behind Namespaces.Count > 0. RUM is scoped by site
+           ownership (AppId), not namespace, so it is intentionally NOT gated here. *@
+        @if (tab == "rum")
+        {
+            @if (sites.Count == 0)
+            {
+                <EmptyState Icon="bi-browser-chrome" Title="No RUM site for this app"
+                            Message="Real-user monitoring appears once an operator registers a RUM site for this application and embeds its snippet." />
+            }
+            else
+            {
+                <div class="row g-2 mb-3 align-items-end">
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted mb-1">Site</label>
+                        <select class="form-select form-select-sm" @bind="selectedSiteId">
+                            @foreach (RumSite s in sites)
+                            {
+                                <option value="@s.Id">@s.Name</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1">Time range</label>
+                        <select class="form-select form-select-sm" @bind="rumRangeHours">
+                            <option value="1">Last 1 hour</option>
+                            <option value="24">Last 24 hours</option>
+                            <option value="168">Last 7 days</option>
+                        </select>
+                    </div>
+                </div>
+                @if (SelectedSite is Guid siteId)
+                {
+                    <RumOverview @key="@($"{siteId}:{rumRangeHours}")" TenantId="Customer.TenantId" SiteId="siteId" From="RumFrom" To="RumTo" />
+                    <RumSessions @key="@($"sess:{siteId}:{rumRangeHours}")" TenantId="Customer.TenantId" SiteId="siteId"
+                                 ClusterId="selectedClusterId" From="RumFrom" To="RumTo" />
+                }
+            }
+        }
+        else if (Namespaces.Count == 0)
+        {
+            <div class="alert alert-info small py-2">
+                <span class="bi bi-info-circle me-1"></span>
+                This app's deployment has no known namespace yet — sync it to enable trace and metric scoping.
+            </div>
+        }
+        else if (tab == "traces")
+        {
+            <TraceExplorer @key="@ScopeKey" ClusterId="selectedClusterId.Value" Namespaces="Namespaces" />
+        }
+        else if (tab == "metrics")
+        {
+            <MetricsExplorer @key="@ScopeKey" ClusterId="selectedClusterId.Value" Namespaces="Namespaces" />
+        }
+    }
+}
+
+@code {
+    [Parameter] public Customer? Customer { get; set; }
+
+    private Guid? loadedCustomerId;
+    private List<DeploymentRow> deployments = [];
+    private List<AppRow> appsWithData = [];
+    private Dictionary<Guid, string> clusterNames = [];
+
+    private Guid? selectedAppId;
+    private Guid? selectedClusterId;
+    private string tab = "traces";
+
+    // RUM sub-state.
+    private List<RumSite> sites = [];
+    private Guid? selectedSiteIdRaw;
+    private int rumRangeHours = 24;
+
+    private string selectedSiteId
+    {
+        get => selectedSiteIdRaw?.ToString() ?? "";
+        set => selectedSiteIdRaw = Guid.TryParse(value, out Guid g) ? g : null;
+    }
+    private Guid? SelectedSite =>
+        selectedSiteIdRaw is Guid g && sites.Any(s => s.Id == g) ? g
+        : sites.Count > 0 ? sites[0].Id : null;
+
+    private DateTime RumTo => DateTime.UtcNow;
+    private DateTime RumFrom => RumTo.AddHours(-rumRangeHours);
+
+    // Clusters the selected app is deployed to (for the cluster picker when it spans more than one).
+    private List<ClusterRow> ClustersForApp =>
+        selectedAppId is null
+            ? []
+            : deployments.Where(d => d.AppId == selectedAppId)
+                .Select(d => d.ClusterId).Distinct()
+                .Select(id => new ClusterRow(id, clusterNames.TryGetValue(id, out string? n) ? n : id.ToString()))
+                .OrderBy(c => c.Name).ToList();
+
+    // The isolation key: distinct namespaces of the selected app on the selected cluster. A namespace
+    // belongs to one customer, so scoping span/metric queries to these is a hard tenant boundary.
+    private IReadOnlyList<string> Namespaces =>
+        (selectedAppId is null || selectedClusterId is null)
+            ? []
+            : deployments
+                .Where(d => d.AppId == selectedAppId && d.ClusterId == selectedClusterId
+                            && !string.IsNullOrWhiteSpace(d.Namespace))
+                .Select(d => d.Namespace).Distinct().ToList();
+
+    // Recreate the hosted explorer whenever the scope changes so it reloads for the new app/cluster/namespaces.
+    private string ScopeKey => $"{selectedClusterId}:{string.Join(',', Namespaces)}";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Customer is null || Customer.Id == loadedCustomerId) return;
+        loadedCustomerId = Customer.Id;
+
+        selectedAppId = null;
+        selectedClusterId = null;
+        sites = [];
+        selectedSiteIdRaw = null;
+
+        List<Guid> appIds = Customer.Apps.Select(a => a.Id).ToList();
+
+        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        deployments = await db.AppDeployments
+            .Where(d => appIds.Contains(d.AppId))
+            .Select(d => new DeploymentRow(d.AppId, d.ClusterId, d.Namespace))
+            .ToListAsync();
+
+        appsWithData = Customer.Apps
+            .Where(a => deployments.Any(d => d.AppId == a.Id))
+            .OrderBy(a => a.Name)
+            .Select(a => new AppRow(a.Id, a.Name))
+            .ToList();
+
+        List<Guid> clusterIds = deployments.Select(d => d.ClusterId).Distinct().ToList();
+        clusterNames = await db.KubernetesClusters
+            .Where(c => clusterIds.Contains(c.Id))
+            .ToDictionaryAsync(c => c.Id, c => c.Name);
+    }
+
+    private async Task OnAppChanged()
+    {
+        selectedClusterId = ClustersForApp.Count > 0 ? ClustersForApp[0].Id : null;
+        selectedSiteIdRaw = null;
+        sites = [];
+        if (tab == "rum") await LoadSitesAsync();
+    }
+
+    private async Task OnRumTab()
+    {
+        tab = "rum";
+        await LoadSitesAsync();
+    }
+
+    private async Task LoadSitesAsync()
+    {
+        if (Customer is null || selectedAppId is null) { sites = []; return; }
+        sites = await Sites.ListForAppsAsync(Customer.TenantId, [selectedAppId.Value]);
+        if (sites.Count > 0 && (selectedSiteIdRaw is null || sites.All(s => s.Id != selectedSiteIdRaw)))
+            selectedSiteIdRaw = sites[0].Id;
+    }
+
+    private record DeploymentRow(Guid AppId, Guid ClusterId, string Namespace);
+    private record AppRow(Guid Id, string Name);
+    private record ClusterRow(Guid Id, string Name);
+}
