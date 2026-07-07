@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Entit">
+  <title>Entit (reversed, for dark backgrounds)</title>
+  <rect x="12" y="12" width="11" height="40" rx="3" fill="#FFFFFF"/>
+  <rect x="26" y="12" width="26" height="11" rx="3" fill="#8FA6FF"/>
+  <rect x="26" y="26.5" width="19" height="11" rx="3" fill="#FFFFFF"/>
+  <rect x="26" y="41" width="26" height="11" rx="3" fill="#FFFFFF"/>
+</svg>

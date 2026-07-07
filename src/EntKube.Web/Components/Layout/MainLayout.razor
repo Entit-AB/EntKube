@@ -1,25 +1,9 @@
 ﻿@inherits LayoutComponentBase
-@inject NavigationManager NavigationManager
 
 <div class="page">
-    <div class="sidebar">
-        <NavMenu />
-    </div>
+    <TopNav />
 
     <main>
-        <div class="top-row px-4 d-flex align-items-center justify-content-between">
-            <span class="text-muted small">
-                <i class="bi bi-server me-1"></i>EntKube Platform
-            </span>
-            <AuthorizeView>
-                <Authorized>
-                    <span class="text-muted small">
-                        <i class="bi bi-person-circle me-1"></i>@context.User.Identity?.Name
-                    </span>
-                </Authorized>
-            </AuthorizeView>
-        </div>
-
         <article class="content px-4">
             @Body
         </article>

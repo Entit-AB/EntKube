@@ -1,20 +1,87 @@
+/* ==========================================================================
+   Entit brand — see https://www.entit.se/brand/brand-guide.html
+   Navy is text/ink & dark surfaces; accent blue drives actions, links & focus.
+   Type: Space Grotesk (headings) + DM Sans (body).
+   ========================================================================== */
+:root {
+    /* Brand palette */
+    --entit-navy: #2C3A5A;
+    --entit-navy-deep: #232E47;
+    --entit-accent: #3A63F0;
+    --entit-accent-hover: #2E4EBE;
+    --entit-accent-darker: #2743A3;
+    --entit-accent-light: #8FA6FF;
+    --entit-muted: #F4F6FA;
+    --entit-border: #E6E9F1;
+    --entit-text: #232E47;
+    --entit-text-muted: #5B6478;
+    --entit-sans: "DM Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --entit-heading: "Space Grotesk", system-ui, sans-serif;
+
+    /* Map the brand onto Bootstrap's theme tokens */
+    --bs-primary: #3A63F0;
+    --bs-primary-rgb: 58, 99, 240;
+    --bs-primary-text-emphasis: #2743A3;
+    --bs-primary-bg-subtle: #DFE6FD;
+    --bs-primary-border-subtle: #C6D2FB;
+    --bs-link-color: #3A63F0;
+    --bs-link-color-rgb: 58, 99, 240;
+    --bs-link-hover-color: #2E4EBE;
+    --bs-link-hover-color-rgb: 46, 78, 190;
+    --bs-body-color: #232E47;
+    --bs-body-color-rgb: 35, 46, 71;
+    --bs-emphasis-color: #232E47;
+    --bs-body-font-family: var(--entit-sans);
+    --bs-heading-color: #232E47;
+    --bs-border-color: #E6E9F1;
+    --bs-border-color-translucent: rgba(35, 46, 71, 0.14);
+}
+
 html, body {
-    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    font-family: var(--entit-sans);
     height: 100%;
 }
 
+h1, h2, h3, h4, h5, h6,
+.h1, .h2, .h3, .h4, .h5, .h6 {
+    font-family: var(--entit-heading);
+    font-weight: 500;
+    letter-spacing: -0.02em;
+}
+
 a, .btn-link {
-    color: #006bb7;
+    color: var(--entit-accent);
 }
 
 .btn-primary {
-    color: #fff;
-    background-color: #1b6ec2;
-    border-color: #1861ac;
+    --bs-btn-color: #fff;
+    --bs-btn-bg: var(--entit-accent);
+    --bs-btn-border-color: var(--entit-accent);
+    --bs-btn-hover-color: #fff;
+    --bs-btn-hover-bg: var(--entit-accent-hover);
+    --bs-btn-hover-border-color: var(--entit-accent-hover);
+    --bs-btn-active-color: #fff;
+    --bs-btn-active-bg: var(--entit-accent-hover);
+    --bs-btn-active-border-color: var(--entit-accent-darker);
+    --bs-btn-disabled-color: #fff;
+    --bs-btn-disabled-bg: var(--entit-accent);
+    --bs-btn-disabled-border-color: var(--entit-accent);
+    --bs-btn-focus-shadow-rgb: 58, 99, 240;
 }
 
-.btn:focus, .btn:active:focus, .btn-link.nav-link:focus, .form-control:focus, .form-check-input:focus {
-  box-shadow: 0 0 0 0.1rem white, 0 0 0 0.25rem #258cfb;
+.btn-outline-primary {
+    --bs-btn-color: var(--entit-accent);
+    --bs-btn-border-color: var(--entit-accent);
+    --bs-btn-hover-bg: var(--entit-accent);
+    --bs-btn-hover-border-color: var(--entit-accent);
+    --bs-btn-active-bg: var(--entit-accent);
+    --bs-btn-active-border-color: var(--entit-accent);
+    --bs-btn-focus-shadow-rgb: 58, 99, 240;
+}
+
+.btn:focus, .btn:active:focus, .btn-link.nav-link:focus, .form-control:focus, .form-check-input:focus, .form-select:focus {
+  border-color: var(--entit-accent-light);
+  box-shadow: 0 0 0 0.1rem white, 0 0 0 0.25rem var(--entit-accent);
 }
 
 .content {
