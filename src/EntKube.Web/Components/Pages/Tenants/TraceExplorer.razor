@@ -309,19 +309,31 @@ else
         DateTime from = to.AddMinutes(-timeRangeMinutes);
         string? service = string.IsNullOrEmpty(selectedService) ? null : selectedService;
 
-        KubernetesOperationResult<List<TraceSummary>> result =
-            await Traces.ListTracesAsync(ClusterId, service, from, to, minDurationMs, errorsOnly, namespaces: Namespaces, podPattern: PodPattern);
+        // These queries are independent and each opens its own connection, so run them
+        // concurrently — the search waits on the slowest, not the sum of all three.
+        Task<KubernetesOperationResult<List<TraceSummary>>> tracesTask =
+            Traces.ListTracesAsync(ClusterId, service, from, to, minDurationMs, errorsOnly, namespaces: Namespaces, podPattern: PodPattern);
+        Task<KubernetesOperationResult<List<ServiceEdge>>> mapTask =
+            Traces.GetServiceMapAsync(ClusterId, from, to, namespaces: Namespaces, podPattern: PodPattern);
+        Task<KubernetesOperationResult<List<RedBucket>>>? redTask = service is null ? null
+            : Traces.GetServiceRedAsync(ClusterId, service, from, to, namespaces: Namespaces, podPattern: PodPattern);
+
+        await Task.WhenAll(redTask is null
+            ? new Task[] { tracesTask, mapTask }
+            : new Task[] { tracesTask, mapTask, redTask });
+
+        KubernetesOperationResult<List<TraceSummary>> result = tracesTask.Result;
         if (result.IsSuccess && result.Data is not null) traces = result.Data;
         else queryError = result.Error;
 
         red = [];
-        if (service is not null)
+        if (redTask is not null)
         {
-            KubernetesOperationResult<List<RedBucket>> r = await Traces.GetServiceRedAsync(ClusterId, service, from, to, namespaces: Namespaces, podPattern: PodPattern);
+            KubernetesOperationResult<List<RedBucket>> r = redTask.Result;
             if (r.IsSuccess && r.Data is not null) red = r.Data;
         }
 
-        KubernetesOperationResult<List<ServiceEdge>> m = await Traces.GetServiceMapAsync(ClusterId, from, to, namespaces: Namespaces, podPattern: PodPattern);
+        KubernetesOperationResult<List<ServiceEdge>> m = mapTask.Result;
         serviceMap = m.IsSuccess && m.Data is not null ? m.Data : [];
 
         hasQueried = true;

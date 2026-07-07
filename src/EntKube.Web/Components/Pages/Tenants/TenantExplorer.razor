@@ -315,20 +315,57 @@ else
     private Guid? selectedServiceEnvId;   // environment a per-env service was opened under
     private Guid? registerEnvId;
 
+    private string? _loadedSlug;                              // tenant whose data is currently loaded
+    private (Guid?, Guid?, string?, Guid?)? _appliedQuery;   // last (app, cluster, section, env) applied
+
     private bool HasFilter => !string.IsNullOrWhiteSpace(filter);
 
-    protected override async Task OnInitializedAsync()
+    protected override async Task OnParametersSetAsync()
+    {
+        // Load a tenant's data once per slug — in OnParametersSetAsync (not OnInitializedAsync)
+        // so switching tenants via the top-nav mega menu, which changes the {Slug} route param
+        // on the same component instance, reloads instead of showing the previous tenant.
+        if (_loadedSlug != Slug)
+        {
+            _loadedSlug = Slug;
+            _appliedQuery = null;
+            if (!await LoadTenantAsync()) return;   // navigated away (unauth / missing / no access)
+        }
+
+        if (tenant is null) return;
+
+        // Re-derive the open pane from the query string whenever it changes. This is what makes
+        // the mega menu's ?section=… / ?app=… links act when you're already on a tenant page:
+        // those change only the query, which never re-runs OnInitializedAsync.
+        (Guid?, Guid?, string?, Guid?) sig = (AppParam, ClusterParam, SectionParam, EnvParam);
+        if (_appliedQuery is not { } applied || applied != sig)
+        {
+            _appliedQuery = sig;
+            RestoreSelectionFromQuery();
+        }
+    }
+
+    private async Task<bool> LoadTenantAsync()
     {
         AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
         System.Security.Claims.ClaimsPrincipal user = authState.User;
-        if (user.Identity?.IsAuthenticated != true) { Nav.NavigateTo("/Account/Login", forceLoad: true); return; }
+        if (user.Identity?.IsAuthenticated != true) { Nav.NavigateTo("/Account/Login", forceLoad: true); return false; }
 
         string? userId = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-        if (userId is null) { Nav.NavigateTo("/Account/Login", forceLoad: true); return; }
+        if (userId is null) { Nav.NavigateTo("/Account/Login", forceLoad: true); return false; }
 
         Tenant? t = await TenantService.GetTenantBySlugAsync(Slug);
-        if (t is null) { Nav.NavigateTo("/tenants"); return; }
-        if (!await UserAccessService.HasTenantAccessAsync(userId, t.Id)) { Nav.NavigateTo("/tenants"); return; }
+        if (t is null) { Nav.NavigateTo("/tenants"); return false; }
+        if (!await UserAccessService.HasTenantAccessAsync(userId, t.Id)) { Nav.NavigateTo("/tenants"); return false; }
+
+        // Clear any previous tenant's tree/selection state before loading the new one.
+        collapsedEnvs.Clear();
+        expandedEnvCustomers.Clear();
+        collapsedGroups.Clear();
+        appsByCustomer.Clear();
+        filter = "";
+        selectedApp = null; selectedAppCustomer = null; selectedCluster = null;
+        selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
 
         environments = await TenantService.GetEnvironmentsAsync(t.Id);
         customers = await TenantService.GetCustomersAsync(t.Id);
@@ -338,7 +375,7 @@ else
         RebuildAppIndex();
 
         tenant = t;
-        RestoreSelectionFromQuery();
+        return true;
     }
 
     private void RebuildAppIndex()
@@ -352,6 +389,12 @@ else
 
     private void RestoreSelectionFromQuery()
     {
+        // Derive the open pane entirely from the query string. Reset the URL-backed selections
+        // first so switching (e.g. app → section via the mega menu) clears the previous pane.
+        // registerEnvId is transient UI state not encoded in the URL, so it is left untouched.
+        selectedApp = null; selectedAppCustomer = null; selectedCluster = null;
+        selectedSection = null; selectedServiceEnvId = null;
+
         if (AppParam is Guid appId)
         {
             selectedApp = allApps.FirstOrDefault(a => a.Id == appId);
