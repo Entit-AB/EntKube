@@ -3,6 +3,7 @@
 @using Microsoft.AspNetCore.Components.Authorization
 @inject OperationsAdvisorService Advisor
 @inject AdvisorStateService State
+@inject AdvisorDigestConfigService DigestConfig
 @inject AuthenticationStateProvider AuthState
 
 @* Operations Advisor: turns raw signals (expiring secrets, open incidents, stale
@@ -60,7 +61,57 @@ else
             <input class="form-check-input" type="checkbox" id="showResolved" @bind="showResolved" @bind:after="StateHasChanged" />
             <label class="form-check-label small text-muted" for="showResolved">Show snoozed &amp; dismissed</label>
         </div>
+        <button class="btn btn-sm btn-outline-secondary" title="Digest settings"
+                @onclick="() => showDigestSettings = !showDigestSettings">
+            <i class="bi bi-envelope-gear"></i>
+        </button>
     </div>
+
+    @if (showDigestSettings && digestCfg is not null)
+    {
+        <div class="card mb-3">
+            <div class="card-body py-2">
+                <div class="d-flex flex-wrap align-items-end gap-2">
+                    <div>
+                        <label class="form-label small mb-0">Digest</label>
+                        <select class="form-select form-select-sm" @bind="digestCfg.Frequency">
+                            <option value="@DigestFrequency.Off">Off</option>
+                            <option value="@DigestFrequency.Daily">Daily</option>
+                            <option value="@DigestFrequency.Weekly">Weekly</option>
+                        </select>
+                    </div>
+                    @if (digestCfg.Frequency == DigestFrequency.Weekly)
+                    {
+                        <div>
+                            <label class="form-label small mb-0">Day</label>
+                            <select class="form-select form-select-sm" @bind="digestCfg.WeeklyDay">
+                                @foreach (DayOfWeek d in Enum.GetValues<DayOfWeek>())
+                                {
+                                    <option value="@d">@d</option>
+                                }
+                            </select>
+                        </div>
+                    }
+                    @if (digestCfg.Frequency != DigestFrequency.Off)
+                    {
+                        <div>
+                            <label class="form-label small mb-0">Hour (UTC)</label>
+                            <input type="number" min="0" max="23" class="form-control form-control-sm" style="width:5rem"
+                                   @bind="digestCfg.HourUtc" />
+                        </div>
+                    }
+                    <button class="btn btn-sm btn-primary" @onclick="SaveDigest" disabled="@savingDigest">
+                        @if (savingDigest) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Save
+                    </button>
+                    <span class="text-muted small">
+                        Summary of overdue &amp; due-today items sent to this tenant's notification channels.
+                        @if (digestCfg.LastSentAt is not null) { <text>Last sent @digestCfg.LastSentAt.Value.ToString("MMM d HH:mm") UTC.</text> }
+                    </span>
+                </div>
+            </div>
+        </div>
+    }
 
     @* ── Summary strip: counts by time horizon ── *@
     <div class="d-flex flex-wrap gap-2 mb-4">
@@ -210,6 +261,9 @@ else
     private Guid selectedCustomer = Guid.Empty;
     private bool showResolved;
     private string currentUser = "Unknown";
+    private bool showDigestSettings;
+    private bool savingDigest;
+    private AdvisorDigestConfig? digestCfg;
 
     // Findings after the active lens/customer filter — recomputed per render; lists are small.
     private List<OperationsFinding> VisibleFindings =>
@@ -222,7 +276,21 @@ else
     {
         AuthenticationState auth = await AuthState.GetAuthenticationStateAsync();
         currentUser = auth.User.Identity?.Name ?? "Unknown";
+        digestCfg = await DigestConfig.GetAsync(TenantId);
         await Reload();
+    }
+
+    private async Task SaveDigest()
+    {
+        if (digestCfg is null) return;
+        savingDigest = true;
+        try
+        {
+            await DigestConfig.SaveAsync(TenantId, digestCfg.Frequency, digestCfg.HourUtc, digestCfg.WeeklyDay);
+            digestCfg = await DigestConfig.GetAsync(TenantId);
+            showDigestSettings = false;
+        }
+        finally { savingDigest = false; }
     }
 
     private async Task Acknowledge(OperationsFinding f) { await State.AcknowledgeAsync(TenantId, f.Id, currentUser); await Reload(); }

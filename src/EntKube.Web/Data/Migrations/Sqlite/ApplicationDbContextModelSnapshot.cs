@@ -17,6 +17,42 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.8");
 
+            modelBuilder.Entity("EntKube.Web.Data.AdvisorDigestConfig", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Frequency")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("HourUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("LastSentAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WeeklyDay")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId")
+                        .IsUnique();
+
+                    b.ToTable("AdvisorDigestConfigs");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.AdvisorFindingState", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4998,6 +5034,15 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasKey("UserId", "LoginProvider", "Name");
 
                     b.ToTable("AspNetUserTokens", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.AdvisorDigestConfig", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AdvisorFindingState", b =>

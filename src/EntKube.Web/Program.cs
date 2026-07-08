@@ -256,6 +256,7 @@ public class Program
         builder.Services.AddScoped<StormSuppressionService>();
         builder.Services.AddScoped<ErrorBudgetService>();
         builder.Services.AddScoped<AdvisorStateService>();
+        builder.Services.AddScoped<AdvisorDigestConfigService>();
         builder.Services.AddScoped<OperationsAdvisorService>();
         builder.Services.AddScoped<CustomerNotificationService>();
 
