@@ -95,6 +95,10 @@
                                                href="@($"tenants/{r.Tenant.Slug}?section=advisor")">
                                                 <i class="bi bi-building me-1"></i>@r.Tenant.Name
                                             </a>
+                                            @if (f.IsNew)
+                                            {
+                                                <span class="badge bg-info-subtle text-info border border-info-subtle"><i class="bi bi-stars me-1"></i>New</span>
+                                            }
                                             @if (f.IsEscalated)
                                             {
                                                 <span class="badge bg-danger"><i class="bi bi-fire me-1"></i>Escalated · @f.AgeDays d</span>
@@ -217,7 +221,7 @@
 
             rows = collected
                 .OrderBy(r => r.Finding.Horizon)
-                .ThenBy(r => r.Finding.Severity)
+                .ThenByDescending(r => r.Finding.PriorityScore)
                 .ThenBy(r => r.Finding.DueAt ?? DateTime.MaxValue)
                 .ToList();
             lastRefreshed = DateTime.UtcNow;

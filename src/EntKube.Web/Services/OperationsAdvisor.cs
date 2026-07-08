@@ -88,6 +88,12 @@ public sealed record OperationsFinding
 
     /// <summary>Overdue, aged past the escalation threshold, and not yet acknowledged.</summary>
     public bool IsEscalated { get; init; }
+
+    /// <summary>First surfaced within the last day (or not yet recorded) — worth a "new" flag.</summary>
+    public bool IsNew { get; init; }
+
+    /// <summary>Composite urgency score used to rank findings within a horizon (higher = more urgent).</summary>
+    public double PriorityScore { get; init; }
 }
 
 /// <summary>
@@ -140,31 +146,35 @@ public class OperationsAdvisorService(
         findings.AddRange(await BuildBackupFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildPostureFindingsAsync(tenantId, ct));
 
-        // Most urgent first: horizon, then severity, then soonest deadline.
-        var ordered = findings
+        var merged = await MergeStateAsync(tenantId, findings, now, ct);
+
+        // Grouped by horizon in the UI; within a horizon, rank by composite priority.
+        var ordered = merged
             .OrderBy(f => f.Horizon)
-            .ThenBy(f => f.Severity)
+            .ThenByDescending(f => f.PriorityScore)
             .ThenBy(f => f.DueAt ?? DateTime.MaxValue)
             .ThenBy(f => f.Title, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var merged = await MergeStateAsync(tenantId, ordered, now, ct);
-        return new AdvisorReport { Findings = merged, GeneratedAt = now };
+        return new AdvisorReport { Findings = ordered, GeneratedAt = now };
     }
 
-    /// <summary>Attaches persisted lifecycle state (ack/snooze/dismiss/assign) and computes aging/escalation.</summary>
+    /// <summary>
+    /// Attaches persisted lifecycle state (ack/snooze/dismiss/assign), computes aging/escalation,
+    /// a "new" flag, and the composite priority score used for ranking.
+    /// </summary>
     private async Task<List<OperationsFinding>> MergeStateAsync(
         Guid tenantId, List<OperationsFinding> findings, DateTime now, CancellationToken ct)
     {
         Dictionary<string, AdvisorFindingState> states = await stateService.GetStatesAsync(tenantId, ct);
-        if (states.Count == 0) return findings;
 
         var result = new List<OperationsFinding>(findings.Count);
         foreach (OperationsFinding f in findings)
         {
             if (!states.TryGetValue(f.Id, out AdvisorFindingState? s))
             {
-                result.Add(f);
+                // No state row yet — treat as freshly surfaced.
+                result.Add(f with { IsNew = true, PriorityScore = Score(f, escalated: false) });
                 continue;
             }
 
@@ -182,9 +192,31 @@ public class OperationsAdvisorService(
                 FirstSeenAt = s.FirstSeenAt,
                 AgeDays = age,
                 IsEscalated = escalated,
+                IsNew = (now - s.FirstSeenAt) < TimeSpan.FromDays(1),
+                PriorityScore = Score(f, escalated),
             });
         }
         return result;
+    }
+
+    /// <summary>Composite urgency: severity + horizon + escalation, scaled down for low-confidence forecasts.</summary>
+    private static double Score(OperationsFinding f, bool escalated)
+    {
+        double s = f.Severity switch
+        {
+            AdvisorSeverity.Critical => 100,
+            AdvisorSeverity.Warning => 50,
+            _ => 10,
+        };
+        s += f.Horizon switch
+        {
+            AdvisorHorizon.Overdue => 40,
+            AdvisorHorizon.Today => 30,
+            AdvisorHorizon.ThisWeek => 12,
+            _ => 0,
+        };
+        if (escalated) s += 25;
+        return s * (f.Confidence <= 0 ? 1.0 : f.Confidence);
     }
 
     // ── Security: certificates, kubeconfigs, OAuth client credentials ──

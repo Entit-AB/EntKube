@@ -111,6 +111,10 @@ else
                                     <div class="d-flex align-items-center gap-2 flex-wrap">
                                         <span class="badge @SeverityClass(f.Severity)">@f.Severity</span>
                                         <span class="badge bg-light text-muted border"><i class="bi @CategoryIcon(f.Category) me-1"></i>@CategoryLabel(f.Category)</span>
+                                        @if (f.IsNew)
+                                        {
+                                            <span class="badge bg-info-subtle text-info border border-info-subtle"><i class="bi bi-stars me-1"></i>New</span>
+                                        }
                                         @if (f.IsEscalated)
                                         {
                                             <span class="badge bg-danger"><i class="bi bi-fire me-1"></i>Escalated · @f.AgeDays d</span>
