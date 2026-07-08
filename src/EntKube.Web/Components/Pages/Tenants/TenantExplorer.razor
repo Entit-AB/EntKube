@@ -15,7 +15,7 @@
    environment's Clusters. Services / Operations / Manage are tenant-
    scoped sections. Every level has an inline "+" to add/register.
    Existing detail/tab components are reused as the right-hand pane;
-   selection deep-links via the URL. Classic page: /tenants/{slug}/classic.
+   selection deep-links via the URL.
    ═══════════════════════════════════════════════════════════════════ *@
 
 <PageTitle>@(tenant?.Name ?? "Tenant")</PageTitle>
@@ -209,12 +209,6 @@ else
                     </button>
                 }
             </div>
-
-            <div class="tree-foot">
-                <a href="/tenants/@Slug/classic" class="small text-decoration-none text-muted">
-                    <i class="bi bi-arrow-left me-1"></i>Classic view
-                </a>
-            </div>
         </aside>
 
         <section class="detail-pane">
@@ -273,7 +267,7 @@ else
     private static readonly TreeGroup[] OpsGroups =
     [
         new("Monitoring", "bi-speedometer2",
-        [ new("overview", "Overview", "bi-speedometer2"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up") ]),
+        [ new("overview", "Overview", "bi-speedometer2"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
@@ -636,6 +630,7 @@ else
             case "dashboards": builder.OpenComponent<TenantDashboardsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "rum": builder.OpenComponent<TenantRumTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "telemetry-alerts": builder.OpenComponent<TelemetryAlertRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "telemetry-storage": builder.OpenComponent<TenantTelemetrySettings>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "analytics": builder.OpenComponent<TenantOpsAnalyticsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "sla": builder.OpenComponent<SlaTargetManager>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "maintenance": builder.OpenComponent<MaintenanceWindows>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
