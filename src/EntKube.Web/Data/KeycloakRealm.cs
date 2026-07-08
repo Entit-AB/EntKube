@@ -49,11 +49,26 @@ public class KeycloakRealm
     /// </summary>
     public Guid? KeycloakThemeId { get; set; }
 
+    /// <summary>
+    /// Cron schedule for automated realm backups (e.g. "0 3 * * *" for daily at 03:00).
+    /// Null means on-demand only. Requires <see cref="StorageLinkId"/>. Unlike CNPG/Mongo/
+    /// RabbitMQ — which push cron to a Kubernetes operator/CronJob — Keycloak has no operator,
+    /// so KeycloakBackupSchedulerService executes this cron in-app.
+    /// </summary>
+    public string? BackupSchedule { get; set; }
+
+    /// <summary>
+    /// The S3 bucket scheduled backups are written to. Required when <see cref="BackupSchedule"/>
+    /// is set; also the default destination offered for on-demand backups.
+    /// </summary>
+    public Guid? StorageLinkId { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation
     public KeycloakComponentConfig ComponentConfig { get; set; } = null!;
     public App? LinkedApp { get; set; }
     public KeycloakTheme? Theme { get; set; }
+    public StorageLink? StorageLink { get; set; }
     public ICollection<KeycloakBackup> Backups { get; set; } = [];
 }

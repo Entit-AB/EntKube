@@ -900,6 +900,44 @@ public class KeycloakService(
         };
     }
 
+    /// <summary>
+    /// Sets (or clears) the automated backup schedule for a realm. EntKube-side config only —
+    /// <c>KeycloakBackupSchedulerService</c> reads it and runs the export on cadence. A schedule
+    /// requires a storage bucket. Pass a null/blank schedule to disable automated backups.
+    /// </summary>
+    public async Task SetBackupScheduleAsync(
+        Guid tenantId, Guid realmId, string? schedule, Guid? storageLinkId,
+        CancellationToken ct = default)
+    {
+        schedule = string.IsNullOrWhiteSpace(schedule) ? null : schedule.Trim();
+        Guid? bucket = storageLinkId is null || storageLinkId == Guid.Empty ? null : storageLinkId;
+
+        if (schedule is not null)
+        {
+            string[] parts = schedule.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            try
+            {
+                Cronos.CronExpression.Parse(schedule,
+                    parts.Length >= 6 ? Cronos.CronFormat.IncludeSeconds : Cronos.CronFormat.Standard);
+            }
+            catch (Cronos.CronFormatException ex)
+            {
+                throw new InvalidOperationException($"Invalid cron schedule: {ex.Message}");
+            }
+            if (bucket is null)
+                throw new InvalidOperationException("A storage bucket is required for scheduled backups.");
+        }
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        KeycloakRealm realm = await db.KeycloakRealms
+            .FirstOrDefaultAsync(r => r.Id == realmId && r.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Realm not found.");
+
+        realm.BackupSchedule = schedule;
+        realm.StorageLinkId = bucket ?? realm.StorageLinkId;
+        await db.SaveChangesAsync(ct);
+    }
+
     public async Task UpdateRealmThemesAsync(
         Guid tenantId, Guid realmId, string? loginTheme, string? accountTheme,
         CancellationToken ct = default)

@@ -12,6 +12,7 @@ namespace EntKube.Web.Services;
 public class IncidentDispatcher(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     NotificationService notifications,
+    StormSuppressionService stormSuppression,
     ILogger<IncidentDispatcher> logger)
 {
     public async Task DispatchAsync(
@@ -39,9 +40,20 @@ public class IncidentDispatcher(
             .ToListAsync(ct);
         if (channels.Count == 0) return;
 
+        // Collapse a storm to one notification per root cause (throttled across cycles).
+        HashSet<Guid> notifiable = await stormSuppression.SelectNotifiableAsync(firing, ct);
+        int suppressed = firing.Count - notifiable.Count;
+        if (suppressed > 0)
+            logger.LogInformation(
+                "Storm suppression: notifying {Notify} of {Total} firing telemetry incidents on cluster {Cluster} ({Suppressed} correlated/throttled).",
+                notifiable.Count, firing.Count, clusterId, suppressed);
+
         foreach (AlertIncident inc in firing)
+        {
+            if (!notifiable.Contains(inc.Id)) continue;
             foreach (NotificationChannel ch in channels)
                 await SafeSendAsync(inc, ch, isFiring: true, ct);
+        }
 
         foreach (AlertIncident inc in resolved)
             foreach (NotificationChannel ch in channels)

@@ -2942,6 +2942,10 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<string>("AccountTheme")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("BackupSchedule")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
 
@@ -2970,6 +2974,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
 
+                    b.Property<Guid?>("StorageLinkId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uniqueidentifier");
 
@@ -2978,6 +2985,8 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("KeycloakThemeId");
 
                     b.HasIndex("LinkedAppId");
+
+                    b.HasIndex("StorageLinkId");
 
                     b.HasIndex("KeycloakComponentConfigId", "RealmName")
                         .IsUnique();
@@ -6012,9 +6021,16 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasForeignKey("LinkedAppId")
                         .OnDelete(DeleteBehavior.SetNull);
 
+                    b.HasOne("EntKube.Web.Data.StorageLink", "StorageLink")
+                        .WithMany()
+                        .HasForeignKey("StorageLinkId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.Navigation("ComponentConfig");
 
                     b.Navigation("LinkedApp");
+
+                    b.Navigation("StorageLink");
 
                     b.Navigation("Theme");
                 });

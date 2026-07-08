@@ -813,6 +813,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasKey(r => r.Id);
             entity.Property(r => r.RealmName).HasMaxLength(100).IsRequired();
             entity.Property(r => r.DisplayName).HasMaxLength(200).IsRequired();
+            entity.Property(r => r.BackupSchedule).HasMaxLength(100);
 
             entity.HasIndex(r => new { r.KeycloakComponentConfigId, r.RealmName }).IsUnique();
 
@@ -820,6 +821,11 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithMany(c => c.Realms)
                 .HasForeignKey(r => r.KeycloakComponentConfigId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(r => r.StorageLink)
+                .WithMany()
+                .HasForeignKey(r => r.StorageLinkId)
+                .OnDelete(DeleteBehavior.SetNull);
 
             entity.HasOne(r => r.LinkedApp)
                 .WithMany()

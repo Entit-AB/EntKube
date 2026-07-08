@@ -1,0 +1,231 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject OperationsAdvisorService Advisor
+
+@* Operations Advisor: turns raw signals (expiring secrets, open incidents, stale
+   backups) into one prioritized "what needs doing" feed, bucketed by time-to-impact.
+   Two lenses over the same findings — Ops (everything) and Customer (per-customer). *@
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <h5 class="mb-0"><i class="bi bi-lightbulb me-2"></i>Operations Advisor</h5>
+        <small class="text-muted">What needs doing — and by when — across security, reliability, and data protection.</small>
+    </div>
+    <AutoRefresh OnRefresh="Reload" IntervalSeconds="60" Enabled="true" LastRefreshed="lastRefreshed" />
+</div>
+
+@if (loadError is not null)
+{
+    <div class="alert alert-danger py-2 d-flex justify-content-between align-items-center">
+        <span>@loadError</span>
+        <button class="btn btn-sm btn-outline-danger" @onclick="Reload">Retry</button>
+    </div>
+}
+else if (report is null)
+{
+    <div class="text-center py-4">
+        <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+        <p class="text-muted small mt-2 mb-0">Analyzing signals…</p>
+    </div>
+}
+else
+{
+    @* ── Lens switch ── *@
+    <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+        <div class="btn-group btn-group-sm" role="group">
+            <button class="btn @(lens == Lens.Ops ? "btn-primary" : "btn-outline-primary")"
+                    @onclick="() => SetLens(Lens.Ops)">
+                <i class="bi bi-hdd-network me-1"></i>Ops
+            </button>
+            <button class="btn @(lens == Lens.Customer ? "btn-primary" : "btn-outline-primary")"
+                    @onclick="() => SetLens(Lens.Customer)">
+                <i class="bi bi-people me-1"></i>Customer
+            </button>
+        </div>
+        @if (lens == Lens.Customer)
+        {
+            <select class="form-select form-select-sm w-auto" @bind="selectedCustomer" @bind:after="StateHasChanged">
+                <option value="@Guid.Empty">All customers</option>
+                @foreach ((Guid id, string name) in report.Customers)
+                {
+                    <option value="@id">@name</option>
+                }
+            </select>
+            <span class="text-muted small">Showing only findings a customer can act on.</span>
+        }
+    </div>
+
+    @* ── Summary strip: counts by time horizon ── *@
+    <div class="d-flex flex-wrap gap-2 mb-4">
+        @foreach (AdvisorHorizon h in Horizons)
+        {
+            int n = VisibleFindings.Count(f => f.Horizon == h);
+            (string label, string _, string tone) = HorizonMeta(h);
+            <div class="card border-0 text-center px-3 py-2 @(n > 0 ? tone : "bg-light")"
+                 style="min-width:9rem">
+                <div class="fw-bold fs-4">@n</div>
+                <div class="text-muted small">@label</div>
+            </div>
+        }
+        <div class="card border-0 bg-light text-center px-3 py-2" style="min-width:7rem">
+            <div class="fw-bold fs-4 @(VisibleFindings.Any(f => f.Severity == AdvisorSeverity.Critical) ? "text-danger" : "")">
+                @VisibleFindings.Count(f => f.Severity == AdvisorSeverity.Critical)
+            </div>
+            <div class="text-muted small">Critical</div>
+        </div>
+    </div>
+
+    @if (VisibleFindings.Count == 0)
+    {
+        <EmptyState Icon="bi-check2-circle" Title="All clear"
+                    Message="@(lens == Lens.Customer ? "No open items for this customer." : "No open findings across secrets, incidents, or backups. Nice.")" />
+    }
+    else
+    {
+        @foreach (AdvisorHorizon h in Horizons)
+        {
+            List<OperationsFinding> bucket = VisibleFindings.Where(f => f.Horizon == h).ToList();
+            if (bucket.Count == 0) continue;
+            (string label, string icon, string tone) = HorizonMeta(h);
+
+            <div class="card mb-3">
+                <div class="card-header d-flex align-items-center gap-2 @tone">
+                    <i class="bi @icon"></i>
+                    <span class="fw-semibold">@label</span>
+                    <span class="badge bg-secondary-subtle text-secondary border ms-1">@bucket.Count</span>
+                    <span class="text-muted small ms-1">@HorizonHint(h)</span>
+                </div>
+                <div class="list-group list-group-flush">
+                    @foreach (OperationsFinding f in bucket)
+                    {
+                        <div class="list-group-item">
+                            <div class="d-flex justify-content-between align-items-start gap-3">
+                                <div class="flex-grow-1">
+                                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                                        <span class="badge @SeverityClass(f.Severity)">@f.Severity</span>
+                                        <span class="badge bg-light text-muted border"><i class="bi @CategoryIcon(f.Category) me-1"></i>@CategoryLabel(f.Category)</span>
+                                        <span class="fw-semibold">@f.Title</span>
+                                    </div>
+                                    @if (!string.IsNullOrWhiteSpace(f.Detail))
+                                    {
+                                        <div class="text-muted small mt-1">@f.Detail</div>
+                                    }
+                                    <div class="small mt-1 d-flex flex-wrap gap-3">
+                                        <span class="text-muted"><i class="bi bi-diagram-2 me-1"></i>@f.ScopeLabel</span>
+                                        @if (!string.IsNullOrWhiteSpace(f.TimingText))
+                                        {
+                                            <span class="text-muted"><i class="bi bi-clock-history me-1"></i>@f.TimingText</span>
+                                        }
+                                    </div>
+                                    @if (!string.IsNullOrWhiteSpace(f.Remediation))
+                                    {
+                                        <div class="small mt-1"><i class="bi bi-arrow-return-right me-1 text-primary"></i>@f.Remediation</div>
+                                    }
+                                </div>
+                                @if (!string.IsNullOrWhiteSpace(f.LinkSection) && OnNavigateTab.HasDelegate)
+                                {
+                                    <button class="btn btn-sm btn-outline-primary flex-shrink-0"
+                                            @onclick="() => OnNavigateTab.InvokeAsync(f.LinkSection)">
+                                        Go <i class="bi bi-arrow-right ms-1"></i>
+                                    </button>
+                                }
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    /// <summary>Deep-links a finding to the relevant tenant-explorer section.</summary>
+    [Parameter] public EventCallback<string> OnNavigateTab { get; set; }
+
+    private enum Lens { Ops, Customer }
+
+    private AdvisorReport? report;
+    private string? loadError;
+    private DateTime? lastRefreshed;
+    private Lens lens = Lens.Ops;
+    private Guid selectedCustomer = Guid.Empty;
+
+    // Findings after the active lens/customer filter — recomputed per render; lists are small.
+    private List<OperationsFinding> VisibleFindings =>
+        report is null ? [] : Filter(report.Findings).ToList();
+
+    private static readonly AdvisorHorizon[] Horizons =
+        [AdvisorHorizon.Overdue, AdvisorHorizon.Today, AdvisorHorizon.ThisWeek, AdvisorHorizon.Later];
+
+    protected override Task OnInitializedAsync() => Reload();
+
+    private async Task Reload()
+    {
+        loadError = null;
+        try
+        {
+            report = await Advisor.GetReportAsync(TenantId);
+            lastRefreshed = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            loadError = $"Could not analyze signals: {ex.Message}";
+        }
+        StateHasChanged();
+    }
+
+    private void SetLens(Lens l)
+    {
+        lens = l;
+        if (l == Lens.Ops) selectedCustomer = Guid.Empty;
+    }
+
+    private IEnumerable<OperationsFinding> Filter(IEnumerable<OperationsFinding> all)
+    {
+        if (lens == Lens.Ops) return all;
+        // Customer lens: only findings a customer owns and can act on.
+        IEnumerable<OperationsFinding> scoped = all.Where(f => f.CustomerId is not null);
+        if (selectedCustomer != Guid.Empty)
+            scoped = scoped.Where(f => f.CustomerId == selectedCustomer);
+        return scoped;
+    }
+
+    private static (string Label, string Icon, string Tone) HorizonMeta(AdvisorHorizon h) => h switch
+    {
+        AdvisorHorizon.Overdue => ("Overdue", "bi-exclamation-octagon-fill", "bg-danger-subtle text-danger"),
+        AdvisorHorizon.Today => ("Today", "bi-exclamation-triangle-fill", "bg-warning-subtle text-warning-emphasis"),
+        AdvisorHorizon.ThisWeek => ("This week", "bi-calendar-week", "bg-info-subtle text-info-emphasis"),
+        _ => ("Coming up", "bi-hourglass-split", "bg-light text-muted"),
+    };
+
+    private static string HorizonHint(AdvisorHorizon h) => h switch
+    {
+        AdvisorHorizon.Overdue => "should already have been done",
+        AdvisorHorizon.Today => "act within ~48 hours",
+        AdvisorHorizon.ThisWeek => "within the next week",
+        _ => "on the radar, no near-term deadline",
+    };
+
+    private static string SeverityClass(AdvisorSeverity s) => s switch
+    {
+        AdvisorSeverity.Critical => "bg-danger",
+        AdvisorSeverity.Warning => "bg-warning text-dark",
+        _ => "bg-secondary",
+    };
+
+    private static string CategoryLabel(AdvisorCategory c) => c switch
+    {
+        AdvisorCategory.Security => "Security",
+        AdvisorCategory.Reliability => "Reliability",
+        _ => "Data protection",
+    };
+
+    private static string CategoryIcon(AdvisorCategory c) => c switch
+    {
+        AdvisorCategory.Security => "bi-shield-lock",
+        AdvisorCategory.Reliability => "bi-activity",
+        _ => "bi-hdd-stack",
+    };
+}

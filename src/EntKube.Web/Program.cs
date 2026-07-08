@@ -252,6 +252,10 @@ public class Program
         builder.Services.AddScoped<KyvernoPolicyService>();
         builder.Services.AddScoped<KedaScalerService>();
         builder.Services.AddScoped<SecretExpiryService>();
+        builder.Services.AddScoped<IncidentCorrelationService>();
+        builder.Services.AddScoped<StormSuppressionService>();
+        builder.Services.AddScoped<ErrorBudgetService>();
+        builder.Services.AddScoped<OperationsAdvisorService>();
         builder.Services.AddScoped<CustomerNotificationService>();
 
         builder.Services.AddScoped<ComponentInstallOrchestrator>();
@@ -271,6 +275,7 @@ public class Program
         builder.Services.AddHostedService<AlertSyncService>();
         builder.Services.AddHostedService<AlertEscalationService>();
         builder.Services.AddHostedService<UptimeTrackingService>();
+        builder.Services.AddHostedService<KeycloakBackupSchedulerService>();
         builder.Services.AddHostedService<HeadscaleCertSyncService>();
         builder.Services.AddHostedService<SecretExpiryNotificationService>();
         builder.Services.AddHostedService<ObservedSecretRefreshService>();
