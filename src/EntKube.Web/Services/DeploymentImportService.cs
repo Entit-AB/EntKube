@@ -700,8 +700,12 @@ public class DeploymentImportService(
         string envName;
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
-            App? app = await db.Apps.FirstOrDefaultAsync(
-                a => a.CustomerId == request.CustomerId && a.Name == request.AppName, ct);
+            // When launched from within an app the target is fixed by id — reuse it and
+            // never resolve by name. Otherwise resolve/create by (customer, name).
+            App? app = request.AppId is Guid targetAppId
+                ? await db.Apps.FirstOrDefaultAsync(a => a.Id == targetAppId, ct)
+                : await db.Apps.FirstOrDefaultAsync(
+                    a => a.CustomerId == request.CustomerId && a.Name == request.AppName, ct);
 
             if (app is null)
             {
@@ -771,7 +775,10 @@ public class DeploymentImportService(
 
         if (deployment is null)
         {
-            string deployName = UniqueDeploymentName(existingDeployments, request.AppName, envName);
+            string requestedName = string.IsNullOrWhiteSpace(request.DeploymentName)
+                ? request.AppName
+                : request.DeploymentName.Trim();
+            string deployName = UniqueDeploymentName(existingDeployments, requestedName, envName);
             deployment = await deploymentService.CreateDeploymentAsync(
                 appId, deployName, DeploymentType.Yaml, request.EnvironmentId, cluster.Id,
                 preview.PrimaryNamespace, performedBy: request.PerformedBy, ct: ct,

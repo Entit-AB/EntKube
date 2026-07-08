@@ -363,35 +363,51 @@
                 @* ════════ Step 3: Target ════════ *@
                 else if (step == Step.Target && preview is not null)
                 {
-                    <div class="mb-2">
-                        <label class="form-label small fw-semibold">Customer</label>
-                        <select class="form-select" @bind="selectedCustomerId" @bind:after="OnCustomerChanged">
-                            <option value="">— select —</option>
-                            @foreach (Customer c in customers)
+                    @if (TargetApp is not null)
+                    {
+                        @* Launched from within an app — the target is fixed. *@
+                        <div class="alert alert-secondary py-2 small mb-2">
+                            <i class="bi bi-box-arrow-in-down me-1"></i>Importing into app <strong>@TargetApp.Name</strong>.
+                            A new deployment will be added to it.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="mb-2">
+                            <label class="form-label small fw-semibold">Customer</label>
+                            <select class="form-select" @bind="selectedCustomerId" @bind:after="OnCustomerChanged">
+                                <option value="">— select —</option>
+                                @foreach (Customer c in customers)
+                                {
+                                    <option value="@c.Id">@c.Name</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small fw-semibold">App name</label>
+                            <input class="form-control" @bind="appName" @bind:event="oninput" list="existing-app-names" placeholder="my-app" />
+                            <datalist id="existing-app-names">
+                                @foreach (Data.App a in customerApps)
+                                {
+                                    <option value="@a.Name"></option>
+                                }
+                            </datalist>
+                            @if (MatchingApp is not null)
                             {
-                                <option value="@c.Id">@c.Name</option>
+                                <div class="form-text text-info">
+                                    <i class="bi bi-info-circle me-1"></i>App exists — this import adds the selected environment to it.
+                                </div>
                             }
-                        </select>
-                    </div>
-                    <div class="mb-2">
-                        <label class="form-label small fw-semibold">App name</label>
-                        <input class="form-control" @bind="appName" @bind:event="oninput" list="existing-app-names" placeholder="my-app" />
-                        <datalist id="existing-app-names">
-                            @foreach (Data.App a in customerApps)
+                            else if (!string.IsNullOrWhiteSpace(appName))
                             {
-                                <option value="@a.Name"></option>
+                                <div class="form-text text-muted"><i class="bi bi-plus-circle me-1"></i>A new app will be created.</div>
                             }
-                        </datalist>
-                        @if (MatchingApp is not null)
-                        {
-                            <div class="form-text text-info">
-                                <i class="bi bi-info-circle me-1"></i>App exists — this import adds the selected environment to it.
-                            </div>
-                        }
-                        else if (!string.IsNullOrWhiteSpace(appName))
-                        {
-                            <div class="form-text text-muted"><i class="bi bi-plus-circle me-1"></i>A new app will be created.</div>
-                        }
+                        </div>
+                    }
+                    <div class="mb-2">
+                        <label class="form-label small fw-semibold">Deployment name</label>
+                        <input class="form-control" @bind="deploymentName" @bind:event="oninput" placeholder="@(appName.Length > 0 ? appName : "my-app")" />
+                        <div class="form-text text-muted">The name for this imported deployment within the app.</div>
                     </div>
                     <div class="mb-2">
                         <label class="form-label small fw-semibold">Environment</label>
@@ -519,6 +535,13 @@
     /// <summary>When set, the Target step's app name is pre-filled (e.g. re-import into an existing app).</summary>
     [Parameter] public string? PreselectAppName { get; set; }
 
+    /// <summary>
+    /// When set, the import is locked to this exact app (launched from within it): the
+    /// customer/app-name selection is hidden and the wizard only asks for a deployment
+    /// name and environment. Takes precedence over <see cref="PreselectAppName"/>.
+    /// </summary>
+    [Parameter] public Data.App? TargetApp { get; set; }
+
     private enum Step { Cluster, Source, Review, Target, Done }
     private Step step = Step.Source;
 
@@ -539,6 +562,7 @@
     private Guid selectedCustomerId;
     private Guid selectedEnvironmentId;
     private string appName = "";
+    private string deploymentName = "";
 
     protected override async Task OnInitializedAsync()
     {
@@ -569,7 +593,8 @@
     private ImportResult? result;
 
     private bool CanImport =>
-        selectedCustomerId != Guid.Empty && selectedEnvironmentId != Guid.Empty && !string.IsNullOrWhiteSpace(appName);
+        selectedCustomerId != Guid.Empty && selectedEnvironmentId != Guid.Empty
+        && !string.IsNullOrWhiteSpace(appName) && !string.IsNullOrWhiteSpace(deploymentName);
 
     private bool HasImportableContent =>
         preview is not null && (preview.Resources.Count > 0 || preview.Secrets.Count > 0
@@ -614,15 +639,21 @@
             selectedEnvironmentId = cluster.EnvironmentId;
         }
         // Pre-select the customer from the launch context (still user-changeable).
-        if (selectedCustomerId == Guid.Empty && PreselectCustomerId is Guid preCustomer)
+        if (selectedCustomerId == Guid.Empty && (TargetApp?.CustomerId ?? PreselectCustomerId) is Guid preCustomer)
         {
             selectedCustomerId = preCustomer;
         }
         if (string.IsNullOrWhiteSpace(appName))
         {
-            appName = !string.IsNullOrWhiteSpace(PreselectAppName)
-                ? PreselectAppName!
-                : preview?.PrimaryNamespace ?? "";
+            appName = TargetApp?.Name
+                ?? (!string.IsNullOrWhiteSpace(PreselectAppName) ? PreselectAppName! : preview?.PrimaryNamespace ?? "");
+        }
+        if (string.IsNullOrWhiteSpace(deploymentName))
+        {
+            // Default the deployment name to the workload's namespace, falling back to the app name.
+            deploymentName = !string.IsNullOrWhiteSpace(preview?.PrimaryNamespace)
+                ? preview!.PrimaryNamespace
+                : appName;
         }
         if (selectedCustomerId != Guid.Empty)
         {
@@ -653,6 +684,8 @@
             {
                 CustomerId = selectedCustomerId,
                 AppName = appName.Trim(),
+                AppId = TargetApp?.Id,
+                DeploymentName = deploymentName.Trim(),
                 EnvironmentId = selectedEnvironmentId,
                 Preview = preview,
                 PerformedBy = "import-wizard"
