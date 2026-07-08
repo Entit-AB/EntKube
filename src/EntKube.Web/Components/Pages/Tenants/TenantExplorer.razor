@@ -273,7 +273,7 @@ else
     private static readonly TreeGroup[] OpsGroups =
     [
         new("Monitoring", "bi-speedometer2",
-        [ new("overview", "Overview", "bi-speedometer2"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up") ]),
+        [ new("overview", "Overview", "bi-speedometer2"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
@@ -636,6 +636,7 @@ else
             case "dashboards": builder.OpenComponent<TenantDashboardsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "rum": builder.OpenComponent<TenantRumTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "telemetry-alerts": builder.OpenComponent<TelemetryAlertRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "telemetry-storage": builder.OpenComponent<TenantTelemetrySettings>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "analytics": builder.OpenComponent<TenantOpsAnalyticsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "sla": builder.OpenComponent<SlaTargetManager>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "maintenance": builder.OpenComponent<MaintenanceWindows>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
