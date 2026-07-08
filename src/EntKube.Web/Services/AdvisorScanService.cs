@@ -13,14 +13,10 @@ namespace EntKube.Web.Services;
 /// </summary>
 public class AdvisorScanService(
     IServiceScopeFactory scopeFactory,
-    IConfiguration configuration,
     ILogger<AdvisorScanService> logger) : BackgroundService
 {
     private static readonly TimeSpan Interval = TimeSpan.FromHours(1);
     private static readonly TimeSpan StartupDelay = TimeSpan.FromMinutes(2);
-
-    // Guards against sending more than one digest per UTC day (per process).
-    private DateOnly _lastDigestDate = DateOnly.MinValue;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -35,22 +31,20 @@ public class AdvisorScanService(
 
     private async Task RunAsync(CancellationToken ct)
     {
-        bool digestEnabled = configuration.GetValue("Advisor:Digest:Enabled", true);
-        int digestHour = configuration.GetValue("Advisor:Digest:HourUtc", 7);
         DateTime now = DateTime.UtcNow;
-        DateOnly today = DateOnly.FromDateTime(now);
-
-        bool sendDigestNow = digestEnabled && now.Hour == digestHour && _lastDigestDate != today;
 
         using IServiceScope scope = scopeFactory.CreateScope();
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
         var advisor = scope.ServiceProvider.GetRequiredService<OperationsAdvisorService>();
         var state = scope.ServiceProvider.GetRequiredService<AdvisorStateService>();
         var notifications = scope.ServiceProvider.GetRequiredService<NotificationService>();
+        var digestConfig = scope.ServiceProvider.GetRequiredService<AdvisorDigestConfigService>();
 
         List<Tenant> tenants;
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
             tenants = await db.Tenants.ToListAsync(ct);
+
+        Dictionary<Guid, AdvisorDigestConfig> configs = await digestConfig.GetAllAsync(ct);
 
         foreach (Tenant tenant in tenants)
         {
@@ -59,20 +53,22 @@ public class AdvisorScanService(
                 AdvisorReport report = await advisor.GetReportAsync(tenant.Id, ct);
                 await state.ReconcileAsync(tenant.Id, report.Findings.Select(f => f.Id).ToHashSet(), ct);
 
-                if (sendDigestNow)
-                    await MaybeSendDigestAsync(notifications, tenant, report, ct);
+                AdvisorDigestConfig cfg = configs.GetValueOrDefault(tenant.Id) ?? digestConfig.DefaultFor(tenant.Id);
+                if (AdvisorDigestConfigService.IsDue(cfg, now)
+                    && await MaybeSendDigestAsync(notifications, tenant, report, ct))
+                {
+                    await digestConfig.MarkSentAsync(tenant.Id, now, ct);
+                }
             }
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Advisor scan failed for tenant {Tenant}", tenant.Id);
             }
         }
-
-        if (sendDigestNow)
-            _lastDigestDate = today;
     }
 
-    private async Task MaybeSendDigestAsync(
+    /// <summary>Sends the digest if there is anything actionable. Returns true when a send occurred.</summary>
+    private async Task<bool> MaybeSendDigestAsync(
         NotificationService notifications, Tenant tenant, AdvisorReport report, CancellationToken ct)
     {
         // Only actionable, not-dismissed/snoozed items count toward a digest.
@@ -80,7 +76,7 @@ public class AdvisorScanService(
             .Where(f => f.State is not AdvisorFindingStatus.Dismissed and not AdvisorFindingStatus.Snoozed)
             .Where(f => f.Horizon is AdvisorHorizon.Overdue or AdvisorHorizon.Today)
             .ToList();
-        if (actionable.Count == 0) return;   // nothing urgent — stay quiet
+        if (actionable.Count == 0) return false;   // nothing urgent — stay quiet, retry next cycle
 
         int overdue = actionable.Count(f => f.Horizon == AdvisorHorizon.Overdue);
         int todayCount = actionable.Count(f => f.Horizon == AdvisorHorizon.Today);
@@ -102,8 +98,16 @@ public class AdvisorScanService(
             body.ToString(), severity, ct);
 
         if (ok)
+        {
             logger.LogInformation("Advisor digest sent for tenant {Tenant} to {N} channel(s).", tenant.Id, notified);
-        else if (err is not null && !err.StartsWith("No enabled"))
+            return true;
+        }
+
+        if (err is not null && err.StartsWith("No enabled"))
+            return true;   // no channels configured — count as "handled" so we don't retry all day
+
+        if (err is not null)
             logger.LogWarning("Advisor digest for tenant {Tenant} had issues: {Error}", tenant.Id, err);
+        return false;
     }
 }

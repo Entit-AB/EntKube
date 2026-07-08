@@ -65,6 +65,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<SlaTarget> SlaTargets => Set<SlaTarget>();
     public DbSet<AdvisorFindingState> AdvisorFindingStates => Set<AdvisorFindingState>();
     public DbSet<ResourceUsageSnapshot> ResourceUsageSnapshots => Set<ResourceUsageSnapshot>();
+    public DbSet<AdvisorDigestConfig> AdvisorDigestConfigs => Set<AdvisorDigestConfig>();
     public DbSet<ExternalRouteHealthHistory> ExternalRouteHealthHistories => Set<ExternalRouteHealthHistory>();
     public DbSet<VpnTunnel> VpnTunnels => Set<VpnTunnel>();
     public DbSet<VpnLocalEndpoint> VpnLocalEndpoints => Set<VpnLocalEndpoint>();
@@ -860,6 +861,15 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(s => s.Name).HasMaxLength(253).IsRequired();
             entity.HasIndex(s => new { s.ClusterId, s.Kind, s.SnapshotAt });
             entity.HasOne<KubernetesCluster>().WithMany().HasForeignKey(s => s.ClusterId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<AdvisorDigestConfig>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.Frequency).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.WeeklyDay).HasConversion<string>().HasMaxLength(20);
+            entity.HasIndex(c => c.TenantId).IsUnique();
+            entity.HasOne<Tenant>().WithMany().HasForeignKey(c => c.TenantId).OnDelete(DeleteBehavior.Cascade);
         });
 
         // KeycloakBackup — realm JSON snapshots stored in S3.
