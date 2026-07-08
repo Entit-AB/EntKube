@@ -1,9 +1,10 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
+@using EntKube.Web.Services.Telemetry
 @using Microsoft.EntityFrameworkCore
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject IngestTokenService IngestTokens
-@inject TelemetryStore Telemetry
+@inject ITelemetryIngest Telemetry
 @inject Microsoft.Extensions.Configuration.IConfiguration Config
 
 @* Cluster picker — required because LogBrowser is cluster-scoped *@

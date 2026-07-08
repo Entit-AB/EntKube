@@ -317,6 +317,41 @@ public class PrometheusService(
     }
 
     /// <summary>
+    /// Prometheus label-values lookup (<c>/api/v1/label/&lt;label&gt;/values</c>), optionally constrained by a
+    /// series <paramref name="matchSelector"/> (e.g. <c>{k8s_namespace_name=~"a|b"}</c>) over a lookback
+    /// window. Powers the metrics explorer's metric-name and service dropdowns now that metrics live in
+    /// Prometheus rather than the native store.
+    /// </summary>
+    public async Task<KubernetesOperationResult<List<string>>> GetLabelValuesAsync(
+        Guid clusterId, string label, string? matchSelector, TimeSpan lookback, CancellationToken ct = default)
+    {
+        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        if (info is null) return KubernetesOperationResult<List<string>>.Failure(error!);
+
+        long end = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        long start = end - (long)lookback.TotalSeconds;
+        string path = $"/api/v1/label/{Uri.EscapeDataString(label)}/values?start={start}&end={end}";
+        if (!string.IsNullOrEmpty(matchSelector))
+            path += $"&match[]={Q(matchSelector)}";
+
+        return await WithServiceAsync<List<string>>(
+            info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+            async (http, baseUrl, token) => ParseStringArray(await http.GetStringAsync($"{baseUrl}{path}", token)),
+            $"label values {label} for {clusterId}", ct);
+    }
+
+    private static List<string> ParseStringArray(string json)
+    {
+        var result = new List<string>();
+        using JsonDocument doc = JsonDocument.Parse(json);
+        if (doc.RootElement.TryGetProperty("data", out JsonElement data) && data.ValueKind == JsonValueKind.Array)
+            foreach (JsonElement e in data.EnumerateArray())
+                if (e.ValueKind == JsonValueKind.String) result.Add(e.GetString()!);
+        result.Sort(StringComparer.Ordinal);
+        return result;
+    }
+
+    /// <summary>
     /// Retrieves active alerts from Alertmanager.
     /// </summary>
     public async Task<KubernetesOperationResult<List<AlertInfo>>> GetAlertsAsync(

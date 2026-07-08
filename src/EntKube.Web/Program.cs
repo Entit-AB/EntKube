@@ -9,6 +9,7 @@ using EntKube.Web.Components;
 using EntKube.Web.Components.Account;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
+using EntKube.Web.Services.Telemetry;
 
 namespace EntKube.Web;
 
@@ -73,6 +74,7 @@ public class Program
             case "Postgres":
                 builder.Services.AddDbContext<ApplicationDbContext, PostgresApplicationDbContext>((sp, options) =>
                     options.UseNpgsql(connectionString)
+                        .ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.ManyServiceProvidersCreatedWarning))
                         .AddInterceptors(sp.GetRequiredService<KubeconfigMaterializationInterceptor>()));
                 builder.Services.AddSingleton<IDbContextFactory<ApplicationDbContext>>(
                     sp => new DelegatingDbContextFactory(() =>
@@ -87,6 +89,7 @@ public class Program
             case "SqlServer":
                 builder.Services.AddDbContext<ApplicationDbContext, SqlServerApplicationDbContext>((sp, options) =>
                     options.UseSqlServer(connectionString)
+                        .ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.ManyServiceProvidersCreatedWarning))
                         .AddInterceptors(sp.GetRequiredService<KubeconfigMaterializationInterceptor>()));
                 builder.Services.AddSingleton<IDbContextFactory<ApplicationDbContext>>(
                     sp => new DelegatingDbContextFactory(() =>
@@ -101,6 +104,7 @@ public class Program
             default: // "Sqlite"
                 builder.Services.AddDbContextFactory<ApplicationDbContext>((sp, options) =>
                     options.UseSqlite(connectionString)
+                        .ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.ManyServiceProvidersCreatedWarning))
                         .AddInterceptors(sp.GetRequiredService<KubeconfigMaterializationInterceptor>()));
                 break;
         }
@@ -146,28 +150,62 @@ public class Program
         builder.Services.AddScoped<KubernetesOperationsService>();
         builder.Services.AddScoped<NodeManagementService>();
         builder.Services.AddScoped<PrometheusService>();
-        // Native telemetry store: a dedicated, isolated Postgres database ("TelemetryConnection")
-        // for logs/traces, kept separate from the operational ApplicationDbContext so log volume
-        // can never threaten the control-plane DB. Disabled cleanly when no TelemetryConnection is set.
-        builder.Services.AddSingleton<TelemetryStore>();
+        // Telemetry engine: the self-built Lucene/S3 segment engine is the sole backend for logs, traces,
+        // and RUM. OTLP/RUM writes go through SegmentTelemetryStore (no per-request DB connection — the
+        // Postgres "too many clients" failure that motivated this cannot occur), and queries run over the
+        // Lucene index unioned across the active index and the sealed segments on object storage. Metrics
+        // are served by Prometheus (apps write there directly). There is no longer a Postgres telemetry
+        // store or a per-cluster telemetry DB.
+        SegmentEngineOptions segmentOptions = new()
+        {
+            DataPath = builder.Configuration.GetValue<string>("Telemetry:DataPath") ?? "/app/Data/telemetry",
+            RollMaxDocs = builder.Configuration.GetValue<long?>("Telemetry:SegmentMaxDocs") ?? 1_000_000,
+            RollMaxAge = TimeSpan.FromMinutes(builder.Configuration.GetValue<int?>("Telemetry:SegmentMaxAgeMinutes") ?? 60),
+            RetentionDays = builder.Configuration.GetValue<int?>("Telemetry:RetentionDays") ?? 14,
+        };
+        builder.Services.AddSingleton(segmentOptions);
+        // Object storage: S3/MinIO when Telemetry:ObjectStorage is configured, else a local-disk fallback
+        // under DataPath so the engine still seals/queries end-to-end on a single node without a bucket.
+        builder.Services.AddSingleton<ISegmentBlobStore>(sp =>
+        {
+            var s3 = new S3SegmentBlobStore(sp.GetRequiredService<IConfiguration>());
+            if (s3.IsConfigured) return s3;
+            s3.Dispose();
+            string localBlobs = System.IO.Path.Combine(segmentOptions.DataPath, "blobs");
+            System.IO.Directory.CreateDirectory(localBlobs);
+            return new LocalSegmentBlobStore(localBlobs);
+        });
+        builder.Services.AddSingleton<LogSegmentManager>();
+        builder.Services.AddSingleton<SpanSegmentManager>();
+        builder.Services.AddSingleton<RumSegmentManager>();
+        builder.Services.AddSingleton<ITelemetryIngest, SegmentTelemetryStore>();
+        builder.Services.AddScoped<ILogBackend, SegmentLogService>();
+        builder.Services.AddScoped<ITraceQueryService, SegmentTraceService>();
+        builder.Services.AddScoped<IRumQueryService, SegmentRumService>();
+        builder.Services.AddScoped<IMetricsQuery, PromMetricsService>();
+        // One seal/retention loop per signal (logs + spans + rum). Each is a SegmentSealService instance.
+        builder.Services.AddHostedService(sp => new SegmentSealService(
+            sp.GetRequiredService<LogSegmentManager>(), segmentOptions,
+            sp.GetRequiredService<ILogger<SegmentSealService>>()));
+        builder.Services.AddHostedService(sp => new SegmentSealService(
+            sp.GetRequiredService<SpanSegmentManager>(), segmentOptions,
+            sp.GetRequiredService<ILogger<SegmentSealService>>()));
+        builder.Services.AddHostedService(sp => new SegmentSealService(
+            sp.GetRequiredService<RumSegmentManager>(), segmentOptions,
+            sp.GetRequiredService<ILogger<SegmentSealService>>()));
         builder.Services.AddSingleton<IngestTokenService>();
         builder.Services.AddSingleton<IngestRateLimiter>();
         // Real User Monitoring: resolves per-site public keys for the public browser ingest endpoint.
         builder.Services.AddSingleton<RumSiteService>();
-        builder.Services.AddScoped<PgRumService>();
         builder.Services.AddScoped<ClusterTenantResolver>();
-        builder.Services.AddScoped<PgLogService>();
-        builder.Services.AddScoped<PgTraceService>();
-        builder.Services.AddScoped<PgMetricsService>();
         // Native telemetry alerting: rules evaluated over logs/spans → incidents via the existing pipeline.
         builder.Services.AddScoped<TelemetryAlertRuleService>();
         builder.Services.AddScoped<DashboardService>();
         builder.Services.AddScoped<IncidentDispatcher>();
         builder.Services.AddHostedService<TelemetryAlertEvaluator>();
-        // Backend-agnostic log facade: routes each cluster to the native store (when it has data)
+        // Backend-agnostic log facade: routes each cluster to the segment engine (when it has data)
         // or Loki. The log viewers inject this instead of LokiService.
         builder.Services.AddScoped<LogQueryService>();
-        builder.Services.AddHostedService<TelemetryMaintenanceService>();
         builder.Services.AddScoped<ComponentLifecycleService>();
         builder.Services.AddScoped<ExternalRouteService>();
         builder.Services.AddScoped<AppRouteService>();
@@ -405,7 +443,7 @@ public class Program
         // returns 503 (telemetry off), 401 (bad token), 413 (too large), or 400 (unparseable). The
         // collector retries on 5xx and drops on 4xx.
         app.MapPost("/ingest/otlp/v1/logs", async (
-            HttpContext httpContext, TelemetryStore telemetry, IngestTokenService tokens,
+            HttpContext httpContext, ITelemetryIngest telemetry, IngestTokenService tokens,
             IngestRateLimiter rateLimiter, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             ILogger log = loggerFactory.CreateLogger("OtlpIngest");
@@ -440,7 +478,7 @@ public class Program
         }).DisableAntiforgery();
 
         app.MapPost("/ingest/otlp/v1/traces", async (
-            HttpContext httpContext, TelemetryStore telemetry, IngestTokenService tokens,
+            HttpContext httpContext, ITelemetryIngest telemetry, IngestTokenService tokens,
             IngestRateLimiter rateLimiter, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             ILogger log = loggerFactory.CreateLogger("OtlpIngest");
@@ -470,36 +508,8 @@ public class Program
             return Results.Json(new { });
         }).DisableAntiforgery();
 
-        app.MapPost("/ingest/otlp/v1/metrics", async (
-            HttpContext httpContext, TelemetryStore telemetry, IngestTokenService tokens,
-            IngestRateLimiter rateLimiter, ILoggerFactory loggerFactory, CancellationToken ct) =>
-        {
-            ILogger log = loggerFactory.CreateLogger("OtlpIngest");
-            OtlpIngest.Result r = await OtlpIngest.ReadAsync(httpContext, telemetry, tokens, rateLimiter, log, ct);
-            if (r.Error is not null) return r.Error;
-
-            using System.Text.Json.JsonDocument doc = r.Doc!;
-            List<MetricIngestRecord> metrics;
-            try
-            {
-                metrics = OtlpMetricsParser.Parse(doc);
-            }
-            catch (Exception ex)
-            {
-                log.LogWarning(ex, "Failed to parse OTLP metrics payload.");
-                return Results.BadRequest();
-            }
-            try
-            {
-                await telemetry.WriteMetricsAsync(r.TenantId, r.ClusterId, metrics, ct);
-            }
-            catch (Exception ex)
-            {
-                log.LogError(ex, "Failed to persist OTLP metrics batch.");
-                return Results.StatusCode(StatusCodes.Status500InternalServerError);
-            }
-            return Results.Json(new { });
-        }).DisableAntiforgery();
+        // NB: there is no /ingest/otlp/v1/metrics endpoint — app metrics go straight to Prometheus (apps
+        // remote-write / are scraped), and EntKube only visualizes them via PromQL (PromMetricsService).
 
         // The first-party RUM snippet — embedded as <script src="…/rum/v1/rum.js" data-key="…">. Static,
         // cacheable, no per-site templating (the key comes from data-key, the ingest origin from the src).
@@ -532,7 +542,7 @@ public class Program
         }).DisableAntiforgery();
 
         app.MapPost("/ingest/rum/v1/{key}", async (
-            HttpContext httpContext, string key, TelemetryStore telemetry, RumSiteService sites,
+            HttpContext httpContext, string key, ITelemetryIngest telemetry, RumSiteService sites,
             IngestRateLimiter rateLimiter, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             ILogger log = loggerFactory.CreateLogger("RumIngest");

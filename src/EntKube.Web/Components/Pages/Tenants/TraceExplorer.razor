@@ -1,6 +1,7 @@
 @using EntKube.Web.Services
-@inject PgTraceService Traces
-@inject PgLogService Logs
+@using EntKube.Web.Services.Telemetry
+@inject ITraceQueryService Traces
+@inject ILogBackend Logs
 
 @if (!available && !isLoading)
 {

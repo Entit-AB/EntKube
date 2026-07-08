@@ -1,5 +1,6 @@
 @using EntKube.Web.Services
-@inject PgRumService Rum
+@using EntKube.Web.Services.Telemetry
+@inject IRumQueryService Rum
 
 @if (loading)
 {

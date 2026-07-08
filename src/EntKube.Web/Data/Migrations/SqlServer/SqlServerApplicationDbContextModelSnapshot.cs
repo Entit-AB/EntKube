@@ -4164,6 +4164,44 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("TelemetryAlertRules");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TelemetrySegment", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("DocCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("MaxTs")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime>("MinTs")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("ObjectKey")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("nvarchar(512)");
+
+                    b.Property<DateTime>("SealedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Signal")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<long>("SizeBytes")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Signal", "MaxTs", "MinTs");
+
+                    b.ToTable("TelemetrySegments");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Tenant", b =>
                 {
                     b.Property<Guid>("Id")
