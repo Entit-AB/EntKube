@@ -108,6 +108,10 @@ else if (selectedCustomer is not null)
                 <button class="btn btn-primary" @onclick="CreateApp" disabled="@string.IsNullOrWhiteSpace(newAppName)">
                     <i class="bi bi-plus-lg me-1"></i>Add App
                 </button>
+                <button class="btn btn-outline-primary" @onclick="() => showImportWizard = true"
+                        title="Adopt a workload already running in a cluster as a new app">
+                    <i class="bi bi-box-arrow-in-down me-1"></i>Import Deployment
+                </button>
             </div>
             @if (!string.IsNullOrEmpty(appError))
             {
@@ -115,6 +119,13 @@ else if (selectedCustomer is not null)
             }
         </div>
     </div>
+
+    @if (showImportWizard && selectedCustomer is not null)
+    {
+        <ImportDeploymentWizard TenantId="TenantId"
+                                PreselectCustomerId="selectedCustomer.Id"
+                                OnClose="OnImportClosed" />
+    }
 
     @* --- App cards --- *@
     <LoadingPanel Loading="@(apps is null)">
@@ -329,6 +340,7 @@ else
     // --- Level 2: Selected customer → apps ---
     private Customer? selectedCustomer;
     private List<Data.App>? apps;
+    private bool showImportWizard;
     private string newAppName = "";
     private string? appError;
     private string customerView = "apps"; // "apps" | "metrics"
@@ -442,6 +454,12 @@ else
     private async Task LoadApps()
     {
         apps = await TenantService.GetAppsAsync(selectedCustomer!.Id);
+    }
+
+    private async Task OnImportClosed()
+    {
+        showImportWizard = false;
+        await LoadApps();
     }
 
     private async Task CreateApp()

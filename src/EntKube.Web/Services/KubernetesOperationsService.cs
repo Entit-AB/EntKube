@@ -797,6 +797,12 @@ public class KubernetesOperationsService(
                     deployment.Name, deploymentId, performedBy ?? "system");
                 await auditService.RecordAsync(deploymentId, "DeleteFromCluster", "Deployment",
                     deployment.Name, performedBy: performedBy, ct: ct);
+
+                // Clear the applied-resource inventory so a later re-apply starts clean.
+                using ApplicationDbContext cleanupDb = dbFactory.CreateDbContext();
+                await cleanupDb.DeploymentAppliedResources
+                    .Where(r => r.DeploymentId == deploymentId)
+                    .ExecuteDeleteAsync(ct);
             }
             else
             {
@@ -927,6 +933,8 @@ public class KubernetesOperationsService(
                 $"apply -f {tempManifest} --kubeconfig {tempKubeconfig} --namespace {deployment.Namespace}",
                 ct);
 
+            string output = result.Output;
+
             if (result.Success)
             {
                 logger.LogInformation("YAML deployment {DeploymentId} applied to {Namespace} by {User}",
@@ -936,6 +944,19 @@ public class KubernetesOperationsService(
 
                 // Ensure the (possibly brand-new) namespace inherits the environment's Kyverno policies.
                 await ApplyKyvernoPoliciesAsync(deployment, ct);
+
+                // Prune resources that were applied before but are no longer in the manifest
+                // set — plain `kubectl apply` doesn't, so removed manifests orphan their
+                // resources. Failure here never fails the (already successful) apply.
+                try
+                {
+                    output += await PruneRemovedResourcesAsync(db, deployment, manifests, performedBy, ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Prune after apply failed for deployment {DeploymentId}", deploymentId);
+                    output += $"\n\nWarning: pruning of removed resources failed: {ex.Message}";
+                }
             }
             else
             {
@@ -944,7 +965,7 @@ public class KubernetesOperationsService(
             }
 
             return result.Success
-                ? KubernetesOperationResult<string>.Success(result.Output)
+                ? KubernetesOperationResult<string>.Success(output)
                 : KubernetesOperationResult<string>.Failure(result.Output);
         }
         finally
@@ -1486,6 +1507,106 @@ public class KubernetesOperationsService(
                 "kubectl",
                 $"delete {kind} {name} --namespace {ns} --kubeconfig {tempKubeconfig} --ignore-not-found",
                 ct);
+        }
+        finally
+        {
+            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+        }
+    }
+
+    /// <summary>
+    /// Diffs the just-applied manifest set against the deployment's applied-resource
+    /// inventory, deletes the resources that were removed (honoring keep-annotations
+    /// and never touching Namespaces), then rewrites the inventory to the new set.
+    /// Returns a human-readable summary to append to the apply output ("" when nothing pruned).
+    /// </summary>
+    private async Task<string> PruneRemovedResourcesAsync(
+        ApplicationDbContext db, AppDeployment deployment, List<DeploymentManifest> manifests,
+        string? performedBy, CancellationToken ct)
+    {
+        // Desired set from the current manifests (version-agnostic identity).
+        Dictionary<(string, string, string?, string), ManifestResourceRef> newSet = new();
+        foreach (DeploymentManifest m in manifests)
+        {
+            foreach (ManifestResourceRef r in ManifestResourceParser.Parse(m.YamlContent, deployment.Namespace))
+            {
+                newSet[r.Key] = r;
+            }
+        }
+
+        List<DeploymentAppliedResource> previous = await db.DeploymentAppliedResources
+            .Where(r => r.DeploymentId == deployment.Id)
+            .ToListAsync(ct);
+
+        // Prune what we recorded applying that is prunable, not a Namespace, and gone from the new set.
+        List<DeploymentAppliedResource> toPrune = previous
+            .Where(p => p.Prunable
+                && !string.Equals(p.Kind, "Namespace", StringComparison.Ordinal)
+                && !newSet.ContainsKey((p.Group, p.Kind, p.Namespace, p.Name)))
+            .ToList();
+
+        List<string> pruned = [];
+        List<string> failed = [];
+        string kubeconfig = deployment.Cluster!.Kubeconfig!;
+        foreach (DeploymentAppliedResource r in toPrune)
+        {
+            string label = $"{r.Kind}/{r.Name}" + (r.Namespace is null ? "" : $" (ns: {r.Namespace})");
+            if (await DeletePrunedResourceAsync(kubeconfig, r, ct))
+            {
+                pruned.Add(label);
+                await auditService.RecordAsync(deployment.Id, "PruneResource", r.Kind, r.Name,
+                    performedBy: performedBy, ct: ct);
+            }
+            else
+            {
+                failed.Add(label);
+            }
+        }
+
+        // Rewrite the inventory to reflect exactly what is now applied.
+        db.DeploymentAppliedResources.RemoveRange(previous);
+        foreach (ManifestResourceRef r in newSet.Values)
+        {
+            db.DeploymentAppliedResources.Add(new DeploymentAppliedResource
+            {
+                Id = Guid.NewGuid(),
+                DeploymentId = deployment.Id,
+                Group = r.Group,
+                Version = r.Version,
+                Kind = r.Kind,
+                Name = r.Name,
+                Namespace = r.Namespace,
+                Prunable = r.Prunable
+            });
+        }
+        await db.SaveChangesAsync(ct);
+
+        string summary = "";
+        if (pruned.Count > 0)
+        {
+            summary += $"\n\nPruned {pruned.Count} orphaned resource(s): {string.Join(", ", pruned)}";
+        }
+        if (failed.Count > 0)
+        {
+            summary += $"\n\nFailed to prune {failed.Count} resource(s): {string.Join(", ", failed)}";
+        }
+        return summary;
+    }
+
+    /// <summary>Deletes a single pruned resource by kind(.group)/name, scoping to its namespace only when it has one.</summary>
+    private async Task<bool> DeletePrunedResourceAsync(string kubeconfig, DeploymentAppliedResource r, CancellationToken ct)
+    {
+        string target = string.IsNullOrEmpty(r.Group) ? r.Kind : $"{r.Kind}.{r.Group}";
+        string nsArg = string.IsNullOrEmpty(r.Namespace) ? "" : $" --namespace {r.Namespace}";
+        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
+        try
+        {
+            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+            HelmExecutionResult res = await RunCliAsync(
+                "kubectl",
+                $"delete {target} {r.Name}{nsArg} --kubeconfig {tempKubeconfig} --ignore-not-found",
+                ct);
+            return res.Success;
         }
         finally
         {

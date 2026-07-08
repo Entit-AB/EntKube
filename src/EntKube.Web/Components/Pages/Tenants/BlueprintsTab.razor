@@ -1,6 +1,7 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject ClusterBlueprintService BlueprintService
+@inject TenantService TenantService
 @inject ToastService Toasts
 
 @* Tenant-scoped cluster blueprints: reusable, ordered recipes of catalog
@@ -249,6 +250,14 @@
                                     }
                                 }
 
+                                @if (variables.Count > 0)
+                                {
+                                    <div class="form-text small">
+                                        Tip: any value may reference a variable as <code>${name}</code>. Defined:
+                                        @string.Join(", ", variables.Select(v => "${" + v.Name + "}"))
+                                    </div>
+                                }
+
                                 <div class="mt-2">
                                     <button class="btn btn-sm btn-success" @onclick="SaveStep" disabled="@(!CanSaveStep)">Save step</button>
                                     <button class="btn btn-sm btn-outline-secondary" @onclick="CancelStepForm">Cancel</button>
@@ -256,6 +265,102 @@
                             }
                         </div>
                     }
+
+                    <!-- Variables -->
+                    <div class="border-top pt-3 mt-3">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <div>
+                                <span class="fw-semibold"><i class="bi bi-braces me-1"></i>Variables</span>
+                                <div class="small text-muted">
+                                    Factor out per-environment values (domains, cluster issuer, storage links). Reference them in step
+                                    parameters as <code>${name}</code>; at bootstrap they resolve from the target cluster's environment.
+                                </div>
+                            </div>
+                            <button class="btn btn-sm btn-outline-primary" @onclick="StartAddVariable">
+                                <i class="bi bi-plus-lg me-1"></i>Add variable
+                            </button>
+                        </div>
+
+                        @if (showVariableForm)
+                        {
+                            <div class="border rounded p-3 bg-light mb-2">
+                                <h6>@(editingVariableId is null ? "Add variable" : "Edit variable")</h6>
+                                <div class="row g-2 mb-2">
+                                    <div class="col-md-4">
+                                        <label class="form-label small mb-0">Name</label>
+                                        <input class="form-control form-control-sm" placeholder="domain" @bind="variableName" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small mb-0">Default value (optional)</label>
+                                        <input class="form-control form-control-sm" @bind="variableDefault" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small mb-0">Description (optional)</label>
+                                        <input class="form-control form-control-sm" @bind="variableDescription" />
+                                    </div>
+                                </div>
+                                <button class="btn btn-sm btn-success" @onclick="SaveVariable" disabled="@string.IsNullOrWhiteSpace(variableName)">Save variable</button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showVariableForm = false">Cancel</button>
+                            </div>
+                        }
+
+                        @if (variables.Count == 0)
+                        {
+                            <div class="text-muted small">No variables defined.</div>
+                        }
+                        else
+                        {
+                            <div class="table-responsive">
+                                <table class="table table-sm align-middle mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th style="min-width: 10rem;">Variable</th>
+                                            @foreach (Data.Environment env in environments)
+                                            {
+                                                <th>@env.Name</th>
+                                            }
+                                            <th>Default</th>
+                                            <th class="text-end"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (BlueprintVariable v in variables)
+                                        {
+                                            <tr>
+                                                <td>
+                                                    <div class="fw-semibold"><code>${@v.Name}</code></div>
+                                                    @if (!string.IsNullOrWhiteSpace(v.Description))
+                                                    {
+                                                        <small class="text-muted">@v.Description</small>
+                                                    }
+                                                </td>
+                                                @foreach (Data.Environment env in environments)
+                                                {
+                                                    <td>
+                                                        <input class="form-control form-control-sm"
+                                                               value="@ValueFor(v, env.Id)"
+                                                               @onchange="e => SetVariableValue(v.Id, env.Id, e.Value?.ToString())" />
+                                                    </td>
+                                                }
+                                                <td><span class="text-muted small">@(v.DefaultValue ?? "—")</span></td>
+                                                <td class="text-end">
+                                                    <div class="btn-group btn-group-sm">
+                                                        <button class="btn btn-outline-primary" title="Edit" aria-label="@($"Edit variable {v.Name}")" @onclick="() => StartEditVariable(v)">
+                                                            <i class="bi bi-pencil"></i>
+                                                        </button>
+                                                        <button class="btn btn-outline-danger" title="Delete" aria-label="@($"Delete variable {v.Name}")"
+                                                                @onclick='() => pendingConfirm = new PendingConfirm($"Delete variable \"{v.Name}\"? Steps referencing ${{{v.Name}}} will keep the literal placeholder.", "Delete variable", () => DeleteVariable(v.Id))'>
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        }
+                    </div>
 
                     <BlueprintRolloutPanel BlueprintId="selected.Id" @key="selected.Id" />
                 </div>
@@ -270,6 +375,15 @@
     private List<ClusterBlueprint> blueprints = [];
     private ClusterBlueprint? selected;
     private string? error;
+
+    // Variables
+    private List<Data.Environment> environments = [];
+    private List<BlueprintVariable> variables = [];
+    private bool showVariableForm;
+    private Guid? editingVariableId;
+    private string variableName = "";
+    private string? variableDefault;
+    private string? variableDescription;
 
     private bool showCreate;
     private string newName = "";
@@ -294,7 +408,11 @@
 
     private bool CanSaveStep => CanShowStepFields && !string.IsNullOrWhiteSpace(stepName);
 
-    protected override async Task OnInitializedAsync() => await LoadBlueprints();
+    protected override async Task OnInitializedAsync()
+    {
+        environments = await TenantService.GetEnvironmentsAsync(TenantId);
+        await LoadBlueprints();
+    }
 
     private async Task LoadBlueprints()
     {
@@ -304,7 +422,9 @@
     private async Task SelectBlueprint(Guid id)
     {
         CancelStepForm();
+        showVariableForm = false;
         selected = await BlueprintService.GetBlueprintAsync(id);
+        variables = await BlueprintService.GetVariablesAsync(id);
     }
 
     private async Task CreateBlueprint()
@@ -336,6 +456,68 @@
         {
             Toasts.Error($"Failed to delete blueprint \"{name}\": {ex.Message}");
         }
+    }
+
+    // ── Variables ──
+
+    private string ValueFor(BlueprintVariable v, Guid environmentId) =>
+        v.Values.FirstOrDefault(x => x.EnvironmentId == environmentId)?.Value ?? "";
+
+    private void StartAddVariable()
+    {
+        editingVariableId = null;
+        variableName = "";
+        variableDefault = null;
+        variableDescription = null;
+        showVariableForm = true;
+    }
+
+    private void StartEditVariable(BlueprintVariable v)
+    {
+        editingVariableId = v.Id;
+        variableName = v.Name;
+        variableDefault = v.DefaultValue;
+        variableDescription = v.Description;
+        showVariableForm = true;
+    }
+
+    private async Task SaveVariable()
+    {
+        error = null;
+        try
+        {
+            if (editingVariableId is Guid id)
+            {
+                await BlueprintService.UpdateVariableAsync(id, variableName, variableDescription, variableDefault);
+            }
+            else
+            {
+                await BlueprintService.AddVariableAsync(selected!.Id, variableName, variableDescription, variableDefault);
+            }
+            showVariableForm = false;
+            editingVariableId = null;
+            variables = await BlueprintService.GetVariablesAsync(selected!.Id);
+        }
+        catch (InvalidOperationException ex) { error = ex.Message; }
+    }
+
+    private async Task DeleteVariable(Guid variableId)
+    {
+        try
+        {
+            await BlueprintService.DeleteVariableAsync(variableId);
+            variables = await BlueprintService.GetVariablesAsync(selected!.Id);
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete variable: {ex.Message}");
+        }
+    }
+
+    private async Task SetVariableValue(Guid variableId, Guid environmentId, string? value)
+    {
+        await BlueprintService.SetVariableValueAsync(variableId, environmentId, value);
+        variables = await BlueprintService.GetVariablesAsync(selected!.Id);
     }
 
     // ── Step editing ──

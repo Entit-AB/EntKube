@@ -7,6 +7,7 @@
 @inject ComponentInstallOrchestrator InstallOrchestrator
 @inject ExternalRouteService RouteService
 @inject ComponentScanService ScanService
+@inject BlueprintFromClusterService BlueprintFromClusterService
 @inject KeycloakService KeycloakService
 @inject HarborService HarborService
 @inject LokiService LokiService
@@ -523,21 +524,67 @@ else if (section == "components")
                     <i class="bi bi-search me-1"></i><span>Scan Components</span>
                 }
             </button>
-            <button class="btn btn-outline-primary btn-sm" @onclick="() => showImportWizard = true">
-                <i class="bi bi-box-arrow-in-down me-1"></i><span>Import Deployment</span>
+            <button class="btn btn-outline-primary btn-sm" @onclick="() => showBlueprintForm = !showBlueprintForm"
+                    title="Capture this cluster's components and services as a reusable blueprint">
+                <i class="bi bi-diagram-3 me-1"></i><span>Create Blueprint</span>
             </button>
         </div>
     }
 
-    @if (showImportWizard)
+    @if (showBlueprintForm)
     {
-        <ImportDeploymentWizard Cluster="Cluster" TenantId="TenantId" OnClose="() => showImportWizard = false" />
+        <div class="card shadow-sm mb-3 border-primary">
+            <div class="card-header bg-primary bg-opacity-10 d-flex align-items-center justify-content-between py-2">
+                <span><i class="bi bi-diagram-3 me-2 text-primary"></i><strong>Create blueprint from this cluster</strong></span>
+                <button class="btn btn-sm btn-outline-secondary" aria-label="Close" @onclick="() => showBlueprintForm = false">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+            <div class="card-body">
+                <p class="small text-muted mb-2">
+                    Captures installed catalog components and CNPG/Redis/RabbitMQ services as blueprint steps.
+                    Cluster-specific values (domains, cluster issuer, storage links, database references) become
+                    <code>${variables}</code> seeded with this environment's values. Secrets are not copied.
+                </p>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-5">
+                        <label class="form-label small mb-0">Blueprint name</label>
+                        <input class="form-control form-control-sm" placeholder="e.g. Standard Platform" @bind="blueprintName" />
+                    </div>
+                    <div class="col-md-7">
+                        <label class="form-label small mb-0">Description (optional)</label>
+                        <input class="form-control form-control-sm" @bind="blueprintDescription" />
+                    </div>
+                </div>
+                <button class="btn btn-sm btn-primary" @onclick="CreateBlueprintFromCluster"
+                        disabled="@(generatingBlueprint || string.IsNullOrWhiteSpace(blueprintName))">
+                    @if (generatingBlueprint)
+                    {
+                        <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+                        <span>Creating…</span>
+                    }
+                    else
+                    {
+                        <span>Create blueprint</span>
+                    }
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showBlueprintForm = false">Cancel</button>
+            </div>
+        </div>
     }
 
     @if (!string.IsNullOrEmpty(componentError))
     {
         <div class="alert alert-danger py-1 small mb-3">
             <i class="bi bi-exclamation-triangle me-1"></i>@componentError
+        </div>
+    }
+
+    @if (!string.IsNullOrEmpty(blueprintNotice))
+    {
+        <div class="alert alert-success py-2 small mb-3 d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-check-circle me-1"></i>@blueprintNotice</span>
+            <button class="btn-close" aria-label="Dismiss" @onclick="() => blueprintNotice = null"></button>
         </div>
     }
 
@@ -1489,7 +1536,13 @@ else if (section == "components")
 
     private string section = "monitoring";
     private bool confirmDelete;
-    private bool showImportWizard;
+
+    // Create-blueprint-from-cluster
+    private bool showBlueprintForm;
+    private bool generatingBlueprint;
+    private string blueprintName = "";
+    private string? blueprintDescription;
+    private string? blueprintNotice;
 
     // Components
     private List<ClusterComponent>? components;
@@ -1668,6 +1721,38 @@ else if (section == "components")
         finally
         {
             scanning = false;
+        }
+    }
+
+    private async Task CreateBlueprintFromCluster()
+    {
+        componentError = null;
+        blueprintNotice = null;
+        generatingBlueprint = true;
+        try
+        {
+            BlueprintFromClusterService.GenerateResult result =
+                await BlueprintFromClusterService.GenerateAsync(Cluster.Id, blueprintName, blueprintDescription);
+
+            string skippedNote = result.Skipped.Count > 0
+                ? $" Skipped {result.Skipped.Count} unrecognized component(s): {string.Join(", ", result.Skipped)}."
+                : "";
+            blueprintNotice =
+                $"Created blueprint \"{result.Blueprint.Name}\" with {result.ComponentSteps} component step(s), " +
+                $"{result.ServiceSteps} service step(s) and {result.VariablesCreated} variable(s). " +
+                $"Open it under the tenant's Blueprints section to review and set values for other environments.{skippedNote}";
+
+            showBlueprintForm = false;
+            blueprintName = "";
+            blueprintDescription = null;
+        }
+        catch (Exception ex)
+        {
+            componentError = $"Failed to create blueprint: {ex.Message}";
+        }
+        finally
+        {
+            generatingBlueprint = false;
         }
     }
 

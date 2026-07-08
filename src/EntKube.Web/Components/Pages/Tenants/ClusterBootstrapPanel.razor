@@ -83,6 +83,52 @@
                             </li>
                         }
                     </ol>
+
+                    @if (variablePreview is not null && variablePreview.Variables.Count > 0)
+                    {
+                        <div class="card bg-light mb-3">
+                            <div class="card-body py-2">
+                                <div class="fw-semibold small mb-1">
+                                    <i class="bi bi-braces me-1"></i>Variables for this cluster's environment
+                                </div>
+                                <div class="small text-muted mb-2">
+                                    <code>${name}</code> tokens in the steps above resolve to these values at bootstrap.
+                                </div>
+                                <div class="table-responsive">
+                                    <table class="table table-sm mb-0">
+                                        <tbody>
+                                            @foreach (ClusterBlueprintService.VariablePreview v in variablePreview.Variables)
+                                            {
+                                                <tr>
+                                                    <td class="fw-semibold" style="width: 14rem;"><code>${@v.Name}</code></td>
+                                                    <td>
+                                                        @if (v.Resolved)
+                                                        {
+                                                            <span>@v.Value</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>no value for this environment (token left as-is)</span>
+                                                        }
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                                @if (variablePreview.UnresolvedReferences.Count > 0)
+                                {
+                                    <div class="alert alert-warning py-1 px-2 small mt-2 mb-0">
+                                        <i class="bi bi-exclamation-triangle me-1"></i>
+                                        Steps reference undefined variable(s):
+                                        @string.Join(", ", variablePreview.UnresolvedReferences.Select(r => "${" + r + "}"))
+                                        — these will be applied literally. Define them under the blueprint's Variables, or override the value above.
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+
                     <button class="btn btn-primary btn-sm" @onclick="StartBootstrap">
                         <i class="bi bi-play-fill me-1"></i>Start bootstrap
                     </button>
@@ -177,6 +223,7 @@
     private ClusterBlueprint? reviewBlueprint;
     // Per-step editable parameters (step.Id → param map), pre-filled from the blueprint.
     private Dictionary<Guid, Dictionary<string, string>> overrides = new();
+    private ClusterBlueprintService.VariablesPreviewResult? variablePreview;
 
     private Guid? expandedRunId;
     private BootstrapRun? runDetail;
@@ -211,6 +258,7 @@
     {
         selectedBlueprintId = id;
         reviewBlueprint = null;
+        variablePreview = null;
         overrides = new();
         if (Guid.TryParse(id, out Guid bid))
         {
@@ -228,6 +276,7 @@
             {
                 overrides[step.Id] = ClusterBlueprintService.DeserializeParams(step.ParametersJson);
             }
+            variablePreview = await BlueprintService.PreviewVariablesAsync(ClusterId, blueprintId);
         }
         StateHasChanged();
     }
@@ -241,6 +290,7 @@
             await BlueprintService.StartBootstrapAsync(ClusterId, reviewBlueprint.Id, overrides, triggeredBy: null);
             reviewBlueprint = null;
             selectedBlueprintId = null;
+            variablePreview = null;
             await RefreshRuns();
             if (activeRun is not null)
             {

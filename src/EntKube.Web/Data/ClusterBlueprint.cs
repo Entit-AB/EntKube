@@ -36,4 +36,7 @@ public class ClusterBlueprint
     // Navigation
     public Tenant Tenant { get; set; } = null!;
     public ICollection<BlueprintStep> Steps { get; set; } = [];
+
+    /// <summary>Per-blueprint variables, each with a value per environment, referenced as ${Name} in step parameters.</summary>
+    public ICollection<BlueprintVariable> Variables { get; set; } = [];
 }

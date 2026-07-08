@@ -33,6 +33,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<AppDeployment> AppDeployments => Set<AppDeployment>();
     public DbSet<DeploymentManifest> DeploymentManifests => Set<DeploymentManifest>();
     public DbSet<DeploymentResource> DeploymentResources => Set<DeploymentResource>();
+    public DbSet<DeploymentAppliedResource> DeploymentAppliedResources => Set<DeploymentAppliedResource>();
     public DbSet<CustomerAccess> CustomerAccesses => Set<CustomerAccess>();
     public DbSet<CnpgCluster> CnpgClusters => Set<CnpgCluster>();
     public DbSet<CnpgDatabase> CnpgDatabases => Set<CnpgDatabase>();
@@ -110,6 +111,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<BootstrapStepRun> BootstrapStepRuns => Set<BootstrapStepRun>();
     public DbSet<BlueprintRollout> BlueprintRollouts => Set<BlueprintRollout>();
     public DbSet<BlueprintRolloutTarget> BlueprintRolloutTargets => Set<BlueprintRolloutTarget>();
+    public DbSet<BlueprintVariable> BlueprintVariables => Set<BlueprintVariable>();
+    public DbSet<BlueprintVariableValue> BlueprintVariableValues => Set<BlueprintVariableValue>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
@@ -572,6 +575,25 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithMany(r => r.ChildResources)
                 .HasForeignKey(r => r.ParentResourceId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // DeploymentAppliedResource — the applied-manifest inventory for non-Helm
+        // deployments; diffed on the next apply to prune removed resources.
+
+        builder.Entity<DeploymentAppliedResource>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => r.DeploymentId);
+            entity.Property(r => r.Group).HasMaxLength(100).IsRequired();
+            entity.Property(r => r.Version).HasMaxLength(20).IsRequired();
+            entity.Property(r => r.Kind).HasMaxLength(100).IsRequired();
+            entity.Property(r => r.Name).HasMaxLength(253).IsRequired();
+            entity.Property(r => r.Namespace).HasMaxLength(63);
+
+            entity.HasOne(r => r.Deployment)
+                .WithMany(d => d.AppliedResources)
+                .HasForeignKey(r => r.DeploymentId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         // CustomerAccess — composite key on (UserId, CustomerId) ensures
@@ -2109,6 +2131,38 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(t => t.Rollout)
                 .WithMany(r => r.Targets)
                 .HasForeignKey(t => t.RolloutId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BlueprintVariable — a named per-blueprint variable (${Name}); cascade from blueprint.
+        // Name unique within a blueprint.
+
+        builder.Entity<BlueprintVariable>(entity =>
+        {
+            entity.HasKey(v => v.Id);
+            entity.HasIndex(v => new { v.BlueprintId, v.Name }).IsUnique();
+            entity.Property(v => v.Name).HasMaxLength(200).IsRequired();
+            entity.Property(v => v.Description).HasMaxLength(2000);
+            entity.Property(v => v.DefaultValue).HasMaxLength(2000);
+
+            entity.HasOne(v => v.Blueprint)
+                .WithMany(b => b.Variables)
+                .HasForeignKey(v => v.BlueprintId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BlueprintVariableValue — a variable's value for one environment; cascade from variable.
+        // One value per (variable, environment).
+
+        builder.Entity<BlueprintVariableValue>(entity =>
+        {
+            entity.HasKey(v => v.Id);
+            entity.HasIndex(v => new { v.VariableId, v.EnvironmentId }).IsUnique();
+            entity.Property(v => v.Value).HasMaxLength(2000).IsRequired();
+
+            entity.HasOne(v => v.Variable)
+                .WithMany(v => v.Values)
+                .HasForeignKey(v => v.VariableId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }

@@ -79,6 +79,10 @@ public class DeploymentImportService(
 
         await MatchPostgresInstancesAsync(cluster, preview, ct);
 
+        // Optional enrichment: if ArgoCD is present, list its Application CRs so the
+        // operator can see what it manages. ArgoCD is never required — absence is silent.
+        await ScanArgoApplicationsAsync(client, preview, ct);
+
         preview.Resources = preview.Resources
             .OrderBy(r => r.SortOrder).ThenBy(r => r.Namespace).ThenBy(r => r.Kind).ThenBy(r => r.Name)
             .ToList();
@@ -1107,6 +1111,102 @@ public class DeploymentImportService(
         }
 
         return [];
+    }
+
+    /// <summary>Lists a custom resource across all namespaces, trying each version until one responds.</summary>
+    private async Task<List<JsonNode>> ListAllCrAsync(
+        Kubernetes client, string group, string[] versions, string plural, CancellationToken ct)
+    {
+        foreach (string version in versions)
+        {
+            try
+            {
+                object raw = await client.CustomObjects.ListCustomObjectForAllNamespacesAsync(group, version, plural, cancellationToken: ct);
+                string json = JsonSerializer.Serialize(raw);
+                JsonNode? root = JsonNode.Parse(json);
+
+                if (root?["items"] is JsonArray items)
+                {
+                    List<JsonNode> result = [];
+                    foreach (JsonNode? node in items)
+                    {
+                        if (node is not null)
+                        {
+                            result.Add(node);
+                        }
+                    }
+                    return result;
+                }
+            }
+            catch
+            {
+                // CRD/version not present or no permission — try the next version.
+            }
+        }
+
+        return [];
+    }
+
+    /// <summary>Best-effort string read of a JSON node (null when absent or not a string).</summary>
+    private static string? Str(JsonNode? node)
+    {
+        try { return node?.GetValue<string>(); }
+        catch { return node?.ToString(); }
+    }
+
+    /// <summary>
+    /// Lists ArgoCD <c>Application</c> CRs on the cluster (across all namespaces) into the
+    /// preview as informational entries. Silently no-ops when ArgoCD's CRD is absent — it
+    /// is never a requirement. Applications targeting a scanned namespace are listed first.
+    /// </summary>
+    private async Task ScanArgoApplicationsAsync(Kubernetes client, ImportPreview preview, CancellationToken ct)
+    {
+        List<JsonNode> apps = await ListAllCrAsync(client, "argoproj.io", ["v1alpha1"], "applications", ct);
+        if (apps.Count == 0)
+        {
+            return;
+        }
+
+        foreach (JsonNode app in apps)
+        {
+            try
+            {
+                string? name = Str(app["metadata"]?["name"]);
+                if (string.IsNullOrEmpty(name))
+                {
+                    continue;
+                }
+
+                JsonNode? spec = app["spec"];
+                // ArgoCD supports either a single spec.source or a spec.sources[] array.
+                JsonNode? source = spec?["source"] ?? (spec?["sources"] as JsonArray)?.FirstOrDefault();
+                JsonNode? dest = spec?["destination"];
+                JsonNode? status = app["status"];
+
+                preview.ArgoApplications.Add(new DetectedArgoApplication
+                {
+                    Name = name,
+                    Project = Str(spec?["project"]),
+                    RepoUrl = Str(source?["repoURL"]),
+                    Path = Str(source?["path"]),
+                    TargetRevision = Str(source?["targetRevision"]),
+                    DestinationNamespace = Str(dest?["namespace"]),
+                    DestinationServer = Str(dest?["server"]) ?? Str(dest?["name"]),
+                    SyncStatus = Str(status?["sync"]?["status"]),
+                    HealthStatus = Str(status?["health"]?["status"])
+                });
+            }
+            catch
+            {
+                // Skip any Application whose shape we can't parse.
+            }
+        }
+
+        HashSet<string> scanned = new(preview.Namespaces, StringComparer.Ordinal);
+        preview.ArgoApplications = preview.ArgoApplications
+            .OrderByDescending(a => a.DestinationNamespace is not null && scanned.Contains(a.DestinationNamespace))
+            .ThenBy(a => a.Name)
+            .ToList();
     }
 
     /// <summary>

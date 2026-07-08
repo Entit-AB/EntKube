@@ -1052,6 +1052,61 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("BlueprintSteps");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintVariable", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("BlueprintId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("DefaultValue")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BlueprintId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("BlueprintVariables");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintVariableValue", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("EnvironmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Value")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<Guid>("VariableId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("VariableId", "EnvironmentId")
+                        .IsUnique();
+
+                    b.ToTable("BlueprintVariableValues");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.BootstrapRun", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1794,6 +1849,52 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("RegisteredPostgresDatabaseId");
 
                     b.ToTable("DatabaseBindings");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.DeploymentAppliedResource", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("AppliedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("DeploymentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Group")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<string>("Namespace")
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
+
+                    b.Property<bool>("Prunable")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Version")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DeploymentId");
+
+                    b.ToTable("DeploymentAppliedResources");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.DeploymentHealthSnapshot", b =>
@@ -5180,6 +5281,28 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Blueprint");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintVariable", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ClusterBlueprint", "Blueprint")
+                        .WithMany("Variables")
+                        .HasForeignKey("BlueprintId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Blueprint");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintVariableValue", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.BlueprintVariable", "Variable")
+                        .WithMany("Values")
+                        .HasForeignKey("VariableId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Variable");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.BootstrapRun", b =>
                 {
                     b.HasOne("EntKube.Web.Data.KubernetesCluster", "Cluster")
@@ -5434,6 +5557,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("MongoDatabase");
 
                     b.Navigation("RegisteredPostgresDatabase");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.DeploymentAppliedResource", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.AppDeployment", "Deployment")
+                        .WithMany("AppliedResources")
+                        .HasForeignKey("DeploymentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Deployment");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.DeploymentHealthSnapshot", b =>
@@ -6670,6 +6804,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
             modelBuilder.Entity("EntKube.Web.Data.AppDeployment", b =>
                 {
+                    b.Navigation("AppliedResources");
+
                     b.Navigation("CacheBindings");
 
                     b.Navigation("ChildDeployments");
@@ -6700,6 +6836,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Targets");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.BlueprintVariable", b =>
+                {
+                    b.Navigation("Values");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.BootstrapRun", b =>
                 {
                     b.Navigation("StepRuns");
@@ -6708,6 +6849,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
                 {
                     b.Navigation("Steps");
+
+                    b.Navigation("Variables");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterComponent", b =>

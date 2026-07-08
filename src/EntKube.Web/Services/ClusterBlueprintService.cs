@@ -81,6 +81,110 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
         }
     }
 
+    // ──────── Variable CRUD ────────
+
+    /// <summary>Loads a blueprint's variables (each with its per-environment values).</summary>
+    public async Task<List<BlueprintVariable>> GetVariablesAsync(Guid blueprintId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.BlueprintVariables
+            .Where(v => v.BlueprintId == blueprintId)
+            .Include(v => v.Values)
+            .OrderBy(v => v.Name)
+            .ToListAsync(ct);
+    }
+
+    public async Task<BlueprintVariable> AddVariableAsync(
+        Guid blueprintId, string name, string? description, string? defaultValue, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        string trimmed = name.Trim();
+        if (await db.BlueprintVariables.AnyAsync(v => v.BlueprintId == blueprintId && v.Name == trimmed, ct))
+        {
+            throw new InvalidOperationException($"A variable named '{trimmed}' already exists in this blueprint.");
+        }
+
+        BlueprintVariable variable = new()
+        {
+            Id = Guid.NewGuid(),
+            BlueprintId = blueprintId,
+            Name = trimmed,
+            Description = string.IsNullOrWhiteSpace(description) ? null : description.Trim(),
+            DefaultValue = string.IsNullOrWhiteSpace(defaultValue) ? null : defaultValue
+        };
+
+        db.BlueprintVariables.Add(variable);
+        await db.SaveChangesAsync(ct);
+        return variable;
+    }
+
+    public async Task UpdateVariableAsync(
+        Guid variableId, string name, string? description, string? defaultValue, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        BlueprintVariable variable = await db.BlueprintVariables.FirstAsync(v => v.Id == variableId, ct);
+
+        string trimmed = name.Trim();
+        if (trimmed != variable.Name
+            && await db.BlueprintVariables.AnyAsync(
+                v => v.BlueprintId == variable.BlueprintId && v.Name == trimmed && v.Id != variableId, ct))
+        {
+            throw new InvalidOperationException($"A variable named '{trimmed}' already exists in this blueprint.");
+        }
+
+        variable.Name = trimmed;
+        variable.Description = string.IsNullOrWhiteSpace(description) ? null : description.Trim();
+        variable.DefaultValue = string.IsNullOrWhiteSpace(defaultValue) ? null : defaultValue;
+        await db.SaveChangesAsync(ct);
+    }
+
+    public async Task DeleteVariableAsync(Guid variableId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        BlueprintVariable? variable = await db.BlueprintVariables.FirstOrDefaultAsync(v => v.Id == variableId, ct);
+        if (variable is not null)
+        {
+            db.BlueprintVariables.Remove(variable);
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    /// <summary>Upserts a variable's value for an environment; a null/blank value clears it.</summary>
+    public async Task SetVariableValueAsync(
+        Guid variableId, Guid environmentId, string? value, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        BlueprintVariableValue? existing = await db.BlueprintVariableValues
+            .FirstOrDefaultAsync(v => v.VariableId == variableId && v.EnvironmentId == environmentId, ct);
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            if (existing is not null)
+            {
+                db.BlueprintVariableValues.Remove(existing);
+                await db.SaveChangesAsync(ct);
+            }
+            return;
+        }
+
+        if (existing is null)
+        {
+            db.BlueprintVariableValues.Add(new BlueprintVariableValue
+            {
+                Id = Guid.NewGuid(),
+                VariableId = variableId,
+                EnvironmentId = environmentId,
+                Value = value
+            });
+        }
+        else
+        {
+            existing.Value = value;
+        }
+        await db.SaveChangesAsync(ct);
+    }
+
     // ──────── Step CRUD ────────
 
     public async Task<BlueprintStep> AddStepAsync(
@@ -191,12 +295,21 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
         ClusterBlueprint blueprint = await db.ClusterBlueprints
             .Include(b => b.Steps)
+            .Include(b => b.Variables).ThenInclude(v => v.Values)
             .FirstAsync(b => b.Id == blueprintId, ct);
 
         if (blueprint.Steps.Count == 0)
         {
             throw new InvalidOperationException("This blueprint has no steps to apply.");
         }
+
+        // Resolve ${var} tokens from the target cluster's environment so a single
+        // blueprint reproduces correctly across environments (dev/staging/prod).
+        Guid environmentId = await db.KubernetesClusters
+            .Where(c => c.Id == clusterId)
+            .Select(c => c.EnvironmentId)
+            .FirstAsync(ct);
+        Dictionary<string, string> variableMap = BuildResolutionMap(blueprint.Variables, environmentId);
 
         // Guard against launching two active runs against the same cluster at once.
         bool activeExists = await db.BootstrapRuns.AnyAsync(
@@ -229,6 +342,12 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
                 {
                     resolved[k] = v;
                 }
+            }
+
+            // Substitute ${var} placeholders with concrete environment values.
+            foreach (string k in resolved.Keys.ToList())
+            {
+                resolved[k] = ApplyVariables(resolved[k], variableMap);
             }
 
             db.BootstrapStepRuns.Add(new BootstrapStepRun
@@ -549,4 +668,90 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
         => string.IsNullOrWhiteSpace(json)
             ? new Dictionary<string, string>()
             : JsonSerializer.Deserialize<Dictionary<string, string>>(json) ?? new Dictionary<string, string>();
+
+    // ──────── Variable resolution / substitution ────────
+
+    private static readonly System.Text.RegularExpressions.Regex VarToken =
+        new(@"\$\{([A-Za-z0-9_.-]+)\}", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// Builds a variable-name → value map for one environment: prefers the
+    /// environment-specific value, falling back to the variable's DefaultValue.
+    /// Variables with neither are omitted (their ${token} is left verbatim).
+    /// </summary>
+    public static Dictionary<string, string> BuildResolutionMap(
+        IEnumerable<BlueprintVariable> variables, Guid environmentId)
+    {
+        Dictionary<string, string> map = new();
+        foreach (BlueprintVariable v in variables)
+        {
+            string? value = v.Values.FirstOrDefault(x => x.EnvironmentId == environmentId)?.Value
+                ?? v.DefaultValue;
+            if (value is not null)
+            {
+                map[v.Name] = value;
+            }
+        }
+        return map;
+    }
+
+    /// <summary>Replaces every <c>${name}</c> token in <paramref name="value"/> using the map. Unknown tokens are left as-is.</summary>
+    public static string ApplyVariables(string value, IReadOnlyDictionary<string, string> map)
+    {
+        if (map.Count == 0 || string.IsNullOrEmpty(value) || !value.Contains("${", StringComparison.Ordinal))
+        {
+            return value;
+        }
+        return VarToken.Replace(value, m =>
+            map.TryGetValue(m.Groups[1].Value, out string? resolved) ? resolved : m.Value);
+    }
+
+    /// <summary>A variable's resolved state for a target cluster's environment.</summary>
+    public record VariablePreview(string Name, string? Value, bool Resolved);
+
+    /// <summary>
+    /// What a bootstrap's ${var} substitution will produce for a specific cluster:
+    /// each variable's resolved value for that cluster's environment, plus any
+    /// tokens referenced in step parameters that won't resolve (left verbatim).
+    /// </summary>
+    public record VariablesPreviewResult(
+        IReadOnlyList<VariablePreview> Variables, IReadOnlyList<string> UnresolvedReferences);
+
+    public async Task<VariablesPreviewResult> PreviewVariablesAsync(
+        Guid clusterId, Guid blueprintId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        ClusterBlueprint blueprint = await db.ClusterBlueprints
+            .Include(b => b.Steps)
+            .Include(b => b.Variables).ThenInclude(v => v.Values)
+            .FirstAsync(b => b.Id == blueprintId, ct);
+
+        Guid environmentId = await db.KubernetesClusters
+            .Where(c => c.Id == clusterId)
+            .Select(c => c.EnvironmentId)
+            .FirstAsync(ct);
+        Dictionary<string, string> map = BuildResolutionMap(blueprint.Variables, environmentId);
+
+        List<VariablePreview> vars = blueprint.Variables
+            .OrderBy(v => v.Name)
+            .Select(v => new VariablePreview(
+                v.Name, map.TryGetValue(v.Name, out string? val) ? val : null, map.ContainsKey(v.Name)))
+            .ToList();
+
+        // Tokens referenced by step params but not resolvable for this environment.
+        HashSet<string> referenced = new(StringComparer.Ordinal);
+        foreach (BlueprintStep step in blueprint.Steps)
+        {
+            foreach (string val in DeserializeParams(step.ParametersJson).Values)
+            {
+                foreach (System.Text.RegularExpressions.Match m in VarToken.Matches(val))
+                {
+                    referenced.Add(m.Groups[1].Value);
+                }
+            }
+        }
+        List<string> unresolved = referenced.Where(r => !map.ContainsKey(r)).OrderBy(r => r).ToList();
+
+        return new VariablesPreviewResult(vars, unresolved);
+    }
 }

@@ -15,7 +15,10 @@
             <div class="modal-header">
                 <h5 class="modal-title">
                     <i class="bi bi-box-arrow-in-down me-2"></i>Import Deployment
-                    <span class="text-muted small ms-2">from @Cluster.Name</span>
+                    @if (cluster is not null)
+                    {
+                        <span class="text-muted small ms-2">from @cluster.Name</span>
+                    }
                 </h5>
                 <button type="button" class="btn-close" @onclick="Close"></button>
             </div>
@@ -23,10 +26,14 @@
             <div class="modal-body">
                 @* ── Step indicator ── *@
                 <div class="d-flex gap-2 mb-3 small">
-                    <span class="badge @(step >= Step.Source ? "bg-primary" : "bg-secondary")">1. Source</span>
-                    <span class="badge @(step >= Step.Review ? "bg-primary" : "bg-secondary")">2. Review</span>
-                    <span class="badge @(step >= Step.Target ? "bg-primary" : "bg-secondary")">3. Target</span>
-                    <span class="badge @(step >= Step.Done ? "bg-success" : "bg-secondary")">4. Done</span>
+                    @if (Cluster is null)
+                    {
+                        <span class="badge @(step >= Step.Cluster ? "bg-primary" : "bg-secondary")">1. Cluster</span>
+                    }
+                    <span class="badge @(step >= Step.Source ? "bg-primary" : "bg-secondary")">@(Cluster is null ? "2." : "1.") Source</span>
+                    <span class="badge @(step >= Step.Review ? "bg-primary" : "bg-secondary")">@(Cluster is null ? "3." : "2.") Review</span>
+                    <span class="badge @(step >= Step.Target ? "bg-primary" : "bg-secondary")">@(Cluster is null ? "4." : "3.") Target</span>
+                    <span class="badge @(step >= Step.Done ? "bg-success" : "bg-secondary")">@(Cluster is null ? "5." : "4.") Done</span>
                 </div>
 
                 @if (!string.IsNullOrEmpty(error))
@@ -34,8 +41,28 @@
                     <div class="alert alert-danger py-2 small"><i class="bi bi-exclamation-triangle me-1"></i>@error</div>
                 }
 
+                @* ════════ Step 0: Cluster ════════ *@
+                @if (step == Step.Cluster)
+                {
+                    <p class="text-muted small">
+                        Choose the cluster to scan for a running workload to adopt.
+                    </p>
+                    <label class="form-label small fw-semibold">Cluster</label>
+                    <select class="form-select" @bind="selectedClusterId">
+                        <option value="@Guid.Empty">— select a cluster —</option>
+                        @foreach (KubernetesCluster c in clusters)
+                        {
+                            <option value="@c.Id">@c.Name @(c.Environment is not null ? $"({c.Environment.Name})" : "")</option>
+                        }
+                    </select>
+                    @if (clusters.Count == 0)
+                    {
+                        <div class="form-text text-muted">No clusters are registered for this tenant yet.</div>
+                    }
+                }
+
                 @* ════════ Step 1: Source ════════ *@
-                @if (step == Step.Source)
+                else if (step == Step.Source)
                 {
                     <p class="text-muted small">
                         Enter the namespace(s) to scan. Add more than one if related resources (e.g. HTTPRoutes)
@@ -269,6 +296,56 @@
                         </div>
                     }
 
+                    @* ArgoCD Applications detected on the cluster (informational only) *@
+                    @if (preview.ArgoApplications.Count > 0)
+                    {
+                        <div class="card mb-2 border-info">
+                            <div class="card-header py-1 bg-info bg-opacity-10">
+                                <strong class="small"><i class="bi bi-arrow-repeat me-1"></i>ArgoCD Applications (detected)</strong>
+                            </div>
+                            <div class="card-body p-0">
+                                <table class="table table-sm mb-0 align-middle">
+                                    <thead>
+                                        <tr class="small text-muted">
+                                            <th>Application</th><th>Project</th><th>Source</th><th>Destination</th><th>Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (DetectedArgoApplication app in preview.ArgoApplications)
+                                        {
+                                            <tr class="small">
+                                                <td class="fw-semibold"><code>@app.Name</code></td>
+                                                <td class="text-muted">@app.Project</td>
+                                                <td class="text-muted">
+                                                    @if (!string.IsNullOrEmpty(app.RepoUrl))
+                                                    {
+                                                        <code>@app.RepoUrl</code>
+                                                        @if (!string.IsNullOrEmpty(app.Path)) { <span>/@app.Path</span> }
+                                                        @if (!string.IsNullOrEmpty(app.TargetRevision)) { <span class="text-muted">@@@app.TargetRevision</span> }
+                                                    }
+                                                </td>
+                                                <td><code class="text-muted">@app.DestinationNamespace</code></td>
+                                                <td>
+                                                    @if (!string.IsNullOrEmpty(app.SyncStatus))
+                                                    {
+                                                        <span class="badge @(app.SyncStatus == "Synced" ? "bg-success" : "bg-secondary")">@app.SyncStatus</span>
+                                                    }
+                                                    @if (!string.IsNullOrEmpty(app.HealthStatus))
+                                                    {
+                                                        <span class="badge @(app.HealthStatus == "Healthy" ? "bg-success" : "bg-warning text-dark")">@app.HealthStatus</span>
+                                                    }
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                                <div class="text-muted fst-italic small p-2">
+                                    Detected via ArgoCD on this cluster — shown to help you find the right namespaces. Not imported directly.
+                                </div>
+                            </div>
+                        </div>
+                    }
+
                     @if (preview.Warnings.Count > 0)
                     {
                         <details class="small text-muted">
@@ -374,9 +451,21 @@
             </div>
 
             <div class="modal-footer">
-                @if (step == Step.Source)
+                @if (step == Step.Cluster)
                 {
                     <button class="btn btn-secondary" @onclick="Close">Cancel</button>
+                    <button class="btn btn-primary" @onclick="PickCluster" disabled="@(selectedClusterId == Guid.Empty)">Next</button>
+                }
+                else if (step == Step.Source)
+                {
+                    @if (Cluster is null)
+                    {
+                        <button class="btn btn-secondary" @onclick="() => step = Step.Cluster">Back</button>
+                    }
+                    else
+                    {
+                        <button class="btn btn-secondary" @onclick="Close">Cancel</button>
+                    }
                     <button class="btn btn-primary" @onclick="Scan" disabled="@(busy || string.IsNullOrWhiteSpace(namespacesText))">
                         @if (busy)
                         {
@@ -417,12 +506,26 @@
 </div>
 
 @code {
-    [Parameter] public required KubernetesCluster Cluster { get; set; }
+    // Optional: when supplied the cluster step is skipped. When null the wizard
+    // asks the user to pick a cluster first (used from the customer/app pages,
+    // which have no cluster in context).
+    [Parameter] public KubernetesCluster? Cluster { get; set; }
     [Parameter] public Guid TenantId { get; set; }
     [Parameter] public EventCallback OnClose { get; set; }
 
-    private enum Step { Source, Review, Target, Done }
+    /// <summary>When set, the Target step's customer is pre-selected (still changeable).</summary>
+    [Parameter] public Guid? PreselectCustomerId { get; set; }
+
+    /// <summary>When set, the Target step's app name is pre-filled (e.g. re-import into an existing app).</summary>
+    [Parameter] public string? PreselectAppName { get; set; }
+
+    private enum Step { Cluster, Source, Review, Target, Done }
     private Step step = Step.Source;
+
+    // The working cluster: the passed-in one, or the one chosen in the Cluster step.
+    private KubernetesCluster? cluster;
+    private List<KubernetesCluster> clusters = [];
+    private Guid selectedClusterId;
 
     private string namespacesText = "";
     private bool busy;
@@ -436,6 +539,29 @@
     private Guid selectedCustomerId;
     private Guid selectedEnvironmentId;
     private string appName = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        cluster = Cluster;
+        if (cluster is null)
+        {
+            clusters = await TenantService.GetClustersAsync(TenantId);
+            step = Step.Cluster;
+        }
+        else
+        {
+            step = Step.Source;
+        }
+    }
+
+    private void PickCluster()
+    {
+        cluster = clusters.FirstOrDefault(c => c.Id == selectedClusterId);
+        if (cluster is not null)
+        {
+            step = Step.Source;
+        }
+    }
 
     private Data.App? MatchingApp =>
         customerApps.FirstOrDefault(a => string.Equals(a.Name, appName.Trim(), StringComparison.OrdinalIgnoreCase));
@@ -459,7 +585,7 @@
                 .Split(['\n', '\r', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .ToList();
 
-            preview = await ImportService.ScanAsync(Cluster, namespaces);
+            preview = await ImportService.ScanAsync(cluster!, namespaces);
             step = Step.Review;
         }
         catch (Exception ex)
@@ -483,13 +609,20 @@
             environments = await TenantService.GetEnvironmentsAsync(TenantId);
         }
         // Default the environment to the cluster's environment if present.
-        if (selectedEnvironmentId == Guid.Empty)
+        if (selectedEnvironmentId == Guid.Empty && cluster is not null)
         {
-            selectedEnvironmentId = Cluster.EnvironmentId;
+            selectedEnvironmentId = cluster.EnvironmentId;
         }
-        if (string.IsNullOrWhiteSpace(appName) && preview is not null)
+        // Pre-select the customer from the launch context (still user-changeable).
+        if (selectedCustomerId == Guid.Empty && PreselectCustomerId is Guid preCustomer)
         {
-            appName = preview.PrimaryNamespace;
+            selectedCustomerId = preCustomer;
+        }
+        if (string.IsNullOrWhiteSpace(appName))
+        {
+            appName = !string.IsNullOrWhiteSpace(PreselectAppName)
+                ? PreselectAppName!
+                : preview?.PrimaryNamespace ?? "";
         }
         if (selectedCustomerId != Guid.Empty)
         {
@@ -525,7 +658,7 @@
                 PerformedBy = "import-wizard"
             };
 
-            result = await ImportService.ImportAsync(Cluster, request);
+            result = await ImportService.ImportAsync(cluster!, request);
             step = Step.Done;
         }
         catch (Exception ex)

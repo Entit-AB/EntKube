@@ -257,6 +257,7 @@ public class Program
         builder.Services.AddScoped<ComponentInstallOrchestrator>();
         builder.Services.AddScoped<CatalogComponentRegistrar>();
         builder.Services.AddScoped<ClusterBlueprintService>();
+        builder.Services.AddScoped<BlueprintFromClusterService>();
         builder.Services.AddScoped<AppGovernanceService>();
         builder.Services.AddScoped<GitOperationsService>();
         builder.Services.AddScoped<GitRepositoryService>();

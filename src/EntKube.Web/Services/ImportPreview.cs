@@ -192,6 +192,25 @@ public class DetectedRoute
     public string? SourceHttpRoute { get; set; }
 }
 
+/// <summary>
+/// An ArgoCD <c>Application</c> custom resource discovered on the cluster. Purely
+/// informational in the import preview — it shows what ArgoCD manages so the operator
+/// can pick the right namespaces. ArgoCD is never required; when it isn't installed
+/// this list is simply empty.
+/// </summary>
+public class DetectedArgoApplication
+{
+    public required string Name { get; set; }
+    public string? Project { get; set; }
+    public string? RepoUrl { get; set; }
+    public string? Path { get; set; }
+    public string? TargetRevision { get; set; }
+    public string? DestinationNamespace { get; set; }
+    public string? DestinationServer { get; set; }
+    public string? SyncStatus { get; set; }
+    public string? HealthStatus { get; set; }
+}
+
 /// <summary>The full result of scanning one or more namespaces — the wizard's working model.</summary>
 public class ImportPreview
 {
@@ -214,6 +233,10 @@ public class ImportPreview
     public List<DetectedRoute> Routes { get; set; } = [];
 
     public List<DetectedPostgres> PostgresConnections { get; set; } = [];
+
+    /// <summary>ArgoCD Applications detected on the cluster (informational; empty when ArgoCD is absent).</summary>
+    public List<DetectedArgoApplication> ArgoApplications { get; set; } = [];
+
     public List<string> Warnings { get; set; } = [];
 }
 
