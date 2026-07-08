@@ -15,7 +15,7 @@
    environment's Clusters. Services / Operations / Manage are tenant-
    scoped sections. Every level has an inline "+" to add/register.
    Existing detail/tab components are reused as the right-hand pane;
-   selection deep-links via the URL. Classic page: /tenants/{slug}/classic.
+   selection deep-links via the URL.
    ═══════════════════════════════════════════════════════════════════ *@
 
 <PageTitle>@(tenant?.Name ?? "Tenant")</PageTitle>
@@ -208,12 +208,6 @@ else
                         <span class="label">@item.Label</span>
                     </button>
                 }
-            </div>
-
-            <div class="tree-foot">
-                <a href="/tenants/@Slug/classic" class="small text-decoration-none text-muted">
-                    <i class="bi bi-arrow-left me-1"></i>Classic view
-                </a>
             </div>
         </aside>
 
