@@ -147,6 +147,7 @@ public class OperationsAdvisorService(
         findings.AddRange(await BuildBackupFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildPostureFindingsAsync(tenantId, ct));
         findings.AddRange(await BuildCapacityFindingsAsync(tenantId, now, ct));
+        findings.AddRange(await BuildBlueprintFindingsAsync(tenantId, now, ct));
 
         var merged = await MergeStateAsync(tenantId, findings, now, ct);
 
@@ -905,6 +906,67 @@ public class OperationsAdvisorService(
                 ClusterId = g.Key.ClusterId,
                 Source = "capacity",
             });
+        }
+
+        return result;
+    }
+
+    // ── Reliability: cluster bootstrap (blueprint) runs that failed or stalled ──
+    private async Task<List<OperationsFinding>> BuildBlueprintFindingsAsync(
+        Guid tenantId, DateTime now, CancellationToken ct)
+    {
+        var result = new List<OperationsFinding>();
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        var runs = await db.BootstrapRuns
+            .Where(r => r.Cluster.TenantId == tenantId)
+            .Select(r => new { r.ClusterId, ClusterName = r.Cluster.Name, r.BlueprintName, r.Status, r.CreatedAt, r.StartedAt })
+            .ToListAsync(ct);
+        if (runs.Count == 0) return result;
+
+        foreach (var g in runs.GroupBy(r => r.ClusterId))
+        {
+            var latest = g.OrderByDescending(r => r.CreatedAt).First();
+
+            if (latest.Status == BootstrapRunStatus.Failed)
+            {
+                result.Add(new OperationsFinding
+                {
+                    Id = $"bootstrap-failed:{latest.ClusterId}",
+                    Category = AdvisorCategory.Reliability,
+                    Severity = AdvisorSeverity.Warning,
+                    Horizon = AdvisorHorizon.Today,
+                    Title = $"Cluster bootstrap failed on “{latest.ClusterName}”",
+                    Detail = $"Applying blueprint “{latest.BlueprintName}” failed and is halted — it can be resumed.",
+                    ScopeLabel = $"Cluster: {latest.ClusterName}",
+                    TimingText = $"failed {DueText(latest.CreatedAt, now)}",
+                    DueAt = latest.CreatedAt,
+                    Remediation = "Open Blueprints and resume the bootstrap, or fix the failing step.",
+                    LinkSection = "blueprints",
+                    ClusterId = latest.ClusterId,
+                    Source = "blueprint",
+                });
+            }
+            else if (latest.Status is BootstrapRunStatus.Queued or BootstrapRunStatus.Running
+                     && now - (latest.StartedAt ?? latest.CreatedAt) > TimeSpan.FromHours(2))
+            {
+                result.Add(new OperationsFinding
+                {
+                    Id = $"bootstrap-stalled:{latest.ClusterId}",
+                    Category = AdvisorCategory.Reliability,
+                    Severity = AdvisorSeverity.Info,
+                    Horizon = AdvisorHorizon.Today,
+                    Title = $"Cluster bootstrap stalled on “{latest.ClusterName}”",
+                    Detail = $"Blueprint “{latest.BlueprintName}” has been {latest.Status.ToString().ToLowerInvariant()} for over 2 hours.",
+                    ScopeLabel = $"Cluster: {latest.ClusterName}",
+                    TimingText = $"since {DueText(latest.StartedAt ?? latest.CreatedAt, now)}",
+                    DueAt = latest.StartedAt ?? latest.CreatedAt,
+                    Remediation = "Check the bootstrap runner and the step it's on.",
+                    LinkSection = "blueprints",
+                    ClusterId = latest.ClusterId,
+                    Source = "blueprint",
+                });
+            }
         }
 
         return result;
