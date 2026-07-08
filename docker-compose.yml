@@ -32,10 +32,11 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # Durable object storage for the self-built Lucene/S3 telemetry segment engine (logs / traces / RUM).
-  # OPTIONAL: only started with the "objectstore" profile (`docker compose --profile objectstore up -d`)
-  # and used when Telemetry__ObjectStorage__* is set on the app. Without it the engine falls back to
-  # local disk under /app/Data — fine for a single node; MinIO gives durable, restart-surviving storage.
+  # Local/backup object storage for the telemetry segment engine. OPTIONAL — the PRIMARY production
+  # store is a registered StorageLink (AWS S3 / Cleura S3) via Telemetry__StorageLinkId; this bundled
+  # MinIO is a self-hosted backup/dev option, started with the "objectstore" profile
+  # (`docker compose --profile objectstore up -d`) and used via Telemetry__ObjectStorage__*. Without any
+  # object storage the engine falls back to local disk under /app/Data (single node only).
   # (Metrics are served by Prometheus; there is no longer a Postgres telemetry database.)
   minio:
     image: minio/minio:latest
@@ -87,16 +88,21 @@ services:
       Telemetry__DataPath: "/app/Data/telemetry"
       # Metrics are served by Prometheus (apps write there directly) — there is no telemetry database.
 
-      # --- Durable object storage (OPTIONAL) ---
-      # By default sealed segments live on local disk under Telemetry__DataPath (fine for one node).
-      # For durable, restart-surviving storage, run MinIO (`docker compose --profile objectstore up -d`)
-      # and uncomment the block below to point the engine at it.
+      # --- Object storage for sealed segments (priority: StorageLink > flat config > local disk) ---
+      # PRIMARY (production): point telemetry at a registered StorageLink (AWS S3 / Cleura S3 / MinIO)
+      # whose credentials live in the vault — the app's existing object-storage abstraction. Set its Id:
+      # Telemetry__StorageLinkId: "<storage-link-guid>"
+      #
+      # ALTERNATIVE (simple/dev, no StorageLink): flat S3/MinIO config. The bundled MinIO here is a
+      # local/backup option — run it with `docker compose --profile objectstore up -d`.
       # Telemetry__ObjectStorage__Endpoint: "http://minio:9000"
       # Telemetry__ObjectStorage__Bucket: "${TELEMETRY_BUCKET:-entkube-telemetry}"
       # Telemetry__ObjectStorage__Region: "us-east-1"
       # Telemetry__ObjectStorage__AccessKey: "${MINIO_ROOT_USER:-entkube}"
       # Telemetry__ObjectStorage__SecretKey: "${MINIO_ROOT_PASSWORD:-changeme-minio}"
       # Telemetry__ObjectStorage__ForcePathStyle: "true"
+      #
+      # If neither is set, sealed segments live on local disk under Telemetry__DataPath (single-node only).
 
       # --- Vault encryption ---
       # Required — set VAULT__ROOTKEY in your .env file (openssl rand -base64 32)

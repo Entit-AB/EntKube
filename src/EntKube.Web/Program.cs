@@ -164,13 +164,24 @@ public class Program
             RetentionDays = builder.Configuration.GetValue<int?>("Telemetry:RetentionDays") ?? 14,
         };
         builder.Services.AddSingleton(segmentOptions);
-        // Object storage: S3/MinIO when Telemetry:ObjectStorage is configured, else a local-disk fallback
-        // under DataPath so the engine still seals/queries end-to-end on a single node without a bucket.
+        // Object storage for sealed segments, in priority order:
+        //   1) An existing storage link (AWS S3 / Cleura S3 / MinIO) via Telemetry:StorageLinkId — the
+        //      primary/production path, reusing the app's StorageLink + vault credential abstraction.
+        //   2) Flat Telemetry:ObjectStorage config (simple S3/MinIO without a storage link).
+        //   3) Local disk under DataPath, so a single node works with no object storage at all.
         builder.Services.AddSingleton<ISegmentBlobStore>(sp =>
         {
-            var s3 = new S3SegmentBlobStore(sp.GetRequiredService<IConfiguration>());
+            IConfiguration cfg = sp.GetRequiredService<IConfiguration>();
+
+            var linkStore = new StorageLinkSegmentBlobStore(
+                sp.GetRequiredService<IServiceScopeFactory>(), cfg,
+                sp.GetRequiredService<ILogger<StorageLinkSegmentBlobStore>>());
+            if (linkStore.IsConfigured) return linkStore;
+
+            var s3 = new S3SegmentBlobStore(cfg);
             if (s3.IsConfigured) return s3;
             s3.Dispose();
+
             string localBlobs = System.IO.Path.Combine(segmentOptions.DataPath, "blobs");
             System.IO.Directory.CreateDirectory(localBlobs);
             return new LocalSegmentBlobStore(localBlobs);
@@ -218,6 +229,7 @@ public class Program
         builder.Services.AddScoped<IKubernetesClientFactory, KubernetesClientFactory>();
         builder.Services.AddScoped<OpenStackS3Service>();
         builder.Services.AddScoped<StorageService>();
+        builder.Services.AddScoped<StorageLinkClientFactory>();
         builder.Services.AddScoped<StorageBrowserService>();
         builder.Services.AddScoped<ComponentScanService>();
         builder.Services.AddScoped<DeploymentImportService>();
