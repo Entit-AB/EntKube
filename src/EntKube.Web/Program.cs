@@ -255,6 +255,7 @@ public class Program
         builder.Services.AddScoped<IncidentCorrelationService>();
         builder.Services.AddScoped<StormSuppressionService>();
         builder.Services.AddScoped<ErrorBudgetService>();
+        builder.Services.AddScoped<AdvisorStateService>();
         builder.Services.AddScoped<OperationsAdvisorService>();
         builder.Services.AddScoped<CustomerNotificationService>();
 
@@ -276,6 +277,8 @@ public class Program
         builder.Services.AddHostedService<AlertEscalationService>();
         builder.Services.AddHostedService<UptimeTrackingService>();
         builder.Services.AddHostedService<KeycloakBackupSchedulerService>();
+        builder.Services.AddHostedService<AdvisorScanService>();
+        builder.Services.AddHostedService<ResourceUsageCollectorService>();
         builder.Services.AddHostedService<HeadscaleCertSyncService>();
         builder.Services.AddHostedService<SecretExpiryNotificationService>();
         builder.Services.AddHostedService<ObservedSecretRefreshService>();

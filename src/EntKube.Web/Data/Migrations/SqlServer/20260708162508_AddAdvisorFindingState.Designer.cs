@@ -4,6 +4,7 @@ using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.SqlServer
 {
     [DbContext(typeof(SqlServerApplicationDbContext))]
-    partial class SqlServerApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260708162508_AddAdvisorFindingState")]
+    partial class AddAdvisorFindingState
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3970,43 +3973,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("RegisteredPostgresInstances");
                 });
 
-            modelBuilder.Entity("EntKube.Web.Data.ResourceUsageSnapshot", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<Guid>("ClusterId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<double>("Fraction")
-                        .HasColumnType("float");
-
-                    b.Property<string>("Kind")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("nvarchar(20)");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(253)
-                        .HasColumnType("nvarchar(253)");
-
-                    b.Property<string>("Namespace")
-                        .IsRequired()
-                        .HasMaxLength(253)
-                        .HasColumnType("nvarchar(253)");
-
-                    b.Property<DateTime>("SnapshotAt")
-                        .HasColumnType("datetime2");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ClusterId", "Kind", "SnapshotAt");
-
-                    b.ToTable("ResourceUsageSnapshots");
-                });
-
             modelBuilder.Entity("EntKube.Web.Data.RumSite", b =>
                 {
                     b.Property<Guid>("Id")
@@ -6442,15 +6408,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("KubernetesCluster");
 
                     b.Navigation("Tenant");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.ResourceUsageSnapshot", b =>
-                {
-                    b.HasOne("EntKube.Web.Data.KubernetesCluster", null)
-                        .WithMany()
-                        .HasForeignKey("ClusterId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.SecretExpiryNotification", b =>

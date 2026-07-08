@@ -4,6 +4,7 @@
 @inject PrometheusService PrometheusService
 @inject IncidentService IncidentService
 @inject OnCallService OnCallService
+@inject OperationsAdvisorService Advisor
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 
 <div class="d-flex justify-content-end align-items-center mb-3">
@@ -54,6 +55,18 @@
                 </div>
             </div>
         }
+        <div class="card border-0 text-center px-3 py-2 @(advisorActionable > 0 ? "bg-warning-subtle" : "bg-light")"
+             style="cursor:@(OnNavigateTab.HasDelegate ? "pointer" : "default")"
+             @onclick='() => NavigateTo("advisor")'>
+            <div class="fw-bold fs-4 @(advisorActionable > 0 ? "text-warning-emphasis" : "text-success")">@advisorActionable</div>
+            <div class="text-muted small d-flex align-items-center gap-1">
+                <i class="bi bi-lightbulb"></i>Needs attention
+                @if (OnNavigateTab.HasDelegate)
+                {
+                    <span class="bi bi-arrow-right" style="font-size:.7rem"></span>
+                }
+            </div>
+        </div>
     </div>
 }
 
@@ -247,6 +260,7 @@
     private OnCallShift? currentOnCall;
     private int tenantActiveAlerts;
     private int criticalIncidents;
+    private int advisorActionable;
     private DateTime? lastRefreshed;
     private bool isLoading;
 
@@ -282,13 +296,17 @@
             IncidentService.GetUpcomingMaintenanceAsync(TenantId);
         Task<OnCallShift?> onCallTask =
             OnCallService.GetCurrentOnCallAsync(TenantId);
+        Task<AdvisorReport> advisorTask = Advisor.GetReportAsync(TenantId);
 
-        await Task.WhenAll(incidentTask, maintenanceTask, onCallTask);
+        await Task.WhenAll(incidentTask, maintenanceTask, onCallTask, advisorTask);
 
         activeIncidents = incidentTask.Result;
         criticalIncidents = activeIncidents.Count(i => i.Severity == "critical");
         upcomingMaintenance = maintenanceTask.Result;
         currentOnCall = onCallTask.Result;
+        advisorActionable = advisorTask.Result.Findings.Count(f =>
+            f.Horizon is AdvisorHorizon.Overdue or AdvisorHorizon.Today
+            && f.State is not AdvisorFindingStatus.Dismissed and not AdvisorFindingStatus.Snoozed);
 
         List<Task<ClusterSummaryVm>> tasks = clusters
             .Select(c => LoadClusterSummaryAsync(c, perClusterCounts.GetValueOrDefault(c.Id)))
