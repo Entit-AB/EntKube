@@ -23,7 +23,8 @@ public sealed class SegmentTraceEngineTests : IDisposable
     private readonly ClusterTenantResolver _resolver;
     private readonly Guid _tenantId = Guid.NewGuid();
     private readonly Guid _clusterId = Guid.NewGuid();
-    private readonly List<SegmentManagerBase> _managers = [];
+    private readonly List<SegmentManagerRegistry<SpanSegmentManager>> _registries = [];
+    private SegmentManagerRegistry<SpanSegmentManager>? _registry;
     private readonly List<string> _tempDirs = [];
 
     public SegmentTraceEngineTests()
@@ -52,13 +53,14 @@ public sealed class SegmentTraceEngineTests : IDisposable
     {
         string dataPath = Path.Combine(Path.GetTempPath(), "spantest-" + Guid.NewGuid().ToString("N"));
         _tempDirs.Add(dataPath);
-        string blobs = Path.Combine(dataPath, "blobs");
-        Directory.CreateDirectory(blobs);
+        string blobsDir = Path.Combine(dataPath, "blobs");
+        Directory.CreateDirectory(blobsDir);
         var options = new SegmentEngineOptions { DataPath = dataPath };
-        var mgr = new SpanSegmentManager(
-            _factory, new LocalSegmentBlobStore(blobs), options, NullLogger<SpanSegmentManager>.Instance);
-        _managers.Add(mgr);
-        return mgr;
+        var store = new LocalSegmentBlobStore(blobsDir);
+        _registry = new SegmentManagerRegistry<SpanSegmentManager>(tid =>
+            new SpanSegmentManager(tid, _factory, store, options, NullLogger<SpanSegmentManager>.Instance));
+        _registries.Add(_registry);
+        return _registry.For(_tenantId);
     }
 
     private static SpanIngestRecord Span(
@@ -78,7 +80,7 @@ public sealed class SegmentTraceEngineTests : IDisposable
             Span(t0.AddMilliseconds(10), "t1", "s2", "s1", "call-backend", "backend", 3, 60, 2),
             Span(t0.AddSeconds(1), "t2", "s3", null, "GET /home", "frontend", 2, 200, 0),
         ]);
-        var svc = new SegmentTraceService(mgr, _resolver, NullLogger<SegmentTraceService>.Instance);
+        var svc = new SegmentTraceService(_registry!, _resolver, NullLogger<SegmentTraceService>.Instance);
         return (mgr, t0.AddMinutes(-1), t0.AddMinutes(5), svc);
     }
 
@@ -158,7 +160,7 @@ public sealed class SegmentTraceEngineTests : IDisposable
 
     public void Dispose()
     {
-        foreach (SegmentManagerBase m in _managers) m.Dispose();
+        foreach (SegmentManagerRegistry<SpanSegmentManager> r in _registries) r.Dispose();
         _context.Dispose();
         _connection.Dispose();
         foreach (string d in _tempDirs)

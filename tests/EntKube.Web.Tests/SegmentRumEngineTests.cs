@@ -21,7 +21,8 @@ public sealed class SegmentRumEngineTests : IDisposable
     private readonly TestDbContextFactory _factory;
     private readonly Guid _tenantId = Guid.NewGuid();
     private readonly Guid _siteId = Guid.NewGuid();
-    private readonly List<SegmentManagerBase> _managers = [];
+    private readonly List<SegmentManagerRegistry<RumSegmentManager>> _registries = [];
+    private SegmentManagerRegistry<RumSegmentManager>? _registry;
     private readonly List<string> _tempDirs = [];
     private readonly DateTime _t0 = new(2026, 7, 8, 12, 0, 0, DateTimeKind.Utc);
 
@@ -39,12 +40,14 @@ public sealed class SegmentRumEngineTests : IDisposable
     {
         string dataPath = Path.Combine(Path.GetTempPath(), "rumtest-" + Guid.NewGuid().ToString("N"));
         _tempDirs.Add(dataPath);
-        string blobs = Path.Combine(dataPath, "blobs");
-        Directory.CreateDirectory(blobs);
-        var mgr = new RumSegmentManager(_factory, new LocalSegmentBlobStore(blobs),
-            new SegmentEngineOptions { DataPath = dataPath }, NullLogger<RumSegmentManager>.Instance);
-        _managers.Add(mgr);
-        return mgr;
+        string blobsDir = Path.Combine(dataPath, "blobs");
+        Directory.CreateDirectory(blobsDir);
+        var store = new LocalSegmentBlobStore(blobsDir);
+        var options = new SegmentEngineOptions { DataPath = dataPath };
+        _registry = new SegmentManagerRegistry<RumSegmentManager>(tid =>
+            new RumSegmentManager(tid, _factory, store, options, NullLogger<RumSegmentManager>.Instance));
+        _registries.Add(_registry);
+        return _registry.For(_tenantId);
     }
 
     private (RumSegmentManager mgr, SegmentRumService svc, DateTime from, DateTime to) Scenario()
@@ -60,7 +63,7 @@ public sealed class SegmentRumEngineTests : IDisposable
             [new RumErrorRecord(_t0.AddSeconds(11), "s1", "v2", "/home", "TypeError x is undefined", "stack", "app.js")]);
         mgr.WriteResources(_tenantId, _siteId,
             [new RumResourceRecord(_t0.AddSeconds(12), "s1", "v2", "/home", "app.js", "script", 30, 200, null)]);
-        var svc = new SegmentRumService(mgr, NullLogger<SegmentRumService>.Instance);
+        var svc = new SegmentRumService(_registry!, NullLogger<SegmentRumService>.Instance);
         return (mgr, svc, _t0.AddMinutes(-1), _t0.AddMinutes(5));
     }
 
@@ -145,7 +148,7 @@ public sealed class SegmentRumEngineTests : IDisposable
 
     public void Dispose()
     {
-        foreach (SegmentManagerBase m in _managers) m.Dispose();
+        foreach (SegmentManagerRegistry<RumSegmentManager> r in _registries) r.Dispose();
         _context.Dispose();
         _connection.Dispose();
         foreach (string d in _tempDirs)

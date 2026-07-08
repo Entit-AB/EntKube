@@ -1185,11 +1185,18 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
         builder.Entity<TelemetrySegment>(entity =>
         {
             entity.HasKey(s => s.Id);
-            // Window-overlap pruning: "Signal = @s AND MaxTs >= @from AND MinTs < @to". Leading Signal +
-            // MaxTs lets the query seek to the segments that can hold rows in the requested time range.
-            entity.HasIndex(s => new { s.Signal, s.MaxTs, s.MinTs });
+            // Window-overlap pruning within a tenant: "TenantId = @t AND Signal = @s AND MaxTs >= @from
+            // AND MinTs < @to". Leading TenantId + Signal + MaxTs seeks straight to the tenant's segments
+            // that can hold rows in the requested time range.
+            entity.HasIndex(s => new { s.TenantId, s.Signal, s.MaxTs, s.MinTs });
             entity.Property(s => s.Signal).HasMaxLength(20).IsRequired();
             entity.Property(s => s.ObjectKey).HasMaxLength(512).IsRequired();
+        });
+
+        builder.Entity<TelemetryStorageSetting>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => s.TenantId).IsUnique(); // one storage setting per tenant
         });
 
         builder.Entity<AlertIncident>(entity =>

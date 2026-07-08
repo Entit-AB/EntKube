@@ -11,8 +11,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.Sqlite
 {
     [DbContext(typeof(ApplicationDbContext))]
-    [Migration("20260708075458_AddTelemetryStorageSetting")]
-    partial class AddTelemetryStorageSetting
+    [Migration("20260708081427_TenantScopedTelemetry")]
+    partial class TenantScopedTelemetry
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -4190,9 +4190,12 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<long>("SizeBytes")
                         .HasColumnType("INTEGER");
 
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
 
-                    b.HasIndex("Signal", "MaxTs", "MinTs");
+                    b.HasIndex("TenantId", "Signal", "MaxTs", "MinTs");
 
                     b.ToTable("TelemetrySegments");
                 });
@@ -4206,6 +4209,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<Guid?>("StorageLinkId")
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("TEXT");
 
@@ -4213,6 +4219,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TenantId")
+                        .IsUnique();
 
                     b.ToTable("TelemetryStorageSettings");
                 });

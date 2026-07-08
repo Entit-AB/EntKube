@@ -11,11 +11,12 @@ namespace EntKube.Web.Services.Telemetry;
 /// <see cref="RumSegmentSchema"/>); sealing/query/retention are inherited.
 /// </summary>
 public sealed class RumSegmentManager(
+    Guid tenantId,
     IDbContextFactory<ApplicationDbContext> catalog,
     ISegmentBlobStore blobs,
     SegmentEngineOptions options,
     ILogger<RumSegmentManager> logger)
-    : SegmentManagerBase(catalog, blobs, options, logger, RumSegmentSchema.CreateAnalyzer())
+    : SegmentManagerBase(tenantId, catalog, blobs, options, logger, RumSegmentSchema.CreateAnalyzer())
 {
     protected override string Signal => "rum";
 

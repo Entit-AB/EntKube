@@ -16,7 +16,7 @@ namespace EntKube.Web.Services.Telemetry;
 /// aggregate DocValues in C#.
 /// </summary>
 public sealed class SegmentLogService(
-    LogSegmentManager segments,
+    SegmentManagerRegistry<LogSegmentManager> logs,
     ClusterTenantResolver tenants,
     ILogger<SegmentLogService> logger) : ILogBackend
 {
@@ -26,6 +26,7 @@ public sealed class SegmentLogService(
     {
         Guid? tenantId = await tenants.ResolveAsync(clusterId, ct);
         if (tenantId is null) return false;
+        LogSegmentManager segments = logs.For(tenantId.Value);
         return await segments.QueryAsync(null, null,
             s => s.Search(ScopeQuery(tenantId.Value, clusterId), 1).TotalHits > 0, ct);
     }
@@ -52,6 +53,7 @@ public sealed class SegmentLogService(
 
         try
         {
+            LogSegmentManager segments = logs.For(tenantId.Value);
             Query q = LogSegmentSchema.BuildQuery(tenantId.Value, clusterId, filter, from, to, segments.Analyzer);
             var sort = new Sort(new SortField(LogSegmentSchema.Ts, SortFieldType.INT64, reverse: true)); // ts DESC
             List<LokiLogStream> streams = await segments.QueryAsync(
@@ -73,6 +75,7 @@ public sealed class SegmentLogService(
 
         try
         {
+            LogSegmentManager segments = logs.For(tenantId.Value);
             Query q = LogSegmentSchema.BuildTraceQuery(tenantId.Value, clusterId, traceId);
             var sort = new Sort(new SortField(LogSegmentSchema.Ts, SortFieldType.INT64, reverse: true));
             // A trace can span any time; search all segments.
@@ -102,6 +105,7 @@ public sealed class SegmentLogService(
 
         try
         {
+            LogSegmentManager segments = logs.For(tenantId.Value);
             Query q = LogSegmentSchema.BuildQuery(tenantId.Value, clusterId, filter, from, to, segments.Analyzer);
             var collector = new HistogramCollector(fromMs, bucketMs);
             await segments.QueryAsync(from, to, s => { s.Search(q, collector); return 0; }, ct);
@@ -128,6 +132,7 @@ public sealed class SegmentLogService(
 
         try
         {
+            LogSegmentManager segments = logs.For(tenantId.Value);
             var filter = new LogQueryFilter
             {
                 Namespaces = string.IsNullOrEmpty(ns) ? [] : [ns],
@@ -160,6 +165,7 @@ public sealed class SegmentLogService(
 
         try
         {
+            LogSegmentManager segments = logs.For(tenantId.Value);
             var scope = new BooleanQuery
             {
                 { new TermQuery(new Term(LogSegmentSchema.TenantId, tenantId.Value.ToString("N"))), Occur.MUST },

@@ -15,7 +15,7 @@ namespace EntKube.Web.Services.Telemetry;
 /// segments overlapping the window by <see cref="SpanSegmentManager"/>.
 /// </summary>
 public sealed class SegmentTraceService(
-    SpanSegmentManager segments,
+    SegmentManagerRegistry<SpanSegmentManager> spans,
     ClusterTenantResolver tenants,
     ILogger<SegmentTraceService> logger) : ITraceQueryService
 {
@@ -28,7 +28,7 @@ public sealed class SegmentTraceService(
         Guid? tenantId = await tenants.ResolveAsync(clusterId, ct);
         if (tenantId is null) return false;
         Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, null, null);
-        return await segments.QueryAsync(null, null, s => s.Search(scope, 1).TotalHits > 0, ct);
+        return await spans.For(tenantId.Value).QueryAsync(null, null, s => s.Search(scope, 1).TotalHits > 0, ct);
     }
 
     public async Task<KubernetesOperationResult<List<string>>> GetServicesAsync(
@@ -43,7 +43,7 @@ public sealed class SegmentTraceService(
         {
             Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, from, null, namespaces, podPattern);
             var sink = new HashSet<string>(StringComparer.Ordinal);
-            await segments.QueryAsync(from, null,
+            await spans.For(tenantId.Value).QueryAsync(from, null,
                 s => { s.Search(scope, new DistinctCollector(SpanSegmentSchema.Service, sink)); return 0; }, ct);
             return KubernetesOperationResult<List<string>>.Success(
                 sink.Where(v => v.Length > 0).OrderBy(v => v, StringComparer.Ordinal).ToList());
@@ -68,7 +68,7 @@ public sealed class SegmentTraceService(
             // Load all in-window scope spans, then group by trace in C# (a trace "involves" the service if
             // any of its spans is that service — matches the old subquery).
             Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, from, to, namespaces, podPattern);
-            List<SpanRow> rows = await LoadRowsAsync(scope, from, to, ct);
+            List<SpanRow> rows = await LoadRowsAsync(spans.For(tenantId.Value), scope, from, to, ct);
 
             List<TraceSummary> summaries = rows
                 .GroupBy(r => r.TraceId)
@@ -96,8 +96,8 @@ public sealed class SegmentTraceService(
         try
         {
             Query q = SpanSegmentSchema.BuildTraceQuery(tenantId.Value, clusterId, traceId, namespaces);
-            List<SpanRow> rows = await LoadRowsAsync(q, null, null, ct);
-            List<SpanRecord> spans = rows
+            List<SpanRow> rows = await LoadRowsAsync(spans.For(tenantId.Value), q, null, null, ct);
+            List<SpanRecord> spanRecords = rows
                 .OrderBy(r => r.TsMs)
                 .Select(r => new SpanRecord(
                     Start: TelemetryTime.FromEpochMillis(r.TsMs),
@@ -110,7 +110,7 @@ public sealed class SegmentTraceService(
                     StatusCode: r.StatusCode,
                     AttributesJson: r.AttributesJson))
                 .ToList();
-            return KubernetesOperationResult<List<SpanRecord>>.Success(spans);
+            return KubernetesOperationResult<List<SpanRecord>>.Success(spanRecords);
         }
         catch (Exception ex)
         {
@@ -133,7 +133,7 @@ public sealed class SegmentTraceService(
         try
         {
             Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, from, to, namespaces, podPattern, service);
-            List<SpanRow> rows = await LoadRowsAsync(scope, from, to, ct);
+            List<SpanRow> rows = await LoadRowsAsync(spans.For(tenantId.Value), scope, from, to, ct);
 
             var byBucket = new SortedDictionary<long, List<SpanRow>>();
             foreach (SpanRow r in rows.Where(r => r.IsInbound))
@@ -170,7 +170,7 @@ public sealed class SegmentTraceService(
         try
         {
             Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, from, to, namespaces, podPattern);
-            List<SpanRow> rows = await LoadRowsAsync(scope, from, to, ct);
+            List<SpanRow> rows = await LoadRowsAsync(spans.For(tenantId.Value), scope, from, to, ct);
 
             // Index spans by (trace, span_id) so a child can find its parent within the same trace — the
             // in-memory equivalent of the old self-join on p.span_id = c.parent_span_id.
@@ -211,7 +211,7 @@ public sealed class SegmentTraceService(
         try
         {
             Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, from, to, service: service);
-            List<SpanRow> rows = (await LoadRowsAsync(scope, from, to, ct)).Where(r => r.IsInbound).ToList();
+            List<SpanRow> rows = (await LoadRowsAsync(spans.For(tenantId.Value), scope, from, to, ct)).Where(r => r.IsInbound).ToList();
             List<double> durations = rows.Select(r => r.DurationMs).OrderBy(d => d).ToList();
             var stats = new ServiceStats(rows.Count, rows.Count(r => r.IsError), PercentileDisc(durations, 0.95));
             return KubernetesOperationResult<ServiceStats>.Success(stats);
@@ -251,8 +251,9 @@ public sealed class SegmentTraceService(
         return sortedAsc[idx];
     }
 
-    // Runs a scope query and materializes matched spans (capped) into SpanRows for C# aggregation.
-    private async Task<List<SpanRow>> LoadRowsAsync(Query q, DateTime? from, DateTime? to, CancellationToken ct)
+    // Runs a scope query and materializes matched spans (capped) into SpanRows for C# aggregation, over
+    // the given tenant's manager.
+    private async Task<List<SpanRow>> LoadRowsAsync(SpanSegmentManager segments, Query q, DateTime? from, DateTime? to, CancellationToken ct)
     {
         return await segments.QueryAsync(from, to, s =>
         {

@@ -11,14 +11,14 @@ namespace EntKube.Web.Services.Telemetry;
 /// page-view series, sessions, session detail) in C# over the materialized rows — replacing the SQL
 /// percentile_cont / GROUP BY / session join. Web Vitals use p75 (the RUM convention), interpolated.
 /// </summary>
-public sealed class SegmentRumService(RumSegmentManager segments, ILogger<SegmentRumService> logger) : IRumQueryService
+public sealed class SegmentRumService(SegmentManagerRegistry<RumSegmentManager> rum, ILogger<SegmentRumService> logger) : IRumQueryService
 {
     private const int MaxRumRows = 200_000;
 
     public async Task<bool> HasDataAsync(Guid tenantId, Guid siteId, CancellationToken ct = default)
     {
         Query scope = RumSegmentSchema.BuildScope(tenantId, siteId, RumSegmentSchema.PageView, null, null);
-        return await segments.QueryAsync(null, null, s => s.Search(scope, 1).TotalHits > 0, ct);
+        return await rum.For(tenantId).QueryAsync(null, null, s => s.Search(scope, 1).TotalHits > 0, ct);
     }
 
     public async Task<RumSiteOverview?> GetOverviewAsync(Guid tenantId, Guid siteId, DateTime from, DateTime to, CancellationToken ct = default)
@@ -116,7 +116,7 @@ public sealed class SegmentRumService(RumSegmentManager segments, ILogger<Segmen
         try
         {
             Query q = RumSegmentSchema.BuildSession(tenantId, siteId, sessionId, from, to);
-            List<RumRow> rows = await MaterializeAsync(q, from, to, ct);
+            List<RumRow> rows = await MaterializeAsync(tenantId, q, from, to, ct);
 
             List<RumViewRow> views = rows.Where(r => r.Kind == RumSegmentSchema.PageView).OrderBy(r => r.TsMs)
                 .Select(r => new RumViewRow(TelemetryTime.FromEpochMillis(r.TsMs), r.Path, r.LoadMs, r.LcpMs, r.Cls, r.InpMs)).ToList();
@@ -132,11 +132,11 @@ public sealed class SegmentRumService(RumSegmentManager segments, ILogger<Segmen
     // ──────── internal ────────
 
     private Task<List<RumRow>> LoadRowsAsync(Guid tenantId, Guid siteId, string? kind, DateTime from, DateTime to, CancellationToken ct)
-        => MaterializeAsync(RumSegmentSchema.BuildScope(tenantId, siteId, kind, from, to), from, to, ct);
+        => MaterializeAsync(tenantId, RumSegmentSchema.BuildScope(tenantId, siteId, kind, from, to), from, to, ct);
 
-    private async Task<List<RumRow>> MaterializeAsync(Query q, DateTime? from, DateTime? to, CancellationToken ct)
+    private async Task<List<RumRow>> MaterializeAsync(Guid tenantId, Query q, DateTime? from, DateTime? to, CancellationToken ct)
     {
-        return await segments.QueryAsync(from, to, s =>
+        return await rum.For(tenantId).QueryAsync(from, to, s =>
         {
             TopDocs hits = s.Search(q, MaxRumRows);
             if (hits.TotalHits > MaxRumRows)

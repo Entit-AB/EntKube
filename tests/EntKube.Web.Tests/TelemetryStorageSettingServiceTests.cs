@@ -27,26 +27,32 @@ public sealed class TelemetryStorageSettingServiceTests : IDisposable
         _service = new TelemetryStorageSettingService(new TestDbContextFactory(_connection));
     }
 
+    private readonly Guid _tenantA = Guid.NewGuid();
+    private readonly Guid _tenantB = Guid.NewGuid();
+
     [Fact]
     public async Task Get_WhenUnset_ReturnsNull()
-        => (await _service.GetStorageLinkIdAsync()).Should().BeNull();
+        => (await _service.GetStorageLinkIdAsync(_tenantA)).Should().BeNull();
 
     [Fact]
-    public async Task Set_ThenGet_PersistsAndInvalidatesCache()
+    public async Task Set_ThenGet_IsPerTenant_AndInvalidatesCache()
     {
-        Guid link = Guid.NewGuid();
+        Guid linkA = Guid.NewGuid();
 
-        await _service.GetStorageLinkIdAsync();               // prime the cache (null)
-        await _service.SetStorageLinkIdAsync(link, "admin-1"); // must invalidate it
-        (await _service.GetStorageLinkIdAsync()).Should().Be(link);
+        await _service.GetStorageLinkIdAsync(_tenantA);                // prime the cache (null)
+        await _service.SetStorageLinkIdAsync(_tenantA, linkA, "admin-1"); // must invalidate it
+        (await _service.GetStorageLinkIdAsync(_tenantA)).Should().Be(linkA);
 
-        // Persisted as a single row.
+        // Per-tenant: tenant B is unaffected by tenant A's setting.
+        (await _service.GetStorageLinkIdAsync(_tenantB)).Should().BeNull();
+
+        // One row per tenant.
         (await _context.TelemetryStorageSettings.CountAsync()).Should().Be(1);
 
-        // Clearing goes back to null (fallback storage).
-        await _service.SetStorageLinkIdAsync(null, "admin-1");
-        (await _service.GetStorageLinkIdAsync()).Should().BeNull();
-        (await _context.TelemetryStorageSettings.CountAsync()).Should().Be(1); // still one row, updated in place
+        // Clearing tenant A goes back to null; the row is updated in place.
+        await _service.SetStorageLinkIdAsync(_tenantA, null, "admin-1");
+        (await _service.GetStorageLinkIdAsync(_tenantA)).Should().BeNull();
+        (await _context.TelemetryStorageSettings.CountAsync()).Should().Be(1);
     }
 
     public void Dispose()

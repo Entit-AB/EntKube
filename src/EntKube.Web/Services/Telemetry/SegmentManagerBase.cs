@@ -57,21 +57,28 @@ public abstract class SegmentManagerBase : IDisposable
     private bool _activeIsA;
     private DateTime _activeSince = DateTime.UtcNow;
 
+    /// <summary>The tenant this manager serves — telemetry is tenant-scoped, one manager per (tenant, signal).</summary>
+    protected Guid TenantId { get; }
+
     protected SegmentManagerBase(
+        Guid tenantId,
         IDbContextFactory<ApplicationDbContext> catalog,
         ISegmentBlobStore blobs,
         SegmentEngineOptions options,
         ILogger logger,
         Analyzer analyzer)
     {
+        TenantId = tenantId;
         _catalog = catalog;
         _blobs = blobs;
         _options = options;
         _logger = logger;
         _analyzer = analyzer;
-        _dirA = Path.Combine(options.DataPath, "active", $"{Signal}.a");
-        _dirB = Path.Combine(options.DataPath, "active", $"{Signal}.b");
-        _cache = new SegmentCache(blobs, Path.Combine(options.DataPath, "cache", Signal));
+        // Per-tenant on-disk state — each tenant's active index and cache live under its own subtree.
+        string tenantRoot = Path.Combine(options.DataPath, tenantId.ToString("N"));
+        _dirA = Path.Combine(tenantRoot, "active", $"{Signal}.a");
+        _dirB = Path.Combine(tenantRoot, "active", $"{Signal}.b");
+        _cache = new SegmentCache(blobs, Path.Combine(tenantRoot, "cache", Signal));
         _active = ActiveSegmentIndex.OpenAt(_dirA, _analyzer);
         _activeIsA = true;
     }
@@ -156,7 +163,7 @@ public abstract class SegmentManagerBase : IDisposable
         sealing.Commit();
         sealing.Dispose(); // release file handles so the directory can be zipped/moved
 
-        string key = $"{Signal}/{min:yyyy/MM/dd}/{segId:N}.zip";
+        string key = $"{TenantId:N}/{Signal}/{min:yyyy/MM/dd}/{segId:N}.zip";
         string tmpZip = Path.Combine(_options.DataPath, "stage", segId.ToString("N") + ".zip");
         Directory.CreateDirectory(Path.GetDirectoryName(tmpZip)!);
         ZipFile.CreateFromDirectory(sealingDir, tmpZip, CompressionLevel.Optimal, includeBaseDirectory: false);
@@ -168,6 +175,7 @@ public abstract class SegmentManagerBase : IDisposable
         var segment = new TelemetrySegment
         {
             Id = segId,
+            TenantId = TenantId,
             Signal = Signal,
             MinTs = min,
             MaxTs = max,
@@ -195,7 +203,7 @@ public abstract class SegmentManagerBase : IDisposable
         DateTime cutoff = DateTime.UtcNow.AddDays(-_options.RetentionDays);
         await using ApplicationDbContext db = await _catalog.CreateDbContextAsync(ct);
         List<TelemetrySegment> expired = await db.TelemetrySegments
-            .Where(s => s.Signal == Signal && s.MaxTs < cutoff)
+            .Where(s => s.TenantId == TenantId && s.Signal == Signal && s.MaxTs < cutoff)
             .ToListAsync(ct);
         if (expired.Count == 0) return 0;
 
@@ -216,7 +224,7 @@ public abstract class SegmentManagerBase : IDisposable
     private async Task<List<TelemetrySegment>> SegmentsOverlappingAsync(DateTime? from, DateTime? to, CancellationToken ct)
     {
         await using ApplicationDbContext db = await _catalog.CreateDbContextAsync(ct);
-        IQueryable<TelemetrySegment> q = db.TelemetrySegments.Where(s => s.Signal == Signal);
+        IQueryable<TelemetrySegment> q = db.TelemetrySegments.Where(s => s.TenantId == TenantId && s.Signal == Signal);
         if (from is DateTime f) q = q.Where(s => s.MaxTs >= f);
         if (to is DateTime t) q = q.Where(s => s.MinTs < t);
         return await q.OrderBy(s => s.MinTs).ToListAsync(ct);
@@ -226,5 +234,6 @@ public abstract class SegmentManagerBase : IDisposable
     {
         _active.Dispose();
         _analyzer.Dispose();
+        (_blobs as IDisposable)?.Dispose(); // per-tenant blob store owned by this manager
     }
 }

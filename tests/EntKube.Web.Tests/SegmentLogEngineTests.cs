@@ -25,7 +25,8 @@ public sealed class SegmentLogEngineTests : IDisposable
     private readonly ClusterTenantResolver _resolver;
     private readonly Guid _tenantId = Guid.NewGuid();
     private readonly Guid _clusterId = Guid.NewGuid();
-    private readonly List<LogSegmentManager> _managers = [];
+    private readonly List<SegmentManagerRegistry<LogSegmentManager>> _registries = [];
+    private SegmentManagerRegistry<LogSegmentManager>? _registry;
     private readonly List<string> _tempDirs = [];
 
     public SegmentLogEngineTests()
@@ -53,17 +54,20 @@ public sealed class SegmentLogEngineTests : IDisposable
     private static LogIngestRecord Log(DateTime ts, string ns, string pod, short sev, string body, string? trace = null)
         => new(ts, ns, pod, "app", sev, body, trace, null);
 
+    // Builds a fresh per-tenant registry (temp data path + local object storage) and returns this test's
+    // tenant manager from it. NewService() then wraps the same registry.
     private LogSegmentManager NewManager(int retentionDays = 14)
     {
         string dataPath = Path.Combine(Path.GetTempPath(), "segtest-" + Guid.NewGuid().ToString("N"));
         _tempDirs.Add(dataPath);
-        string blobs = Path.Combine(dataPath, "blobs");
-        Directory.CreateDirectory(blobs);
+        string blobsDir = Path.Combine(dataPath, "blobs");
+        Directory.CreateDirectory(blobsDir);
         var options = new SegmentEngineOptions { DataPath = dataPath, RetentionDays = retentionDays };
-        var mgr = new LogSegmentManager(
-            _factory, new LocalSegmentBlobStore(blobs), options, NullLogger<LogSegmentManager>.Instance);
-        _managers.Add(mgr);
-        return mgr;
+        var store = new LocalSegmentBlobStore(blobsDir);
+        _registry = new SegmentManagerRegistry<LogSegmentManager>(tid =>
+            new LogSegmentManager(tid, _factory, store, options, NullLogger<LogSegmentManager>.Instance));
+        _registries.Add(_registry);
+        return _registry.For(_tenantId);
     }
 
     private LogSegmentManager ManagerWith(params LogIngestRecord[] records)
@@ -73,8 +77,14 @@ public sealed class SegmentLogEngineTests : IDisposable
         return mgr;
     }
 
-    private SegmentLogService NewService(LogSegmentManager mgr)
-        => new(mgr, _resolver, NullLogger<SegmentLogService>.Instance);
+    private SegmentLogService NewService()
+        => new(_registry!, _resolver, NullLogger<SegmentLogService>.Instance);
+
+    private SegmentManagerRegistry<LogSegmentManager> Registry(int retentionDays = 14)
+    {
+        NewManager(retentionDays);
+        return _registry!;
+    }
 
     [Fact]
     public async Task Query_FiltersByNamespaceTextAndSeverity_NewestFirst()
@@ -85,7 +95,7 @@ public sealed class SegmentLogEngineTests : IDisposable
             Log(t0.AddSeconds(2), "prod", "api-2", 4, "ERROR failed to reach database timeout", "abc123"),
             Log(t0.AddSeconds(3), "staging", "worker-1", 4, "ERROR unrelated namespace"),
             Log(t0.AddSeconds(4), "prod", "api-1", 4, "ERROR null reference in handler"));
-        SegmentLogService svc = NewService(mgr);
+        SegmentLogService svc = NewService();
 
         var filter = new LogQueryFilter { Namespaces = ["prod"], Text = "database", MinLevel = LogLevel.Error };
         var result = await svc.QueryAsync(_clusterId, filter, t0, t0.AddMinutes(1));
@@ -106,7 +116,7 @@ public sealed class SegmentLogEngineTests : IDisposable
             Log(t0.AddSeconds(2), "prod", "api-1", 4, "boom", "trace-xyz"),
             Log(t0.AddSeconds(3), "prod", "api-1", 2, "other request", "trace-other"));
 
-        var result = await NewService(mgr).QueryByTraceAsync(_clusterId, "trace-xyz");
+        var result = await NewService().QueryByTraceAsync(_clusterId, "trace-xyz");
 
         result.IsSuccess.Should().BeTrue();
         result.Data!.SelectMany(s => s.Entries).Should().HaveCount(2);
@@ -120,7 +130,7 @@ public sealed class SegmentLogEngineTests : IDisposable
             Log(t0.AddSeconds(1), "prod", "api-1", 2, "a"),
             Log(t0.AddSeconds(2), "prod", "api-2", 4, "b"),
             Log(t0.AddSeconds(3), "staging", "worker-1", 1, "c"));
-        SegmentLogService svc = NewService(mgr);
+        SegmentLogService svc = NewService();
 
         (await svc.GetNamespacesAsync(_clusterId)).Data.Should().BeEquivalentTo(["prod", "staging"]);
         (await svc.GetPodsAsync(_clusterId, "prod")).Data.Should().BeEquivalentTo(["api-1", "api-2"]);
@@ -150,7 +160,7 @@ public sealed class SegmentLogEngineTests : IDisposable
             (await db.TelemetrySegments.CountAsync()).Should().Be(1);
 
         // The logs are now only in the sealed segment; a query must fetch it back from object storage.
-        SegmentLogService svc = NewService(mgr);
+        SegmentLogService svc = NewService();
         var result = await svc.QueryAsync(
             _clusterId, new LogQueryFilter { Namespaces = ["prod"] }, t0, t0.AddMinutes(1));
         result.IsSuccess.Should().BeTrue();
@@ -194,7 +204,7 @@ public sealed class SegmentLogEngineTests : IDisposable
         }
         LogSegmentManager mgr = NewManager();
         mgr.WriteLogs(_tenantId, _clusterId, records);
-        SegmentLogService svc = NewService(mgr);
+        SegmentLogService svc = NewService();
 
         var filter = new LogQueryFilter { Namespaces = ["prod"], Text = "timeout", MinLevel = LogLevel.Error };
         var sw = Stopwatch.StartNew();
@@ -208,9 +218,44 @@ public sealed class SegmentLogEngineTests : IDisposable
         sw.ElapsedMilliseconds.Should().BeLessThan(3000);
     }
 
+    [Fact]
+    public async Task Tenants_AreIsolated_NoCrossTenantLogs()
+    {
+        // A second tenant + cluster. Telemetry must be tenant-scoped: neither tenant can see the other's logs.
+        Guid tenantB = Guid.NewGuid(), clusterB = Guid.NewGuid(), envB = Guid.NewGuid();
+        _context.Tenants.Add(new Tenant { Id = tenantB, Name = "Beta", Slug = "beta-" + tenantB.ToString("N")[..8] });
+        _context.Environments.Add(new Environment { Id = envB, TenantId = tenantB, Name = "prod" });
+        _context.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = clusterB, TenantId = tenantB, EnvironmentId = envB, Name = "c2", ApiServerUrl = "https://k8s.example.com",
+        });
+        _context.SaveChanges();
+
+        DateTime t0 = new(2026, 7, 8, 12, 0, 0, DateTimeKind.Utc);
+        SegmentManagerRegistry<LogSegmentManager> reg = Registry();
+        reg.For(_tenantId).WriteLogs(_tenantId, _clusterId, [Log(t0, "prod", "api-1", 2, "tenant A private log")]);
+        reg.For(tenantB).WriteLogs(tenantB, clusterB, [Log(t0, "prod", "api-1", 2, "tenant B private log")]);
+
+        // Seal tenant A so its data lives only in a sealed (tenant-scoped) segment; B stays in its active index.
+        await reg.For(_tenantId).RollAndSealAsync();
+
+        SegmentLogService svc = NewService();
+        var window = (from: t0.AddMinutes(-1), to: t0.AddMinutes(1));
+        var a = await svc.QueryAsync(_clusterId, new LogQueryFilter { Namespaces = ["prod"] }, window.from, window.to);
+        var b = await svc.QueryAsync(clusterB, new LogQueryFilter { Namespaces = ["prod"] }, window.from, window.to);
+
+        a.Data!.SelectMany(s => s.Entries).Should().ContainSingle().Which.Line.Should().Contain("tenant A");
+        b.Data!.SelectMany(s => s.Entries).Should().ContainSingle().Which.Line.Should().Contain("tenant B");
+
+        // Cross-tenant catalog isolation: each tenant's sealed/active segments are tagged with its TenantId.
+        await using ApplicationDbContext db = _factory.CreateDbContext();
+        (await db.TelemetrySegments.CountAsync(s => s.TenantId == tenantB)).Should().Be(0); // B not sealed yet
+        (await db.TelemetrySegments.Where(s => s.Signal == "logs").AllAsync(s => s.TenantId == _tenantId)).Should().BeTrue();
+    }
+
     public void Dispose()
     {
-        foreach (LogSegmentManager m in _managers) m.Dispose();
+        foreach (SegmentManagerRegistry<LogSegmentManager> r in _registries) r.Dispose();
         _context.Dispose();
         _connection.Dispose();
         foreach (string d in _tempDirs)

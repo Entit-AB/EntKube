@@ -10,11 +10,12 @@ namespace EntKube.Web.Services.Telemetry;
 /// into a Lucene document via <see cref="SpanSegmentSchema"/> and appends it to the active index.
 /// </summary>
 public sealed class SpanSegmentManager(
+    Guid tenantId,
     IDbContextFactory<ApplicationDbContext> catalog,
     ISegmentBlobStore blobs,
     SegmentEngineOptions options,
     ILogger<SpanSegmentManager> logger)
-    : SegmentManagerBase(catalog, blobs, options, logger, SpanSegmentSchema.CreateAnalyzer())
+    : SegmentManagerBase(tenantId, catalog, blobs, options, logger, SpanSegmentSchema.CreateAnalyzer())
 {
     protected override string Signal => "spans";
 

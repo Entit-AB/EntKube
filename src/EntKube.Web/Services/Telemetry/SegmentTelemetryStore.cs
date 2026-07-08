@@ -3,54 +3,51 @@ using EntKube.Web.Services;
 namespace EntKube.Web.Services.Telemetry;
 
 /// <summary>
-/// The Lucene/S3 segment-engine implementation of <see cref="ITelemetryIngest"/> — the ingest
-/// counterpart to <see cref="SegmentLogService"/>. Log batches are appended to the active Lucene index
-/// (<see cref="ActiveLogIndex"/>); there is no per-request database connection, so the Postgres
-/// "too many clients" exhaustion that motivated this rewrite cannot occur.
-///
-/// Phase status: logs are fully implemented. Spans and RUM are appended by later phases (trace engine =
-/// Phase 3, RUM = Phase 5); until then they are accepted-and-dropped rather than 500'd, so an OTLP
-/// collector configured for the segment engine does not retry-storm. Metrics are intentionally NOT
-/// stored here at all — they move to Prometheus (Phase 4).
+/// The Lucene/S3 segment-engine implementation of <see cref="ITelemetryIngest"/>. Each batch is routed to
+/// the writing tenant's own segment manager (telemetry is tenant-scoped — no tenant's data ever shares a
+/// segment or a bucket with another's). There is no per-request database connection, so the Postgres
+/// "too many clients" exhaustion that motivated this rewrite cannot occur. Metrics are not stored here —
+/// they are served by Prometheus.
 /// </summary>
 public sealed class SegmentTelemetryStore(
-    LogSegmentManager logs, SpanSegmentManager spans, RumSegmentManager rum,
-    ILogger<SegmentTelemetryStore> logger) : ITelemetryIngest
+    SegmentManagerRegistry<LogSegmentManager> logs,
+    SegmentManagerRegistry<SpanSegmentManager> spans,
+    SegmentManagerRegistry<RumSegmentManager> rum) : ITelemetryIngest
 {
     public bool IsEnabled => true;
 
     public Task<int> WriteLogsAsync(Guid tenantId, Guid clusterId, IReadOnlyList<LogIngestRecord> records, CancellationToken ct = default)
     {
         if (records.Count == 0) return Task.FromResult(0);
-        logs.WriteLogs(tenantId, clusterId, records);
+        logs.For(tenantId).WriteLogs(tenantId, clusterId, records);
         return Task.FromResult(records.Count);
     }
 
     public Task<int> WriteSpansAsync(Guid tenantId, Guid clusterId, IReadOnlyList<SpanIngestRecord> records, CancellationToken ct = default)
     {
         if (records.Count == 0) return Task.FromResult(0);
-        spans.WriteSpans(tenantId, clusterId, records);
+        spans.For(tenantId).WriteSpans(tenantId, clusterId, records);
         return Task.FromResult(records.Count);
     }
 
     public Task<int> WriteRumPageViewsAsync(Guid tenantId, Guid siteId, IReadOnlyList<RumPageViewRecord> records, CancellationToken ct = default)
     {
         if (records.Count == 0) return Task.FromResult(0);
-        rum.WritePageViews(tenantId, siteId, records);
+        rum.For(tenantId).WritePageViews(tenantId, siteId, records);
         return Task.FromResult(records.Count);
     }
 
     public Task<int> WriteRumErrorsAsync(Guid tenantId, Guid siteId, IReadOnlyList<RumErrorRecord> records, CancellationToken ct = default)
     {
         if (records.Count == 0) return Task.FromResult(0);
-        rum.WriteErrors(tenantId, siteId, records);
+        rum.For(tenantId).WriteErrors(tenantId, siteId, records);
         return Task.FromResult(records.Count);
     }
 
     public Task<int> WriteRumResourcesAsync(Guid tenantId, Guid siteId, IReadOnlyList<RumResourceRecord> records, CancellationToken ct = default)
     {
         if (records.Count == 0) return Task.FromResult(0);
-        rum.WriteResources(tenantId, siteId, records);
+        rum.For(tenantId).WriteResources(tenantId, siteId, records);
         return Task.FromResult(records.Count);
     }
 }

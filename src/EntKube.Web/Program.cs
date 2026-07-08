@@ -164,29 +164,42 @@ public class Program
             RetentionDays = builder.Configuration.GetValue<int?>("Telemetry:RetentionDays") ?? 14,
         };
         builder.Services.AddSingleton(segmentOptions);
-        // Global, admin-configurable setting for which StorageLink backs telemetry (edited at /admin/telemetry).
+        // Per-tenant setting for which StorageLink backs a tenant's telemetry (edited in the tenant's
+        // telemetry settings UI) + the per-tenant blob-store factory that resolves it.
         builder.Services.AddSingleton<TelemetryStorageSettingService>();
-        // Object storage for sealed segments, resolved at runtime (priority: the admin-selected StorageLink
-        // > flat Telemetry:ObjectStorage config > local disk under DataPath). Runtime resolution lets an
-        // admin change the storage target from the UI without a restart.
-        builder.Services.AddSingleton<ISegmentBlobStore, TelemetrySegmentBlobStore>();
-        builder.Services.AddSingleton<LogSegmentManager>();
-        builder.Services.AddSingleton<SpanSegmentManager>();
-        builder.Services.AddSingleton<RumSegmentManager>();
+        builder.Services.AddSingleton<TenantBlobStoreFactory>();
+        // Telemetry is TENANT-SCOPED: one segment manager per (tenant, signal), created lazily on first
+        // ingest/query, each with its own active index, catalog partition, and object storage — no tenant's
+        // logs/traces/RUM ever share a segment or a bucket with another's. The registries hold them.
+        builder.Services.AddSingleton(sp => new SegmentManagerRegistry<LogSegmentManager>(tenantId =>
+            new LogSegmentManager(tenantId,
+                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
+                segmentOptions, sp.GetRequiredService<ILogger<LogSegmentManager>>())));
+        builder.Services.AddSingleton(sp => new SegmentManagerRegistry<SpanSegmentManager>(tenantId =>
+            new SpanSegmentManager(tenantId,
+                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
+                segmentOptions, sp.GetRequiredService<ILogger<SpanSegmentManager>>())));
+        builder.Services.AddSingleton(sp => new SegmentManagerRegistry<RumSegmentManager>(tenantId =>
+            new RumSegmentManager(tenantId,
+                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
+                segmentOptions, sp.GetRequiredService<ILogger<RumSegmentManager>>())));
         builder.Services.AddSingleton<ITelemetryIngest, SegmentTelemetryStore>();
         builder.Services.AddScoped<ILogBackend, SegmentLogService>();
         builder.Services.AddScoped<ITraceQueryService, SegmentTraceService>();
         builder.Services.AddScoped<IRumQueryService, SegmentRumService>();
         builder.Services.AddScoped<IMetricsQuery, PromMetricsService>();
-        // One seal/retention loop per signal (logs + spans + rum). Each is a SegmentSealService instance.
+        // One seal/retention loop per signal; each iterates that signal's live per-tenant managers.
         builder.Services.AddHostedService(sp => new SegmentSealService(
-            sp.GetRequiredService<LogSegmentManager>(), segmentOptions,
+            sp.GetRequiredService<SegmentManagerRegistry<LogSegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
         builder.Services.AddHostedService(sp => new SegmentSealService(
-            sp.GetRequiredService<SpanSegmentManager>(), segmentOptions,
+            sp.GetRequiredService<SegmentManagerRegistry<SpanSegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
         builder.Services.AddHostedService(sp => new SegmentSealService(
-            sp.GetRequiredService<RumSegmentManager>(), segmentOptions,
+            sp.GetRequiredService<SegmentManagerRegistry<RumSegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
         builder.Services.AddSingleton<IngestTokenService>();
         builder.Services.AddSingleton<IngestRateLimiter>();

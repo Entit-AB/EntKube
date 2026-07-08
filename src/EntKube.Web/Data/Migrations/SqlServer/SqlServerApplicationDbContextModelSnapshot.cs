@@ -4195,9 +4195,12 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<long>("SizeBytes")
                         .HasColumnType("bigint");
 
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.HasKey("Id");
 
-                    b.HasIndex("Signal", "MaxTs", "MinTs");
+                    b.HasIndex("TenantId", "Signal", "MaxTs", "MinTs");
 
                     b.ToTable("TelemetrySegments");
                 });
@@ -4211,6 +4214,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<Guid?>("StorageLinkId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("datetime2");
 
@@ -4218,6 +4224,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasColumnType("nvarchar(max)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TenantId")
+                        .IsUnique();
 
                     b.ToTable("TelemetryStorageSettings");
                 });

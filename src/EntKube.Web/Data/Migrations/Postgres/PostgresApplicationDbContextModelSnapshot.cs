@@ -4192,9 +4192,12 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<long>("SizeBytes")
                         .HasColumnType("bigint");
 
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
                     b.HasKey("Id");
 
-                    b.HasIndex("Signal", "MaxTs", "MinTs");
+                    b.HasIndex("TenantId", "Signal", "MaxTs", "MinTs");
 
                     b.ToTable("TelemetrySegments");
                 });
@@ -4208,6 +4211,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid?>("StorageLinkId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -4215,6 +4221,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasColumnType("text");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TenantId")
+                        .IsUnique();
 
                     b.ToTable("TelemetryStorageSettings");
                 });

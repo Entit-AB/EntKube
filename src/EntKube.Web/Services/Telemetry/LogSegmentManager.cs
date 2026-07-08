@@ -10,11 +10,12 @@ namespace EntKube.Web.Services.Telemetry;
 /// into a Lucene document via <see cref="LogSegmentSchema"/> and appends it to the active index.
 /// </summary>
 public sealed class LogSegmentManager(
+    Guid tenantId,
     IDbContextFactory<ApplicationDbContext> catalog,
     ISegmentBlobStore blobs,
     SegmentEngineOptions options,
     ILogger<LogSegmentManager> logger)
-    : SegmentManagerBase(catalog, blobs, options, logger, LogSegmentSchema.CreateAnalyzer())
+    : SegmentManagerBase(tenantId, catalog, blobs, options, logger, LogSegmentSchema.CreateAnalyzer())
 {
     protected override string Signal => "logs";
 
