@@ -1,4 +1,5 @@
 using System.Text.Json;
+using EntKube.Web.Services.Telemetry;
 
 namespace EntKube.Web.Services;
 
@@ -16,7 +17,7 @@ public static class OtlpIngest
     public sealed record Result(IResult? Error, JsonDocument? Doc, Guid TenantId, Guid ClusterId);
 
     public static async Task<Result> ReadAsync(
-        HttpContext ctx, TelemetryStore telemetry, IngestTokenService tokens, IngestRateLimiter rateLimiter,
+        HttpContext ctx, ITelemetryIngest telemetry, IngestTokenService tokens, IngestRateLimiter rateLimiter,
         ILogger logger, CancellationToken ct)
     {
         if (!telemetry.IsEnabled)

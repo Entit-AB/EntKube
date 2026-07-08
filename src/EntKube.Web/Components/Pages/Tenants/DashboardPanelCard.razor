@@ -1,6 +1,7 @@
 @using EntKube.Web.Services
-@inject PgMetricsService Metrics
-@inject PgTraceService Traces
+@using EntKube.Web.Services.Telemetry
+@inject IMetricsQuery Metrics
+@inject ITraceQueryService Traces
 @inject LogQueryService Logs
 
 <div class="card h-100">

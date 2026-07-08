@@ -1,5 +1,6 @@
 @using EntKube.Web.Services
-@inject PgMetricsService Metrics
+@using EntKube.Web.Services.Telemetry
+@inject IMetricsQuery Metrics
 
 @if (!available && !isLoading)
 {

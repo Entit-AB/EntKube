@@ -155,6 +155,11 @@ else
                 </button>
             </li>
             <li class="nav-item" role="presentation">
+                <button class="nav-link @(activeTab == "telemetry-storage" ? "active" : "")" @onclick='() => SetTab("telemetry-storage")' role="tab" aria-selected="@(activeTab == "telemetry-storage")" tabindex="@(activeTab == "telemetry-storage" ? 0 : -1)" id="@($"tab-telemetry-storage")">
+                    <i class="bi bi-hdd-network me-1"></i>Telemetry Storage
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(activeTab == "logs" ? "active" : "")" @onclick='() => SetTab("logs")' role="tab" aria-selected="@(activeTab == "logs")" tabindex="@(activeTab == "logs" ? 0 : -1)" id="@($"tab-logs")">
                     <i class="bi bi-journal-text me-1"></i>Logs
                 </button>
@@ -250,6 +255,9 @@ else
                 break;
             case "databases":
                 <DatabaseTab TenantId="tenant.Id" />
+                break;
+            case "telemetry-storage":
+                <TenantTelemetrySettings TenantId="tenant.Id" />
                 break;
             case "storage":
                 <StorageTab TenantId="tenant.Id" />

@@ -4156,6 +4156,73 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("TelemetryAlertRules");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TelemetrySegment", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("DocCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("MaxTs")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("MinTs")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ObjectKey")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("SealedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Signal")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("SizeBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Signal", "MaxTs", "MinTs");
+
+                    b.ToTable("TelemetrySegments");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TelemetryStorageSetting", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("StorageLinkId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("UpdatedByUserId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId")
+                        .IsUnique();
+
+                    b.ToTable("TelemetryStorageSettings");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Tenant", b =>
                 {
                     b.Property<Guid>("Id")

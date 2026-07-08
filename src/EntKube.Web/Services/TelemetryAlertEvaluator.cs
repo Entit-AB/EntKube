@@ -1,5 +1,6 @@
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Services.Telemetry;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -35,7 +36,7 @@ public sealed class TelemetryAlertEvaluator(
     private async Task EvaluateAllAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
-        TelemetryStore store = scope.ServiceProvider.GetRequiredService<TelemetryStore>();
+        ITelemetryIngest store = scope.ServiceProvider.GetRequiredService<ITelemetryIngest>();
         if (!store.IsEnabled) return;
 
         using ApplicationDbContext db = scope.ServiceProvider
@@ -44,9 +45,9 @@ public sealed class TelemetryAlertEvaluator(
         List<TelemetryAlertRule> rules = await db.TelemetryAlertRules.Where(r => r.IsEnabled).ToListAsync(ct);
         if (rules.Count == 0) return;
 
-        PgTraceService trace = scope.ServiceProvider.GetRequiredService<PgTraceService>();
-        PgLogService log = scope.ServiceProvider.GetRequiredService<PgLogService>();
-        PgRumService rum = scope.ServiceProvider.GetRequiredService<PgRumService>();
+        ITraceQueryService trace = scope.ServiceProvider.GetRequiredService<ITraceQueryService>();
+        ILogBackend log = scope.ServiceProvider.GetRequiredService<ILogBackend>();
+        IRumQueryService rum = scope.ServiceProvider.GetRequiredService<IRumQueryService>();
         IncidentDispatcher dispatcher = scope.ServiceProvider.GetRequiredService<IncidentDispatcher>();
 
         DateTime now = DateTime.UtcNow;
@@ -131,7 +132,7 @@ public sealed class TelemetryAlertEvaluator(
     /// only the clusters that actually carry telemetry for this signal — idle clusters are skipped so
     /// they don't cost an aggregate scan every cycle.</summary>
     private static async Task<List<Guid>> ResolveClustersAsync(
-        ApplicationDbContext db, TelemetryAlertRule rule, PgTraceService trace, PgLogService log, CancellationToken ct)
+        ApplicationDbContext db, TelemetryAlertRule rule, ITraceQueryService trace, ILogBackend log, CancellationToken ct)
     {
         if (rule.ClusterId is Guid cid) return [cid];
 
@@ -148,7 +149,7 @@ public sealed class TelemetryAlertEvaluator(
     }
 
     private static Task<bool> HasSignalAsync(
-        TelemetryAlertKind kind, Guid clusterId, PgTraceService trace, PgLogService log, CancellationToken ct)
+        TelemetryAlertKind kind, Guid clusterId, ITraceQueryService trace, ILogBackend log, CancellationToken ct)
         => kind == TelemetryAlertKind.LogErrorRate ? log.HasDataAsync(clusterId, ct) : trace.HasDataAsync(clusterId, ct);
 
     private enum EvalStatus { Firing, Clear, Indeterminate }
@@ -167,7 +168,7 @@ public sealed class TelemetryAlertEvaluator(
         => string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s[..max]);
 
     private static async Task<Evaluation> EvaluateRuleAsync(
-        TelemetryAlertRule rule, Guid clusterId, DateTime now, PgTraceService trace, PgLogService log, PgRumService rum, CancellationToken ct)
+        TelemetryAlertRule rule, Guid clusterId, DateTime now, ITraceQueryService trace, ILogBackend log, IRumQueryService rum, CancellationToken ct)
     {
         DateTime from = now.AddMinutes(-Math.Max(1, rule.WindowMinutes));
         int w = rule.WindowMinutes;

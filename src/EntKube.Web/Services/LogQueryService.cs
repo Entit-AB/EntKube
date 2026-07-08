@@ -1,3 +1,5 @@
+using EntKube.Web.Services.Telemetry;
+
 namespace EntKube.Web.Services;
 
 /// <summary>
@@ -10,7 +12,7 @@ namespace EntKube.Web.Services;
 /// all with no per-cluster flag or configuration. The method surface mirrors LokiService and
 /// PgLogService exactly, so switching a viewer's injection to this type is a drop-in.
 /// </summary>
-public class LogQueryService(PgLogService native, LokiService loki, TelemetryStore store)
+public class LogQueryService(ILogBackend native, LokiService loki)
 {
     // The routing probe (HasDataAsync = tenant resolve + SELECT 1) would otherwise run before EVERY
     // facade call — ~5 extra round-trips per log-panel load. Memoize per cluster for a few seconds:
@@ -20,7 +22,7 @@ public class LogQueryService(PgLogService native, LokiService loki, TelemetrySto
 
     private async Task<bool> UseNativeAsync(Guid clusterId, CancellationToken ct)
     {
-        if (!store.IsEnabled) return false;
+        if (!native.IsEnabled) return false;
         if (_routeCache.TryGetValue(clusterId, out (bool UseNative, DateTime At) c)
             && DateTime.UtcNow - c.At < TimeSpan.FromSeconds(5))
             return c.UseNative;

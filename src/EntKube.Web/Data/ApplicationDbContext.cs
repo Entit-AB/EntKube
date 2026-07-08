@@ -97,6 +97,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<TelemetryAlertRule> TelemetryAlertRules => Set<TelemetryAlertRule>();
     public DbSet<Dashboard> Dashboards => Set<Dashboard>();
     public DbSet<RumSite> RumSites => Set<RumSite>();
+    public DbSet<TelemetrySegment> TelemetrySegments => Set<TelemetrySegment>();
+    public DbSet<TelemetryStorageSetting> TelemetryStorageSettings => Set<TelemetryStorageSetting>();
     public DbSet<NotificationProviderConfig> NotificationProviderConfigs => Set<NotificationProviderConfig>();
     public DbSet<SecretExpiryNotificationConfig> SecretExpiryNotificationConfigs => Set<SecretExpiryNotificationConfig>();
     public DbSet<SecretExpiryNotification> SecretExpiryNotifications => Set<SecretExpiryNotification>();
@@ -1178,6 +1180,23 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(s => s.Name).HasMaxLength(200).IsRequired();
             entity.Property(s => s.PublicKey).HasMaxLength(64).IsRequired();
             entity.Property(s => s.AllowedOrigins).HasMaxLength(4000);
+        });
+
+        builder.Entity<TelemetrySegment>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            // Window-overlap pruning within a tenant: "TenantId = @t AND Signal = @s AND MaxTs >= @from
+            // AND MinTs < @to". Leading TenantId + Signal + MaxTs seeks straight to the tenant's segments
+            // that can hold rows in the requested time range.
+            entity.HasIndex(s => new { s.TenantId, s.Signal, s.MaxTs, s.MinTs });
+            entity.Property(s => s.Signal).HasMaxLength(20).IsRequired();
+            entity.Property(s => s.ObjectKey).HasMaxLength(512).IsRequired();
+        });
+
+        builder.Entity<TelemetryStorageSetting>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => s.TenantId).IsUnique(); // one storage setting per tenant
         });
 
         builder.Entity<AlertIncident>(entity =>

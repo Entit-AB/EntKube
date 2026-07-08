@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using EntKube.Web.Services.Telemetry;
 
 namespace EntKube.Web.Services;
 
@@ -34,7 +35,7 @@ public static class RumIngest
     }
 
     public static async Task<Result> ReadAsync(
-        HttpContext ctx, string publicKey, TelemetryStore telemetry, RumSiteService sites,
+        HttpContext ctx, string publicKey, ITelemetryIngest telemetry, RumSiteService sites,
         IngestRateLimiter rateLimiter, ILogger logger, CancellationToken ct)
     {
         if (!telemetry.IsEnabled)

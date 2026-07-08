@@ -32,27 +32,39 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # Dedicated, isolated Postgres for the native telemetry store (logs / traces /
-  # metrics / RUM). Kept on a separate instance and volume from the control-plane
-  # DB so a runaway telemetry workload can never threaten it. The app connects via
-  # ConnectionStrings__TelemetryConnection and creates its own schema on startup;
-  # without this service that connection string is empty and all observability
-  # tabs stay disabled (TelemetryStore.IsEnabled == false).
-  postgres-telemetry:
-    image: postgres:17
+  # Local/backup object storage for the telemetry segment engine. OPTIONAL — the PRIMARY production
+  # store is a registered StorageLink (AWS S3 / Cleura S3) via Telemetry__StorageLinkId; this bundled
+  # MinIO is a self-hosted backup/dev option, started with the "objectstore" profile
+  # (`docker compose --profile objectstore up -d`) and used via Telemetry__ObjectStorage__*. Without any
+  # object storage the engine falls back to local disk under /app/Data (single node only).
+  # (Metrics are served by Prometheus; there is no longer a Postgres telemetry database.)
+  minio:
+    image: minio/minio:latest
+    profiles: ["objectstore"]
+    command: server /data --console-address ":9001"
     environment:
-      POSTGRES_DB: entkube_telemetry
-      POSTGRES_USER: entkube
-      POSTGRES_PASSWORD: "${TELEMETRY_POSTGRES_PASSWORD:-changeme}"
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-entkube}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-changeme-minio}"
     volumes:
-      - postgres-telemetry-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U entkube -d entkube_telemetry"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
+      - minio-data:/data
     restart: unless-stopped
+
+  # One-shot: create the telemetry bucket if absent, then exit. Retries until MinIO is reachable.
+  minio-init:
+    image: minio/mc:latest
+    profiles: ["objectstore"]
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-entkube}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-changeme-minio}"
+      TELEMETRY_BUCKET: "${TELEMETRY_BUCKET:-entkube-telemetry}"
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set tel http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do echo 'waiting for minio'; sleep 2; done &&
+      mc mb --ignore-existing tel/$$TELEMETRY_BUCKET &&
+      echo 'telemetry bucket ready'"
+    restart: "no"
 
   entkube:
     image: ${REGISTRY:-entit.azurecr.io}/entkube:${IMAGE_TAG:-latest}
@@ -61,22 +73,36 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      postgres-telemetry:
-        condition: service_healthy
     environment:
       # --- Database ---
       DatabaseProvider: Postgres
       ConnectionStrings__DefaultConnection: "Host=postgres;Port=5432;Database=entkube;Username=entkube;Password=${POSTGRES_PASSWORD:-changeme}"
 
-      # --- Native telemetry / observability ---
-      # Enables the Logs / Traces / Metrics / Dashboards / RUM tabs. Points at the
-      # dedicated postgres-telemetry instance; the app creates its schema on startup.
-      ConnectionStrings__TelemetryConnection: "Host=postgres-telemetry;Port=5432;Database=entkube_telemetry;Username=entkube;Password=${TELEMETRY_POSTGRES_PASSWORD:-changeme}"
+      # --- Telemetry (self-built Lucene/S3 segment engine — logs / traces / RUM) ---
       # Base URL clusters use to reach this server. The app appends /ingest/otlp to
       # build the collector's Ingest URL. Must be externally reachable from clusters.
       Telemetry__PublicIngestUrl: "https://${DOMAIN}"
-      # How many days of telemetry to retain (older daily partitions are dropped).
+      # How many days of telemetry to retain (sealed segments older than this are dropped).
       Telemetry__RetentionDays: "${TELEMETRY_RETENTION_DAYS:-14}"
+      # Local state (active index + sealed-segment cache). Persisted on the entkube-data volume.
+      Telemetry__DataPath: "/app/Data/telemetry"
+      # Metrics are served by Prometheus (apps write there directly) — there is no telemetry database.
+
+      # --- Object storage for sealed segments (priority: StorageLink > flat config > local disk) ---
+      # PRIMARY (production): point telemetry at a registered StorageLink (AWS S3 / Cleura S3 / MinIO)
+      # whose credentials live in the vault — the app's existing object-storage abstraction. Set its Id:
+      # Telemetry__StorageLinkId: "<storage-link-guid>"
+      #
+      # ALTERNATIVE (simple/dev, no StorageLink): flat S3/MinIO config. The bundled MinIO here is a
+      # local/backup option — run it with `docker compose --profile objectstore up -d`.
+      # Telemetry__ObjectStorage__Endpoint: "http://minio:9000"
+      # Telemetry__ObjectStorage__Bucket: "${TELEMETRY_BUCKET:-entkube-telemetry}"
+      # Telemetry__ObjectStorage__Region: "us-east-1"
+      # Telemetry__ObjectStorage__AccessKey: "${MINIO_ROOT_USER:-entkube}"
+      # Telemetry__ObjectStorage__SecretKey: "${MINIO_ROOT_PASSWORD:-changeme-minio}"
+      # Telemetry__ObjectStorage__ForcePathStyle: "true"
+      #
+      # If neither is set, sealed segments live on local disk under Telemetry__DataPath (single-node only).
 
       # --- Vault encryption ---
       # Required — set VAULT__ROOTKEY in your .env file (openssl rand -base64 32)
@@ -115,7 +141,7 @@ volumes:
   # Named volumes are NOT removed by "docker compose down".
   # Data is only deleted if you explicitly run "docker compose down -v".
   postgres-data:
-  postgres-telemetry-data:
+  minio-data:
   entkube-data:
   caddy-data:
   caddy-config:
