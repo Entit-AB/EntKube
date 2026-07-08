@@ -266,6 +266,8 @@ else
     ];
     private static readonly TreeGroup[] OpsGroups =
     [
+        new("Advisor", "bi-lightbulb",
+        [ new("advisor", "Priorities", "bi-lightbulb") ]),
         new("Monitoring", "bi-speedometer2",
         [ new("overview", "Overview", "bi-speedometer2"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
         new("Alerting", "bi-bell",
@@ -636,6 +638,12 @@ else
             case "maintenance": builder.OpenComponent<MaintenanceWindows>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "secret-expiry":
                 builder.OpenComponent<SecretExpiryTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.AddComponentParameter(2, "OnNavigateTab", EventCallback.Factory.Create<string>(this, NavigateToSection));
+                builder.CloseComponent();
+                break;
+            case "advisor":
+                builder.OpenComponent<OperationsAdvisorTab>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);
                 builder.AddComponentParameter(2, "OnNavigateTab", EventCallback.Factory.Create<string>(this, NavigateToSection));
                 builder.CloseComponent();

@@ -153,6 +153,7 @@ public class AlertSyncService(
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
         var prometheusService = scope.ServiceProvider.GetRequiredService<PrometheusService>();
         var notificationService = scope.ServiceProvider.GetRequiredService<NotificationService>();
+        var stormSuppression = scope.ServiceProvider.GetRequiredService<StormSuppressionService>();
 
         // Fetch current alerts from Alertmanager
         KubernetesOperationResult<List<AlertInfo>> alertsResult =
@@ -315,9 +316,19 @@ public class AlertSyncService(
         Dictionary<Guid, NotificationChannel> channelsById =
             channels.ToDictionary(c => c.Id);
 
+        // Collapse a storm to one notification per root cause (throttled across cycles).
+        foreach (AlertIncident incident in newIncidents)
+            incident.Cluster = cluster;
+        HashSet<Guid> notifiable = await stormSuppression.SelectNotifiableAsync(newIncidents, ct);
+        int suppressed = newIncidents.Count - newIncidents.Count(i => notifiable.Contains(i.Id));
+        if (suppressed > 0)
+            logger.LogInformation(
+                "Storm suppression: notifying {Notify} of {Total} new alerts on cluster {Cluster} ({Suppressed} correlated/throttled).",
+                newIncidents.Count - suppressed, newIncidents.Count, clusterId, suppressed);
+
         foreach (AlertIncident incident in newIncidents)
         {
-            incident.Cluster = cluster;
+            if (!notifiable.Contains(incident.Id)) continue;
             await DispatchAsync(incident, isFiring: true, channels, channelsById, routingRules, notificationService, ct);
         }
 
