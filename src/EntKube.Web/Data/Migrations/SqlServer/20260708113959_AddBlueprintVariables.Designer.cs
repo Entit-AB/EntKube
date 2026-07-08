@@ -4,6 +4,7 @@ using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.SqlServer
 {
     [DbContext(typeof(SqlServerApplicationDbContext))]
-    partial class SqlServerApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260708113959_AddBlueprintVariables")]
+    partial class AddBlueprintVariables
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1850,52 +1853,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("RegisteredPostgresDatabaseId");
 
                     b.ToTable("DatabaseBindings");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.DeploymentAppliedResource", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime>("AppliedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<Guid>("DeploymentId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("Group")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("nvarchar(100)");
-
-                    b.Property<string>("Kind")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("nvarchar(100)");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(253)
-                        .HasColumnType("nvarchar(253)");
-
-                    b.Property<string>("Namespace")
-                        .HasMaxLength(63)
-                        .HasColumnType("nvarchar(63)");
-
-                    b.Property<bool>("Prunable")
-                        .HasColumnType("bit");
-
-                    b.Property<string>("Version")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("nvarchar(20)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("DeploymentId");
-
-                    b.ToTable("DeploymentAppliedResources");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.DeploymentHealthSnapshot", b =>
@@ -5563,17 +5520,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("RegisteredPostgresDatabase");
                 });
 
-            modelBuilder.Entity("EntKube.Web.Data.DeploymentAppliedResource", b =>
-                {
-                    b.HasOne("EntKube.Web.Data.AppDeployment", "Deployment")
-                        .WithMany("AppliedResources")
-                        .HasForeignKey("DeploymentId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Deployment");
-                });
-
             modelBuilder.Entity("EntKube.Web.Data.DeploymentHealthSnapshot", b =>
                 {
                     b.HasOne("EntKube.Web.Data.AppDeployment", "Deployment")
@@ -6808,8 +6754,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
             modelBuilder.Entity("EntKube.Web.Data.AppDeployment", b =>
                 {
-                    b.Navigation("AppliedResources");
-
                     b.Navigation("CacheBindings");
 
                     b.Navigation("ChildDeployments");

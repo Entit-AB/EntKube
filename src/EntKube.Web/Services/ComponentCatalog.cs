@@ -2090,6 +2090,29 @@ public static class ComponentCatalog
 
         new CatalogEntry
         {
+            Key = "argo-cd",
+            DisplayName = "Argo CD",
+            Description = "Declarative GitOps continuous delivery for Kubernetes. Continuously reconciles the live cluster state against manifests in Git, exposing each app as an Application custom resource with sync and health status. Optional for EntKube — when present, EntKube can read its Applications to enrich deployment discovery.",
+            Icon = "bi-arrow-repeat",
+            Category = "GitOps",
+            HelmRepoUrl = "https://argoproj.github.io/argo-helm",
+            HelmChartName = "argo-cd",
+            DefaultNamespace = "argocd",
+            DefaultReleaseName = "argocd",
+            DetectionCrds = ["applications.argoproj.io", "appprojects.argoproj.io"],
+            FormFields = [],
+            DefaultValues = """
+                # Argo CD Helm values — see https://github.com/argoproj/argo-helm for the full reference.
+                # To publish the API server behind your ingress/gateway (with TLS terminated upstream),
+                # set configs.params."server.insecure": true and add a Gateway/HTTPRoute or ingress.
+                configs:
+                  params:
+                    server.insecure: false
+                """
+        },
+
+        new CatalogEntry
+        {
             Key = "rabbitmq-messaging-topology-operator",
             DisplayName = "RabbitMQ Messaging Topology Operator",
             Description = "Manages RabbitMQ topology objects (vhosts, queues, exchanges, bindings, policies, users, permissions) as Kubernetes CRDs. Requires cert-manager for webhook TLS certificate management.",

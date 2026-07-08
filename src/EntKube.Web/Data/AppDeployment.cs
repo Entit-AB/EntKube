@@ -145,6 +145,7 @@ public class AppDeployment
     public ICollection<AppDeployment> ChildDeployments { get; set; } = [];
     public ICollection<DeploymentManifest> Manifests { get; set; } = [];
     public ICollection<DeploymentResource> Resources { get; set; } = [];
+    public ICollection<DeploymentAppliedResource> AppliedResources { get; set; } = [];
     public ICollection<StorageBinding> StorageBindings { get; set; } = [];
     public ICollection<DatabaseBinding> DatabaseBindings { get; set; } = [];
     public ICollection<CacheBinding> CacheBindings { get; set; } = [];
