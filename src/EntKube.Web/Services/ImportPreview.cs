@@ -248,6 +248,20 @@ public class ImportRequest
     public required Guid EnvironmentId { get; set; }
     public required ImportPreview Preview { get; set; }
     public string? PerformedBy { get; set; }
+
+    /// <summary>
+    /// When set, the import targets this exact existing app (reuse), regardless of name.
+    /// Used when launching from within an app, where the target is unambiguous and must
+    /// not be resolved by fuzzy name matching. When null the app is resolved/created by
+    /// (<see cref="CustomerId"/>, <see cref="AppName"/>).
+    /// </summary>
+    public Guid? AppId { get; set; }
+
+    /// <summary>
+    /// Explicit name for the created deployment. When null/blank the deployment is named
+    /// after the app (qualified by environment on collision).
+    /// </summary>
+    public string? DeploymentName { get; set; }
 }
 
 /// <summary>Summary of what an import actually created, with best-effort warnings/errors.</summary>

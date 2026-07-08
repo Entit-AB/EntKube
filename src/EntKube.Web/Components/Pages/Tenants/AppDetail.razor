@@ -32,7 +32,40 @@ else
                 <div class="d-flex align-items-start">
                     <i class="bi bi-app-indicator fs-3 me-3 text-primary"></i>
                     <div>
-                        <h4 class="mb-1">@App.Name</h4>
+                        @if (renaming)
+                        {
+                            <div class="d-flex align-items-center gap-2 mb-1">
+                                <input class="form-control form-control-sm" style="max-width:20rem" @bind="renameValue"
+                                       @bind:event="oninput" @onkeydown="OnRenameKeyDown" placeholder="App name" />
+                                <button class="btn btn-sm btn-primary" @onclick="SaveRename"
+                                        disabled="@(savingRename || string.IsNullOrWhiteSpace(renameValue) || renameValue.Trim() == App.Name)">
+                                    @if (savingRename)
+                                    {
+                                        <span class="spinner-border spinner-border-sm"></span>
+                                    }
+                                    else
+                                    {
+                                        <i class="bi bi-check-lg"></i>
+                                    }
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => renaming = false" disabled="@savingRename">
+                                    <i class="bi bi-x-lg"></i>
+                                </button>
+                            </div>
+                            @if (!string.IsNullOrEmpty(renameError))
+                            {
+                                <div class="text-danger small mb-1">@renameError</div>
+                            }
+                        }
+                        else
+                        {
+                            <h4 class="mb-1 d-flex align-items-center gap-2">
+                                @App.Name
+                                <button class="btn btn-sm btn-link p-0 text-muted" title="Rename app" @onclick="BeginRename">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                            </h4>
+                        }
                         <div class="d-flex flex-wrap gap-2 text-muted small">
                             <span><i class="bi bi-person me-1"></i>@CustomerName</span>
                             <span><i class="bi bi-calendar me-1"></i>Created @App.CreatedAt.ToString("MMM d, yyyy")</span>
@@ -66,8 +99,7 @@ else
     @if (showImportWizard)
     {
         <ImportDeploymentWizard TenantId="TenantId"
-                                PreselectCustomerId="App.CustomerId"
-                                PreselectAppName="App.Name"
+                                TargetApp="App"
                                 OnClose="OnImportClosed" />
     }
 
@@ -190,6 +222,11 @@ else
     private bool showLinkPanel;
     private bool showImportWizard;
 
+    private bool renaming;
+    private bool savingRename;
+    private string renameValue = "";
+    private string? renameError;
+
     private List<Data.Environment>? allEnvironments;
     private List<Data.Environment>? linkedEnvironments;
     private HashSet<Guid> linkedEnvIds = new();
@@ -206,6 +243,59 @@ else
     {
         showImportWizard = false;
         await LoadEnvironments();
+    }
+
+    private void BeginRename()
+    {
+        renameValue = App.Name;
+        renameError = null;
+        renaming = true;
+    }
+
+    private async Task OnRenameKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await SaveRename();
+        }
+        else if (e.Key == "Escape")
+        {
+            renaming = false;
+        }
+    }
+
+    private async Task SaveRename()
+    {
+        string newName = renameValue.Trim();
+        if (string.IsNullOrWhiteSpace(newName) || newName == App.Name)
+        {
+            renaming = false;
+            return;
+        }
+
+        savingRename = true;
+        renameError = null;
+        try
+        {
+            bool ok = await TenantService.RenameAppAsync(App.Id, newName);
+            if (ok)
+            {
+                App.Name = newName;
+                renaming = false;
+            }
+            else
+            {
+                renameError = "Could not rename the app.";
+            }
+        }
+        catch (Exception ex)
+        {
+            renameError = ex.Message;
+        }
+        finally
+        {
+            savingRename = false;
+        }
     }
 
     private async Task DeleteApp()
