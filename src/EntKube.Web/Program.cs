@@ -278,6 +278,7 @@ public class Program
         builder.Services.AddHostedService<UptimeTrackingService>();
         builder.Services.AddHostedService<KeycloakBackupSchedulerService>();
         builder.Services.AddHostedService<AdvisorScanService>();
+        builder.Services.AddHostedService<ResourceUsageCollectorService>();
         builder.Services.AddHostedService<HeadscaleCertSyncService>();
         builder.Services.AddHostedService<SecretExpiryNotificationService>();
         builder.Services.AddHostedService<ObservedSecretRefreshService>();

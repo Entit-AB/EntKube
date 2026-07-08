@@ -3968,6 +3968,43 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("RegisteredPostgresInstances");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ResourceUsageSnapshot", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<double>("Fraction")
+                        .HasColumnType("double precision");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<DateTime>("SnapshotAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterId", "Kind", "SnapshotAt");
+
+                    b.ToTable("ResourceUsageSnapshots");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.RumSite", b =>
                 {
                     b.Property<Guid>("Id")
@@ -6401,6 +6438,15 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("KubernetesCluster");
 
                     b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ResourceUsageSnapshot", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KubernetesCluster", null)
+                        .WithMany()
+                        .HasForeignKey("ClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.SecretExpiryNotification", b =>

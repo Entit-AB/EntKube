@@ -32,6 +32,7 @@ public enum AdvisorCategory
     Security,        // certificates, kubeconfigs, OAuth client credentials
     Reliability,     // firing / unresolved incidents
     DataProtection,  // backups missing, failed, or stale
+    Capacity,        // resources trending toward their ceiling (PVC fill, memory-vs-limit)
 }
 
 /// <summary>
@@ -145,6 +146,7 @@ public class OperationsAdvisorService(
         findings.AddRange(await BuildSloFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildBackupFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildPostureFindingsAsync(tenantId, ct));
+        findings.AddRange(await BuildCapacityFindingsAsync(tenantId, now, ct));
 
         var merged = await MergeStateAsync(tenantId, findings, now, ct);
 
@@ -816,6 +818,103 @@ public class OperationsAdvisorService(
         }
 
         return result;
+    }
+
+    // ── Capacity: resources trending toward their ceiling (forecast, confidence < 1) ──
+    // Reads cached ResourceUsageSnapshot samples (written by ResourceUsageCollectorService)
+    // and linearly projects time-to-full. Never queries Prometheus on the read path.
+    private async Task<List<OperationsFinding>> BuildCapacityFindingsAsync(
+        Guid tenantId, DateTime now, CancellationToken ct)
+    {
+        var result = new List<OperationsFinding>();
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<Guid> clusterIds = await db.KubernetesClusters
+            .Where(c => c.TenantId == tenantId).Select(c => c.Id).ToListAsync(ct);
+        if (clusterIds.Count == 0) return result;
+
+        DateTime since = now.AddDays(-7);
+        var samples = await db.ResourceUsageSnapshots
+            .Where(s => clusterIds.Contains(s.ClusterId) && s.SnapshotAt >= since)
+            .Select(s => new { s.ClusterId, s.Kind, s.Namespace, s.Name, s.Fraction, s.SnapshotAt })
+            .ToListAsync(ct);
+        if (samples.Count == 0) return result;
+
+        foreach (var g in samples.GroupBy(s => (s.ClusterId, s.Kind, s.Namespace, s.Name)))
+        {
+            var series = g.OrderBy(s => s.SnapshotAt).ToList();
+            double current = series[^1].Fraction;
+
+            // Ignore comfortably-provisioned resources.
+            if (current < 0.70) continue;
+
+            // Linear trend over the window (fraction per hour).
+            double slopePerHour = 0;
+            if (series.Count >= 2)
+            {
+                double hours = (series[^1].SnapshotAt - series[0].SnapshotAt).TotalHours;
+                if (hours >= 1) slopePerHour = (series[^1].Fraction - series[0].Fraction) / hours;
+            }
+
+            (AdvisorSeverity sev, AdvisorHorizon horizon, string timing, double conf)? verdict = null;
+
+            if (current >= 0.95)
+            {
+                verdict = (AdvisorSeverity.Critical, AdvisorHorizon.Overdue, "at capacity now", 0.9);
+            }
+            else if (slopePerHour > 0)
+            {
+                double hoursToFull = (1.0 - current) / slopePerHour;
+                if (hoursToFull <= 48)
+                    verdict = (AdvisorSeverity.Warning, AdvisorHorizon.Today, $"full in ~{FmtHours(hoursToFull)}", 0.6);
+                else if (hoursToFull <= 24 * 7)
+                    verdict = (AdvisorSeverity.Info, AdvisorHorizon.ThisWeek, $"full in ~{FmtHours(hoursToFull)}", 0.55);
+                else if (current >= 0.90)
+                    verdict = (AdvisorSeverity.Warning, AdvisorHorizon.ThisWeek, $"{current * 100:0}% used", 0.7);
+            }
+            else if (current >= 0.90)
+            {
+                // High and steady — not imminent, but worth right-sizing.
+                verdict = (AdvisorSeverity.Info, AdvisorHorizon.ThisWeek, $"{current * 100:0}% used, steady", 0.7);
+            }
+
+            if (verdict is not (AdvisorSeverity sv, AdvisorHorizon hz, string tt, double cf)) continue;
+
+            bool pvc = g.Key.Kind == ResourceUsageKind.PvcFill;
+            string what = pvc
+                ? $"PVC “{g.Key.Name}” is {current * 100:0}% full"
+                : $"Pod “{g.Key.Name}” memory is {current * 100:0}% of its limit";
+
+            result.Add(new OperationsFinding
+            {
+                Id = $"capacity:{(pvc ? "pvc" : "mem")}:{g.Key.ClusterId}:{g.Key.Namespace}:{g.Key.Name}",
+                Category = AdvisorCategory.Capacity,
+                Severity = sv,
+                Horizon = hz,
+                Title = what,
+                Detail = pvc
+                    ? "The volume is filling up; a full PVC stalls writes and can crash the workload."
+                    : "Memory is approaching the limit; the container risks OOM-kill and restarts.",
+                ScopeLabel = $"{g.Key.Namespace}",
+                TimingText = tt,
+                Confidence = cf,
+                Remediation = pvc
+                    ? "Expand the volume, clean up data, or add retention/rotation."
+                    : "Raise the memory limit or reduce the workload's footprint.",
+                LinkSection = "infrastructure",
+                ClusterId = g.Key.ClusterId,
+                Source = "capacity",
+            });
+        }
+
+        return result;
+    }
+
+    private static string FmtHours(double hours)
+    {
+        if (hours < 1) return "under 1 h";
+        if (hours < 48) return $"{(int)hours} h";
+        return $"{(int)(hours / 24)} d";
     }
 
     private async Task<Dictionary<Guid, (Guid CustomerId, string CustomerName)>> LoadAppOwnersAsync(

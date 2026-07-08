@@ -3963,6 +3963,43 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("RegisteredPostgresInstances");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ResourceUsageSnapshot", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<double>("Fraction")
+                        .HasColumnType("REAL");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("SnapshotAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterId", "Kind", "SnapshotAt");
+
+                    b.ToTable("ResourceUsageSnapshots");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.RumSite", b =>
                 {
                     b.Property<Guid>("Id")
@@ -6392,6 +6429,15 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("KubernetesCluster");
 
                     b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ResourceUsageSnapshot", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KubernetesCluster", null)
+                        .WithMany()
+                        .HasForeignKey("ClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.SecretExpiryNotification", b =>
