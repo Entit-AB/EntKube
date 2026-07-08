@@ -4199,6 +4199,26 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("TelemetrySegments");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TelemetryStorageSetting", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("StorageLinkId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedByUserId")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("TelemetryStorageSettings");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Tenant", b =>
                 {
                     b.Property<Guid>("Id")

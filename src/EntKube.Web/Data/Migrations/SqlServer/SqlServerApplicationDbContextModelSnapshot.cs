@@ -4202,6 +4202,26 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("TelemetrySegments");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TelemetryStorageSetting", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("StorageLinkId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("UpdatedByUserId")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("TelemetryStorageSettings");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Tenant", b =>
                 {
                     b.Property<Guid>("Id")

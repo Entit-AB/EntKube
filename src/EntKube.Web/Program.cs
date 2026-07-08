@@ -164,28 +164,12 @@ public class Program
             RetentionDays = builder.Configuration.GetValue<int?>("Telemetry:RetentionDays") ?? 14,
         };
         builder.Services.AddSingleton(segmentOptions);
-        // Object storage for sealed segments, in priority order:
-        //   1) An existing storage link (AWS S3 / Cleura S3 / MinIO) via Telemetry:StorageLinkId — the
-        //      primary/production path, reusing the app's StorageLink + vault credential abstraction.
-        //   2) Flat Telemetry:ObjectStorage config (simple S3/MinIO without a storage link).
-        //   3) Local disk under DataPath, so a single node works with no object storage at all.
-        builder.Services.AddSingleton<ISegmentBlobStore>(sp =>
-        {
-            IConfiguration cfg = sp.GetRequiredService<IConfiguration>();
-
-            var linkStore = new StorageLinkSegmentBlobStore(
-                sp.GetRequiredService<IServiceScopeFactory>(), cfg,
-                sp.GetRequiredService<ILogger<StorageLinkSegmentBlobStore>>());
-            if (linkStore.IsConfigured) return linkStore;
-
-            var s3 = new S3SegmentBlobStore(cfg);
-            if (s3.IsConfigured) return s3;
-            s3.Dispose();
-
-            string localBlobs = System.IO.Path.Combine(segmentOptions.DataPath, "blobs");
-            System.IO.Directory.CreateDirectory(localBlobs);
-            return new LocalSegmentBlobStore(localBlobs);
-        });
+        // Global, admin-configurable setting for which StorageLink backs telemetry (edited at /admin/telemetry).
+        builder.Services.AddSingleton<TelemetryStorageSettingService>();
+        // Object storage for sealed segments, resolved at runtime (priority: the admin-selected StorageLink
+        // > flat Telemetry:ObjectStorage config > local disk under DataPath). Runtime resolution lets an
+        // admin change the storage target from the UI without a restart.
+        builder.Services.AddSingleton<ISegmentBlobStore, TelemetrySegmentBlobStore>();
         builder.Services.AddSingleton<LogSegmentManager>();
         builder.Services.AddSingleton<SpanSegmentManager>();
         builder.Services.AddSingleton<RumSegmentManager>();

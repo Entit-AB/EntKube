@@ -98,6 +98,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<Dashboard> Dashboards => Set<Dashboard>();
     public DbSet<RumSite> RumSites => Set<RumSite>();
     public DbSet<TelemetrySegment> TelemetrySegments => Set<TelemetrySegment>();
+    public DbSet<TelemetryStorageSetting> TelemetryStorageSettings => Set<TelemetryStorageSetting>();
     public DbSet<NotificationProviderConfig> NotificationProviderConfigs => Set<NotificationProviderConfig>();
     public DbSet<SecretExpiryNotificationConfig> SecretExpiryNotificationConfigs => Set<SecretExpiryNotificationConfig>();
     public DbSet<SecretExpiryNotification> SecretExpiryNotifications => Set<SecretExpiryNotification>();
