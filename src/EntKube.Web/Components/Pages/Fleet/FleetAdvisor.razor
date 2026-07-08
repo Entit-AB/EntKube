@@ -1,0 +1,249 @@
+@page "/fleet"
+@rendermode InteractiveServer
+@attribute [Authorize]
+@using System.Security.Claims
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@inject AuthenticationStateProvider AuthState
+@inject UserAccessService Access
+@inject OperationsAdvisorService Advisor
+@inject AdvisorStateService State
+
+@* Fleet Advisor: the cross-tenant fan-out of the per-tenant Operations Advisor —
+   one ranked "what needs doing across the whole platform" view for ops. *@
+
+<PageTitle>Fleet Advisor</PageTitle>
+
+<div class="container-fluid py-3">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h4 class="mb-0"><i class="bi bi-lightbulb me-2"></i>Fleet Advisor</h4>
+            <small class="text-muted">What needs doing — and by when — across every tenant you can access.</small>
+        </div>
+        <AutoRefresh OnRefresh="Reload" IntervalSeconds="120" Enabled="true" LastRefreshed="lastRefreshed" />
+    </div>
+
+    @if (loadError is not null)
+    {
+        <div class="alert alert-danger py-2">@loadError</div>
+    }
+    else if (rows is null)
+    {
+        <div class="text-center py-5">
+            <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+            <p class="text-muted small mt-2 mb-0">Analyzing @tenantCount tenant(s)…</p>
+        </div>
+    }
+    else if (tenantCount == 0)
+    {
+        <EmptyState Icon="bi-shield-lock" Title="No access"
+                    Message="You don't have access to any tenants yet." />
+    }
+    else
+    {
+        @* Fleet-wide summary strip *@
+        <div class="d-flex flex-wrap gap-2 mb-4">
+            @foreach (AdvisorHorizon h in Horizons)
+            {
+                int n = Visible.Count(r => r.Finding.Horizon == h);
+                (string label, string _, string tone) = HorizonMeta(h);
+                <div class="card border-0 text-center px-3 py-2 @(n > 0 ? tone : "bg-light")" style="min-width:9rem">
+                    <div class="fw-bold fs-4">@n</div>
+                    <div class="text-muted small">@label</div>
+                </div>
+            }
+            <div class="card border-0 bg-light text-center px-3 py-2" style="min-width:7rem">
+                <div class="fw-bold fs-4 @(Visible.Any(r => r.Finding.Severity == AdvisorSeverity.Critical) ? "text-danger" : "")">
+                    @Visible.Count(r => r.Finding.Severity == AdvisorSeverity.Critical)
+                </div>
+                <div class="text-muted small">Critical</div>
+            </div>
+            <div class="card border-0 bg-light text-center px-3 py-2" style="min-width:7rem">
+                <div class="fw-bold fs-4">@tenantCount</div>
+                <div class="text-muted small">Tenants</div>
+            </div>
+        </div>
+
+        <div class="row g-3">
+            @* Top priorities across the fleet *@
+            <div class="col-lg-8">
+                <div class="card">
+                    <div class="card-header d-flex align-items-center gap-2">
+                        <i class="bi bi-list-stars"></i><span class="fw-semibold">Top priorities</span>
+                        <span class="badge bg-secondary-subtle text-secondary border ms-1">@Priorities.Count</span>
+                        <span class="text-muted small ms-1">overdue &amp; due-today, most urgent first</span>
+                    </div>
+                    <div class="list-group list-group-flush">
+                        @if (Priorities.Count == 0)
+                        {
+                            <div class="list-group-item">
+                                <EmptyState Icon="bi-check2-circle" Title="All clear"
+                                            Message="Nothing overdue or due today across the fleet." />
+                            </div>
+                        }
+                        @foreach (Row r in Priorities)
+                        {
+                            OperationsFinding f = r.Finding;
+                            <div class="list-group-item">
+                                <div class="d-flex justify-content-between align-items-start gap-3">
+                                    <div class="flex-grow-1">
+                                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                                            <span class="badge @SeverityClass(f.Severity)">@f.Severity</span>
+                                            <a class="badge bg-dark-subtle text-dark border text-decoration-none"
+                                               href="@($"tenants/{r.Tenant.Slug}?section=advisor")">
+                                                <i class="bi bi-building me-1"></i>@r.Tenant.Name
+                                            </a>
+                                            @if (f.IsEscalated)
+                                            {
+                                                <span class="badge bg-danger"><i class="bi bi-fire me-1"></i>Escalated · @f.AgeDays d</span>
+                                            }
+                                            @if (f.State == AdvisorFindingStatus.Acknowledged)
+                                            {
+                                                <span class="badge bg-success-subtle text-success border border-success-subtle">Ack’d</span>
+                                            }
+                                            <span class="fw-semibold">@f.Title</span>
+                                        </div>
+                                        <div class="small mt-1 d-flex flex-wrap gap-3">
+                                            <span class="text-muted"><i class="bi bi-diagram-2 me-1"></i>@f.ScopeLabel</span>
+                                            @if (!string.IsNullOrWhiteSpace(f.TimingText))
+                                            {
+                                                <span class="text-muted"><i class="bi bi-clock-history me-1"></i>@f.TimingText</span>
+                                            }
+                                        </div>
+                                    </div>
+                                    <div class="btn-group btn-group-sm flex-shrink-0" role="group">
+                                        <a class="btn btn-outline-primary" href="@($"tenants/{r.Tenant.Slug}?section=advisor")">Open</a>
+                                        @if (f.State == AdvisorFindingStatus.Active)
+                                        {
+                                            <button class="btn btn-outline-secondary" title="Acknowledge"
+                                                    @onclick="() => Acknowledge(r)"><i class="bi bi-check2"></i></button>
+                                        }
+                                        @if (f.State != AdvisorFindingStatus.Dismissed)
+                                        {
+                                            <button class="btn btn-outline-secondary" title="Dismiss"
+                                                    @onclick="() => Dismiss(r)"><i class="bi bi-slash-circle"></i></button>
+                                        }
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            @* Per-tenant rollup *@
+            <div class="col-lg-4">
+                <div class="card">
+                    <div class="card-header"><i class="bi bi-building me-1"></i><span class="fw-semibold">By tenant</span></div>
+                    <div class="table-responsive">
+                        <table class="table table-sm mb-0 align-middle">
+                            <thead>
+                                <tr class="small text-muted">
+                                    <th>Tenant</th>
+                                    <th class="text-end text-danger">Overdue</th>
+                                    <th class="text-end text-warning-emphasis">Today</th>
+                                    <th class="text-end text-muted">Week</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var g in Visible.GroupBy(r => r.Tenant).OrderByDescending(g => g.Count(r => r.Finding.Horizon == AdvisorHorizon.Overdue)).ThenByDescending(g => g.Count()))
+                                {
+                                    <tr>
+                                        <td><a href="@($"tenants/{g.Key.Slug}?section=advisor")" class="text-decoration-none">@g.Key.Name</a></td>
+                                        <td class="text-end @(g.Count(r => r.Finding.Horizon == AdvisorHorizon.Overdue) > 0 ? "text-danger fw-semibold" : "text-muted")">@g.Count(r => r.Finding.Horizon == AdvisorHorizon.Overdue)</td>
+                                        <td class="text-end">@g.Count(r => r.Finding.Horizon == AdvisorHorizon.Today)</td>
+                                        <td class="text-end text-muted">@g.Count(r => r.Finding.Horizon == AdvisorHorizon.ThisWeek)</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private record Row(Tenant Tenant, OperationsFinding Finding);
+
+    private List<Row>? rows;
+    private string? loadError;
+    private DateTime? lastRefreshed;
+    private int tenantCount;
+    private string currentUser = "Unknown";
+
+    private static readonly AdvisorHorizon[] Horizons =
+        [AdvisorHorizon.Overdue, AdvisorHorizon.Today, AdvisorHorizon.ThisWeek, AdvisorHorizon.Later];
+
+    // Hide dismissed / still-snoozed by default across the fleet.
+    private IEnumerable<Row> Visible => rows is null ? [] : rows.Where(r =>
+        r.Finding.State != AdvisorFindingStatus.Dismissed &&
+        !(r.Finding.State == AdvisorFindingStatus.Snoozed && r.Finding.SnoozedUntil > DateTime.UtcNow));
+
+    private List<Row> Priorities => Visible
+        .Where(r => r.Finding.Horizon is AdvisorHorizon.Overdue or AdvisorHorizon.Today)
+        .Take(50).ToList();
+
+    protected override async Task OnInitializedAsync()
+    {
+        AuthenticationState auth = await AuthState.GetAuthenticationStateAsync();
+        currentUser = auth.User.Identity?.Name ?? "Unknown";
+        userId = auth.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        await Reload();
+    }
+
+    private string? userId;
+
+    private async Task Reload()
+    {
+        loadError = null;
+        try
+        {
+            if (string.IsNullOrEmpty(userId)) { rows = []; tenantCount = 0; return; }
+
+            List<Tenant> tenants = await Access.GetAccessibleTenantsAsync(userId);
+            tenantCount = tenants.Count;
+
+            var collected = new List<Row>();
+            foreach (Tenant t in tenants)
+            {
+                AdvisorReport report = await Advisor.GetReportAsync(t.Id);
+                foreach (OperationsFinding f in report.Findings)
+                    collected.Add(new Row(t, f));
+            }
+
+            rows = collected
+                .OrderBy(r => r.Finding.Horizon)
+                .ThenBy(r => r.Finding.Severity)
+                .ThenBy(r => r.Finding.DueAt ?? DateTime.MaxValue)
+                .ToList();
+            lastRefreshed = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            loadError = $"Could not build the fleet view: {ex.Message}";
+        }
+        StateHasChanged();
+    }
+
+    private async Task Acknowledge(Row r) { await State.AcknowledgeAsync(r.Tenant.Id, r.Finding.Id, currentUser); await Reload(); }
+    private async Task Dismiss(Row r) { await State.DismissAsync(r.Tenant.Id, r.Finding.Id, currentUser); await Reload(); }
+
+    private static (string Label, string Icon, string Tone) HorizonMeta(AdvisorHorizon h) => h switch
+    {
+        AdvisorHorizon.Overdue => ("Overdue", "bi-exclamation-octagon-fill", "bg-danger-subtle text-danger"),
+        AdvisorHorizon.Today => ("Today", "bi-exclamation-triangle-fill", "bg-warning-subtle text-warning-emphasis"),
+        AdvisorHorizon.ThisWeek => ("This week", "bi-calendar-week", "bg-info-subtle text-info-emphasis"),
+        _ => ("Coming up", "bi-hourglass-split", "bg-light text-muted"),
+    };
+
+    private static string SeverityClass(AdvisorSeverity s) => s switch
+    {
+        AdvisorSeverity.Critical => "bg-danger",
+        AdvisorSeverity.Warning => "bg-warning text-dark",
+        _ => "bg-secondary",
+    };
+}

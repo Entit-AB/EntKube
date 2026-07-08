@@ -63,6 +63,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<DeploymentHealthSnapshot> DeploymentHealthSnapshots => Set<DeploymentHealthSnapshot>();
     public DbSet<MaintenanceWindow> MaintenanceWindows => Set<MaintenanceWindow>();
     public DbSet<SlaTarget> SlaTargets => Set<SlaTarget>();
+    public DbSet<AdvisorFindingState> AdvisorFindingStates => Set<AdvisorFindingState>();
     public DbSet<ExternalRouteHealthHistory> ExternalRouteHealthHistories => Set<ExternalRouteHealthHistory>();
     public DbSet<VpnTunnel> VpnTunnels => Set<VpnTunnel>();
     public DbSet<VpnLocalEndpoint> VpnLocalEndpoints => Set<VpnLocalEndpoint>();
@@ -836,6 +837,18 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithMany(t => t.Realms)
                 .HasForeignKey(r => r.KeycloakThemeId)
                 .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<AdvisorFindingState>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.Property(s => s.FindingKey).HasMaxLength(256).IsRequired();
+            entity.Property(s => s.Status).HasConversion<string>().HasMaxLength(20);
+            entity.Property(s => s.AcknowledgedBy).HasMaxLength(256);
+            entity.Property(s => s.AssignedTo).HasMaxLength(256);
+            entity.Property(s => s.Note).HasMaxLength(1024);
+            entity.HasIndex(s => new { s.TenantId, s.FindingKey }).IsUnique();
+            entity.HasOne<Tenant>().WithMany().HasForeignKey(s => s.TenantId).OnDelete(DeleteBehavior.Cascade);
         });
 
         // KeycloakBackup — realm JSON snapshots stored in S3.

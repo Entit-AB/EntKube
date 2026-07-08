@@ -1,6 +1,9 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
+@using Microsoft.AspNetCore.Components.Authorization
 @inject OperationsAdvisorService Advisor
+@inject AdvisorStateService State
+@inject AuthenticationStateProvider AuthState
 
 @* Operations Advisor: turns raw signals (expiring secrets, open incidents, stale
    backups) into one prioritized "what needs doing" feed, bucketed by time-to-impact.
@@ -53,6 +56,10 @@ else
             </select>
             <span class="text-muted small">Showing only findings a customer can act on.</span>
         }
+        <div class="form-check form-switch ms-auto">
+            <input class="form-check-input" type="checkbox" id="showResolved" @bind="showResolved" @bind:after="StateHasChanged" />
+            <label class="form-check-label small text-muted" for="showResolved">Show snoozed &amp; dismissed</label>
+        </div>
     </div>
 
     @* ── Summary strip: counts by time horizon ── *@
@@ -104,6 +111,26 @@ else
                                     <div class="d-flex align-items-center gap-2 flex-wrap">
                                         <span class="badge @SeverityClass(f.Severity)">@f.Severity</span>
                                         <span class="badge bg-light text-muted border"><i class="bi @CategoryIcon(f.Category) me-1"></i>@CategoryLabel(f.Category)</span>
+                                        @if (f.IsEscalated)
+                                        {
+                                            <span class="badge bg-danger"><i class="bi bi-fire me-1"></i>Escalated · @f.AgeDays d</span>
+                                        }
+                                        @if (f.State == AdvisorFindingStatus.Acknowledged)
+                                        {
+                                            <span class="badge bg-success-subtle text-success border border-success-subtle"><i class="bi bi-check2 me-1"></i>Ack’d@(string.IsNullOrWhiteSpace(f.AcknowledgedBy) ? "" : " · " + f.AcknowledgedBy)</span>
+                                        }
+                                        @if (f.State == AdvisorFindingStatus.Snoozed && f.SnoozedUntil is not null)
+                                        {
+                                            <span class="badge bg-secondary-subtle text-secondary border"><i class="bi bi-moon me-1"></i>Snoozed → @f.SnoozedUntil.Value.ToString("MMM d")</span>
+                                        }
+                                        @if (f.State == AdvisorFindingStatus.Dismissed)
+                                        {
+                                            <span class="badge bg-secondary-subtle text-secondary border"><i class="bi bi-slash-circle me-1"></i>Dismissed</span>
+                                        }
+                                        @if (!string.IsNullOrWhiteSpace(f.AssignedTo))
+                                        {
+                                            <span class="badge bg-primary-subtle text-primary border border-primary-subtle"><i class="bi bi-person me-1"></i>@f.AssignedTo</span>
+                                        }
                                         <span class="fw-semibold">@f.Title</span>
                                     </div>
                                     @if (!string.IsNullOrWhiteSpace(f.Detail))
@@ -122,13 +149,39 @@ else
                                         <div class="small mt-1"><i class="bi bi-arrow-return-right me-1 text-primary"></i>@f.Remediation</div>
                                     }
                                 </div>
-                                @if (!string.IsNullOrWhiteSpace(f.LinkSection) && OnNavigateTab.HasDelegate)
-                                {
-                                    <button class="btn btn-sm btn-outline-primary flex-shrink-0"
-                                            @onclick="() => OnNavigateTab.InvokeAsync(f.LinkSection)">
-                                        Go <i class="bi bi-arrow-right ms-1"></i>
-                                    </button>
-                                }
+                                <div class="d-flex flex-column align-items-end gap-1 flex-shrink-0">
+                                    @if (!string.IsNullOrWhiteSpace(f.LinkSection) && OnNavigateTab.HasDelegate)
+                                    {
+                                        <button class="btn btn-sm btn-outline-primary"
+                                                @onclick="() => OnNavigateTab.InvokeAsync(f.LinkSection)">
+                                            Go <i class="bi bi-arrow-right ms-1"></i>
+                                        </button>
+                                    }
+                                    <div class="btn-group btn-group-sm" role="group">
+                                        @if (f.State == AdvisorFindingStatus.Active)
+                                        {
+                                            <button class="btn btn-outline-secondary" title="Acknowledge — mark as being handled"
+                                                    @onclick="() => Acknowledge(f)"><i class="bi bi-check2"></i></button>
+                                        }
+                                        <button class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown"
+                                                title="Snooze"><i class="bi bi-moon"></i></button>
+                                        <ul class="dropdown-menu dropdown-menu-end">
+                                            <li><button class="dropdown-item" @onclick="() => Snooze(f, 1)">Snooze 1 day</button></li>
+                                            <li><button class="dropdown-item" @onclick="() => Snooze(f, 3)">Snooze 3 days</button></li>
+                                            <li><button class="dropdown-item" @onclick="() => Snooze(f, 7)">Snooze 1 week</button></li>
+                                        </ul>
+                                        @if (f.State != AdvisorFindingStatus.Dismissed)
+                                        {
+                                            <button class="btn btn-outline-secondary" title="Dismiss — accept/ignore"
+                                                    @onclick="() => Dismiss(f)"><i class="bi bi-slash-circle"></i></button>
+                                        }
+                                        @if (f.State != AdvisorFindingStatus.Active)
+                                        {
+                                            <button class="btn btn-outline-secondary" title="Reactivate"
+                                                    @onclick="() => Reactivate(f)"><i class="bi bi-arrow-counterclockwise"></i></button>
+                                        }
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     }
@@ -151,6 +204,8 @@ else
     private DateTime? lastRefreshed;
     private Lens lens = Lens.Ops;
     private Guid selectedCustomer = Guid.Empty;
+    private bool showResolved;
+    private string currentUser = "Unknown";
 
     // Findings after the active lens/customer filter — recomputed per render; lists are small.
     private List<OperationsFinding> VisibleFindings =>
@@ -159,7 +214,17 @@ else
     private static readonly AdvisorHorizon[] Horizons =
         [AdvisorHorizon.Overdue, AdvisorHorizon.Today, AdvisorHorizon.ThisWeek, AdvisorHorizon.Later];
 
-    protected override Task OnInitializedAsync() => Reload();
+    protected override async Task OnInitializedAsync()
+    {
+        AuthenticationState auth = await AuthState.GetAuthenticationStateAsync();
+        currentUser = auth.User.Identity?.Name ?? "Unknown";
+        await Reload();
+    }
+
+    private async Task Acknowledge(OperationsFinding f) { await State.AcknowledgeAsync(TenantId, f.Id, currentUser); await Reload(); }
+    private async Task Snooze(OperationsFinding f, int days) { await State.SnoozeAsync(TenantId, f.Id, DateTime.UtcNow.AddDays(days), currentUser); await Reload(); }
+    private async Task Dismiss(OperationsFinding f) { await State.DismissAsync(TenantId, f.Id, currentUser); await Reload(); }
+    private async Task Reactivate(OperationsFinding f) { await State.ReactivateAsync(TenantId, f.Id); await Reload(); }
 
     private async Task Reload()
     {
@@ -184,12 +249,24 @@ else
 
     private IEnumerable<OperationsFinding> Filter(IEnumerable<OperationsFinding> all)
     {
-        if (lens == Lens.Ops) return all;
-        // Customer lens: only findings a customer owns and can act on.
-        IEnumerable<OperationsFinding> scoped = all.Where(f => f.CustomerId is not null);
-        if (selectedCustomer != Guid.Empty)
-            scoped = scoped.Where(f => f.CustomerId == selectedCustomer);
-        return scoped;
+        IEnumerable<OperationsFinding> q = all;
+
+        if (lens == Lens.Customer)
+        {
+            q = q.Where(f => f.CustomerId is not null);
+            if (selectedCustomer != Guid.Empty)
+                q = q.Where(f => f.CustomerId == selectedCustomer);
+        }
+
+        // Hide dismissed and still-snoozed items unless the user opts to see them.
+        if (!showResolved)
+        {
+            DateTime now = DateTime.UtcNow;
+            q = q.Where(f => f.State != AdvisorFindingStatus.Dismissed
+                          && !(f.State == AdvisorFindingStatus.Snoozed && f.SnoozedUntil > now));
+        }
+
+        return q;
     }
 
     private static (string Label, string Icon, string Tone) HorizonMeta(AdvisorHorizon h) => h switch

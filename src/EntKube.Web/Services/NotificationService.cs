@@ -120,6 +120,55 @@ public class NotificationService(
         return (notified, success, Truncate(error));
     }
 
+    /// <summary>
+    /// Sends a generic, non-incident digest (title + body) to a tenant's enabled ops
+    /// channels. Used by the Operations Advisor's daily/weekly summary. Honors each
+    /// channel's severity/firing filters but not incident routing rules.
+    /// </summary>
+    public async Task<(int Notified, bool Success, string? Error)> DispatchDigestAsync(
+        Guid tenantId, string title, string body, string severity = "info", CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<NotificationChannel> channels = await db.NotificationChannels
+            .Where(c => c.TenantId == tenantId && c.CustomerId == null && c.IsEnabled)
+            .ToListAsync(ct);
+        if (channels.Count == 0)
+            return (0, false, "No enabled notification channels are configured for this tenant");
+
+        var message = new NotificationMessage
+        {
+            Title = title,
+            Severity = severity,
+            ScopeFieldName = "Scope",
+            ScopeLabel = "Operations Advisor",
+            Timestamp = DateTime.UtcNow,
+            Summary = body,
+            StatusLabel = "Digest",
+            Status = IncidentStatus.Active,
+        };
+
+        int notified = 0;
+        List<string> errors = [];
+        foreach (NotificationChannel channel in channels)
+        {
+            if (!MeetsFilters(channel, severity, isFiring: true, IncidentStatus.Active))
+                continue;
+            try
+            {
+                if (await DispatchToChannelAsync(message, channel, isFiring: true, ct))
+                    notified++;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Advisor digest failed for channel {Channel} ({Type})", channel.Name, channel.Type);
+                errors.Add($"{channel.Name}: {ex.Message}");
+            }
+        }
+
+        return (notified, notified > 0, Truncate(errors.Count == 0 ? null : string.Join("; ", errors)));
+    }
+
     /// <summary>Dispatches a prepared message to a single channel's transport. May throw; returns transport success.</summary>
     private async Task<bool> DispatchToChannelAsync(
         NotificationMessage message, NotificationChannel channel, bool isFiring, CancellationToken ct)

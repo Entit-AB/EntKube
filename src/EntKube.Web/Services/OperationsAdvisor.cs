@@ -75,6 +75,19 @@ public sealed record OperationsFinding
 
     /// <summary>Which signal produced this — "certificate" | "incident" | "backup".</summary>
     public string Source { get; init; } = "";
+
+    // ── Lifecycle state (merged from AdvisorFindingState; defaults when untouched) ──
+    public AdvisorFindingStatus State { get; init; } = AdvisorFindingStatus.Active;
+    public DateTime? SnoozedUntil { get; init; }
+    public string? AcknowledgedBy { get; init; }
+    public string? AssignedTo { get; init; }
+    public DateTime? FirstSeenAt { get; init; }
+
+    /// <summary>Whole days since the finding was first observed (0 when unknown/new).</summary>
+    public int AgeDays { get; init; }
+
+    /// <summary>Overdue, aged past the escalation threshold, and not yet acknowledged.</summary>
+    public bool IsEscalated { get; init; }
 }
 
 /// <summary>
@@ -110,8 +123,12 @@ public class OperationsAdvisorService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     SecretExpiryService secretExpiry,
     IncidentCorrelationService correlation,
-    ErrorBudgetService errorBudget)
+    ErrorBudgetService errorBudget,
+    AdvisorStateService stateService)
 {
+    /// <summary>Overdue findings older than this, still unacknowledged, are escalated.</summary>
+    private static readonly TimeSpan EscalateAfter = TimeSpan.FromDays(3);
+
     public async Task<AdvisorReport> GetReportAsync(Guid tenantId, CancellationToken ct = default)
     {
         DateTime now = DateTime.UtcNow;
@@ -121,6 +138,7 @@ public class OperationsAdvisorService(
         findings.AddRange(await BuildIncidentFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildSloFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildBackupFindingsAsync(tenantId, now, ct));
+        findings.AddRange(await BuildPostureFindingsAsync(tenantId, ct));
 
         // Most urgent first: horizon, then severity, then soonest deadline.
         var ordered = findings
@@ -130,7 +148,43 @@ public class OperationsAdvisorService(
             .ThenBy(f => f.Title, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        return new AdvisorReport { Findings = ordered, GeneratedAt = now };
+        var merged = await MergeStateAsync(tenantId, ordered, now, ct);
+        return new AdvisorReport { Findings = merged, GeneratedAt = now };
+    }
+
+    /// <summary>Attaches persisted lifecycle state (ack/snooze/dismiss/assign) and computes aging/escalation.</summary>
+    private async Task<List<OperationsFinding>> MergeStateAsync(
+        Guid tenantId, List<OperationsFinding> findings, DateTime now, CancellationToken ct)
+    {
+        Dictionary<string, AdvisorFindingState> states = await stateService.GetStatesAsync(tenantId, ct);
+        if (states.Count == 0) return findings;
+
+        var result = new List<OperationsFinding>(findings.Count);
+        foreach (OperationsFinding f in findings)
+        {
+            if (!states.TryGetValue(f.Id, out AdvisorFindingState? s))
+            {
+                result.Add(f);
+                continue;
+            }
+
+            int age = Math.Max(0, (int)(now - s.FirstSeenAt).TotalDays);
+            bool escalated = f.Horizon == AdvisorHorizon.Overdue
+                             && (now - s.FirstSeenAt) >= EscalateAfter
+                             && s.Status is not AdvisorFindingStatus.Acknowledged and not AdvisorFindingStatus.Dismissed;
+
+            result.Add(f with
+            {
+                State = s.Status,
+                SnoozedUntil = s.SnoozedUntil,
+                AcknowledgedBy = s.AcknowledgedBy,
+                AssignedTo = s.AssignedTo,
+                FirstSeenAt = s.FirstSeenAt,
+                AgeDays = age,
+                IsEscalated = escalated,
+            });
+        }
+        return result;
     }
 
     // ── Security: certificates, kubeconfigs, OAuth client credentials ──
@@ -556,6 +610,180 @@ public class OperationsAdvisorService(
             ClusterId = clusterId,
             Source = "backup",
         });
+    }
+
+    // ── Posture: deployment drift + best-practice gaps (all DB-cheap; no live cluster calls) ──
+    // k8s-version EOL and PVC/memory-trend finders are intentionally omitted here — they need
+    // live Prometheus/external-EOL data unsuitable for compute-on-read; a cached collector is TODO.
+    private async Task<List<OperationsFinding>> BuildPostureFindingsAsync(Guid tenantId, CancellationToken ct)
+    {
+        var result = new List<OperationsFinding>();
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        var deps = await db.AppDeployments
+            .Where(d => d.App.Customer.TenantId == tenantId && d.IsManaged)
+            .Select(d => new
+            {
+                d.Id, d.Name, d.AppId, AppName = d.App.Name,
+                CustomerId = d.App.CustomerId, CustomerName = d.App.Customer.Name,
+                d.EnvironmentId, EnvName = d.Environment.Name, d.ClusterId,
+                d.SyncStatus, d.HealthStatus, d.StatusMessage,
+                Exposes = d.App.ServicePorts.Any(),
+            })
+            .ToListAsync(ct);
+
+        if (deps.Count == 0) return result;
+
+        // ── Reliability: deployments whose live state has drifted or degraded ──
+        foreach (var d in deps)
+        {
+            bool degraded = d.HealthStatus is HealthStatus.Degraded or HealthStatus.Missing;
+            bool syncFailed = d.SyncStatus == SyncStatus.Failed;
+            bool outOfSync = d.SyncStatus == SyncStatus.OutOfSync;
+            if (!degraded && !syncFailed && !outOfSync) continue;
+
+            string scope = $"{d.AppName} / {d.EnvName}";
+            if (degraded || syncFailed)
+            {
+                string what = syncFailed ? "failed to sync"
+                    : d.HealthStatus == HealthStatus.Missing ? "has missing resources" : "is degraded";
+                result.Add(new OperationsFinding
+                {
+                    Id = $"deploy:{d.Id}",
+                    Category = AdvisorCategory.Reliability,
+                    Severity = AdvisorSeverity.Warning,
+                    Horizon = AdvisorHorizon.Today,
+                    Title = $"Deployment “{d.Name}” {what}",
+                    Detail = string.IsNullOrWhiteSpace(d.StatusMessage)
+                        ? "Live state does not match the desired/healthy state." : d.StatusMessage,
+                    ScopeLabel = scope,
+                    TimingText = "unhealthy now",
+                    Remediation = "Check the workload's pods and events, then re-sync or roll back.",
+                    CustomerId = d.CustomerId, CustomerName = d.CustomerName, ClusterId = d.ClusterId,
+                    Source = "deployment",
+                });
+            }
+            else // out of sync but healthy — drift
+            {
+                result.Add(new OperationsFinding
+                {
+                    Id = $"deploy-drift:{d.Id}",
+                    Category = AdvisorCategory.Reliability,
+                    Severity = AdvisorSeverity.Info,
+                    Horizon = AdvisorHorizon.ThisWeek,
+                    Title = $"Deployment “{d.Name}” has drifted from its declared spec",
+                    Detail = string.IsNullOrWhiteSpace(d.StatusMessage)
+                        ? "Live state is out of sync with the declared spec." : d.StatusMessage,
+                    ScopeLabel = scope,
+                    TimingText = "out of sync",
+                    Remediation = "Review the diff and sync, or adopt the live changes.",
+                    CustomerId = d.CustomerId, CustomerName = d.CustomerName, ClusterId = d.ClusterId,
+                    Source = "deployment",
+                });
+            }
+        }
+
+        // ── Security: exposed apps with no NetworkPolicy baseline ──
+        HashSet<(Guid, Guid)> netpolKeys = (await db.AppNetworkPolicies
+                .Where(p => p.App.Customer.TenantId == tenantId)
+                .Select(p => new { p.AppId, p.EnvironmentId }).ToListAsync(ct))
+            .Select(x => (x.AppId, x.EnvironmentId)).ToHashSet();
+
+        var seenNetpol = new HashSet<(Guid, Guid)>();
+        foreach (var d in deps.Where(x => x.Exposes))
+        {
+            var key = (d.AppId, d.EnvironmentId);
+            if (!seenNetpol.Add(key) || netpolKeys.Contains(key)) continue;
+            result.Add(new OperationsFinding
+            {
+                Id = $"netpol:{d.AppId}:{d.EnvironmentId}",
+                Category = AdvisorCategory.Security,
+                Severity = AdvisorSeverity.Info,
+                Horizon = AdvisorHorizon.Later,
+                Title = $"No network policy for “{d.AppName}” in {d.EnvName}",
+                Detail = "This app exposes ports but has no NetworkPolicy baseline — pod traffic is unrestricted.",
+                ScopeLabel = $"{d.AppName} / {d.EnvName}",
+                TimingText = "no deadline",
+                Remediation = "Define a least-privilege NetworkPolicy for this app and environment.",
+                LinkSection = "networking",
+                CustomerId = d.CustomerId, CustomerName = d.CustomerName, ClusterId = d.ClusterId,
+                Source = "posture",
+            });
+        }
+
+        // ── Reliability: KEDA installed on the cluster but the workload has no autoscaler ──
+        HashSet<Guid> kedaClusters = (await db.ClusterComponents
+                .Where(c => c.Status == ComponentStatus.Installed
+                         && (c.Name == "keda" || c.HelmChartName == "keda" || c.ReleaseName == "keda"))
+                .Select(c => c.ClusterId).ToListAsync(ct))
+            .ToHashSet();
+        if (kedaClusters.Count > 0)
+        {
+            HashSet<(Guid, Guid)> scalerKeys = (await db.KedaScalers
+                    .Where(s => s.TenantId == tenantId)
+                    .Select(s => new { s.AppId, s.EnvironmentId }).ToListAsync(ct))
+                .Select(x => (x.AppId, x.EnvironmentId)).ToHashSet();
+
+            var seenKeda = new HashSet<(Guid, Guid)>();
+            foreach (var d in deps.Where(x => kedaClusters.Contains(x.ClusterId)))
+            {
+                var key = (d.AppId, d.EnvironmentId);
+                if (!seenKeda.Add(key) || scalerKeys.Contains(key)) continue;
+                result.Add(new OperationsFinding
+                {
+                    Id = $"noautoscaler:{d.AppId}:{d.EnvironmentId}",
+                    Category = AdvisorCategory.Reliability,
+                    Severity = AdvisorSeverity.Info,
+                    Horizon = AdvisorHorizon.Later,
+                    Title = $"No autoscaler for “{d.AppName}” in {d.EnvName}",
+                    Detail = "KEDA is installed on this cluster but this workload has no ScaledObject — it can't scale to load.",
+                    ScopeLabel = $"{d.AppName} / {d.EnvName}",
+                    TimingText = "no deadline",
+                    Remediation = "Add a KEDA scaler, or confirm fixed replicas are intended.",
+                    CustomerId = d.CustomerId, CustomerName = d.CustomerName, ClusterId = d.ClusterId,
+                    Source = "posture",
+                });
+            }
+        }
+
+        // ── Security: Kyverno installed for an environment but no policies defined ──
+        HashSet<Guid> kyvernoEnvs = (await db.KubernetesClusters
+                .Where(cl => cl.TenantId == tenantId && db.ClusterComponents.Any(c =>
+                    c.ClusterId == cl.Id && c.Status == ComponentStatus.Installed
+                    && (c.Name == "kyverno" || c.HelmChartName == "kyverno" || c.ReleaseName == "kyverno")))
+                .Select(cl => cl.EnvironmentId).ToListAsync(ct))
+            .ToHashSet();
+        if (kyvernoEnvs.Count > 0)
+        {
+            HashSet<Guid> policyEnvs = (await db.KyvernoPolicies
+                    .Where(p => p.TenantId == tenantId)
+                    .Select(p => p.EnvironmentId).ToListAsync(ct))
+                .ToHashSet();
+            Dictionary<Guid, string> envNames = await db.Environments
+                .Where(e => e.TenantId == tenantId)
+                .ToDictionaryAsync(e => e.Id, e => e.Name, ct);
+
+            foreach (Guid envId in kyvernoEnvs)
+            {
+                if (policyEnvs.Contains(envId)) continue;
+                string envName = envNames.GetValueOrDefault(envId, "—");
+                result.Add(new OperationsFinding
+                {
+                    Id = $"nokyverno:{envId}",
+                    Category = AdvisorCategory.Security,
+                    Severity = AdvisorSeverity.Info,
+                    Horizon = AdvisorHorizon.Later,
+                    Title = $"Kyverno installed in {envName} but no policies defined",
+                    Detail = "The admission controller is running but enforcing nothing — no guardrails are active.",
+                    ScopeLabel = $"Environment: {envName}",
+                    TimingText = "no deadline",
+                    Remediation = "Define baseline Kyverno policies (or uninstall it if unused).",
+                    Source = "posture",
+                });
+            }
+        }
+
+        return result;
     }
 
     private async Task<Dictionary<Guid, (Guid CustomerId, string CustomerName)>> LoadAppOwnersAsync(

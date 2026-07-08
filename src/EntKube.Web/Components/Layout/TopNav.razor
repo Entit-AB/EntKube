@@ -34,6 +34,15 @@
                     </a>
                 </li>
 
+                @if (tenants.Count > 0 || isAdmin)
+                {
+                    <li class="nav-item">
+                        <a class="nav-link @(IsActive("fleet"))" href="fleet">
+                            <i class="bi bi-lightbulb me-1"></i>Advisor
+                        </a>
+                    </li>
+                }
+
                 @if (tenants.Count > 0)
                 {
                     <li class="nav-item dropdown position-static">
