@@ -1,15 +1,15 @@
 @page "/"
 @using Microsoft.AspNetCore.Components.Authorization
 
-<PageTitle>EntKube</PageTitle>
-
-<div class="mb-4">
-    <h1 class="mb-1"><i class="bi bi-server me-2 text-primary"></i>EntKube</h1>
-    <p class="text-muted mb-0">Multi-tenant platform for managing shared Kubernetes applications and infrastructure services.</p>
-</div>
+<PageTitle>EntKube — Kubernetes platform for teams</PageTitle>
 
 <AuthorizeView>
     <Authorized>
+        <div class="mb-4">
+            <h1 class="mb-1"><i class="bi bi-server me-2 text-primary"></i>EntKube</h1>
+            <p class="text-muted mb-0">Multi-tenant platform for managing shared Kubernetes applications and infrastructure services.</p>
+        </div>
+
         <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-3">
 
             <AuthorizeView Policy="HasTenantAccess" Context="tenantCtx">
@@ -24,7 +24,7 @@
                                         </div>
                                         <h5 class="mb-0">Tenants</h5>
                                     </div>
-                                    <p class="text-muted small mb-0">Manage tenant organisations, infrastructure, services, and deployments.</p>
+                                    <p class="text-muted small mb-0">Manage tenant organisations, clusters, infrastructure, services, and deployments.</p>
                                 </div>
                                 <div class="card-footer bg-transparent border-0 pt-0">
                                     <span class="text-primary small fw-semibold">Manage Tenants <i class="bi bi-arrow-right ms-1"></i></span>
@@ -79,14 +79,181 @@
 
         </div>
     </Authorized>
+
     <NotAuthorized>
-        <div class="d-flex gap-2 mt-3">
-            <a href="/Account/Login" class="btn btn-primary btn-lg">
-                <i class="bi bi-box-arrow-in-right me-2"></i>Sign In
-            </a>
-            <a href="/Account/Register" class="btn btn-outline-secondary btn-lg">
-                <i class="bi bi-person-plus me-2"></i>Register
-            </a>
+
+        <!-- Hero -->
+        <div class="landing-hero text-center mb-5">
+            <span class="landing-eyebrow mb-3"><i class="bi bi-hexagon-fill"></i> The Kubernetes control plane for platform teams</span>
+            <h1 class="display-4 mb-3">Run shared Kubernetes infrastructure<br class="d-none d-md-block" /> without the operational grind</h1>
+            <p class="lead mx-auto mb-4 text-white-50" style="max-width: 46rem;">
+                EntKube is a multi-tenant developer portal that turns a fleet of clusters into self-service infrastructure.
+                Register clusters, deploy a curated catalog of production services in one click, manage secrets, ship applications,
+                and watch everything through a built-in observability stack — all from a single pane of glass.
+            </p>
+            <div class="d-flex gap-2 justify-content-center flex-wrap">
+                <a href="/Account/Login" class="btn btn-primary btn-lg">
+                    <i class="bi bi-box-arrow-in-right me-2"></i>Sign In
+                </a>
+                <a href="/Account/Register" class="btn btn-light btn-lg">
+                    <i class="bi bi-person-plus me-2"></i>Create an account
+                </a>
+            </div>
         </div>
+
+        <!-- Value stats -->
+        <div class="row text-center g-4 mb-5">
+            <div class="col-6 col-md-3">
+                <div class="landing-stat-value">30+</div>
+                <div class="text-muted small">One-click infrastructure components</div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="landing-stat-value">Multi-tenant</div>
+                <div class="text-muted small">Isolated tenants, customers &amp; environments</div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="landing-stat-value">Built-in</div>
+                <div class="text-muted small">Logs, traces, metrics, RUM &amp; alerting</div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="landing-stat-value">Self-hosted</div>
+                <div class="text-muted small">Your clusters, your data, your registry</div>
+            </div>
+        </div>
+
+        <!-- What is EntKube -->
+        <div class="text-center mb-5">
+            <h2 class="landing-section-title mb-3">One platform, the whole lifecycle</h2>
+            <p class="text-muted mx-auto" style="max-width: 44rem;">
+                Most teams stitch together a dozen tools to run internal infrastructure — GitOps for delivery, a secrets manager,
+                a monitoring stack, an incident tool, a status page, a pile of Helm charts. EntKube brings all of it into one
+                opinionated portal built on the Kubernetes ecosystem you already trust.
+            </p>
+        </div>
+
+        <!-- Feature grid -->
+        <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-3 mb-5">
+
+            @foreach (var f in Features)
+            {
+                <div class="col">
+                    <div class="landing-feature p-4">
+                        <div class="landing-feature-icon @f.IconBg @f.IconText mb-3">
+                            <i class="bi @f.Icon"></i>
+                        </div>
+                        <h5 class="mb-2">@f.Title</h5>
+                        <p class="text-muted small mb-0">@f.Description</p>
+                    </div>
+                </div>
+            }
+
+        </div>
+
+        <!-- Service catalog showcase -->
+        <div class="card border-0 shadow-sm mb-5">
+            <div class="card-body p-4 p-md-5">
+                <div class="row align-items-center g-4">
+                    <div class="col-lg-5">
+                        <h2 class="landing-section-title mb-3">A curated catalog of production services</h2>
+                        <p class="text-muted mb-3">
+                            Pick a component, fill in a short form, and EntKube installs and wires up the Helm release for you —
+                            ingress, TLS, storage, credentials and all. Every service is vaulted, monitored, and lifecycle-managed
+                            from the same portal. Assemble ordered <strong>Cluster Blueprints</strong> to bootstrap a brand-new
+                            cluster end to end.
+                        </p>
+                        <a href="/Account/Login" class="btn btn-outline-primary">
+                            Explore the catalog <i class="bi bi-arrow-right ms-1"></i>
+                        </a>
+                    </div>
+                    <div class="col-lg-7">
+                        <div class="text-lg-end">
+                            @foreach (var c in CatalogItems)
+                            {
+                                <span class="landing-catalog-pill">@c</span>
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Closing CTA -->
+        <div class="text-center border rounded-3 p-5 mb-3" style="background: var(--entit-muted);">
+            <h2 class="landing-section-title mb-2">Ready to tame your clusters?</h2>
+            <p class="text-muted mb-4">Sign in to your workspace, or create an account to get started.</p>
+            <div class="d-flex gap-2 justify-content-center flex-wrap">
+                <a href="/Account/Login" class="btn btn-primary btn-lg">
+                    <i class="bi bi-box-arrow-in-right me-2"></i>Sign In
+                </a>
+                <a href="/Account/Register" class="btn btn-outline-secondary btn-lg">
+                    <i class="bi bi-person-plus me-2"></i>Register
+                </a>
+            </div>
+        </div>
+
     </NotAuthorized>
 </AuthorizeView>
+
+@code {
+    private record Feature(string Icon, string IconBg, string IconText, string Title, string Description);
+
+    private static readonly Feature[] Features =
+    [
+        new("bi-building", "bg-primary bg-opacity-10", "text-primary",
+            "Multi-tenant control plane",
+            "Model your world as tenants, customers, environments and groups with role-based access at every level. Teams get self-service without stepping on each other."),
+
+        new("bi-hdd-network", "bg-info bg-opacity-10", "text-info",
+            "Cluster fleet management",
+            "Register any Kubernetes cluster, then watch nodes, health, capacity and workloads across the fleet. Kubeconfigs are stored encrypted in the vault, never on disk."),
+
+        new("bi-box-seam", "bg-success bg-opacity-10", "text-success",
+            "One-click service catalog",
+            "Deploy Postgres, Keycloak, MinIO, Harbor, RabbitMQ, Kafka, Redis and more as managed Helm releases — with ingress, TLS and credentials wired up for you."),
+
+        new("bi-rocket-takeoff", "bg-primary bg-opacity-10", "text-primary",
+            "Application delivery",
+            "Ship apps per environment with plain YAML deployments, apply-or-recreate sync, and import wizards that adopt live cluster workloads into managed apps."),
+
+        new("bi-shield-lock", "bg-warning bg-opacity-10", "text-warning",
+            "Encrypted secrets vault",
+            "A built-in vault scopes secrets per app and environment: certificates, OAuth/OIDC client secrets, kubeconfigs and more — with expiry tracking and safe sync to clusters."),
+
+        new("bi-graph-up-arrow", "bg-danger bg-opacity-10", "text-danger",
+            "Native observability",
+            "Logs, distributed traces / APM, metrics, real-user monitoring and dashboards ship in the box — powered by a self-built S3 + Lucene telemetry engine and Prometheus."),
+
+        new("bi-diagram-3", "bg-info bg-opacity-10", "text-info",
+            "Governance & connectivity",
+            "Enforce Kyverno admission policies and author a least-privilege connectivity model that generates NetworkPolicies and Istio rules — previewed before they ever apply."),
+
+        new("bi-bell", "bg-warning bg-opacity-10", "text-warning",
+            "Incidents, on-call & SLAs",
+            "Alert rules and routing, notification channels, on-call schedules, incident management, SLA targets and maintenance windows — the operations layer, built in."),
+
+        new("bi-people", "bg-success bg-opacity-10", "text-success",
+            "Customer-facing portal",
+            "Give your customers a self-service view: status dashboards, SLA reports, observability, maintenance notices and incident history — scoped strictly to their data."),
+
+        new("bi-hexagon", "bg-primary bg-opacity-10", "text-primary",
+            "Autoscaling & caching",
+            "Manage KEDA ScaledObjects and ScaledJobs per app and environment, and provision Redis caches — event-driven scale and low-latency data without leaving the portal."),
+
+        new("bi-router", "bg-info bg-opacity-10", "text-info",
+            "Networking & VPN",
+            "Bridge clusters and operators to your network with Tailscale, Headscale, WireGuard, StrongSwan IPsec and Submariner — managed alongside everything else."),
+
+        new("bi-arrow-repeat", "bg-secondary bg-opacity-10", "text-secondary",
+            "Backup & restore",
+            "Export the full platform state and restore it on new hardware. Migrate servers or recover from disaster without hand-rebuilding your configuration."),
+    ];
+
+    private static readonly string[] CatalogItems =
+    [
+        "Traefik", "Istio", "cert-manager", "Let's Encrypt", "Prometheus", "Grafana",
+        "Loki", "Mimir", "Tempo", "OpenTelemetry", "eBPF tracing", "MinIO",
+        "CloudNativePG", "MongoDB", "Keycloak", "Harbor", "RabbitMQ", "Strimzi Kafka",
+        "Redis", "Kyverno", "KEDA", "Tailscale", "Headscale", "WireGuard",
+        "StrongSwan", "Submariner", "Gateway API",
+    ];
+}

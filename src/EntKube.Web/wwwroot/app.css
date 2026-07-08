@@ -157,6 +157,105 @@ h1:focus {
     flex-shrink: 0;
 }
 
+/* ==========================================================================
+   Landing / marketing hero (signed-out home page)
+   ========================================================================== */
+.landing-hero {
+    position: relative;
+    overflow: hidden;
+    border-radius: 1rem;
+    padding: 4rem 1.5rem;
+    color: #fff;
+    background: linear-gradient(135deg, var(--entit-navy-deep) 0%, var(--entit-navy) 45%, var(--entit-accent-darker) 100%);
+}
+
+.landing-hero::after {
+    /* subtle mesh glow, purely decorative */
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+        radial-gradient(40rem 20rem at 85% -10%, rgba(143, 166, 255, .35), transparent 60%),
+        radial-gradient(30rem 18rem at 5% 120%, rgba(58, 99, 240, .35), transparent 60%);
+    pointer-events: none;
+}
+
+.landing-hero > * {
+    position: relative;
+    z-index: 1;
+}
+
+.landing-hero .display-4 {
+    font-family: var(--entit-heading);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+.landing-eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: .4rem;
+    padding: .3rem .75rem;
+    border-radius: 2rem;
+    font-size: .8rem;
+    font-weight: 600;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+    background: rgba(255, 255, 255, .12);
+    border: 1px solid rgba(255, 255, 255, .18);
+}
+
+.landing-section-title {
+    font-family: var(--entit-heading);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+.landing-feature {
+    height: 100%;
+    border: 1px solid var(--entit-border);
+    border-radius: .75rem;
+    background: #fff;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.landing-feature:hover {
+    transform: translateY(-3px);
+    border-color: var(--bs-primary-border-subtle);
+    box-shadow: 0 .5rem 1.25rem rgba(44, 58, 90, .12);
+}
+
+.landing-feature-icon {
+    width: 2.75rem;
+    height: 2.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: .625rem;
+    font-size: 1.25rem;
+    flex-shrink: 0;
+}
+
+.landing-catalog-pill {
+    display: inline-block;
+    padding: .35rem .7rem;
+    margin: .2rem;
+    border-radius: 2rem;
+    font-size: .8rem;
+    font-weight: 500;
+    color: var(--entit-text);
+    background: var(--entit-muted);
+    border: 1px solid var(--entit-border);
+}
+
+.landing-stat-value {
+    font-family: var(--entit-heading);
+    font-weight: 700;
+    font-size: 2rem;
+    line-height: 1;
+    color: var(--bs-primary);
+}
+
 /* Tenant detail category/sub-tab hierarchy */
 .tenant-category-nav .nav-link {
     font-weight: 600;
