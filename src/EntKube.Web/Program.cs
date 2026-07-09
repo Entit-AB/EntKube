@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Authorization;
@@ -10,6 +11,7 @@ using EntKube.Web.Components.Account;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
 using EntKube.Web.Services.Telemetry;
+using StackExchange.Redis;
 
 namespace EntKube.Web;
 
@@ -118,8 +120,31 @@ public class Program
             })
             .AddRoles<IdentityRole>()
             .AddEntityFrameworkStores<ApplicationDbContext>()
-            .AddSignInManager()
+            .AddSignInManager<TrackingSignInManager>()
             .AddDefaultTokenProviders();
+
+        // Live "online now" presence for the admin users page, fed by a
+        // per-circuit handler. Defaults to a process-local in-memory backend;
+        // set "Presence:Provider" to "Redis" (with ConnectionStrings:Redis) for
+        // cross-instance presence in a multi-instance/HA deployment.
+        string presenceProvider = builder.Configuration.GetValue<string>("Presence:Provider") ?? "InMemory";
+        if (string.Equals(presenceProvider, "Redis", StringComparison.OrdinalIgnoreCase))
+        {
+            string redisConnection = builder.Configuration.GetConnectionString("Redis")
+                ?? builder.Configuration.GetValue<string>("Presence:Redis:Configuration")
+                ?? throw new InvalidOperationException(
+                    "Presence:Provider is 'Redis' but no Redis connection string was found " +
+                    "(set ConnectionStrings:Redis or Presence:Redis:Configuration).");
+            builder.Services.AddSingleton<IConnectionMultiplexer>(
+                _ => ConnectionMultiplexer.Connect(redisConnection));
+            builder.Services.AddSingleton<IPresenceTracker, RedisPresenceTracker>();
+            builder.Services.AddHostedService<PresenceHeartbeatService>();
+        }
+        else
+        {
+            builder.Services.AddSingleton<IPresenceTracker, InMemoryPresenceTracker>();
+        }
+        builder.Services.AddScoped<CircuitHandler, PresenceCircuitHandler>();
 
         builder.Services.AddAuthorization(options =>
         {

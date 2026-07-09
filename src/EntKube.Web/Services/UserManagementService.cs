@@ -7,11 +7,49 @@ namespace EntKube.Web.Services;
 public class UserManagementService(
     UserManager<ApplicationUser> userManager,
     RoleManager<IdentityRole> roleManager,
-    IDbContextFactory<ApplicationDbContext> dbFactory)
+    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IPresenceTracker presence)
 {
     public async Task<List<ApplicationUser>> GetAllUsersAsync()
     {
         return await userManager.Users.OrderBy(u => u.Email).ToListAsync();
+    }
+
+    /// <summary>
+    /// Loads all users together with their security posture — online status,
+    /// two-factor state, and registered passkey count — for the admin list.
+    /// </summary>
+    public async Task<List<UserSecurityInfo>> GetAllUsersWithSecurityAsync()
+    {
+        List<ApplicationUser> users = await GetAllUsersAsync();
+        IReadOnlySet<string> online = await presence.GetOnlineUsersAsync();
+
+        List<UserSecurityInfo> result = new(users.Count);
+        foreach (ApplicationUser user in users)
+        {
+            // GetPasskeysAsync uses the same schema-v3 context the UserManager
+            // owns, so it works consistently across all database providers.
+            int passkeys = (await userManager.GetPasskeysAsync(user)).Count;
+            result.Add(new UserSecurityInfo(
+                user,
+                IsOnline: online.Contains(user.Id),
+                TwoFactorEnabled: user.TwoFactorEnabled,
+                PasskeyCount: passkeys));
+        }
+        return result;
+    }
+
+    /// <summary>Security posture for a single user (used by the detail page).</summary>
+    public async Task<UserSecurityInfo?> GetUserSecurityAsync(string userId)
+    {
+        ApplicationUser? user = await userManager.FindByIdAsync(userId);
+        if (user is null) return null;
+        int passkeys = (await userManager.GetPasskeysAsync(user)).Count;
+        return new UserSecurityInfo(
+            user,
+            IsOnline: await presence.IsOnlineAsync(user.Id),
+            TwoFactorEnabled: user.TwoFactorEnabled,
+            PasskeyCount: passkeys);
     }
 
     public async Task<ApplicationUser?> GetUserByIdAsync(string userId)
@@ -161,3 +199,14 @@ public class UserManagementService(
         }
     }
 }
+
+/// <summary>
+/// A user paired with its security posture for the admin views: whether they
+/// currently have an active session, whether MFA (two-factor) is enabled, and
+/// how many passkeys they have registered.
+/// </summary>
+public record UserSecurityInfo(
+    ApplicationUser User,
+    bool IsOnline,
+    bool TwoFactorEnabled,
+    int PasskeyCount);

@@ -51,6 +51,64 @@ else if (user is not null)
 
     <div class="row g-4">
 
+        @* ── Security & Access ── *@
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5 class="card-title mb-3"><i class="bi bi-shield-lock me-2 text-primary"></i>Security &amp; Access</h5>
+                    <div class="row g-3">
+                        <div class="col-6 col-md-3">
+                            <div class="text-muted small mb-1">Session</div>
+                            @if (security?.IsOnline == true)
+                            {
+                                <span class="badge bg-success-subtle text-success border border-success-subtle">
+                                    <i class="bi bi-circle-fill me-1" style="font-size:.5rem;vertical-align:middle"></i>Online now
+                                </span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">Offline</span>
+                            }
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="text-muted small mb-1">Multi-factor auth</div>
+                            @if (security?.TwoFactorEnabled == true)
+                            {
+                                <span class="badge bg-success-subtle text-success border border-success-subtle">
+                                    <i class="bi bi-shield-check me-1"></i>Enabled
+                                </span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-warning-subtle text-warning border border-warning-subtle">
+                                    <i class="bi bi-shield-x me-1"></i>Not enabled
+                                </span>
+                            }
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="text-muted small mb-1">Passkeys</div>
+                            @if (security is { PasskeyCount: > 0 })
+                            {
+                                <span class="badge bg-primary-subtle text-primary border border-primary-subtle">
+                                    <i class="bi bi-key me-1"></i>@security.PasskeyCount registered
+                                </span>
+                            }
+                            else
+                            {
+                                <span class="text-muted small">None registered</span>
+                            }
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="text-muted small mb-1">Last login</div>
+                            <span class="fw-semibold">
+                                @(user.LastLoginAt is { } t ? t.ToString("MMM d, yyyy HH:mm 'UTC'") : "Never")
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         @* ── Global Roles ── *@
         <div class="col-12">
             <div class="card border-0 shadow-sm">
@@ -310,6 +368,7 @@ else if (user is not null)
     [Parameter] public string UserId { get; set; } = null!;
 
     private ApplicationUser? user;
+    private UserSecurityInfo? security;
     private bool loaded;
     private string? errorMessage;
 
@@ -361,6 +420,8 @@ else if (user is not null)
         user = await UserManagement.GetUserByIdAsync(UserId);
         loaded = true;
         if (user is null) return;
+
+        security = await UserManagement.GetUserSecurityAsync(UserId);
 
         // UserManager and RoleManager share the scoped DbContext — run sequentially.
         // The IDbContextFactory-based calls each create their own instance and are safe.

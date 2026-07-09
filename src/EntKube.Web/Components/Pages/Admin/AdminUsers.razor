@@ -71,22 +71,27 @@
     {
         <div class="card border-0 shadow-sm">
             <div class="table-responsive">
-                <table class="table table-hover mb-0">
+                <table class="table table-hover align-middle mb-0">
                     <thead class="table-light">
                         <tr>
-                            <th>Email</th>
+                            <th>User</th>
                             <th>Status</th>
+                            <th class="text-center">Session</th>
+                            <th class="text-center">MFA</th>
+                            <th class="text-center">Passkeys</th>
+                            <th>Last login</th>
                             <th></th>
                         </tr>
                     </thead>
                     <tbody>
-                        @foreach (ApplicationUser user in users)
+                        @foreach (UserSecurityInfo info in users)
                         {
+                            ApplicationUser user = info.User;
                             <tr style="cursor:pointer" @onclick='() => NavigationManager.NavigateTo($"/admin/users/{user.Id}")'>
-                                <td class="align-middle">
+                                <td>
                                     <i class="bi bi-person-circle me-2 text-muted"></i>@user.Email
                                 </td>
-                                <td class="align-middle">
+                                <td>
                                     @if (user.EmailConfirmed)
                                     {
                                         <span class="badge bg-success-subtle text-success border border-success-subtle">Confirmed</span>
@@ -96,7 +101,44 @@
                                         <span class="badge bg-warning-subtle text-warning border border-warning-subtle">Unconfirmed</span>
                                     }
                                 </td>
-                                <td class="align-middle text-end">
+                                <td class="text-center">
+                                    @if (info.IsOnline)
+                                    {
+                                        <span class="badge bg-success-subtle text-success border border-success-subtle" title="Has an active session right now">
+                                            <i class="bi bi-circle-fill me-1" style="font-size:.5rem;vertical-align:middle"></i>Online
+                                        </span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle" title="No active session">Offline</span>
+                                    }
+                                </td>
+                                <td class="text-center">
+                                    @if (info.TwoFactorEnabled)
+                                    {
+                                        <i class="bi bi-shield-check text-success fs-5" title="Two-factor authentication enabled"></i>
+                                    }
+                                    else
+                                    {
+                                        <i class="bi bi-shield-x text-muted fs-5" title="Two-factor authentication not enabled"></i>
+                                    }
+                                </td>
+                                <td class="text-center">
+                                    @if (info.PasskeyCount > 0)
+                                    {
+                                        <span class="badge bg-primary-subtle text-primary border border-primary-subtle" title="@(info.PasskeyCount) passkey(s) registered">
+                                            <i class="bi bi-key me-1"></i>@info.PasskeyCount
+                                        </span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted small">None</span>
+                                    }
+                                </td>
+                                <td class="text-muted small">
+                                    @(user.LastLoginAt is { } t ? FormatRelative(t) : "Never")
+                                </td>
+                                <td class="text-end">
                                     <i class="bi bi-chevron-right text-muted"></i>
                                 </td>
                             </tr>
@@ -109,7 +151,7 @@
 </LoadingPanel>
 
 @code {
-    private List<ApplicationUser>? users;
+    private List<UserSecurityInfo>? users;
     private bool showAddForm;
     private bool creating;
     private string newEmail = "";
@@ -123,7 +165,17 @@
 
     private async Task Load()
     {
-        users = await UserManagement.GetAllUsersAsync();
+        users = await UserManagement.GetAllUsersWithSecurityAsync();
+    }
+
+    private static string FormatRelative(DateTime utc)
+    {
+        TimeSpan ago = DateTime.UtcNow - utc;
+        if (ago < TimeSpan.FromMinutes(1)) return "Just now";
+        if (ago < TimeSpan.FromHours(1)) return $"{(int)ago.TotalMinutes}m ago";
+        if (ago < TimeSpan.FromDays(1)) return $"{(int)ago.TotalHours}h ago";
+        if (ago < TimeSpan.FromDays(30)) return $"{(int)ago.TotalDays}d ago";
+        return utc.ToString("MMM d, yyyy");
     }
 
     private async Task CreateUser()
