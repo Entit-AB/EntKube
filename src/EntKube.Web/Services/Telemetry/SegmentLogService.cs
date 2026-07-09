@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using EntKube.Web.Services;
 using Lucene.Net.Documents;
 using Lucene.Net.Index;
@@ -22,25 +23,37 @@ public sealed class SegmentLogService(
 {
     public bool IsEnabled => true;
 
+    private const int DefaultDiscoveryWindowMinutes = 60;
+
+    // Label discovery (namespaces/pods/containers) scans a distinct-collector over the window — the
+    // dropdown-population cost. Cache briefly per (tenant, cluster, field, ns, window): the set changes
+    // slowly, so re-renders / reopens are instant. Static (shared across scopes/circuits).
+    private static readonly ConcurrentDictionary<string, (DateTime At, List<string> Values)> LabelCache = new();
+    private static readonly TimeSpan LabelTtl = TimeSpan.FromSeconds(30);
+
     public async Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
     {
         Guid? tenantId = await tenants.ResolveAsync(clusterId, ct);
         if (tenantId is null) return false;
         LogSegmentManager segments = logs.For(tenantId.Value);
-        return await segments.QueryAsync(null, null,
+        // "Has recent data" is the routing signal — bound to a week so this doesn't open a reader for
+        // every segment across the (up to 90-day) retention window just to check existence.
+        DateTime from = DateTime.UtcNow.AddDays(-7);
+        return await segments.QueryAsync(from, null,
             s => s.Search(ScopeQuery(tenantId.Value, clusterId), 1).TotalHits > 0, ct);
     }
 
-    public Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(Guid clusterId, CancellationToken ct = default)
-        => DistinctLabelAsync(clusterId, LogSegmentSchema.Namespace, null, ct);
+    public Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(
+        Guid clusterId, int windowMinutes = DefaultDiscoveryWindowMinutes, CancellationToken ct = default)
+        => DistinctLabelAsync(clusterId, LogSegmentSchema.Namespace, null, windowMinutes, ct);
 
     public Task<KubernetesOperationResult<List<string>>> GetPodsAsync(
-        Guid clusterId, string namespaceName, CancellationToken ct = default)
-        => DistinctLabelAsync(clusterId, LogSegmentSchema.Pod, namespaceName, ct);
+        Guid clusterId, string namespaceName, int windowMinutes = DefaultDiscoveryWindowMinutes, CancellationToken ct = default)
+        => DistinctLabelAsync(clusterId, LogSegmentSchema.Pod, namespaceName, windowMinutes, ct);
 
     public Task<KubernetesOperationResult<List<string>>> GetContainersAsync(
-        Guid clusterId, string namespaceName, CancellationToken ct = default)
-        => DistinctLabelAsync(clusterId, LogSegmentSchema.Container, namespaceName, ct);
+        Guid clusterId, string namespaceName, int windowMinutes = DefaultDiscoveryWindowMinutes, CancellationToken ct = default)
+        => DistinctLabelAsync(clusterId, LogSegmentSchema.Container, namespaceName, windowMinutes, ct);
 
     public async Task<KubernetesOperationResult<List<LokiLogStream>>> QueryAsync(
         Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int limit = 200, CancellationToken ct = default)
@@ -158,10 +171,18 @@ public sealed class SegmentLogService(
     // ──────── internal ────────
 
     private async Task<KubernetesOperationResult<List<string>>> DistinctLabelAsync(
-        Guid clusterId, string field, string? namespaceName, CancellationToken ct)
+        Guid clusterId, string field, string? namespaceName, int windowMinutes, CancellationToken ct)
     {
         Guid? tenantId = await tenants.ResolveAsync(clusterId, ct);
         if (tenantId is null) return Fail<List<string>>();
+
+        if (windowMinutes <= 0) windowMinutes = DefaultDiscoveryWindowMinutes;
+        string cacheKey = $"{tenantId.Value:N}|{clusterId:N}|{field}|{namespaceName}|{windowMinutes}";
+        if (LabelCache.TryGetValue(cacheKey, out (DateTime At, List<string> Values) c)
+            && DateTime.UtcNow - c.At < LabelTtl)
+        {
+            return KubernetesOperationResult<List<string>>.Success(c.Values);
+        }
 
         try
         {
@@ -174,10 +195,14 @@ public sealed class SegmentLogService(
             if (field != LogSegmentSchema.Namespace && !string.IsNullOrEmpty(namespaceName))
                 scope.Add(new TermQuery(new Term(LogSegmentSchema.Namespace, namespaceName)), Occur.MUST);
 
+            // Scan only the requested window (default 1h) instead of ALL segments — with 90-day
+            // retention, unbounded discovery opened a reader per segment and visited every doc.
+            DateTime from = DateTime.UtcNow.AddMinutes(-windowMinutes);
             var sink = new HashSet<string>(StringComparer.Ordinal);
-            await segments.QueryAsync(null, null, s => { s.Search(scope, new DistinctCollector(field, sink)); return 0; }, ct);
+            await segments.QueryAsync(from, null, s => { s.Search(scope, new DistinctCollector(field, sink)); return 0; }, ct);
 
             List<string> values = sink.Where(v => v.Length > 0).OrderBy(v => v, StringComparer.Ordinal).ToList();
+            LabelCache[cacheKey] = (DateTime.UtcNow, values);
             return KubernetesOperationResult<List<string>>.Success(values);
         }
         catch (Exception ex)

@@ -186,15 +186,48 @@ public class VaultService(
     /// stored as a single encrypted value with <see cref="VaultSecretType.Certificate"/>.
     /// Upserts by (app, environment, name) like <see cref="SetAppSecretAsync"/>.
     /// </summary>
-    /// <returns>(true, secret) on success; (false, null) with the reason in <paramref name="error"/> on validation failure.</returns>
+    /// <returns>(true, null) on success; (false, reason) on validation failure.</returns>
     public async Task<(bool Ok, string? Error)> SetAppCertificateAsync(
         Guid tenantId, Guid appId, string name, CertificateBundle bundle,
         Guid? environmentId = null, string? updatedBy = null, CancellationToken ct = default)
     {
+        (bool ok, string? error, _) = await UpsertAppCertificateAsync(
+            tenantId, appId, name, bundle, environmentId, updatedBy, ct);
+        return (ok, error);
+    }
+
+    /// <summary>
+    /// Imports a TLS certificate Secret observed in a cluster as a Certificate-type app
+    /// secret and records its live sync target with Kubernetes sync DISABLED — the
+    /// "cluster-owned"/observed state the opaque import path also uses. The reverse
+    /// refresher then tracks the certificate read-only until ownership is taken.
+    /// </summary>
+    public async Task<(bool Ok, string? Error)> ImportObservedAppCertificateAsync(
+        Guid tenantId, Guid appId, string name, CertificateBundle bundle,
+        Guid clusterId, string secretName, string ns, Guid? environmentId = null,
+        string? updatedBy = null, CancellationToken ct = default)
+    {
+        (bool ok, string? error, VaultSecret? stored) = await UpsertAppCertificateAsync(
+            tenantId, appId, name, bundle, environmentId, updatedBy, ct);
+        if (!ok || stored is null)
+        {
+            return (ok, error);
+        }
+
+        await ConfigureKubernetesSyncAsync(stored.Id, syncEnabled: false, secretName, ns, ct, clusterId);
+        return (true, null);
+    }
+
+    // Core upsert for a certificate app secret; returns the stored row so callers that
+    // need the id (e.g. the importer, to record a sync target) don't have to re-query.
+    private async Task<(bool Ok, string? Error, VaultSecret? Secret)> UpsertAppCertificateAsync(
+        Guid tenantId, Guid appId, string name, CertificateBundle bundle,
+        Guid? environmentId, string? updatedBy, CancellationToken ct)
+    {
         (bool valid, string? validationError) = CertificateParser.Validate(bundle);
         if (!valid)
         {
-            return (false, validationError);
+            return (false, validationError, null);
         }
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
@@ -217,7 +250,7 @@ public class VaultService(
             existing.UpdatedAt = DateTime.UtcNow;
             existing.UpdatedBy = updatedBy;
             await db.SaveChangesAsync(ct);
-            return (true, null);
+            return (true, null, existing);
         }
 
         SecretVault vault = (await GetVaultAsync(tenantId, ct))!;
@@ -237,7 +270,107 @@ public class VaultService(
 
         db.Set<VaultSecret>().Add(secret);
         await db.SaveChangesAsync(ct);
-        return (true, null);
+        return (true, null, secret);
+    }
+
+    /// <summary>
+    /// Idempotent backfill for secrets imported before TLS detection existed: opaque app
+    /// secrets that are really the split keys of one TLS Secret (names <c>tls.crt</c>
+    /// [+ <c>tls.key</c> / <c>ca.crt</c>] sharing the same Kubernetes target) are merged
+    /// into a single readable Certificate secret named after the Kubernetes Secret, keeping
+    /// the observed (sync-off) target. Only converts a group whose <c>tls.crt</c> actually
+    /// parses as a certificate — everything else is left untouched. Returns the count merged.
+    /// </summary>
+    public async Task<int> ConvertImportedTlsSecretsToCertificatesAsync(CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<VaultSecret> candidates = await db.Set<VaultSecret>()
+            .Include(s => s.Vault)
+            .Where(s => s.AppId != null
+                && s.SecretType == VaultSecretType.Opaque
+                && s.KubernetesClusterId != null
+                && s.KubernetesSecretName != null
+                && (s.Name == "tls.crt" || s.Name == "tls.key" || s.Name == "ca.crt"))
+            .ToListAsync(ct);
+
+        if (candidates.Count == 0)
+        {
+            return 0;
+        }
+
+        int converted = 0;
+
+        IEnumerable<IGrouping<(Guid?, Guid?, Guid?, string?, string?), VaultSecret>> groups =
+            candidates.GroupBy(s => (s.AppId, s.EnvironmentId, s.KubernetesClusterId,
+                s.KubernetesSecretName, s.KubernetesNamespace));
+
+        foreach (IGrouping<(Guid?, Guid?, Guid?, string?, string?), VaultSecret> group in groups)
+        {
+            List<VaultSecret> members = group.ToList();
+            VaultSecret? crtSecret = members.FirstOrDefault(s => s.Name == "tls.crt");
+            if (crtSecret is null)
+            {
+                continue; // no certificate body → not a TLS group
+            }
+
+            string certName = crtSecret.KubernetesSecretName!;
+            // Guard the (pathological) case where the K8s Secret name collides with a data
+            // key we're about to delete — skip rather than risk deleting the new cert.
+            if (members.Any(m => string.Equals(m.Name, certName, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            Guid tenantId = crtSecret.Vault.TenantId;
+            byte[] dataKey;
+            try
+            {
+                dataKey = await UnsealVaultAsync(tenantId, ct);
+            }
+            catch
+            {
+                continue;
+            }
+
+            string Decrypt(VaultSecret? s) =>
+                s is null ? "" : encryption.Decrypt(dataKey, s.EncryptedValue, s.Nonce);
+
+            string crt = Decrypt(crtSecret);
+            if (CertificateParser.TryParse(crt) is null)
+            {
+                continue; // the value isn't actually a certificate — leave the opaque keys alone
+            }
+            string key = Decrypt(members.FirstOrDefault(s => s.Name == "tls.key"));
+            string ca = Decrypt(members.FirstOrDefault(s => s.Name == "ca.crt"));
+
+            string combined = string.Join("\n",
+                new[] { key, crt, ca }.Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p.Trim()));
+            (bool ok, _, CertificateBundle? bundle) = CertificateImporter.Import(
+                Encoding.UTF8.GetBytes(combined), "convert.pem", null);
+            if (!ok || bundle is null)
+            {
+                continue;
+            }
+
+            // Create the Certificate secret first (own DbContext), then delete the opaque
+            // keys — if the delete fails, a retry re-upserts the same cert (idempotent).
+            (bool stored, _) = await ImportObservedAppCertificateAsync(
+                tenantId, crtSecret.AppId!.Value, certName, bundle,
+                crtSecret.KubernetesClusterId!.Value, certName,
+                crtSecret.KubernetesNamespace ?? "default", crtSecret.EnvironmentId,
+                updatedBy: "system:tls-convert", ct);
+            if (!stored)
+            {
+                continue;
+            }
+
+            db.Set<VaultSecret>().RemoveRange(members);
+            await db.SaveChangesAsync(ct);
+            converted++;
+        }
+
+        return converted;
     }
 
     /// <summary>
@@ -1794,13 +1927,15 @@ public class VaultService(
     }
 
     /// <summary>
-    /// Re-reads an app secret's value from the live Kubernetes Secret and updates the
-    /// stored vault value. Used before taking ownership of an observed/imported secret
-    /// so EntKube pushes the current live value (e.g. whatever ArgoCD/Flux last set)
-    /// rather than the stale import-time snapshot. Returns true when a value was read
-    /// and updated; false if there is no sync target or the live key is absent.
+    /// Reconciles a "cluster-owned" secret from its live Kubernetes Secret (the reverse,
+    /// k8s→vault direction) and records <see cref="VaultSecret.LastRefreshedFromClusterAt"/>.
+    /// Handles every app secret shape: Opaque (single value), Certificate
+    /// (kubernetes.io/tls — tls.crt/tls.key/ca.crt) and OAuthClient (named keys). Used by
+    /// the background refresher for imported/observed secrets, by the manual "Refresh from
+    /// cluster" action, and before taking ownership so EntKube adopts the current live
+    /// value (e.g. whatever ArgoCD/Flux last set) rather than a stale snapshot.
     /// </summary>
-    public async Task<bool> RefreshAppSecretFromClusterAsync(Guid secretId, CancellationToken ct = default)
+    public async Task<ClusterRefreshResult> RefreshAppSecretFromClusterAsync(Guid secretId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -1812,7 +1947,7 @@ public class VaultService(
             || secret.KubernetesClusterId is null
             || string.IsNullOrEmpty(secret.KubernetesSecretName))
         {
-            return false;
+            return ClusterRefreshResult.NoTarget;
         }
 
         KubernetesCluster? cluster = await db.KubernetesClusters
@@ -1820,36 +1955,177 @@ public class VaultService(
 
         if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
         {
-            return false;
+            return ClusterRefreshResult.NoTarget;
         }
 
         string ns = secret.KubernetesNamespace ?? "default";
-        string? liveValue = await ReadLiveSecretValueAsync(
-            secret.KubernetesSecretName!, secret.Name, ns, cluster.Kubeconfig!, ct);
+        Dictionary<string, string>? liveData = await ReadLiveSecretDataAsync(
+            secret.KubernetesSecretName!, ns, cluster.Kubeconfig!, ct);
 
-        if (liveValue is null)
+        if (liveData is null)
         {
-            return false;
+            // The Secret no longer exists in the cluster (or couldn't be read).
+            return ClusterRefreshResult.NotFound;
         }
 
         byte[] dataKey = await UnsealVaultAsync(secret.Vault.TenantId, ct);
-
-        // Skip the write (and version-history churn) when the live value is unchanged —
-        // important because the background refresher polls these on an interval.
         string currentValue = encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
-        if (string.Equals(currentValue, liveValue, StringComparison.Ordinal))
+
+        (bool changed, string? newValue) = secret.SecretType switch
         {
-            return false;
+            VaultSecretType.Certificate => ReconcileCertificateFromCluster(currentValue, liveData),
+            VaultSecretType.OAuthClient => ReconcileOAuthClientFromCluster(currentValue, liveData),
+            _ => ReconcileOpaqueFromCluster(currentValue, liveData, secret.Name),
+        };
+
+        // Skip the value write (and version-history churn) when nothing changed — the
+        // background refresher polls these on an interval — but always record that we
+        // checked, so the UI can show how fresh the vault copy is.
+        if (changed && newValue is not null)
+        {
+            (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, newValue);
+            await ArchiveVersionAsync(db, secret, ct);
+            secret.EncryptedValue = ciphertext;
+            secret.Nonce = nonce;
+            secret.UpdatedAt = DateTime.UtcNow;
         }
 
-        (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, liveValue);
-
-        await ArchiveVersionAsync(db, secret, ct);
-        secret.EncryptedValue = ciphertext;
-        secret.Nonce = nonce;
-        secret.UpdatedAt = DateTime.UtcNow;
+        secret.LastRefreshedFromClusterAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
-        return true;
+        return changed ? ClusterRefreshResult.Updated : ClusterRefreshResult.Unchanged;
+    }
+
+    /// <summary>Outcome of a k8s→vault reconcile for one secret.</summary>
+    public enum ClusterRefreshResult
+    {
+        /// <summary>No live target is configured (no cluster or Secret name recorded).</summary>
+        NoTarget,
+        /// <summary>The target Secret could not be found or read in the cluster.</summary>
+        NotFound,
+        /// <summary>The live value matched the vault copy — nothing to write.</summary>
+        Unchanged,
+        /// <summary>The vault copy was updated to match the live value.</summary>
+        Updated,
+    }
+
+    // Opaque: the value lives under the vault secret's own name as the data key.
+    private static (bool Changed, string? NewValue) ReconcileOpaqueFromCluster(
+        string currentValue, Dictionary<string, string> liveData, string key)
+    {
+        if (!liveData.TryGetValue(key, out string? liveValue))
+        {
+            return (false, null);
+        }
+        return string.Equals(currentValue, liveValue, StringComparison.Ordinal)
+            ? (false, null)
+            : (true, liveValue);
+    }
+
+    // Certificate: compare the live tls.crt/tls.key/ca.crt material against the stored
+    // bundle by certificate identity (thumbprint set) so cosmetic PEM differences and
+    // leaf/chain/CA re-splitting don't cause churn; rebuild the bundle only on real change.
+    private static (bool Changed, string? NewValue) ReconcileCertificateFromCluster(
+        string currentJson, Dictionary<string, string> liveData)
+    {
+        string liveCrt = liveData.GetValueOrDefault("tls.crt") ?? "";
+        if (string.IsNullOrWhiteSpace(liveCrt))
+        {
+            // Not a readable TLS secret — leave the stored bundle untouched.
+            return (false, null);
+        }
+        string liveKey = liveData.GetValueOrDefault("tls.key") ?? "";
+        string liveCa = liveData.GetValueOrDefault("ca.crt") ?? "";
+
+        CertificateBundle current = DeserializeBundle(currentJson);
+        string currentCerts = ConcatPemParts(current.Certificate, current.Chain, current.CaCertificate);
+        string liveCerts = ConcatPemParts(liveCrt, liveCa);
+
+        bool sameCerts = CertificateThumbprints(currentCerts).SetEquals(CertificateThumbprints(liveCerts));
+        bool sameKey = NormalizePem(current.PrivateKey) == NormalizePem(liveKey);
+        if (sameCerts && sameKey)
+        {
+            return (false, null);
+        }
+
+        // Rebuild from the live material, reusing the importer so the leaf/chain/CA are
+        // split exactly as a fresh upload would be.
+        string combined = ConcatPemParts(liveKey, liveCrt, liveCa);
+        (bool ok, _, CertificateBundle? rebuilt) = CertificateImporter.Import(
+            Encoding.UTF8.GetBytes(combined), "cluster.pem", null);
+        if (!ok || rebuilt is null)
+        {
+            return (false, null);
+        }
+        return (true, JsonSerializer.Serialize(rebuilt, CertificateJsonOptions));
+    }
+
+    // OAuth client: update only the keys the cluster actually publishes, preserving
+    // vault-only metadata (provider, region, user-pool, expiry) that k8s never carries.
+    private static (bool Changed, string? NewValue) ReconcileOAuthClientFromCluster(
+        string currentJson, Dictionary<string, string> liveData)
+    {
+        OAuthClientBundle b = DeserializeOAuthBundle(currentJson);
+        bool changed = false;
+
+        if (liveData.TryGetValue("client-secret", out string? cs) && (b.ClientSecret ?? "").Trim() != cs.Trim())
+        {
+            b.ClientSecret = cs.Trim();
+            changed = true;
+        }
+        if (liveData.TryGetValue("client-id", out string? cid) && (b.ClientId ?? "").Trim() != cid.Trim())
+        {
+            b.ClientId = cid.Trim();
+            changed = true;
+        }
+        if (liveData.TryGetValue("tenant-id", out string? tid) && (b.TenantId ?? "").Trim() != tid.Trim())
+        {
+            b.TenantId = tid.Trim();
+            changed = true;
+        }
+        if (liveData.TryGetValue("scopes", out string? sc) && (b.Scopes ?? "").Trim() != sc.Trim())
+        {
+            b.Scopes = sc.Trim();
+            changed = true;
+        }
+        if (liveData.TryGetValue("issuer", out string? iss) && (b.EffectiveIssuer ?? "").Trim() != iss.Trim())
+        {
+            // Store the explicit issuer; EffectiveIssuer then returns it verbatim.
+            b.Issuer = iss.Trim();
+            changed = true;
+        }
+
+        return changed ? (true, JsonSerializer.Serialize(b, CertificateJsonOptions)) : (false, null);
+    }
+
+    private static string ConcatPemParts(params string?[] parts) =>
+        string.Join("\n", parts.Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p!.Trim()));
+
+    private static string NormalizePem(string? pem) =>
+        string.IsNullOrWhiteSpace(pem) ? "" : pem.Replace("\r", "").Trim();
+
+    /// <summary>The set of certificate thumbprints found in a PEM blob (empty on parse failure).</summary>
+    private static HashSet<string> CertificateThumbprints(string pem)
+    {
+        HashSet<string> thumbs = new(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(pem))
+        {
+            return thumbs;
+        }
+        try
+        {
+            System.Security.Cryptography.X509Certificates.X509Certificate2Collection col = [];
+            col.ImportFromPem(pem);
+            foreach (System.Security.Cryptography.X509Certificates.X509Certificate2 c in col)
+            {
+                thumbs.Add(c.Thumbprint);
+                c.Dispose();
+            }
+        }
+        catch
+        {
+            // Unparseable material → empty set; treated as "changed" so we rebuild.
+        }
+        return thumbs;
     }
 
     /// <summary>
@@ -1871,9 +2147,13 @@ public class VaultService(
             .ToListAsync(ct);
     }
 
-    /// <summary>Reads one key from a live Secret via kubectl and base64-decodes it.</summary>
-    private static async Task<string?> ReadLiveSecretValueAsync(
-        string secretName, string key, string ns, string kubeconfig, CancellationToken ct)
+    /// <summary>
+    /// Reads every key of a live Secret via kubectl and returns them base64-decoded,
+    /// or null when the Secret cannot be read (e.g. it no longer exists). An existing
+    /// Secret with no data section returns an empty map.
+    /// </summary>
+    private static async Task<Dictionary<string, string>?> ReadLiveSecretDataAsync(
+        string secretName, string ns, string kubeconfig, CancellationToken ct)
     {
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
@@ -1888,16 +2168,31 @@ public class VaultService(
                 return null;
             }
 
-            // Index the data map by the literal key so dotted keys (e.g. tls.crt) work.
             System.Text.Json.Nodes.JsonNode? node = System.Text.Json.Nodes.JsonNode.Parse(result.Output);
-            string? base64 = node?["data"]?[key]?.GetValue<string>();
-
-            if (string.IsNullOrEmpty(base64))
+            if (node?["data"] is not System.Text.Json.Nodes.JsonObject data)
             {
-                return null;
+                return new Dictionary<string, string>(StringComparer.Ordinal);
             }
 
-            return Encoding.UTF8.GetString(Convert.FromBase64String(base64));
+            // Index by the literal key so dotted keys (e.g. tls.crt) round-trip.
+            Dictionary<string, string> decoded = new(StringComparer.Ordinal);
+            foreach (KeyValuePair<string, System.Text.Json.Nodes.JsonNode?> kv in data)
+            {
+                string? base64 = kv.Value?.GetValue<string>();
+                if (string.IsNullOrEmpty(base64))
+                {
+                    continue;
+                }
+                try
+                {
+                    decoded[kv.Key] = Encoding.UTF8.GetString(Convert.FromBase64String(base64));
+                }
+                catch
+                {
+                    // Skip values that aren't valid base64.
+                }
+            }
+            return decoded;
         }
         catch
         {

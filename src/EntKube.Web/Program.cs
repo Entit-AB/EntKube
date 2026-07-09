@@ -186,7 +186,7 @@ public class Program
             DataPath = builder.Configuration.GetValue<string>("Telemetry:DataPath") ?? "/app/Data/telemetry",
             RollMaxDocs = builder.Configuration.GetValue<long?>("Telemetry:SegmentMaxDocs") ?? 1_000_000,
             RollMaxAge = TimeSpan.FromMinutes(builder.Configuration.GetValue<int?>("Telemetry:SegmentMaxAgeMinutes") ?? 60),
-            RetentionDays = builder.Configuration.GetValue<int?>("Telemetry:RetentionDays") ?? 14,
+            RetentionDays = builder.Configuration.GetValue<int?>("Telemetry:RetentionDays") ?? 90,
         };
         builder.Services.AddSingleton(segmentOptions);
         // Per-tenant setting for which StorageLink backs a tenant's telemetry (edited in the tenant's
@@ -211,6 +211,12 @@ public class Program
                 sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<RumSegmentManager>>())));
+        // Trace-summary index — pre-aggregated per-trace partials fed from span ingest for a fast trace list.
+        builder.Services.AddSingleton(sp => new SegmentManagerRegistry<TraceSummarySegmentManager>(tenantId =>
+            new TraceSummarySegmentManager(tenantId,
+                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
+                segmentOptions, sp.GetRequiredService<ILogger<TraceSummarySegmentManager>>())));
         builder.Services.AddSingleton<ITelemetryIngest, SegmentTelemetryStore>();
         builder.Services.AddScoped<ILogBackend, SegmentLogService>();
         builder.Services.AddScoped<ITraceQueryService, SegmentTraceService>();
@@ -225,6 +231,9 @@ public class Program
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
         builder.Services.AddHostedService(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<RumSegmentManager>>(), segmentOptions,
+            sp.GetRequiredService<ILogger<SegmentSealService>>()));
+        builder.Services.AddHostedService(sp => new SegmentSealService(
+            sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
         builder.Services.AddSingleton<IngestTokenService>();
         builder.Services.AddSingleton<IngestRateLimiter>();
@@ -368,6 +377,7 @@ public class Program
             await EnsureNotificationChannelFiltersAsync(db, app.Logger);
             await EnsureRumSiteAppIdAsync(db, app.Logger);
             await EnsureClusterKubeconfigsMigratedAsync(db, scope.ServiceProvider, app.Logger);
+            await EnsureImportedTlsSecretsAsCertificatesAsync(scope.ServiceProvider, app.Logger);
 
             RoleManager<IdentityRole> roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
             if (!await roleManager.RoleExistsAsync("Admin"))
@@ -779,6 +789,27 @@ public class Program
     /// no-op, and it only drops the column after confirming no cluster still holds an unmigrated
     /// plaintext kubeconfig — so a partial failure keeps the column for the next startup.
     /// </summary>
+    // One-time/idempotent: secrets imported before TLS detection existed are sitting in the
+    // vault as separate opaque keys (tls.crt + tls.key). Merge each such group into a single
+    // readable Certificate secret so it shows expiry and syncs as kubernetes.io/tls.
+    private static async Task EnsureImportedTlsSecretsAsCertificatesAsync(
+        IServiceProvider services, ILogger logger)
+    {
+        try
+        {
+            VaultService vault = services.GetRequiredService<VaultService>();
+            int converted = await vault.ConvertImportedTlsSecretsToCertificatesAsync();
+            if (converted > 0)
+            {
+                logger.LogInformation("Merged {Count} imported TLS secret(s) into certificate secrets.", converted);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "TLS-secret to certificate backfill failed; leaving secrets as-is.");
+        }
+    }
+
     private static async Task EnsureClusterKubeconfigsMigratedAsync(
         ApplicationDbContext db, IServiceProvider services, ILogger logger)
     {

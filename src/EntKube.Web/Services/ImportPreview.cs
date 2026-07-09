@@ -86,6 +86,19 @@ public class DetectedSecret
 
     public bool ImportToVault { get; set; } = true;
     public string? Warning { get; set; }
+
+    /// <summary>
+    /// True when this Secret is a TLS certificate — it carries a non-empty
+    /// <c>tls.crt</c> and every key is part of the standard TLS set
+    /// (<c>tls.crt</c>/<c>tls.key</c>/<c>ca.crt</c>). Such a Secret is imported as a
+    /// single <c>VaultSecretType.Certificate</c> (parseable, with expiry) rather than
+    /// as separate opaque keys. Extra, non-TLS keys fall back to the opaque path so no
+    /// value is silently dropped.
+    /// </summary>
+    public bool IsCertificate =>
+        Values.TryGetValue("tls.crt", out string? crt)
+        && !string.IsNullOrWhiteSpace(crt)
+        && Values.Keys.All(k => k is "tls.crt" or "tls.key" or "ca.crt");
 }
 
 /// <summary>

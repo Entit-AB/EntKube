@@ -427,8 +427,14 @@ else if (!isLoading)
 @code {
     [Parameter] public required Guid TenantId { get; set; }
 
+    /// <summary>When set (via a deep link, e.g. from the Fleet/Operations Advisor), the incident
+    /// whose detail should open automatically on load — no drill-down required.</summary>
+    [Parameter] public Guid? FocusIncidentId { get; set; }
+
     private List<AlertIncident> incidents = [];
     private List<IncidentGroup> storms = [];
+    private bool initialized;
+    private Guid? focusApplied;
 
     private async Task FilterToAlert(string alertName)
     {
@@ -468,6 +474,41 @@ else if (!isLoading)
         AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
         currentUser = authState.User.Identity?.Name ?? "Unknown";
         await Task.WhenAll(LoadIncidents(), LoadStats(), LoadOnCall());
+        initialized = true;
+        if (FocusIncidentId is Guid fid) await ApplyFocusAsync(fid);
+    }
+
+    // Fires when the deep link's ?incident= changes while the component is already mounted
+    // (e.g. opening a different incident from the advisor without a full reload).
+    protected override async Task OnParametersSetAsync()
+    {
+        if (initialized && FocusIncidentId is Guid fid && fid != focusApplied)
+        {
+            await ApplyFocusAsync(fid);
+        }
+    }
+
+    // Expand the targeted incident's detail. If the default "Open" filter would hide it
+    // (e.g. it was resolved since the advisor computed the finding), widen the filters and
+    // reload so the row is still there to open.
+    private async Task ApplyFocusAsync(Guid id)
+    {
+        focusApplied = id;
+        if (!incidents.Any(i => i.Id == id))
+        {
+            filterStatus = "";
+            filterSeverity = "";
+            filterClusterId = "";
+            searchText = "";
+            filterUnassigned = false;
+            await LoadIncidents();
+        }
+        if (incidents.Any(i => i.Id == id))
+        {
+            expandedId = id;
+            await LoadDeliveriesAsync(id);
+        }
+        StateHasChanged();
     }
 
     private async Task LoadOnCall()

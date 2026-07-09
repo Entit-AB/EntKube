@@ -64,6 +64,9 @@ public sealed record OperationsFinding
 
     public string? Remediation { get; init; }
 
+    /// <summary>Direct runbook URL to act on this finding, when the source supplies one.</summary>
+    public string? RunbookUrl { get; init; }
+
     /// <summary>Tenant-explorer section key to deep-link to, e.g. "secret-expiry", "incidents".</summary>
     public string? LinkSection { get; init; }
 
@@ -73,6 +76,10 @@ public sealed record OperationsFinding
     public string? CustomerName { get; init; }
 
     public Guid? ClusterId { get; init; }
+
+    /// <summary>For an incident finding: the representative (lead) incident to open directly,
+    /// so a deep link can jump straight to its detail instead of the incidents list.</summary>
+    public Guid? IncidentId { get; init; }
 
     /// <summary>Which signal produced this — "certificate" | "incident" | "backup".</summary>
     public string Source { get; init; } = "";
@@ -348,9 +355,11 @@ public class OperationsAdvisorService(
                 DueAt = g.EarliestStartsAt,
                 Remediation = string.IsNullOrWhiteSpace(g.RunbookUrl)
                     ? "Triage the root cause, then acknowledge or resolve the group."
-                    : $"Follow the runbook: {g.RunbookUrl}",
+                    : "Follow the runbook, then acknowledge or resolve the group.",
+                RunbookUrl = string.IsNullOrWhiteSpace(g.RunbookUrl) ? null : g.RunbookUrl,
                 LinkSection = "incidents",
                 ClusterId = g.ClusterId,
+                IncidentId = g.LeadIncidentId,
                 Source = "incident",
             });
         }

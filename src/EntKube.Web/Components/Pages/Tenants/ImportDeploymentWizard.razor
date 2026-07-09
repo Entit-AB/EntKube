@@ -178,6 +178,10 @@
                                             <label class="form-check-label" for="@($"sec-{secret.Namespace}-{secret.SecretName}")">
                                                 <code>@secret.SecretName</code>
                                                 <span class="text-muted">@secret.Namespace</span>
+                                                @if (secret.IsCertificate)
+                                                {
+                                                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle ms-1"><i class="bi bi-patch-check me-1"></i>TLS certificate</span>
+                                                }
                                                 @if (secret.Source == "ExternalSecret")
                                                 {
                                                     <span class="badge bg-info ms-1">via ExternalSecret</span>

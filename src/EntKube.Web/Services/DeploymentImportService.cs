@@ -360,7 +360,11 @@ public class DeploymentImportService(
                 }
             }
 
-            if (secret.Type is not null && secret.Type != "Opaque")
+            if (detected.IsCertificate)
+            {
+                detected.Warning = "Detected as a TLS certificate — imported as a readable certificate (with expiry), not opaque keys.";
+            }
+            else if (secret.Type is not null && secret.Type != "Opaque")
             {
                 detected.Warning = $"Original type was {secret.Type}; it will sync back as an Opaque Secret.";
             }
@@ -368,6 +372,39 @@ public class DeploymentImportService(
             DetectPostgres($"Secret {name}", detected.Values, preview);
             preview.Secrets.Add(detected);
         }
+    }
+
+    /// <summary>
+    /// Builds a <see cref="CertificateBundle"/> from a TLS secret's decoded data
+    /// (tls.crt [+ tls.key] [+ ca.crt]) by feeding the concatenated PEM through the same
+    /// importer a manual upload uses. Returns false when the material isn't a parseable
+    /// certificate, so the caller can fall back to the opaque import path.
+    /// </summary>
+    private static bool TryBuildCertificateBundle(
+        IReadOnlyDictionary<string, string> values, out CertificateBundle bundle)
+    {
+        bundle = new CertificateBundle();
+        if (!values.TryGetValue("tls.crt", out string? crt) || string.IsNullOrWhiteSpace(crt))
+        {
+            return false;
+        }
+        values.TryGetValue("tls.key", out string? key);
+        values.TryGetValue("ca.crt", out string? ca);
+
+        // Key first, then leaf+chain, then CA — the importer splits leaf/chain/CA itself.
+        string combined = string.Join("\n",
+            new[] { key, crt, ca }
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(p => p!.Trim()));
+
+        (bool ok, _, CertificateBundle? built) = CertificateImporter.Import(
+            Encoding.UTF8.GetBytes(combined), "import.pem", null);
+        if (!ok || built is null)
+        {
+            return false;
+        }
+        bundle = built;
+        return true;
     }
 
     /// <summary>
@@ -828,6 +865,33 @@ public class DeploymentImportService(
 
         foreach (DetectedSecret secret in secretsToImport)
         {
+            // A kubernetes.io/tls secret (tls.crt [+ tls.key/ca.crt]) IS a certificate —
+            // import it as one parseable Certificate secret (with expiry) instead of loose
+            // opaque keys. Falls back to the opaque path if the material won't parse.
+            if (secret.IsCertificate && TryBuildCertificateBundle(secret.Values, out CertificateBundle certBundle))
+            {
+                try
+                {
+                    (bool ok, string? error) = await vaultService.ImportObservedAppCertificateAsync(
+                        tenantId, appId, secret.SecretName, certBundle,
+                        cluster.Id, secret.SecretName, secret.Namespace, request.EnvironmentId, ct: ct);
+
+                    if (ok)
+                    {
+                        result.SecretKeyCount += secret.Values.Count;
+                        result.SecretCount++;
+                        continue;
+                    }
+
+                    // Validation failed — fall through to import the keys opaquely so nothing is lost.
+                    result.Errors.Add($"Certificate {secret.SecretName}: {error} — imported its keys as opaque secrets instead.");
+                }
+                catch (Exception ex)
+                {
+                    result.Errors.Add($"Certificate {secret.SecretName}: {Detail(ex)} — imported its keys as opaque secrets instead.");
+                }
+            }
+
             foreach (KeyValuePair<string, string> kv in secret.Values)
             {
                 try

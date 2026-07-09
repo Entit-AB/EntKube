@@ -1463,11 +1463,12 @@ public static class ComponentCatalog
                         receivers: [otlp]
                         processors: [k8sattributes, batch]
                         exporters: [otlphttp/entkube]
-                      # Metrics from instrumented apps (OTLP receiver) → EntKube native metrics.
-                      metrics:
-                        receivers: [otlp]
-                        processors: [k8sattributes, batch]
-                        exporters: [otlphttp/entkube]
+                      # NB: no metrics pipeline. EntKube has no native metrics ingest — app/host
+                      # metrics go straight to Prometheus (there is no /ingest/otlp/v1/metrics
+                      # endpoint). A metrics pipeline here just POSTs to a dead URL and the whole
+                      # batch is rejected (HTTP 400), spamming "Exporting failed" and dropping data.
+                      # OTLP metrics the receiver accepts (e.g. from eBPF/apps) are simply not
+                      # forwarded; scrape those via Prometheus instead.
                 """
         },
 

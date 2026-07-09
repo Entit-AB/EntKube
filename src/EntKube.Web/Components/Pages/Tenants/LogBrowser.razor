@@ -1,6 +1,7 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject LogQueryService Logs
+@inject KubernetesOperationsService K8s
 @inject NavigationManager Nav
 @implements IAsyncDisposable
 
@@ -13,21 +14,53 @@
 }
 else
 {
+    @* Source picker — only when the cluster genuinely has both backends. *@
+    @if (nativeBackend && lokiBackend)
+    {
+        <div class="d-flex align-items-center gap-2 mb-2">
+            <span class="small text-muted">Source</span>
+            <div class="btn-group btn-group-sm" role="group">
+                <button class="btn @(backend == LogBackendKind.Native ? "btn-primary" : "btn-outline-primary")"
+                        @onclick="() => SetBackend(LogBackendKind.Native)">
+                    <i class="bi bi-hdd-network me-1"></i>EntKube telemetry
+                </button>
+                <button class="btn @(backend == LogBackendKind.Loki ? "btn-primary" : "btn-outline-primary")"
+                        @onclick="() => SetBackend(LogBackendKind.Loki)">
+                    <i class="bi bi-graph-up me-1"></i>Loki
+                </button>
+            </div>
+        </div>
+    }
+
     @if (!string.IsNullOrEmpty(loadError))
     {
         <div class="alert alert-warning small py-2">
             <span class="bi bi-exclamation-triangle me-1"></span>
-            Could not reach Loki: @loadError
+            Could not load namespaces from @BackendLabel: @loadError
+        </div>
+    }
+
+    @if (namespacesFromCluster)
+    {
+        <div class="alert alert-light border small py-2">
+            <span class="bi bi-info-circle me-1"></span>
+            No namespaces were discovered in @BackendLabel yet, so this list is the cluster's live namespaces. Pick one and search — if nothing comes back, no logs have been ingested into @BackendLabel for it.
         </div>
     }
 
     @* ── Controls ── *@
     <div class="row g-2 mb-3 align-items-end">
         <div class="col-md-3">
-            <label class="form-label small text-muted mb-1">Namespace</label>
+            <label class="form-label small text-muted mb-1">
+                Namespace
+                @if (isLoading)
+                {
+                    <span class="spinner-border ms-1" style="width:.7rem;height:.7rem" role="status"></span>
+                }
+            </label>
             <select class="form-select form-select-sm" @bind="selectedNamespace" @bind:after="OnNamespaceChanged"
-                    disabled="@(namespaces.Count == 0)">
-                <option value="">— select namespace —</option>
+                    disabled="@(isLoading || namespaces.Count == 0)">
+                <option value="">@(isLoading ? "Loading namespaces…" : "— select namespace —")</option>
                 @foreach (string ns in namespaces)
                 {
                     <option value="@ns">@ns</option>
@@ -47,7 +80,7 @@ else
         </div>
         <div class="col-md-3">
             <label class="form-label small text-muted mb-1">Time range</label>
-            <select class="form-select form-select-sm" @bind="timeRangeMinutes">
+            <select class="form-select form-select-sm" @bind="timeRangeMinutes" @bind:after="OnTimeRangeChanged">
                 <option value="15">Last 15 minutes</option>
                 <option value="60">Last 1 hour</option>
                 <option value="180">Last 3 hours</option>
@@ -192,7 +225,11 @@ else
     private string levelFilter = "";
     private int timeRangeMinutes = 60;
     private int limit = 200;
-    private bool lokiAvailable;
+    private bool lokiAvailable;      // any backend usable (drives the "no backend" banner)
+    private bool nativeBackend;      // EntKube native telemetry has data for this cluster
+    private bool lokiBackend;        // a Loki component is installed on this cluster
+    private LogBackendKind backend = LogBackendKind.Auto;   // the source the viewer queries
+    private bool namespacesFromCluster;
     private bool isLoading = true;
     private bool isQuerying;
     private bool hasQueried;
@@ -211,16 +248,20 @@ else
     protected override async Task OnParametersSetAsync()
     {
         isLoading = true;
-        lokiAvailable = await Logs.IsAvailableAsync(ClusterId);
+        StateHasChanged();   // paint the "Loading namespaces…" state immediately, before the scan
 
-        loadError = null;
+        (nativeBackend, lokiBackend) = await Logs.ProbeBackendsAsync(ClusterId);
+        lokiAvailable = nativeBackend || lokiBackend;
+
+        // Default source: prefer whichever backend actually has data; the user can switch when
+        // both are present (a cluster can run EntKube telemetry AND Loki side by side).
+        backend = nativeBackend ? LogBackendKind.Native
+                : lokiBackend ? LogBackendKind.Loki
+                : LogBackendKind.Auto;
+
         if (lokiAvailable)
         {
-            KubernetesOperationResult<List<string>> nsResult = await Logs.GetNamespacesAsync(ClusterId);
-            if (nsResult.IsSuccess)
-                namespaces = nsResult.Data ?? [];
-            else
-                loadError = nsResult.Error;
+            await LoadNamespacesAsync();
 
             if (!string.IsNullOrEmpty(PresetNamespace))
             {
@@ -233,6 +274,72 @@ else
         isLoading = false;
     }
 
+    private async Task LoadNamespacesAsync()
+    {
+        loadError = null;
+        namespacesFromCluster = false;
+        namespaces = [];
+
+        KubernetesOperationResult<List<string>> nsResult =
+            await Logs.GetNamespacesAsync(ClusterId, backend, windowMinutes: timeRangeMinutes);
+        if (nsResult.IsSuccess)
+            namespaces = nsResult.Data ?? [];
+        else
+            loadError = nsResult.Error;   // real backend error — keep it visible, don't mask it
+
+        // Discovery can be empty (nothing ingested for this backend yet, or a label it doesn't
+        // expose). Fall back to the cluster's real namespaces so the picker is populated and a
+        // search can still run — but leave any backend error above on screen so it's diagnosable.
+        if (namespaces.Count == 0)
+        {
+            KubernetesOperationResult<List<string>> clusterNs = await K8s.ListNamespacesAsync(ClusterId);
+            if (clusterNs.IsSuccess && clusterNs.Data is { Count: > 0 } clusterNamespaces)
+            {
+                namespaces = clusterNamespaces;
+                namespacesFromCluster = true;
+            }
+            else if (string.IsNullOrEmpty(loadError))
+            {
+                loadError = clusterNs.Error ?? "No namespaces found for this cluster.";
+            }
+        }
+    }
+
+    private string BackendLabel => backend == LogBackendKind.Native ? "EntKube telemetry"
+        : backend == LogBackendKind.Loki ? "Loki" : "the log backend";
+
+    private async Task SetBackend(LogBackendKind kind)
+    {
+        if (backend == kind) return;
+        backend = kind;
+        await OnBackendChanged();
+    }
+
+    private async Task OnBackendChanged()
+    {
+        selectedNamespace = "";
+        selectedPod = "";
+        pods = [];
+        allEntries = [];
+        hasQueried = false;
+        await LoadNamespacesAsync();
+    }
+
+    // Reload the namespace list for the newly-selected window (the discovery scan is bounded to it).
+    private async Task OnTimeRangeChanged()
+    {
+        isLoading = true;
+        StateHasChanged();
+        await LoadNamespacesAsync();
+        if (!string.IsNullOrEmpty(selectedNamespace) && !namespaces.Contains(selectedNamespace))
+        {
+            selectedNamespace = "";
+            selectedPod = "";
+            pods = [];
+        }
+        isLoading = false;
+    }
+
     private async Task OnNamespaceChanged()
     {
         pods = [];
@@ -240,7 +347,7 @@ else
         if (string.IsNullOrEmpty(selectedNamespace)) return;
 
         KubernetesOperationResult<List<string>> podResult =
-            await Logs.GetPodsAsync(ClusterId, selectedNamespace);
+            await Logs.GetPodsAsync(ClusterId, selectedNamespace, backend, windowMinutes: timeRangeMinutes);
         if (podResult.IsSuccess) pods = podResult.Data ?? [];
     }
 
@@ -258,8 +365,8 @@ else
 
         // The log page and the volume histogram are independent queries over the same filters —
         // issue them concurrently so the search waits on the slower, not the sum.
-        Task<KubernetesOperationResult<List<LokiLogStream>>> resultTask = Logs.QueryAsync(ClusterId, filter, from, to, limit);
-        Task<KubernetesOperationResult<List<LogHistogramBucket>>> histTask = Logs.GetHistogramAsync(ClusterId, filter, from, to);
+        Task<KubernetesOperationResult<List<LokiLogStream>>> resultTask = Logs.QueryAsync(ClusterId, filter, from, to, limit, backend);
+        Task<KubernetesOperationResult<List<LogHistogramBucket>>> histTask = Logs.GetHistogramAsync(ClusterId, filter, from, to, backend: backend);
         await Task.WhenAll(resultTask, histTask);
 
         KubernetesOperationResult<List<LokiLogStream>> result = resultTask.Result;
@@ -322,7 +429,7 @@ else
                 DateTime now = DateTime.UtcNow;
                 // Query just past the cursor; a 1s overlap tolerates clock skew, de-duped by ts.
                 KubernetesOperationResult<List<LokiLogStream>> result =
-                    await Logs.QueryAsync(ClusterId, BuildFilter(), lastTs.AddSeconds(-1), now, limit, ct);
+                    await Logs.QueryAsync(ClusterId, BuildFilter(), lastTs.AddSeconds(-1), now, limit, backend, ct);
                 if (!result.IsSuccess || result.Data is null) continue;
 
                 List<LokiLogEntry> newer = result.Data

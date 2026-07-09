@@ -12,7 +12,8 @@ namespace EntKube.Web.Services.Telemetry;
 public sealed class SegmentTelemetryStore(
     SegmentManagerRegistry<LogSegmentManager> logs,
     SegmentManagerRegistry<SpanSegmentManager> spans,
-    SegmentManagerRegistry<RumSegmentManager> rum) : ITelemetryIngest
+    SegmentManagerRegistry<RumSegmentManager> rum,
+    SegmentManagerRegistry<TraceSummarySegmentManager> traceSummaries) : ITelemetryIngest
 {
     public bool IsEnabled => true;
 
@@ -27,6 +28,8 @@ public sealed class SegmentTelemetryStore(
     {
         if (records.Count == 0) return Task.FromResult(0);
         spans.For(tenantId).WriteSpans(tenantId, clusterId, records);
+        // Also feed the trace-summary index (partials merged at query time for the fast trace list).
+        traceSummaries.For(tenantId).WriteFromSpanBatch(tenantId, clusterId, records);
         return Task.FromResult(records.Count);
     }
 

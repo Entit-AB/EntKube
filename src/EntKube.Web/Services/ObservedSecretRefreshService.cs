@@ -62,8 +62,9 @@ public class ObservedSecretRefreshService(
 
             try
             {
-                // Returns true only when the live value differed and the vault was updated.
-                if (await vaultService.RefreshAppSecretFromClusterAsync(id, ct))
+                // Counts only secrets whose live value differed and were rewritten.
+                if (await vaultService.RefreshAppSecretFromClusterAsync(id, ct)
+                    == VaultService.ClusterRefreshResult.Updated)
                 {
                     updated++;
                 }
