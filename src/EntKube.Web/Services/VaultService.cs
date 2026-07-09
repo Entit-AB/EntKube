@@ -524,6 +524,77 @@ public class VaultService(
     }
 
     /// <summary>
+    /// Creates or updates a generic opaque secret scoped to a cluster (by
+    /// <see cref="VaultSecret.OwnerClusterId"/>). Used to persist the OpenStack
+    /// application credential minted during provisioning, so the in-cluster
+    /// cloud-controller-manager / Cinder CSI cloud-config can be rebuilt later.
+    /// Upserts by (cluster, name).
+    /// </summary>
+    public async Task<VaultSecret> SetClusterSecretAsync(
+        Guid tenantId, Guid clusterId, string name, string value, CancellationToken ct = default)
+    {
+        await InitializeVaultAsync(tenantId, ct);
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+
+        VaultSecret? existing = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
+                && s.OwnerClusterId == clusterId && s.Name == name && s.SecretType == VaultSecretType.Opaque, ct);
+
+        (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, value);
+
+        if (existing is not null)
+        {
+            await ArchiveVersionAsync(db, existing, ct);
+            existing.EncryptedValue = ciphertext;
+            existing.Nonce = nonce;
+            existing.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+            return existing;
+        }
+
+        SecretVault vault = (await GetVaultAsync(tenantId, ct))!;
+
+        VaultSecret secret = new()
+        {
+            Id = Guid.NewGuid(),
+            VaultId = vault.Id,
+            Name = name,
+            SecretType = VaultSecretType.Opaque,
+            EncryptedValue = ciphertext,
+            Nonce = nonce,
+            OwnerClusterId = clusterId
+        };
+
+        db.Set<VaultSecret>().Add(secret);
+        await db.SaveChangesAsync(ct);
+        return secret;
+    }
+
+    /// <summary>
+    /// Decrypts and returns a generic opaque cluster-scoped secret by name, or null.
+    /// </summary>
+    public async Task<string?> GetClusterSecretValueAsync(
+        Guid tenantId, Guid clusterId, string name, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        VaultSecret? secret = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
+                && s.OwnerClusterId == clusterId && s.Name == name && s.SecretType == VaultSecretType.Opaque, ct);
+
+        if (secret is null)
+        {
+            return null;
+        }
+
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+        return encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
+    }
+
+    /// <summary>
     /// Enumerates every certificate and OAuth/OIDC client secret in the tenant's vault,
     /// decrypting each just far enough to read its expiry, and projects the non-secret
     /// metadata (scope, expiry, days remaining) used by the expiry-notification scanner

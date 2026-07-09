@@ -603,6 +603,7 @@
                             <option value="@StorageProvider.AwsS3">AWS S3</option>
                             <option value="@StorageProvider.AzureStorage">Azure Storage</option>
                             <option value="@StorageProvider.CleuraS3">Cleura S3</option>
+                            <option value="@StorageProvider.CubeFS">CubeFS (in-cluster)</option>
                         </select>
                     </div>
                     <div class="col-md-6">
@@ -631,6 +632,28 @@
                                     @foreach (OpenStackConnection conn in openStackConnections)
                                     {
                                         <option value="@conn.Id">@conn.Name (@conn.Region)</option>
+                                    }
+                                </select>
+                            }
+                        </div>
+                    }
+                    @if (formProvider == StorageProvider.CubeFS)
+                    {
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">CubeFS component</label>
+                            @if (cubeFsComponents.Count == 0)
+                            {
+                                <div class="text-danger small">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>No installed CubeFS component found. Install the CubeFS catalog component on a cluster first.
+                                </div>
+                            }
+                            else
+                            {
+                                <select class="form-select form-select-sm" @bind="formCubeFsComponentId">
+                                    <option value="@Guid.Empty">— Select CubeFS instance —</option>
+                                    @foreach (ClusterComponent comp in cubeFsComponents)
+                                    {
+                                        <option value="@comp.Id">@comp.Cluster.Name / @comp.Namespace</option>
                                     }
                                 </select>
                             }
@@ -687,7 +710,7 @@
                         }
                         else
                         {
-                            <text>@(formProvider == StorageProvider.CleuraS3 ? "Create Bucket" : "Save")</text>
+                            <text>@(formProvider is StorageProvider.CleuraS3 or StorageProvider.CubeFS ? "Create Bucket" : "Save")</text>
                         }
                     </button>
                     <button class="btn btn-sm btn-outline-secondary" @onclick="CancelForm">Cancel</button>
@@ -897,6 +920,10 @@
     // OpenStack connections
     private List<OpenStackConnection> openStackConnections = [];
 
+    // Installed CubeFS components (targets for in-cluster S3 bucket provisioning)
+    private List<ClusterComponent> cubeFsComponents = [];
+    private Guid formCubeFsComponentId;
+
     // Storage link form fields
     private StorageProvider formProvider = StorageProvider.AwsS3;
     private Guid formEnvironmentId;
@@ -978,6 +1005,7 @@
 
         environments = await StorageService.GetEnvironmentsAsync(TenantId);
         openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+        cubeFsComponents = await StorageService.GetCubeFSComponentsAsync(TenantId);
 
         // When scoped to a single environment, restrict the env picker to that
         // environment and build the set of its cluster ids (used to filter
@@ -1057,6 +1085,16 @@
             return;
         }
 
+        // CubeFS needs a target component, a bucket name, and the object-gateway endpoint + creds.
+        if (formProvider == StorageProvider.CubeFS)
+        {
+            if (formCubeFsComponentId == Guid.Empty) { formError = "Select a CubeFS component."; return; }
+            if (string.IsNullOrWhiteSpace(formBucket)) { formError = "Bucket name is required."; return; }
+            if (string.IsNullOrWhiteSpace(formEndpoint)) { formError = "CubeFS object-gateway endpoint is required."; return; }
+            if (string.IsNullOrWhiteSpace(formAccessKey) || string.IsNullOrWhiteSpace(formSecretKey))
+            { formError = "CubeFS access key and secret key are required."; return; }
+        }
+
         saving = true;
         formError = null;
         StateHasChanged();
@@ -1071,6 +1109,21 @@
                     TenantId,
                     formEnvironmentId,
                     formOpenStackConnectionId,
+                    formBucket.Trim(),
+                    formName.Trim(),
+                    string.IsNullOrWhiteSpace(formNotes) ? null : formNotes.Trim());
+            }
+            else if (formProvider == StorageProvider.CubeFS)
+            {
+                // Create the bucket on the in-cluster CubeFS object gateway (S3 PutBucket via the K8s proxy).
+
+                await StorageService.ProvisionCubeFSBucketAsync(
+                    TenantId,
+                    formEnvironmentId,
+                    formCubeFsComponentId,
+                    formEndpoint.Trim(),
+                    formAccessKey.Trim(),
+                    formSecretKey.Trim(),
                     formBucket.Trim(),
                     formName.Trim(),
                     string.IsNullOrWhiteSpace(formNotes) ? null : formNotes.Trim());
@@ -1468,6 +1521,7 @@
             showOsForm = false;
             ResetOsForm();
             openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+        cubeFsComponents = await StorageService.GetCubeFSComponentsAsync(TenantId);
         }
         finally
         {
@@ -1484,6 +1538,7 @@
             if (deleted)
             {
                 openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+        cubeFsComponents = await StorageService.GetCubeFSComponentsAsync(TenantId);
                 Toasts.Success("OpenStack connection deleted.");
             }
             else
@@ -1611,6 +1666,7 @@
         StorageProvider.AwsS3 => "https://s3.eu-west-1.amazonaws.com",
         StorageProvider.AzureStorage => "https://<account>.blob.core.windows.net",
         StorageProvider.CleuraS3 => "https://s3-<region>.cloudferro.com",
+        StorageProvider.CubeFS => "http://objectnode.cubefs-system.svc.cluster.local:17410",
         _ => "https://..."
     };
 
@@ -1620,6 +1676,7 @@
         StorageProvider.AzureStorage => "bi bi-microsoft",
         StorageProvider.CleuraS3 => "bi bi-cloud-haze2",
         StorageProvider.MinIO => "bi bi-bucket",
+        StorageProvider.CubeFS => "bi bi-hdd-stack-fill",
         _ => "bi bi-cloud"
     };
 
@@ -1629,6 +1686,7 @@
         StorageProvider.AzureStorage => "text-primary",
         StorageProvider.CleuraS3 => "text-info",
         StorageProvider.MinIO => "text-warning",
+        StorageProvider.CubeFS => "text-success",
         _ => ""
     };
 
@@ -1638,6 +1696,7 @@
         StorageProvider.AzureStorage => "Azure Storage",
         StorageProvider.CleuraS3 => "Cleura S3",
         StorageProvider.MinIO => "MinIO",
+        StorageProvider.CubeFS => "CubeFS",
         _ => provider.ToString()
     };
 

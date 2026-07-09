@@ -32,8 +32,9 @@ public sealed class StorageLinkClientFactory(VaultService vaultService, IDbConte
             throw new InvalidOperationException(
                 "Storage credentials not found in vault. Ensure ACCESS_KEY and SECRET_KEY are configured.");
 
-        // MinIO: proxy via K8s API server so cluster-internal service URLs are reachable.
-        if (link.Provider == StorageProvider.MinIO && link.Endpoint is not null)
+        // MinIO / CubeFS: cluster-hosted S3 gateways — proxy via the K8s API server so
+        // cluster-internal service URLs are reachable.
+        if (link.Provider is StorageProvider.MinIO or StorageProvider.CubeFS && link.Endpoint is not null)
         {
             string? kubeconfig = await ResolveKubeconfigAsync(link, ct);
             if (!string.IsNullOrWhiteSpace(kubeconfig))
@@ -102,7 +103,7 @@ public sealed class StorageLinkClientFactory(VaultService vaultService, IDbConte
         IQueryable<ClusterComponent> query = db.ClusterComponents
             .Include(c => c.Cluster)
             .Where(c => c.Cluster.TenantId == link.TenantId
-                && (c.Name == "minio-operator" || c.Name == "minio")
+                && (c.Name == "minio-operator" || c.Name == "minio" || c.Name == "cubefs")
                 && c.Status == ComponentStatus.Installed
                 && c.Cluster.KubeconfigSecretId != null);
         if (parsed is not null)

@@ -224,7 +224,10 @@ public class Program
         builder.Services.AddScoped<MongoService>();
         builder.Services.AddScoped<RegisteredPostgresService>();
         builder.Services.AddScoped<IKubernetesClientFactory, KubernetesClientFactory>();
+        builder.Services.AddScoped<OpenStackKeystoneClient>();
         builder.Services.AddScoped<OpenStackS3Service>();
+        builder.Services.AddScoped<OpenStackComputeService>();
+        builder.Services.AddScoped<ClusterProvisioningService>();
         builder.Services.AddScoped<StorageService>();
         builder.Services.AddScoped<StorageLinkClientFactory>();
         builder.Services.AddScoped<StorageBrowserService>();

@@ -15,7 +15,15 @@ public enum StorageProvider
     AzureStorage,
 
     /// <summary>Cleura (City Cloud) S3-compatible object storage.</summary>
-    CleuraS3
+    CleuraS3,
+
+    /// <summary>
+    /// CubeFS object gateway running on the cluster (auto-discovered / component-linked).
+    /// S3-compatible; reached the same way as MinIO — through the Kubernetes API server
+    /// proxy when its endpoint is a cluster-internal service URL. Provides a single,
+    /// cloud-portable S3 story regardless of what the underlying OpenStack exposes.
+    /// </summary>
+    CubeFS
 }
 
 /// <summary>

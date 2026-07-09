@@ -20,7 +20,9 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
 # libgit2sharp needs libssl/libcurl; git is used by GitOperationsService;
-# kubectl and helm are invoked by KubernetesOperationsService/ComponentLifecycleService.
+# kubectl and helm are invoked by KubernetesOperationsService/ComponentLifecycleService;
+# clusterctl + ssh (openssh-client) are invoked by ClusterProvisioningService to stand up
+# OpenStack clusters (Cluster API + CAPO, ephemeral-bootstrap + pivot).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -39,6 +41,16 @@ RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
 
 # helm — latest stable via official installer script
 RUN curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# clusterctl — Cluster API CLI, architecture-aware. Resolves the latest release tag so
+# the download URL always points at a real asset (override with --build-arg CLUSTERCTL_VERSION).
+ARG CLUSTERCTL_VERSION=
+RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
+    VERSION="${CLUSTERCTL_VERSION:-$(curl -fsSL https://api.github.com/repos/kubernetes-sigs/cluster-api/releases/latest | grep -oP '"tag_name":\s*"\K[^"]+')}" && \
+    curl -fsSL "https://github.com/kubernetes-sigs/cluster-api/releases/download/${VERSION}/clusterctl-linux-${ARCH}" \
+         -o /usr/local/bin/clusterctl && \
+    chmod +x /usr/local/bin/clusterctl && \
+    clusterctl version
 
 # Run as non-root
 RUN groupadd --system appgroup && useradd --system --gid appgroup --no-create-home appuser

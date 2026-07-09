@@ -3147,6 +3147,12 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
+                    b.Property<string>("ProvisioningStateJson")
+                        .HasColumnType("text");
+
+                    b.Property<int>("ProvisioningStatus")
+                        .HasColumnType("integer");
+
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uuid");
 
