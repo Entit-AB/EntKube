@@ -209,6 +209,10 @@ else if (!isLoading)
     private bool initialized;
     private Guid? focusApplied;
 
+    // When an advisor deep link focuses an incident, scroll its (expanded) row into view once rendered.
+    private ElementReference focusAnchor;
+    private Guid? pendingScrollId;
+
     /// <summary>A tenant's environment with its correlated incident groups, for the grouped list.</summary>
     private sealed record EnvGroup(
         Guid? EnvironmentId, string EnvironmentName, List<IncidentGroup> Groups, int AlertCount, int CriticalCount);
@@ -344,9 +348,22 @@ else if (!isLoading)
                 .FirstOrDefault(g => g.IncidentIds.Contains(id));
             if (group is { Count: > 1 }) expandedStormKey = group.Key;
             expandedId = id;
+            pendingScrollId = id;   // scroll the expanded row into view after it renders
             await LoadDeliveriesAsync(id);
         }
         StateHasChanged();
+    }
+
+    // Bring a deep-linked, now-expanded incident row into view. FocusAsync scrolls the anchor
+    // into view without any custom JS interop.
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (pendingScrollId is not null)
+        {
+            pendingScrollId = null;
+            try { await focusAnchor.FocusAsync(); }
+            catch { /* row not in DOM (filtered/collapsed) — nothing to scroll to */ }
+        }
     }
 
     private async Task LoadOnCall()
@@ -617,6 +634,11 @@ else if (!isLoading)
     // One incident's summary row + (when expanded) its full detail. Reused for uncorrelated
     // incidents and for the members inside a correlated storm.
     private RenderFragment RenderIncidentRow(AlertIncident? incident, bool nested) => incident is null ? @<text></text> : @<div>
+        @* Scroll anchor for deep links (advisor "Open"): focusing this brings the expanded row into view. *@
+        @if (expandedId == incident.Id)
+        {
+            <span @ref="focusAnchor" tabindex="-1" style="display:block;height:0;outline:none"></span>
+        }
         <div class="d-flex justify-content-between align-items-start gap-3" style="cursor:pointer"
              @onclick="() => ToggleExpand(incident.Id)">
             <div>
