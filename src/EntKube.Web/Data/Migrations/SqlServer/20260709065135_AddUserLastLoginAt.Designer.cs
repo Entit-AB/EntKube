@@ -4,6 +4,7 @@ using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.SqlServer
 {
     [DbContext(typeof(SqlServerApplicationDbContext))]
-    partial class SqlServerApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260709065135_AddUserLastLoginAt")]
+    partial class AddUserLastLoginAt
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
