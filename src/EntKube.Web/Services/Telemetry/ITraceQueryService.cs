@@ -12,7 +12,8 @@ public interface ITraceQueryService
     Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default);
 
     Task<KubernetesOperationResult<List<string>>> GetServicesAsync(
-        Guid clusterId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null, string? podPattern = null);
+        Guid clusterId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null,
+        string? podPattern = null, int windowMinutes = 60);
 
     Task<KubernetesOperationResult<List<TraceSummary>>> ListTracesAsync(
         Guid clusterId, string? service, DateTime from, DateTime to,

@@ -1,8 +1,11 @@
+using System.Collections.Concurrent;
+using EntKube.Web.Data;
 using EntKube.Web.Services;
 using Lucene.Net.Documents;
 using Lucene.Net.Index;
 using Lucene.Net.Search;
 using Lucene.Net.Util;
+using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Telemetry;
 
@@ -16,12 +19,15 @@ namespace EntKube.Web.Services.Telemetry;
 /// </summary>
 public sealed class SegmentTraceService(
     SegmentManagerRegistry<SpanSegmentManager> spans,
+    SegmentManagerRegistry<TraceSummarySegmentManager> traceSummaries,
+    IDbContextFactory<ApplicationDbContext> dbFactory,
     ClusterTenantResolver tenants,
     ILogger<SegmentTraceService> logger) : ITraceQueryService
 {
     // Safety cap on how many spans an aggregation will materialize from one window. Well above a normal
     // trace-search window; if exceeded we log and truncate rather than risk unbounded memory.
     private const int MaxSpansPerQuery = 200_000;
+    private const int MaxPartialsPerQuery = 200_000;
 
     public async Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
     {
@@ -31,22 +37,40 @@ public sealed class SegmentTraceService(
         return await spans.For(tenantId.Value).QueryAsync(null, null, s => s.Search(scope, 1).TotalHits > 0, ct);
     }
 
+    // The distinct-service scan touches every span in the window, so it's the page's most expensive
+    // load-time call. Cache it briefly per (cluster, namespaces, pod, window) — the set changes slowly,
+    // and this makes re-renders / deep-links / tab revisits instant. Static so it's shared across
+    // circuits (this service is scoped). Bounded by cluster count; entries expire by TTL.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, List<string> Services)> ServiceListCache = new();
+    private static readonly TimeSpan ServiceListTtl = TimeSpan.FromSeconds(30);
+
     public async Task<KubernetesOperationResult<List<string>>> GetServicesAsync(
-        Guid clusterId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null, string? podPattern = null)
+        Guid clusterId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null,
+        string? podPattern = null, int windowMinutes = 60)
     {
         Guid? tenantId = await tenants.ResolveAsync(clusterId, ct);
         if (tenantId is null) return Fail<List<string>>();
 
-        // Bound to the last 24h (the trace search's max range), like PgTraceService.
-        DateTime from = DateTime.UtcNow.AddHours(-24);
+        // Scan only the window the viewer is actually searching (default 1h) instead of a fixed 24h —
+        // the dropdown then reflects the selected range and, by default, opens ~24× fewer segments.
+        if (windowMinutes <= 0) windowMinutes = 60;
+        string cacheKey = $"{clusterId:N}|{windowMinutes}|{string.Join(",", namespaces ?? [])}|{podPattern}";
+        if (ServiceListCache.TryGetValue(cacheKey, out (DateTime At, List<string> Services) hit)
+            && DateTime.UtcNow - hit.At < ServiceListTtl)
+        {
+            return KubernetesOperationResult<List<string>>.Success(hit.Services);
+        }
+
+        DateTime from = DateTime.UtcNow.AddMinutes(-windowMinutes);
         try
         {
             Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, from, null, namespaces, podPattern);
             var sink = new HashSet<string>(StringComparer.Ordinal);
             await spans.For(tenantId.Value).QueryAsync(from, null,
                 s => { s.Search(scope, new DistinctCollector(SpanSegmentSchema.Service, sink)); return 0; }, ct);
-            return KubernetesOperationResult<List<string>>.Success(
-                sink.Where(v => v.Length > 0).OrderBy(v => v, StringComparer.Ordinal).ToList());
+            List<string> result = sink.Where(v => v.Length > 0).OrderBy(v => v, StringComparer.Ordinal).ToList();
+            ServiceListCache[cacheKey] = (DateTime.UtcNow, result);
+            return KubernetesOperationResult<List<string>>.Success(result);
         }
         catch (Exception ex)
         {
@@ -63,12 +87,156 @@ public sealed class SegmentTraceService(
         Guid? tenantId = await tenants.ResolveAsync(clusterId, ct);
         if (tenantId is null) return Fail<List<TraceSummary>>();
 
+        // The pre-aggregated trace-summary index answers the list cheaply — EXCEPT when a pod-pattern is
+        // filtered (exact only from spans) or the window reaches back before the index had partials. Those
+        // fall back to scanning spans directly.
+        if (string.IsNullOrEmpty(podPattern) && from >= await TracesIndexCutoffAsync(tenantId.Value, ct))
+            return await ListTracesFromIndexAsync(
+                tenantId.Value, clusterId, service, from, to, minDurationMs, errorsOnly, limit, namespaces, ct);
+
+        return await ListTracesFromSpansAsync(
+            tenantId.Value, clusterId, service, from, to, minDurationMs, errorsOnly, limit, namespaces, podPattern, ct);
+    }
+
+    // ── Fast path: merge pre-aggregated per-(trace,namespace,batch) partials from the trace-summary index ──
+    private async Task<KubernetesOperationResult<List<TraceSummary>>> ListTracesFromIndexAsync(
+        Guid tenantId, Guid clusterId, string? service, DateTime from, DateTime to,
+        double minDurationMs, bool errorsOnly, int limit, IReadOnlyList<string>? namespaces, CancellationToken ct)
+    {
         try
         {
-            // Load all in-window scope spans, then group by trace in C# (a trace "involves" the service if
-            // any of its spans is that service — matches the old subquery).
-            Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, from, to, namespaces, podPattern);
-            List<SpanRow> rows = await LoadRowsAsync(spans.For(tenantId.Value), scope, from, to, ct);
+            Query scope = TraceSummarySchema.BuildWindowScope(tenantId, clusterId, from, to, namespaces);
+            List<TraceSummaryPartial> partials = await traceSummaries.For(tenantId).QueryAsync(from, to, s =>
+            {
+                TopDocs hits = s.Search(scope, MaxPartialsPerQuery);
+                if (hits.TotalHits > MaxPartialsPerQuery)
+                    logger.LogWarning("Trace-summary query matched {Total} partials; truncated to {Cap}.", hits.TotalHits, MaxPartialsPerQuery);
+                var list = new List<TraceSummaryPartial>(hits.ScoreDocs.Length);
+                foreach (ScoreDoc sd in hits.ScoreDocs)
+                    list.Add(TraceSummarySchema.ReadPartial(s.Doc(sd.Doc)));
+                return list;
+            }, ct);
+
+            // DISTINCT by partial_id (collapses OTLP whole-batch retries) → group by trace → merge.
+            var seenPartials = new HashSet<string>(StringComparer.Ordinal);
+            var byTrace = new Dictionary<string, List<TraceSummaryPartial>>(StringComparer.Ordinal);
+            foreach (TraceSummaryPartial p in partials)
+            {
+                if (p.PartialId.Length > 0 && !seenPartials.Add(p.PartialId)) continue;
+                if (!byTrace.TryGetValue(p.TraceId, out List<TraceSummaryPartial>? list))
+                    byTrace[p.TraceId] = list = [];
+                list.Add(p);
+            }
+
+            List<TraceSummary> summaries = byTrace.Values
+                .Select(MergePartials)
+                .Where(x => x.Summary.DurationMs >= minDurationMs
+                            && (!errorsOnly || x.Summary.ErrorCount > 0)
+                            && (string.IsNullOrEmpty(service) || x.Services.Contains(service)))
+                .Select(x => x.Summary)
+                .OrderByDescending(t => t.Start)
+                .Take(limit)
+                .ToList();
+            return KubernetesOperationResult<List<TraceSummary>>.Success(summaries);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Segment trace-summary list failed (cluster {Cluster})", clusterId);
+            return Fail<List<TraceSummary>>(ex.Message);
+        }
+    }
+
+    // Reassembles a trace from its partials: start=min, end=max, counts summed, root = earliest partial that
+    // saw a root span, else the earliest partial's earliest-start span. Services unioned for the filter.
+    private static (TraceSummary Summary, HashSet<string> Services) MergePartials(List<TraceSummaryPartial> ps)
+    {
+        long start = ps.Min(p => p.StartMs);
+        double end = ps.Max(p => p.EndMs);
+        int spanCount = ps.Sum(p => p.SpanCount);
+        int errorCount = ps.Sum(p => p.ErrorCount);
+        var services = new HashSet<string>(ps.SelectMany(p => p.Services), StringComparer.Ordinal);
+
+        string rootService, rootName;
+        TraceSummaryPartial? rooted = ps.Where(p => p.RootService is not null)
+            .OrderBy(p => p.RootTs ?? p.StartMs).FirstOrDefault();
+        if (rooted is not null)
+        {
+            rootService = rooted.RootService!;
+            rootName = rooted.RootName ?? "";
+        }
+        else
+        {
+            TraceSummaryPartial e = ps.OrderBy(p => p.StartMs).First();
+            rootService = e.EarliestService;
+            rootName = e.EarliestName;
+        }
+
+        var summary = new TraceSummary(
+            TraceId: ps[0].TraceId,
+            Start: TelemetryTime.FromEpochMillis(start),
+            DurationMs: end - start,
+            SpanCount: spanCount,
+            ErrorCount: errorCount,
+            RootService: rootService,
+            RootName: rootName);
+        return (summary, services);
+    }
+
+    // Earliest time the trace-summary index holds partials for this tenant (sealed catalog MIN + active
+    // index MIN). Windows starting before it must use the span path (pre-index history). Cached briefly.
+    private static readonly ConcurrentDictionary<Guid, (DateTime Cutoff, DateTime At)> CutoffCache = new();
+    private static readonly TimeSpan CutoffTtl = TimeSpan.FromSeconds(60);
+
+    private async Task<DateTime> TracesIndexCutoffAsync(Guid tenantId, CancellationToken ct)
+    {
+        if (CutoffCache.TryGetValue(tenantId, out (DateTime Cutoff, DateTime At) c) && DateTime.UtcNow - c.At < CutoffTtl)
+            return c.Cutoff;
+
+        DateTime? sealedMin;
+        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+            sealedMin = await db.TelemetrySegments
+                .Where(seg => seg.TenantId == tenantId && seg.Signal == "traces")
+                .MinAsync(seg => (DateTime?)seg.MinTs, ct);
+
+        DateTime? activeMin = traceSummaries.For(tenantId).ActiveMinTs;
+        DateTime cutoff = (sealedMin, activeMin) switch
+        {
+            (null, null) => DateTime.MaxValue,                 // no partials yet → always use the span path
+            (DateTime s, null) => s,
+            (null, DateTime a) => a,
+            (DateTime s, DateTime a) => s < a ? s : a,
+        };
+        CutoffCache[tenantId] = (cutoff, DateTime.UtcNow);
+        return cutoff;
+    }
+
+    // ── Fallback path: aggregate raw spans (used for pod-pattern filters and pre-index windows) ──
+    private async Task<KubernetesOperationResult<List<TraceSummary>>> ListTracesFromSpansAsync(
+        Guid tenantId, Guid clusterId, string? service, DateTime from, DateTime to,
+        double minDurationMs, bool errorsOnly, int limit, IReadOnlyList<string>? namespaces, string? podPattern, CancellationToken ct)
+    {
+        try
+        {
+            SpanSegmentManager mgr = spans.For(tenantId);
+            List<SpanRow> rows;
+
+            // A service is selected with no per-trace filter → two-phase (find recent involving traces, then
+            // load just those). Per-trace filters (minDuration/errorsOnly) fall back to the full scan.
+            if (!string.IsNullOrEmpty(service) && minDurationMs <= 0 && !errorsOnly)
+            {
+                List<string> traceIds = await RecentServiceTraceIdsAsync(
+                    mgr, tenantId, clusterId, from, to, namespaces, podPattern, service, limit, ct);
+                if (traceIds.Count == 0)
+                    return KubernetesOperationResult<List<TraceSummary>>.Success([]);
+
+                Query tracesScope = BuildTracesScope(tenantId, clusterId, from, to, namespaces, podPattern, traceIds);
+                rows = await LoadRowsAsync(mgr, tracesScope, from, to, ct, AggregationFields);
+            }
+            else
+            {
+                Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId, clusterId, from, to, namespaces, podPattern);
+                rows = await LoadRowsAsync(mgr, scope, from, to, ct, AggregationFields);
+            }
 
             List<TraceSummary> summaries = rows
                 .GroupBy(r => r.TraceId)
@@ -82,7 +250,7 @@ public sealed class SegmentTraceService(
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Segment trace list failed (cluster {Cluster})", clusterId);
+            logger.LogWarning(ex, "Segment trace list (span path) failed (cluster {Cluster})", clusterId);
             return Fail<List<TraceSummary>>(ex.Message);
         }
     }
@@ -133,7 +301,7 @@ public sealed class SegmentTraceService(
         try
         {
             Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, from, to, namespaces, podPattern, service);
-            List<SpanRow> rows = await LoadRowsAsync(spans.For(tenantId.Value), scope, from, to, ct);
+            List<SpanRow> rows = await LoadRowsAsync(spans.For(tenantId.Value), scope, from, to, ct, AggregationFields);
 
             var byBucket = new SortedDictionary<long, List<SpanRow>>();
             foreach (SpanRow r in rows.Where(r => r.IsInbound))
@@ -170,7 +338,7 @@ public sealed class SegmentTraceService(
         try
         {
             Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, from, to, namespaces, podPattern);
-            List<SpanRow> rows = await LoadRowsAsync(spans.For(tenantId.Value), scope, from, to, ct);
+            List<SpanRow> rows = await LoadRowsAsync(spans.For(tenantId.Value), scope, from, to, ct, AggregationFields);
 
             // Index spans by (trace, span_id) so a child can find its parent within the same trace — the
             // in-memory equivalent of the old self-join on p.span_id = c.parent_span_id.
@@ -211,7 +379,7 @@ public sealed class SegmentTraceService(
         try
         {
             Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, from, to, service: service);
-            List<SpanRow> rows = (await LoadRowsAsync(spans.For(tenantId.Value), scope, from, to, ct)).Where(r => r.IsInbound).ToList();
+            List<SpanRow> rows = (await LoadRowsAsync(spans.For(tenantId.Value), scope, from, to, ct, AggregationFields)).Where(r => r.IsInbound).ToList();
             List<double> durations = rows.Select(r => r.DurationMs).OrderBy(d => d).ToList();
             var stats = new ServiceStats(rows.Count, rows.Count(r => r.IsError), PercentileDisc(durations, 0.95));
             return KubernetesOperationResult<ServiceStats>.Success(stats);
@@ -251,9 +419,63 @@ public sealed class SegmentTraceService(
         return sortedAsc[idx];
     }
 
+    private static readonly ISet<string> TraceIdFieldOnly = new HashSet<string> { SpanSegmentSchema.TraceId };
+
+    // Phase 1 of the service-filtered trace list: the ids of the most-recently-active traces that
+    // involve the service. Searches the service's spans sorted newest-first and reads only trace ids,
+    // stopping once `limit` distinct traces are collected — so it touches a bounded number of docs.
+    private async Task<List<string>> RecentServiceTraceIdsAsync(
+        SpanSegmentManager mgr, Guid tenantId, Guid clusterId, DateTime from, DateTime to,
+        IReadOnlyList<string>? namespaces, string? podPattern, string service, int limit, CancellationToken ct)
+    {
+        Query svcScope = SpanSegmentSchema.BuildScopeQuery(tenantId, clusterId, from, to, namespaces, podPattern, service);
+        var sort = new Sort(new SortField(SpanSegmentSchema.Ts, SortFieldType.INT64, reverse: true)); // newest first
+        int fetch = Math.Max(2000, limit * 100);
+        return await mgr.QueryAsync(from, to, s =>
+        {
+            TopDocs hits = s.Search(svcScope, fetch, sort);
+            var ids = new List<string>(limit);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (ScoreDoc sd in hits.ScoreDocs)
+            {
+                string tid = s.Doc(sd.Doc, TraceIdFieldOnly).Get(SpanSegmentSchema.TraceId) ?? "";
+                if (tid.Length > 0 && seen.Add(tid))
+                {
+                    ids.Add(tid);
+                    if (ids.Count >= limit) break;
+                }
+            }
+            return ids;
+        }, ct);
+    }
+
+    // Phase 2 scope: the same (cluster/ns/pod/window) filter restricted to a specific set of trace ids.
+    private static Query BuildTracesScope(
+        Guid tenantId, Guid clusterId, DateTime from, DateTime to,
+        IReadOnlyList<string>? namespaces, string? podPattern, IReadOnlyList<string> traceIds)
+    {
+        Query baseScope = SpanSegmentSchema.BuildScopeQuery(tenantId, clusterId, from, to, namespaces, podPattern);
+        var traceSet = new BooleanQuery { MinimumNumberShouldMatch = 1 };
+        foreach (string tid in traceIds)
+            traceSet.Add(new TermQuery(new Term(SpanSegmentSchema.TraceId, tid)), Occur.SHOULD);
+        return new BooleanQuery { { baseScope, Occur.MUST }, { traceSet, Occur.MUST } };
+    }
+
+    // The fields the C# aggregations (summaries, RED, service map, stats) actually read. Loading only
+    // these — NOT the whole stored document — skips the potentially-large `attributes` JSON blob per
+    // span, which none of the aggregations use. Cuts the per-span materialization cost dramatically.
+    private static readonly ISet<string> AggregationFields = new HashSet<string>
+    {
+        SpanSegmentSchema.TraceId, SpanSegmentSchema.SpanId, SpanSegmentSchema.ParentSpanId,
+        SpanSegmentSchema.Name, SpanSegmentSchema.Service, SpanSegmentSchema.Kind,
+        SpanSegmentSchema.DurationMs, SpanSegmentSchema.StatusCode, SpanSegmentSchema.Ts,
+    };
+
     // Runs a scope query and materializes matched spans (capped) into SpanRows for C# aggregation, over
-    // the given tenant's manager.
-    private async Task<List<SpanRow>> LoadRowsAsync(SpanSegmentManager segments, Query q, DateTime? from, DateTime? to, CancellationToken ct)
+    // the given tenant's manager. Pass <paramref name="fields"/> to load only a subset of stored fields
+    // (aggregations); null loads the full document (the waterfall, which needs attributes).
+    private async Task<List<SpanRow>> LoadRowsAsync(
+        SpanSegmentManager segments, Query q, DateTime? from, DateTime? to, CancellationToken ct, ISet<string>? fields = null)
     {
         return await segments.QueryAsync(from, to, s =>
         {
@@ -262,7 +484,7 @@ public sealed class SegmentTraceService(
                 logger.LogWarning("Trace query matched {Total} spans; truncated to {Cap}.", hits.TotalHits, MaxSpansPerQuery);
             var rows = new List<SpanRow>(hits.ScoreDocs.Length);
             foreach (ScoreDoc sd in hits.ScoreDocs)
-                rows.Add(SpanSegmentSchema.ReadRow(s.Doc(sd.Doc)));
+                rows.Add(SpanSegmentSchema.ReadRow(fields is null ? s.Doc(sd.Doc) : s.Doc(sd.Doc, fields)));
             return rows;
         }, ct);
     }

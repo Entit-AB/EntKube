@@ -25,6 +25,7 @@ public sealed class SegmentTraceEngineTests : IDisposable
     private readonly Guid _clusterId = Guid.NewGuid();
     private readonly List<SegmentManagerRegistry<SpanSegmentManager>> _registries = [];
     private SegmentManagerRegistry<SpanSegmentManager>? _registry;
+    private SegmentManagerRegistry<TraceSummarySegmentManager>? _traceReg;
     private readonly List<string> _tempDirs = [];
 
     public SegmentTraceEngineTests()
@@ -49,18 +50,39 @@ public sealed class SegmentTraceEngineTests : IDisposable
         _resolver = new ClusterTenantResolver(_factory);
     }
 
-    private SpanSegmentManager NewManager()
+    private SpanSegmentManager NewManager(int retentionDays = 90, int maxCachedReaders = 256)
     {
         string dataPath = Path.Combine(Path.GetTempPath(), "spantest-" + Guid.NewGuid().ToString("N"));
         _tempDirs.Add(dataPath);
         string blobsDir = Path.Combine(dataPath, "blobs");
         Directory.CreateDirectory(blobsDir);
-        var options = new SegmentEngineOptions { DataPath = dataPath };
+        var options = new SegmentEngineOptions
+        {
+            DataPath = dataPath, RetentionDays = retentionDays, MaxCachedReaders = maxCachedReaders,
+        };
         var store = new LocalSegmentBlobStore(blobsDir);
         _registry = new SegmentManagerRegistry<SpanSegmentManager>(tid =>
             new SpanSegmentManager(tid, _factory, store, options, NullLogger<SpanSegmentManager>.Instance));
         _registries.Add(_registry);
         return _registry.For(_tenantId);
+    }
+
+    // A SegmentTraceService with an (empty, unless fed) trace-summary registry. These tests write spans
+    // directly to the span manager, so the traces index stays empty → the list routes to the span path.
+    private SegmentTraceService TraceSvc()
+    {
+        if (_traceReg is null)
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "tracesum-" + Guid.NewGuid().ToString("N"));
+            _tempDirs.Add(dataPath);
+            string blobsDir = Path.Combine(dataPath, "blobs");
+            Directory.CreateDirectory(blobsDir);
+            var options = new SegmentEngineOptions { DataPath = dataPath };
+            var store = new LocalSegmentBlobStore(blobsDir);
+            _traceReg = new SegmentManagerRegistry<TraceSummarySegmentManager>(tid =>
+                new TraceSummarySegmentManager(tid, _factory, store, options, NullLogger<TraceSummarySegmentManager>.Instance));
+        }
+        return new SegmentTraceService(_registry!, _traceReg, _factory, _resolver, NullLogger<SegmentTraceService>.Instance);
     }
 
     private static SpanIngestRecord Span(
@@ -80,7 +102,7 @@ public sealed class SegmentTraceEngineTests : IDisposable
             Span(t0.AddMilliseconds(10), "t1", "s2", "s1", "call-backend", "backend", 3, 60, 2),
             Span(t0.AddSeconds(1), "t2", "s3", null, "GET /home", "frontend", 2, 200, 0),
         ]);
-        var svc = new SegmentTraceService(_registry!, _resolver, NullLogger<SegmentTraceService>.Instance);
+        var svc = TraceSvc();
         return (mgr, t0.AddMinutes(-1), t0.AddMinutes(5), svc);
     }
 
@@ -103,6 +125,21 @@ public sealed class SegmentTraceEngineTests : IDisposable
 
         var waterfall = await svc.GetTraceAsync(_clusterId, "t1");
         waterfall.Data!.Select(s => s.SpanId).Should().ContainInOrder("s1", "s2");
+    }
+
+    [Fact]
+    public async Task ListTraces_FilteredByService_ReturnsFullTraceSummaries()
+    {
+        // Two-phase path (service selected, no per-trace filter): phase 1 finds traces involving
+        // "backend"; phase 2 must load the WHOLE trace so the summary sees the frontend root too.
+        var (_, from, to, svc) = Scenario();
+
+        var traces = await svc.ListTracesAsync(_clusterId, service: "backend", from, to);
+        traces.IsSuccess.Should().BeTrue();
+        TraceSummary t1 = traces.Data!.Should().ContainSingle(t => t.TraceId == "t1").Subject;
+        t1.SpanCount.Should().Be(2);            // both spans, not just the backend one
+        t1.RootService.Should().Be("frontend"); // root came from the non-filtered service
+        t1.ErrorCount.Should().Be(1);
     }
 
     [Fact]
@@ -158,9 +195,62 @@ public sealed class SegmentTraceEngineTests : IDisposable
         traces.Data!.Should().ContainSingle(t => t.TraceId == "t1");
     }
 
+    [Fact]
+    public async Task ReaderCache_ServesRepeatQueries_AndEvictsOnRetention()
+    {
+        SpanSegmentManager mgr = NewManager(retentionDays: 7);
+        DateTime old = DateTime.UtcNow.AddDays(-20);   // beyond the manager's 7-day retention
+        mgr.WriteSpans(_tenantId, _clusterId,
+        [
+            Span(old, "t1", "s1", null, "GET /", "frontend", 2, 100, 0),
+            Span(old.AddMilliseconds(10), "t1", "s2", "s1", "call-backend", "backend", 3, 60, 2),
+        ]);
+        var svc = TraceSvc();
+
+        await mgr.RollAndSealAsync();
+        DateTime from = old.AddMinutes(-1), to = old.AddMinutes(5);
+
+        // First query opens + caches the sealed reader; the second must hit the cache with the same result.
+        var q1 = await svc.ListTracesAsync(_clusterId, service: null, from, to);
+        var q2 = await svc.ListTracesAsync(_clusterId, service: null, from, to);
+        q1.Data!.Should().ContainSingle(t => t.TraceId == "t1");
+        q2.Data!.Should().ContainSingle(t => t.TraceId == "t1");
+
+        // Retention drops the 20-day-old segment; its cached reader is evicted without breaking anything.
+        (await mgr.DropExpiredAsync()).Should().Be(1);
+
+        var q3 = await svc.ListTracesAsync(_clusterId, service: null, from, to);
+        q3.IsSuccess.Should().BeTrue();
+        q3.Data!.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ReaderCache_UnderTinyCap_ReopensAndReturnsAllData()
+    {
+        // Cap of 1 open reader, but three sealed segments — eviction + reopen must not drop data.
+        SpanSegmentManager mgr = NewManager(maxCachedReaders: 1);
+        DateTime t0 = DateTime.UtcNow.AddMinutes(-30);
+        for (int i = 0; i < 3; i++)
+        {
+            mgr.WriteSpans(_tenantId, _clusterId,
+                [Span(t0.AddMinutes(i), $"t{i}", "s", null, "op", "svc", 2, 10, 0)]);
+            await mgr.RollAndSealAsync();
+        }
+        var svc = TraceSvc();
+        DateTime from = t0.AddMinutes(-1), to = t0.AddMinutes(10);
+
+        var q1 = await svc.ListTracesAsync(_clusterId, service: null, from, to);
+        q1.Data!.Select(t => t.TraceId).Should().BeEquivalentTo(["t0", "t1", "t2"]);
+
+        // Repeat to exercise the reopen-after-eviction path under the cap.
+        var q2 = await svc.ListTracesAsync(_clusterId, service: null, from, to);
+        q2.Data!.Should().HaveCount(3);
+    }
+
     public void Dispose()
     {
         foreach (SegmentManagerRegistry<SpanSegmentManager> r in _registries) r.Dispose();
+        _traceReg?.Dispose();
         _context.Dispose();
         _connection.Dispose();
         foreach (string d in _tempDirs)

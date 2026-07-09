@@ -161,6 +161,48 @@ public class KubernetesOperationsService(
     }
 
     /// <summary>
+    /// Lists the namespace names on a cluster directly from its Kubernetes API. Used to
+    /// populate the log browser's namespace picker so it works even when no logs have yet
+    /// been discovered in the telemetry / Loki backend for the cluster.
+    /// </summary>
+    public async Task<KubernetesOperationResult<List<string>>> ListNamespacesAsync(
+        Guid clusterId, CancellationToken ct = default)
+    {
+        KubernetesCluster? cluster;
+        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        {
+            cluster = await db.KubernetesClusters.FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+        }
+
+        if (cluster is null)
+        {
+            return KubernetesOperationResult<List<string>>.Failure("Cluster not found.");
+        }
+        if (string.IsNullOrEmpty(cluster.Kubeconfig))
+        {
+            return KubernetesOperationResult<List<string>>.Failure(
+                "Cluster has no kubeconfig configured.");
+        }
+
+        try
+        {
+            using Kubernetes client = CreateClient(cluster.Kubeconfig);
+            V1NamespaceList list = await client.CoreV1.ListNamespaceAsync(cancellationToken: ct);
+            List<string> names = list.Items
+                .Select(n => n.Metadata?.Name)
+                .Where(n => !string.IsNullOrEmpty(n))
+                .Select(n => n!)
+                .OrderBy(n => n, StringComparer.Ordinal)
+                .ToList();
+            return KubernetesOperationResult<List<string>>.Success(names);
+        }
+        catch (Exception ex)
+        {
+            return KubernetesOperationResult<List<string>>.Failure($"Could not list namespaces: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// Returns the governance-locked namespace for a deployment's app+environment,
     /// or null if no namespace lock is configured.
     /// </summary>

@@ -132,8 +132,11 @@ public sealed class SegmentLogEngineTests : IDisposable
             Log(t0.AddSeconds(3), "staging", "worker-1", 1, "c"));
         SegmentLogService svc = NewService();
 
-        (await svc.GetNamespacesAsync(_clusterId)).Data.Should().BeEquivalentTo(["prod", "staging"]);
-        (await svc.GetPodsAsync(_clusterId, "prod")).Data.Should().BeEquivalentTo(["api-1", "api-2"]);
+        // Wide discovery window: the fixtures are timestamped at a fixed absolute date, so scan well
+        // past it (the default is only the last hour) to discover every namespace/pod regardless of age.
+        const int allTime = 10_000_000;
+        (await svc.GetNamespacesAsync(_clusterId, allTime)).Data.Should().BeEquivalentTo(["prod", "staging"]);
+        (await svc.GetPodsAsync(_clusterId, "prod", allTime)).Data.Should().BeEquivalentTo(["api-1", "api-2"]);
 
         var hist = await svc.GetHistogramAsync(
             _clusterId, new LogQueryFilter { Namespaces = ["prod", "staging"] }, t0, t0.AddMinutes(1), buckets: 4);

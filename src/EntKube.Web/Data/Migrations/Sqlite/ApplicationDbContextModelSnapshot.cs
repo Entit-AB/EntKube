@@ -4592,6 +4592,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(253)
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime?>("LastRefreshedFromClusterAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<Guid?>("MongoClusterId")
                         .HasColumnType("TEXT");
 

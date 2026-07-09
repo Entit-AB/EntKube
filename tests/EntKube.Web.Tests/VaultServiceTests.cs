@@ -678,4 +678,185 @@ public class VaultServiceTests : IDisposable
         kubeconfig.ScopeLabel.Should().Be($"Cluster: {cluster.Name}");
         kubeconfig.DaysUntilExpiry.Should().BeInRange(9, 10);
     }
+
+    // --- Certificate import (kubernetes.io/tls → readable Certificate secret) ---
+
+    [Fact]
+    public async Task ImportObservedAppCertificate_StoresParseableCertificate_ClusterOwned()
+    {
+        // A tls.crt + tls.key Secret imported from a cluster becomes one Certificate-type
+        // vault secret, tracked read-only (sync off, target recorded).
+
+        (Tenant tenant, App app) = CreateTenantWithApp();
+        Data.Environment env = new() { Id = Guid.NewGuid(), TenantId = tenant.Id, Name = "production" };
+        db.Environments.Add(env);
+        KubernetesCluster cluster = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            EnvironmentId = env.Id,
+            Name = "prod-cluster",
+            ApiServerUrl = "https://k8s.example.com"
+        };
+        db.KubernetesClusters.Add(cluster);
+        db.SaveChanges();
+        Guid clusterId = cluster.Id;
+        await sut.InitializeVaultAsync(tenant.Id);
+
+        (string certPem, string keyPem) = MakeSelfSignedCert("import-test.example.com");
+        (bool ok, CertificateBundle bundle) = TryBuild(certPem, keyPem);
+        ok.Should().BeTrue();
+
+        (bool stored, string? error) = await sut.ImportObservedAppCertificateAsync(
+            tenant.Id, app.Id, "my-app-tls", bundle,
+            clusterId, secretName: "my-app-tls", ns: "prod");
+
+        stored.Should().BeTrue(error);
+
+        List<VaultSecret> secrets = await sut.GetAppSecretsAsync(tenant.Id, app.Id);
+        secrets.Should().HaveCount(1);
+        VaultSecret cert = secrets[0];
+        cert.Name.Should().Be("my-app-tls");
+        cert.SecretType.Should().Be(VaultSecretType.Certificate);
+        cert.SyncToKubernetes.Should().BeFalse();
+        cert.KubernetesClusterId.Should().Be(clusterId);
+        cert.KubernetesSecretName.Should().Be("my-app-tls");
+        cert.KubernetesNamespace.Should().Be("prod");
+
+        // It is genuinely readable as a certificate.
+        CertificateInfo? info = await sut.GetCertificateInfoByIdAsync(cert.Id);
+        info.Should().NotBeNull();
+        info!.Subject.Should().Contain("import-test.example.com");
+
+        // And it lands in the observed set the reverse-refresher polls.
+        List<Guid> observed = await sut.GetObservedAppSecretIdsAsync();
+        observed.Should().Contain(cert.Id);
+    }
+
+    [Fact]
+    public async Task ConvertImportedTlsSecrets_MergesOpaqueKeyPair_IntoOneCertificate()
+    {
+        // A pre-existing import that landed as two opaque secrets (tls.crt + tls.key sharing
+        // one K8s target) is merged into a single readable Certificate secret.
+
+        (Tenant tenant, App app) = CreateTenantWithApp();
+        Data.Environment env = new() { Id = Guid.NewGuid(), TenantId = tenant.Id, Name = "production" };
+        db.Environments.Add(env);
+        KubernetesCluster cluster = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            EnvironmentId = env.Id,
+            Name = "prod-cluster",
+            ApiServerUrl = "https://k8s.example.com"
+        };
+        db.KubernetesClusters.Add(cluster);
+        db.SaveChanges();
+        await sut.InitializeVaultAsync(tenant.Id);
+
+        (string certPem, string keyPem) = MakeSelfSignedCert("legacy-import.example.com");
+
+        // Simulate the old opaque import: one vault secret per key, same K8s target, sync off.
+        foreach ((string key, string val) in new[] { ("tls.crt", certPem), ("tls.key", keyPem) })
+        {
+            VaultSecret s = await sut.SetAppSecretAsync(tenant.Id, app.Id, key, val);
+            await sut.ConfigureKubernetesSyncAsync(
+                s.Id, syncEnabled: false, secretName: "legacy-tls", ns: "prod", clusterId: cluster.Id);
+        }
+
+        int converted = await sut.ConvertImportedTlsSecretsToCertificatesAsync();
+
+        converted.Should().Be(1);
+
+        List<VaultSecret> secrets = await sut.GetAppSecretsAsync(tenant.Id, app.Id);
+        secrets.Should().HaveCount(1);
+        VaultSecret cert = secrets[0];
+        cert.Name.Should().Be("legacy-tls");
+        cert.SecretType.Should().Be(VaultSecretType.Certificate);
+        cert.KubernetesSecretName.Should().Be("legacy-tls");
+        cert.SyncToKubernetes.Should().BeFalse();
+
+        CertificateInfo? info = await sut.GetCertificateInfoByIdAsync(cert.Id);
+        info!.Subject.Should().Contain("legacy-import.example.com");
+
+        // Idempotent: a second pass finds nothing to do.
+        (await sut.ConvertImportedTlsSecretsToCertificatesAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task ConvertImportedTlsSecrets_LeavesNonCertificateOpaqueKeysAlone()
+    {
+        // A "tls.crt" opaque secret whose value isn't actually a certificate is not merged.
+
+        (Tenant tenant, App app) = CreateTenantWithApp();
+        Data.Environment env = new() { Id = Guid.NewGuid(), TenantId = tenant.Id, Name = "production" };
+        db.Environments.Add(env);
+        KubernetesCluster cluster = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            EnvironmentId = env.Id,
+            Name = "prod-cluster",
+            ApiServerUrl = "https://k8s.example.com"
+        };
+        db.KubernetesClusters.Add(cluster);
+        db.SaveChanges();
+        await sut.InitializeVaultAsync(tenant.Id);
+
+        VaultSecret s = await sut.SetAppSecretAsync(tenant.Id, app.Id, "tls.crt", "not-a-certificate");
+        await sut.ConfigureKubernetesSyncAsync(
+            s.Id, syncEnabled: false, secretName: "weird", ns: "prod", clusterId: cluster.Id);
+
+        (await sut.ConvertImportedTlsSecretsToCertificatesAsync()).Should().Be(0);
+
+        List<VaultSecret> secrets = await sut.GetAppSecretsAsync(tenant.Id, app.Id);
+        secrets.Should().ContainSingle(x => x.Name == "tls.crt" && x.SecretType == VaultSecretType.Opaque);
+    }
+
+    [Theory]
+    [InlineData(new[] { "tls.crt", "tls.key" }, true)]
+    [InlineData(new[] { "tls.crt", "tls.key", "ca.crt" }, true)]
+    [InlineData(new[] { "tls.crt" }, true)]
+    [InlineData(new[] { "tls.crt", "extra" }, false)] // extra key → opaque, don't drop it
+    [InlineData(new[] { "username", "password" }, false)]
+    public void DetectedSecret_IsCertificate_ClassifiesByTlsKeys(string[] keys, bool expected)
+    {
+        DetectedSecret detected = new() { SecretName = "s", Namespace = "ns" };
+        foreach (string k in keys)
+        {
+            detected.Values[k] = k == "tls.crt" ? "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----" : "v";
+        }
+
+        detected.IsCertificate.Should().Be(expected);
+    }
+
+    [Fact]
+    public void DetectedSecret_IsCertificate_False_WhenTlsCrtEmpty()
+    {
+        DetectedSecret detected = new() { SecretName = "s", Namespace = "ns" };
+        detected.Values["tls.crt"] = "";
+        detected.Values["tls.key"] = "key";
+
+        detected.IsCertificate.Should().BeFalse();
+    }
+
+    private static (bool Ok, CertificateBundle Bundle) TryBuild(string certPem, string keyPem)
+    {
+        string combined = keyPem.Trim() + "\n" + certPem.Trim();
+        (bool ok, _, CertificateBundle? built) = CertificateImporter.Import(
+            System.Text.Encoding.UTF8.GetBytes(combined), "import.pem", null);
+        return (ok && built is not null, built ?? new CertificateBundle());
+    }
+
+    private static (string CertPem, string KeyPem) MakeSelfSignedCert(string cn)
+    {
+        using System.Security.Cryptography.RSA rsa = System.Security.Cryptography.RSA.Create(2048);
+        System.Security.Cryptography.X509Certificates.CertificateRequest req = new(
+            $"CN={cn}", rsa,
+            System.Security.Cryptography.HashAlgorithmName.SHA256,
+            System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+        using System.Security.Cryptography.X509Certificates.X509Certificate2 cert =
+            req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
+        return (cert.ExportCertificatePem(), rsa.ExportPkcs8PrivateKeyPem());
+    }
 }

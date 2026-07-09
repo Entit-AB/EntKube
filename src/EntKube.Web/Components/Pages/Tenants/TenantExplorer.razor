@@ -244,6 +244,7 @@ else
     [SupplyParameterFromQuery(Name = "cluster")] private Guid? ClusterParam { get; set; }
     [SupplyParameterFromQuery(Name = "section")] private string? SectionParam { get; set; }
     [SupplyParameterFromQuery(Name = "env")] private Guid? EnvParam { get; set; }
+    [SupplyParameterFromQuery(Name = "incident")] private Guid? IncidentParam { get; set; }
 
     private sealed record SectionItem(string Key, string Label, string Icon);
     private sealed record TreeGroup(string Name, string Icon, SectionItem[] Items);
@@ -292,9 +293,12 @@ else
     private List<Data.App> allApps = [];
     private List<KubernetesCluster> clusters = [];
 
-    private readonly HashSet<Guid> collapsedEnvs = [];              // environments expanded by default
-    private readonly HashSet<string> expandedEnvCustomers = [];     // "env:customer" expanded (collapsed by default)
-    private readonly HashSet<string> collapsedGroups = [];          // service/ops groups expanded by default
+    // The whole tree starts collapsed for easier navigation: environments, customers, and
+    // service/ops groups are all collapsed unless the user opens them (or a deep link /
+    // filter reveals the relevant node). Each set holds the ids the user has expanded.
+    private readonly HashSet<Guid> expandedEnvs = [];               // environments (collapsed by default)
+    private readonly HashSet<string> expandedEnvCustomers = [];     // "env:customer" (collapsed by default)
+    private readonly HashSet<string> expandedGroups = [];           // service/ops groups (collapsed by default)
     private string filter = "";
 
     private bool addingEnv;
@@ -312,7 +316,7 @@ else
     private Guid? registerEnvId;
 
     private string? _loadedSlug;                              // tenant whose data is currently loaded
-    private (Guid?, Guid?, string?, Guid?)? _appliedQuery;   // last (app, cluster, section, env) applied
+    private (Guid?, Guid?, string?, Guid?, Guid?)? _appliedQuery;   // last (app, cluster, section, env, incident) applied
 
     private bool HasFilter => !string.IsNullOrWhiteSpace(filter);
 
@@ -333,7 +337,7 @@ else
         // Re-derive the open pane from the query string whenever it changes. This is what makes
         // the mega menu's ?section=… / ?app=… links act when you're already on a tenant page:
         // those change only the query, which never re-runs OnInitializedAsync.
-        (Guid?, Guid?, string?, Guid?) sig = (AppParam, ClusterParam, SectionParam, EnvParam);
+        (Guid?, Guid?, string?, Guid?, Guid?) sig = (AppParam, ClusterParam, SectionParam, EnvParam, IncidentParam);
         if (_appliedQuery is not { } applied || applied != sig)
         {
             _appliedQuery = sig;
@@ -355,9 +359,9 @@ else
         if (!await UserAccessService.HasTenantAccessAsync(userId, t.Id)) { Nav.NavigateTo("/tenants"); return false; }
 
         // Clear any previous tenant's tree/selection state before loading the new one.
-        collapsedEnvs.Clear();
+        expandedEnvs.Clear();
         expandedEnvCustomers.Clear();
-        collapsedGroups.Clear();
+        expandedGroups.Clear();
         appsByCustomer.Clear();
         filter = "";
         selectedApp = null; selectedAppCustomer = null; selectedCluster = null;
@@ -400,7 +404,7 @@ else
                 if (selectedAppCustomer is not null)
                     foreach (AppEnvironment ae in selectedApp.AppEnvironments)
                     {
-                        collapsedEnvs.Remove(ae.EnvironmentId);
+                        expandedEnvs.Add(ae.EnvironmentId);
                         expandedEnvCustomers.Add($"{ae.EnvironmentId}:{selectedAppCustomer.Id}");
                     }
             }
@@ -415,7 +419,7 @@ else
             if (EnvParam is Guid svcEnv)
             {
                 selectedServiceEnvId = svcEnv;
-                collapsedEnvs.Remove(svcEnv);
+                expandedEnvs.Add(svcEnv);
             }
         }
     }
@@ -461,12 +465,12 @@ else
     private List<SectionItem> VisiblePlatform() =>
         HasFilter ? PlatformItems.Where(i => Match(i.Label)).ToList() : PlatformItems.ToList();
 
-    private bool EnvOpen(Data.Environment env) => HasFilter || !collapsedEnvs.Contains(env.Id);
-    private void ToggleEnv(Guid id) { if (!collapsedEnvs.Remove(id)) collapsedEnvs.Add(id); }
+    private bool EnvOpen(Data.Environment env) => HasFilter || expandedEnvs.Contains(env.Id);
+    private void ToggleEnv(Guid id) { if (!expandedEnvs.Remove(id)) expandedEnvs.Add(id); }
     private bool EnvCustomerOpen(Guid envId, Guid custId) => HasFilter || expandedEnvCustomers.Contains($"{envId}:{custId}");
     private void ToggleEnvCustomer(Guid envId, Guid custId) { string k = $"{envId}:{custId}"; if (!expandedEnvCustomers.Remove(k)) expandedEnvCustomers.Add(k); }
-    private bool GroupOpen(string name) => HasFilter || !collapsedGroups.Contains(name);
-    private void ToggleGroup(string name) { if (!collapsedGroups.Remove(name)) collapsedGroups.Add(name); }
+    private bool GroupOpen(string name) => HasFilter || expandedGroups.Contains(name);
+    private void ToggleGroup(string name) { if (!expandedGroups.Remove(name)) expandedGroups.Add(name); }
     private void OnFilterInput(ChangeEventArgs e) => filter = e.Value?.ToString() ?? "";
 
     // ── Inline add ──
@@ -619,7 +623,12 @@ else
             case "alert-routing": builder.OpenComponent<AlertRoutingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "notifications": builder.OpenComponent<NotificationChannels>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "on-call": builder.OpenComponent<OnCallTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "incidents": builder.OpenComponent<IncidentManagement>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "incidents":
+                builder.OpenComponent<IncidentManagement>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.AddComponentParameter(2, "FocusIncidentId", IncidentParam);
+                builder.CloseComponent();
+                break;
             case "logs": builder.OpenComponent<TenantLogsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "traces":
                 builder.OpenComponent<TenantTracesTab>(0);

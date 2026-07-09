@@ -10,6 +10,7 @@
 @inject UserAccessService Access
 @inject OperationsAdvisorService Advisor
 @inject AdvisorStateService State
+@inject IncidentService Incidents
 
 @* Fleet Advisor: the cross-tenant fan-out of the per-tenant Operations Advisor —
    one ranked "what needs doing across the whole platform" view for ops. *@
@@ -118,7 +119,7 @@
                                         </div>
                                     </div>
                                     <div class="btn-group btn-group-sm flex-shrink-0" role="group">
-                                        <a class="btn btn-outline-primary" href="@($"tenants/{r.Tenant.Slug}?section=advisor")">Open</a>
+                                        <button class="btn btn-outline-primary" @onclick="() => Open(r)">Open</button>
                                         @if (f.State == AdvisorFindingStatus.Active)
                                         {
                                             <button class="btn btn-outline-secondary" title="Acknowledge"
@@ -170,6 +171,179 @@
     }
 </div>
 
+@* Focused single-alert view: everything you need to act, no extra clicks. *@
+@if (selected is { } sel)
+{
+    OperationsFinding f = sel.Finding;
+    <div class="modal fade show d-block" tabindex="-1" style="background:rgba(0,0,0,.5)" @onclick="CloseDetail">
+        <div class="modal-dialog modal-dialog-centered modal-lg" @onclick:stopPropagation="true">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                        <span class="badge @SeverityClass(f.Severity)">@f.Severity</span>
+                        <span class="badge bg-dark-subtle text-dark border"><i class="bi bi-building me-1"></i>@sel.Tenant.Name</span>
+                        @if (f.IsEscalated)
+                        {
+                            <span class="badge bg-danger"><i class="bi bi-fire me-1"></i>Escalated · @f.AgeDays d</span>
+                        }
+                        @if (f.State == AdvisorFindingStatus.Acknowledged)
+                        {
+                            <span class="badge bg-success-subtle text-success border border-success-subtle">Ack’d</span>
+                        }
+                    </div>
+                    <button type="button" class="btn-close" @onclick="CloseDetail"></button>
+                </div>
+                <div class="modal-body">
+                    <h5 class="mb-2">@f.Title</h5>
+                    <div class="small text-muted d-flex flex-wrap gap-3 mb-3">
+                        <span><i class="bi bi-diagram-2 me-1"></i>@f.ScopeLabel</span>
+                        @if (!string.IsNullOrWhiteSpace(f.TimingText))
+                        {
+                            <span><i class="bi bi-clock-history me-1"></i>@f.TimingText</span>
+                        }
+                    </div>
+
+                    @if (!string.IsNullOrWhiteSpace(f.Detail))
+                    {
+                        <p class="mb-3">@f.Detail</p>
+                    }
+
+                    @if (!string.IsNullOrWhiteSpace(f.Remediation))
+                    {
+                        <div class="alert alert-light border py-2 mb-3">
+                            <i class="bi bi-arrow-return-right me-1 text-primary"></i>@f.Remediation
+                        </div>
+                    }
+
+                    @if (!string.IsNullOrWhiteSpace(f.RunbookUrl))
+                    {
+                        <a class="btn btn-primary" href="@f.RunbookUrl" target="_blank" rel="noopener noreferrer">
+                            <i class="bi bi-journal-text me-1"></i>Open runbook <i class="bi bi-box-arrow-up-right ms-1"></i>
+                        </a>
+                    }
+                    else
+                    {
+                        <span class="text-muted small"><i class="bi bi-info-circle me-1"></i>No runbook link for this finding.</span>
+                    }
+                </div>
+                <div class="modal-footer justify-content-between">
+                    <a class="btn btn-outline-secondary btn-sm" href="@($"tenants/{sel.Tenant.Slug}?section=advisor")">
+                        View in tenant advisor <i class="bi bi-arrow-right ms-1"></i>
+                    </a>
+                    <div class="btn-group btn-group-sm" role="group">
+                        @if (f.State == AdvisorFindingStatus.Active)
+                        {
+                            <button class="btn btn-outline-success" @onclick="() => AcknowledgeSelected()">
+                                <i class="bi bi-check2 me-1"></i>Acknowledge
+                            </button>
+                        }
+                        @if (f.State != AdvisorFindingStatus.Dismissed)
+                        {
+                            <button class="btn btn-outline-secondary" @onclick="() => DismissSelected()">
+                                <i class="bi bi-slash-circle me-1"></i>Dismiss
+                            </button>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@* Incident findings open the alert's details right here — no navigation, no scrolling. *@
+@if (incidentRow is { } irow)
+{
+    OperationsFinding f = irow.Finding;
+    <div class="modal fade show d-block" tabindex="-1" style="background:rgba(0,0,0,.5)" @onclick="CloseIncident">
+        <div class="modal-dialog modal-dialog-centered modal-lg" @onclick:stopPropagation="true">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                        <span class="badge @SeverityClass(f.Severity)">@f.Severity</span>
+                        <span class="badge bg-dark-subtle text-dark border"><i class="bi bi-building me-1"></i>@irow.Tenant.Name</span>
+                        @if (incident is not null)
+                        {
+                            <span class="badge @IncidentStatusClass(incident.Status)">@incident.Status</span>
+                        }
+                    </div>
+                    <button type="button" class="btn-close" @onclick="CloseIncident"></button>
+                </div>
+                <div class="modal-body">
+                    @if (loadingIncident)
+                    {
+                        <div class="text-center py-4">
+                            <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                            <p class="text-muted small mt-2 mb-0">Loading incident…</p>
+                        </div>
+                    }
+                    else if (incident is null)
+                    {
+                        <p class="text-muted mb-0">
+                            <i class="bi bi-info-circle me-1"></i>This incident is no longer active — it may have resolved since the advisor last refreshed.
+                        </p>
+                    }
+                    else
+                    {
+                        <h5 class="mb-2">@incident.AlertName</h5>
+                        <div class="small text-muted d-flex flex-wrap gap-3 mb-3">
+                            <span><i class="bi bi-hexagon me-1"></i>@(incident.Cluster?.Name ?? "—")</span>
+                            <span><i class="bi bi-clock-history me-1"></i>Started @incident.StartsAt.ToLocalTime().ToString("MMM d, HH:mm")</span>
+                            <span><i class="bi bi-stopwatch me-1"></i>@FormatDuration(incident)</span>
+                            @if (!string.IsNullOrWhiteSpace(incident.AcknowledgedBy))
+                            {
+                                <span><i class="bi bi-person-check me-1"></i>@incident.AcknowledgedBy</span>
+                            }
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(incident.Summary))
+                        {
+                            <p class="mb-2"><strong>@incident.Summary</strong></p>
+                        }
+                        @if (!string.IsNullOrWhiteSpace(incident.Description))
+                        {
+                            <p class="text-muted mb-3">@incident.Description</p>
+                        }
+
+                        @if (!string.IsNullOrWhiteSpace(incident.RunbookUrl))
+                        {
+                            <a class="btn btn-primary" href="@incident.RunbookUrl" target="_blank" rel="noopener noreferrer">
+                                <i class="bi bi-journal-text me-1"></i>Open runbook <i class="bi bi-box-arrow-up-right ms-1"></i>
+                            </a>
+                        }
+                        else
+                        {
+                            <span class="text-muted small"><i class="bi bi-info-circle me-1"></i>No runbook link for this alert.</span>
+                        }
+                    }
+                </div>
+                <div class="modal-footer justify-content-between">
+                    <a class="btn btn-outline-secondary btn-sm"
+                       href="@($"tenants/{irow.Tenant.Slug}?section=incidents&incident={f.IncidentId}")">
+                        Full incident &amp; timeline <i class="bi bi-arrow-right ms-1"></i>
+                    </a>
+                    @if (incident is not null)
+                    {
+                        <div class="btn-group btn-group-sm" role="group">
+                            @if (incident.Status == IncidentStatus.Active)
+                            {
+                                <button class="btn btn-outline-warning" @onclick="AcknowledgeIncident" disabled="@incidentBusy">
+                                    <i class="bi bi-check2 me-1"></i>Acknowledge
+                                </button>
+                            }
+                            @if (incident.Status != IncidentStatus.Resolved)
+                            {
+                                <button class="btn btn-outline-success" @onclick="ResolveIncident" disabled="@incidentBusy">
+                                    <i class="bi bi-check2-all me-1"></i>Resolve
+                                </button>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
 @code {
     private record Row(Tenant Tenant, OperationsFinding Finding);
 
@@ -178,6 +352,16 @@
     private DateTime? lastRefreshed;
     private int tenantCount;
     private string currentUser = "Unknown";
+
+    // The finding shown in the focused single-alert detail view (null = closed).
+    private Row? selected;
+
+    // Incident-finding modal: the row whose alert details are shown, the loaded incident,
+    // and transient load/action state.
+    private Row? incidentRow;
+    private AlertIncident? incident;
+    private bool loadingIncident;
+    private bool incidentBusy;
 
     private static readonly AdvisorHorizon[] Horizons =
         [AdvisorHorizon.Overdue, AdvisorHorizon.Today, AdvisorHorizon.ThisWeek, AdvisorHorizon.Later];
@@ -235,6 +419,71 @@
 
     private async Task Acknowledge(Row r) { await State.AcknowledgeAsync(r.Tenant.Id, r.Finding.Id, currentUser); await Reload(); }
     private async Task Dismiss(Row r) { await State.DismissAsync(r.Tenant.Id, r.Finding.Id, currentUser); await Reload(); }
+
+    private async Task Open(Row r)
+    {
+        // An incident finding already knows the exact tenant, cluster and incident — show the
+        // alert's details right here in a modal instead of navigating to the incidents list.
+        if (r.Finding.IncidentId is Guid incidentId)
+        {
+            incidentRow = r;
+            incident = null;
+            loadingIncident = true;
+            incident = await Incidents.GetByIdAsync(incidentId);
+            loadingIncident = false;
+            return;
+        }
+        selected = r;
+    }
+
+    private void CloseDetail() => selected = null;
+
+    private void CloseIncident() { incidentRow = null; incident = null; }
+
+    private async Task AcknowledgeIncident()
+    {
+        if (incident is null) return;
+        incidentBusy = true;
+        await Incidents.AcknowledgeAsync(incident.Id, currentUser);
+        incident = await Incidents.GetByIdAsync(incident.Id);
+        incidentBusy = false;
+        await Reload();
+    }
+
+    private async Task ResolveIncident()
+    {
+        if (incident is null) return;
+        incidentBusy = true;
+        await Incidents.ResolveAsync(incident.Id, currentUser);
+        incidentBusy = false;
+        CloseIncident();
+        await Reload();
+    }
+
+    private static string IncidentStatusClass(IncidentStatus s) => s switch
+    {
+        IncidentStatus.Active => "bg-danger",
+        IncidentStatus.Acknowledged => "bg-warning text-dark",
+        _ => "bg-success",
+    };
+
+    private static string FormatDuration(AlertIncident i)
+    {
+        TimeSpan d = (i.EndsAt ?? DateTime.UtcNow) - i.StartsAt;
+        if (d.TotalHours >= 1) return $"{(int)d.TotalHours}h {d.Minutes}m";
+        if (d.TotalMinutes >= 1) return $"{(int)d.TotalMinutes}m";
+        return "just now";
+    }
+
+    private async Task AcknowledgeSelected()
+    {
+        if (selected is { } r) { await Acknowledge(r); CloseDetail(); }
+    }
+
+    private async Task DismissSelected()
+    {
+        if (selected is { } r) { await Dismiss(r); CloseDetail(); }
+    }
 
     private static (string Label, string Icon, string Tone) HorizonMeta(AdvisorHorizon h) => h switch
     {

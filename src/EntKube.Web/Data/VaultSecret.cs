@@ -196,6 +196,14 @@ public class VaultSecret
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
     /// <summary>
+    /// When this secret was last reconciled from its live Kubernetes Secret (the
+    /// reverse, k8s→vault direction). Set for "cluster-owned" secrets that EntKube
+    /// tracks read-only; null until the first successful read. Distinct from
+    /// <see cref="UpdatedAt"/>, which only moves when the stored value actually changes.
+    /// </summary>
+    public DateTime? LastRefreshedFromClusterAt { get; set; }
+
+    /// <summary>
     /// The identity (email) of the user who last updated this secret's value.
     /// Null for secrets created before audit tracking was added.
     /// </summary>

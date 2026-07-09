@@ -16,9 +16,15 @@ else
     @* ── Filters ── *@
     <div class="row g-2 align-items-end mb-3">
         <div class="col-md-3">
-            <label class="form-label small text-muted mb-1">Service</label>
-            <select class="form-select form-select-sm" @bind="selectedService">
-                <option value="">All services</option>
+            <label class="form-label small text-muted mb-1">
+                Service
+                @if (isLoading || servicesLoading)
+                {
+                    <span class="spinner-border ms-1" style="width:.7rem;height:.7rem" role="status"></span>
+                }
+            </label>
+            <select class="form-select form-select-sm" @bind="selectedService" disabled="@(isLoading || servicesLoading)">
+                <option value="">@(isLoading || servicesLoading ? "Loading services…" : "All services")</option>
                 @foreach (string s in services)
                 {
                     <option value="@s">@s</option>
@@ -27,7 +33,7 @@ else
         </div>
         <div class="col-md-2">
             <label class="form-label small text-muted mb-1">Time range</label>
-            <select class="form-select form-select-sm" @bind="timeRangeMinutes">
+            <select class="form-select form-select-sm" @bind="timeRangeMinutes" @bind:after="OnTimeRangeChanged">
                 <option value="15">Last 15 minutes</option>
                 <option value="60">Last 1 hour</option>
                 <option value="180">Last 3 hours</option>
@@ -99,13 +105,27 @@ else
         </div>
     }
 
-    @* ── Service map (caller→callee dependencies) ── *@
-    @if (serviceMap.Count > 0)
+    @* ── Service map (caller→callee dependencies) — loaded lazily on expand (it's the costliest query) ── *@
+    @if (hasQueried && !isQuerying)
     {
-        <details class="mb-3">
+        <details class="mb-3" @ontoggle="OnServiceMapToggle">
             <summary class="small text-muted" style="cursor:pointer">
-                <span class="bi bi-diagram-2 me-1"></span>Service map (@serviceMap.Count dependencies)
+                <span class="bi bi-diagram-2 me-1"></span>Service map
+                @if (serviceMapLoading)
+                {
+                    <span class="spinner-border ms-1" style="width:.7rem;height:.7rem" role="status"></span>
+                }
+                else if (serviceMapLoaded)
+                {
+                    <text>(@serviceMap.Count dependencies)</text>
+                }
             </summary>
+            @if (serviceMapLoaded && serviceMap.Count == 0)
+            {
+                <div class="small text-muted mt-2">No cross-service calls in this window.</div>
+            }
+            else if (serviceMap.Count > 0)
+            {
             <div class="table-responsive mt-2">
                 <table class="table table-sm small mb-0 align-middle">
                     <thead>
@@ -129,6 +149,7 @@ else
                     </tbody>
                 </table>
             </div>
+            }
         </details>
     }
 
@@ -248,6 +269,7 @@ else
 
     private bool available;
     private bool isLoading = true;
+    private bool servicesLoading;
     private List<string> services = [];
 
     private string selectedService = "";
@@ -283,13 +305,10 @@ else
         }
 
         isLoading = true;
-        // Presence probe and the service dropdown are independent — run them concurrently.
-        Task<bool> hasTask = Traces.HasDataAsync(ClusterId);
-        Task<KubernetesOperationResult<List<string>>> svcTask =
-            Traces.GetServicesAsync(ClusterId, namespaces: Namespaces, podPattern: PodPattern);
-        await Task.WhenAll(hasTask, svcTask);
-        available = hasTask.Result;
-        services = available && svcTask.Result.IsSuccess ? svcTask.Result.Data ?? [] : [];
+        StateHasChanged();   // paint the filter row + "loading services…" immediately, before the scan
+
+        available = await Traces.HasDataAsync(ClusterId);
+        await LoadServicesAsync();
         isLoading = false;
 
         // Deep-link from a log line: auto-open the preset trace once (per distinct value).
@@ -298,6 +317,25 @@ else
             _handledPreset = PresetTraceId;
             await SelectTrace(PresetTraceId);
         }
+    }
+
+    // Populate the service dropdown for the currently-selected time window. Kept off the initial
+    // render path (awaited after the spinner paints) and reloaded when the range changes so the
+    // dropdown reflects the window being searched.
+    private async Task LoadServicesAsync()
+    {
+        if (!available) { services = []; return; }
+        KubernetesOperationResult<List<string>> svc = await Traces.GetServicesAsync(
+            ClusterId, namespaces: Namespaces, podPattern: PodPattern, windowMinutes: timeRangeMinutes);
+        services = svc.IsSuccess ? svc.Data ?? [] : [];
+    }
+
+    private async Task OnTimeRangeChanged()
+    {
+        servicesLoading = true;
+        StateHasChanged();
+        await LoadServicesAsync();
+        servicesLoading = false;
     }
 
     private async Task Search()
@@ -309,20 +347,20 @@ else
 
         DateTime to = DateTime.UtcNow;
         DateTime from = to.AddMinutes(-timeRangeMinutes);
+        _searchFrom = from;
+        _searchTo = to;
         string? service = string.IsNullOrEmpty(selectedService) ? null : selectedService;
 
-        // These queries are independent and each opens its own connection, so run them
-        // concurrently — the search waits on the slowest, not the sum of all three.
+        // Trace list + (when a service is picked) its RED overview. The service map is cluster-wide and
+        // expensive, so it is NOT run here — it loads lazily when the user expands it (OnServiceMapToggle).
         Task<KubernetesOperationResult<List<TraceSummary>>> tracesTask =
             Traces.ListTracesAsync(ClusterId, service, from, to, minDurationMs, errorsOnly, namespaces: Namespaces, podPattern: PodPattern);
-        Task<KubernetesOperationResult<List<ServiceEdge>>> mapTask =
-            Traces.GetServiceMapAsync(ClusterId, from, to, namespaces: Namespaces, podPattern: PodPattern);
         Task<KubernetesOperationResult<List<RedBucket>>>? redTask = service is null ? null
             : Traces.GetServiceRedAsync(ClusterId, service, from, to, namespaces: Namespaces, podPattern: PodPattern);
 
         await Task.WhenAll(redTask is null
-            ? new Task[] { tracesTask, mapTask }
-            : new Task[] { tracesTask, mapTask, redTask });
+            ? new Task[] { tracesTask }
+            : new Task[] { tracesTask, redTask });
 
         KubernetesOperationResult<List<TraceSummary>> result = tracesTask.Result;
         if (result.IsSuccess && result.Data is not null) traces = result.Data;
@@ -335,11 +373,31 @@ else
             if (r.IsSuccess && r.Data is not null) red = r.Data;
         }
 
-        KubernetesOperationResult<List<ServiceEdge>> m = mapTask.Result;
-        serviceMap = m.IsSuccess && m.Data is not null ? m.Data : [];
+        // Reset the (lazy) service map for the new search.
+        serviceMap = [];
+        serviceMapLoaded = false;
 
         hasQueried = true;
         isQuerying = false;
+    }
+
+    private DateTime _searchFrom;
+    private DateTime _searchTo;
+    private bool serviceMapLoaded;
+    private bool serviceMapLoading;
+
+    // The service map is a cluster-wide self-join — the single most expensive trace query. Compute it
+    // only when the user actually expands the (collapsed) "Service map" section, once per search.
+    private async Task OnServiceMapToggle()
+    {
+        if (serviceMapLoaded || serviceMapLoading) return;
+        serviceMapLoading = true;
+        StateHasChanged();
+        KubernetesOperationResult<List<ServiceEdge>> m =
+            await Traces.GetServiceMapAsync(ClusterId, _searchFrom, _searchTo, namespaces: Namespaces, podPattern: PodPattern);
+        serviceMap = m.IsSuccess && m.Data is not null ? m.Data : [];
+        serviceMapLoaded = true;
+        serviceMapLoading = false;
     }
 
     private async Task SelectTrace(string traceId)

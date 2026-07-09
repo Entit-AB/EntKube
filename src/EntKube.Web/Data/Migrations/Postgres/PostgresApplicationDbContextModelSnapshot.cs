@@ -4597,6 +4597,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(253)
                         .HasColumnType("character varying(253)");
 
+                    b.Property<DateTime?>("LastRefreshedFromClusterAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<Guid?>("MongoClusterId")
                         .HasColumnType("uuid");
 

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using EntKube.Web.Data;
 using Lucene.Net.Analysis;
@@ -22,8 +23,14 @@ public sealed class SegmentEngineOptions
     /// <summary>Seal the active index at least this often, even if under RollMaxDocs. Default 1 hour.</summary>
     public TimeSpan RollMaxAge { get; init; } = TimeSpan.FromHours(1);
 
-    /// <summary>Drop sealed segments whose newest event is older than this. Default 14 days.</summary>
-    public int RetentionDays { get; init; } = 14;
+    /// <summary>Drop sealed segments whose newest event is older than this. Default 90 days.</summary>
+    public int RetentionDays { get; init; } = 90;
+
+    /// <summary>Max number of sealed-segment readers kept open in memory per (tenant, signal). Least-
+    /// recently-used readers beyond this are closed (they reopen on demand). Bounds file handles /
+    /// heap so a long-running app with 90-day retention doesn't accumulate a reader per segment.
+    /// Default 256.</summary>
+    public int MaxCachedReaders { get; init; } = 256;
 }
 
 /// <summary>
@@ -56,6 +63,16 @@ public abstract class SegmentManagerBase : IDisposable
     private volatile ActiveSegmentIndex _active;
     private bool _activeIsA;
     private DateTime _activeSince = DateTime.UtcNow;
+
+    // Sealed segments are immutable, so their opened Lucene readers are reusable across queries.
+    // Cache them (keyed by segment id) so a query doesn't re-open a DirectoryReader — and, on a cold
+    // local cache, re-download from S3 — for every overlapping segment on every call. This is the
+    // dominant repeat/wide-query cost. Bounded by the number of live segments (retention). Lucene's
+    // own reference count keeps a reader (and its Directory, via the close listener) alive through any
+    // in-flight query that races the segment's retention eviction.
+    private readonly ConcurrentDictionary<Guid, Lazy<Task<DirectoryReader>>> _readerCache = new();
+    private readonly ConcurrentDictionary<Guid, long> _readerLastUsed = new();  // seg id → monotonic tick (LRU order)
+    private long _accessClock;
 
     /// <summary>The tenant this manager serves — telemetry is tenant-scoped, one manager per (tenant, signal).</summary>
     protected Guid TenantId { get; }
@@ -92,6 +109,9 @@ public abstract class SegmentManagerBase : IDisposable
     /// <summary>How long the current active index has been accumulating — the age-based roll trigger.</summary>
     public TimeSpan ActiveAge => DateTime.UtcNow - _activeSince;
 
+    /// <summary>Earliest event timestamp in the (unsealed) active index, or null when empty.</summary>
+    public DateTime? ActiveMinTs => _active.MinTs;
+
     /// <summary>Appends prepared (document, epoch-ms) pairs to the active index. Serialized against a roll.</summary>
     protected void AddDocuments(IReadOnlyList<(Document Doc, long TsMs)> docs)
     {
@@ -114,27 +134,107 @@ public abstract class SegmentManagerBase : IDisposable
         active.Refresh();
         IndexSearcher activeSearcher = active.Acquire();
 
-        var openedDirs = new List<LuceneDirectory>();
-        var readers = new List<IndexReader> { activeSearcher.IndexReader };
+        // Cached, immutable sealed-segment readers — reused across queries (opened once). Each is
+        // IncRef'd for the life of this query so retention eviction can't close it mid-search.
+        var sealedReaders = new List<DirectoryReader>(segments.Count);
         try
         {
             foreach (TelemetrySegment seg in segments)
-            {
-                string dir = await _cache.EnsureLocalAsync(seg, ct);
-                FSDirectory fsd = FSDirectory.Open(dir);
-                openedDirs.Add(fsd);
-                readers.Add(DirectoryReader.Open(fsd));
-            }
-            using var multi = new MultiReader(readers.ToArray(), closeSubReaders: false);
+                sealedReaders.Add(await AcquireSegmentReaderAsync(seg, ct));
+
+            var readers = new IndexReader[1 + sealedReaders.Count];
+            readers[0] = activeSearcher.IndexReader;
+            for (int i = 0; i < sealedReaders.Count; i++) readers[i + 1] = sealedReaders[i];
+
+            using var multi = new MultiReader(readers, closeSubReaders: false);
             var searcher = new IndexSearcher(multi);
-            return read(searcher);
+            // Offload the CPU-bound Lucene search + doc materialization off the caller's thread. On a
+            // Blazor Server circuit this yields the synchronization context so the UI stays responsive
+            // (renders spinners, handles clicks) instead of freezing the whole app while a wide scan
+            // runs. Readers stay valid — we await before the finally releases them.
+            return await Task.Run(() => read(searcher), ct);
         }
         finally
         {
-            active.Release(activeSearcher);          // index 0 — owned by the SearcherManager
-            for (int i = 1; i < readers.Count; i++) readers[i].Dispose();
-            foreach (LuceneDirectory d in openedDirs) d.Dispose();
+            active.Release(activeSearcher);                 // index 0 — owned by the SearcherManager
+            foreach (DirectoryReader r in sealedReaders) r.DecRef();  // release this query's hold; cached readers stay open
         }
+    }
+
+    // Get-or-open the cached reader for a sealed segment, then IncRef it for the caller's query.
+    private async Task<DirectoryReader> AcquireSegmentReaderAsync(TelemetrySegment seg, CancellationToken ct)
+    {
+        // Lazy (not a bare Task) so the reader is opened EXACTLY once even if GetOrAdd's factory races —
+        // a duplicated open would leak an undisposed reader + Directory.
+        Lazy<Task<DirectoryReader>> lazy = _readerCache.GetOrAdd(
+            seg.Id, _ => new Lazy<Task<DirectoryReader>>(() => OpenSegmentReaderAsync(seg, ct)));
+        // Mark used up-front so a concurrent trim can't pick this (freshly-requested) entry as the LRU
+        // victim before we've IncRef'd it.
+        _readerLastUsed[seg.Id] = Interlocked.Increment(ref _accessClock);
+
+        DirectoryReader reader;
+        try
+        {
+            reader = await lazy.Value;
+        }
+        catch
+        {
+            // Don't cache a failed open (e.g. a transient S3 download error) — let the next query retry.
+            _readerCache.TryRemove(new KeyValuePair<Guid, Lazy<Task<DirectoryReader>>>(seg.Id, lazy));
+            _readerLastUsed.TryRemove(seg.Id, out _);
+            throw;
+        }
+
+        // TryIncRef (not IncRef) closes the race with LRU/retention eviction: if the reader was closed
+        // between GetOrAdd and here, drop the stale entry and reopen.
+        if (!reader.TryIncRef())
+        {
+            _readerCache.TryRemove(new KeyValuePair<Guid, Lazy<Task<DirectoryReader>>>(seg.Id, lazy));
+            return await AcquireSegmentReaderAsync(seg, ct);
+        }
+
+        TrimReaderCache();   // safe now: this reader is IncRef'd and has the newest access tick
+        return reader;
+    }
+
+    private async Task<DirectoryReader> OpenSegmentReaderAsync(TelemetrySegment seg, CancellationToken ct)
+    {
+        string dir = await _cache.EnsureLocalAsync(seg, ct);
+        FSDirectory fsd = FSDirectory.Open(dir);
+        DirectoryReader reader = DirectoryReader.Open(fsd);
+        // Dispose the Directory exactly when the reader is truly closed (refcount → 0), never while an
+        // in-flight query still holds it. Reader starts at refcount 1 — the cache's own reference.
+        reader.AddReaderClosedListener(new DirectoryCloser(fsd));
+        return reader;
+    }
+
+    // Close least-recently-used cached readers beyond the cap. DecRef only releases the cache's own
+    // reference — a reader in use by an in-flight query stays open until that query DecRef's it, and
+    // the DirectoryCloser then disposes its Directory. Reopened on demand.
+    private void TrimReaderCache()
+    {
+        int over = _readerCache.Count - _options.MaxCachedReaders;
+        if (over <= 0) return;
+
+        foreach (Guid id in _readerCache.Keys
+                     .OrderBy(k => _readerLastUsed.GetValueOrDefault(k, 0))
+                     .Take(over)
+                     .ToList())
+        {
+            if (_readerCache.TryRemove(id, out Lazy<Task<DirectoryReader>>? lz))
+            {
+                _readerLastUsed.TryRemove(id, out _);
+                if (lz.IsValueCreated && lz.Value.IsCompletedSuccessfully)
+                {
+                    try { lz.Value.Result.DecRef(); } catch { /* already closed */ }
+                }
+            }
+        }
+    }
+
+    private sealed class DirectoryCloser(FSDirectory dir) : IndexReader.IReaderClosedListener
+    {
+        public void OnClose(IndexReader reader) => dir.Dispose();
     }
 
     /// <summary>
@@ -207,14 +307,24 @@ public abstract class SegmentManagerBase : IDisposable
             .ToListAsync(ct);
         if (expired.Count == 0) return 0;
 
+        // Remove from the catalog FIRST so no new query resolves these segments, then free storage.
+        db.TelemetrySegments.RemoveRange(expired);
+        await db.SaveChangesAsync(ct);
+
         foreach (TelemetrySegment seg in expired)
         {
+            // Release the cache's reference — the reader (and its Directory) closes once any in-flight
+            // query that IncRef'd it finishes; the DirectoryCloser then disposes the FSDirectory.
+            _readerLastUsed.TryRemove(seg.Id, out _);
+            if (_readerCache.TryRemove(seg.Id, out Lazy<Task<DirectoryReader>>? lz) && lz.IsValueCreated)
+            {
+                try { (await lz.Value).DecRef(); }
+                catch { /* open never succeeded — nothing to release */ }
+            }
             try { await _blobs.DeleteAsync(seg.ObjectKey, ct); }
             catch (Exception ex) { _logger.LogWarning(ex, "Failed to delete expired segment object {Key}", seg.ObjectKey); }
             _cache.Remove(seg.Id);
         }
-        db.TelemetrySegments.RemoveRange(expired);
-        await db.SaveChangesAsync(ct);
         _logger.LogInformation("Dropped {Count} expired {Signal} segment(s) older than {Cutoff:o}", expired.Count, Signal, cutoff);
         return expired.Count;
     }
@@ -233,6 +343,16 @@ public abstract class SegmentManagerBase : IDisposable
     public void Dispose()
     {
         _active.Dispose();
+        // Release the cache's reference on every open sealed reader (closes it → DirectoryCloser
+        // disposes the FSDirectory). Only completed opens hold a reference.
+        foreach (Lazy<Task<DirectoryReader>> lz in _readerCache.Values)
+        {
+            if (lz.IsValueCreated && lz.Value.IsCompletedSuccessfully)
+            {
+                try { lz.Value.Result.DecRef(); } catch { /* already closed */ }
+            }
+        }
+        _readerCache.Clear();
         _analyzer.Dispose();
         (_blobs as IDisposable)?.Dispose(); // per-tenant blob store owned by this manager
     }

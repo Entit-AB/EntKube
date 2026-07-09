@@ -15,13 +15,14 @@ public interface ILogBackend
     /// <summary>True when this backend holds any log for the cluster (drives native-vs-Loki routing).</summary>
     Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default);
 
-    Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(Guid clusterId, CancellationToken ct = default);
+    Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(
+        Guid clusterId, int windowMinutes = 60, CancellationToken ct = default);
 
     Task<KubernetesOperationResult<List<string>>> GetPodsAsync(
-        Guid clusterId, string namespaceName, CancellationToken ct = default);
+        Guid clusterId, string namespaceName, int windowMinutes = 60, CancellationToken ct = default);
 
     Task<KubernetesOperationResult<List<string>>> GetContainersAsync(
-        Guid clusterId, string namespaceName, CancellationToken ct = default);
+        Guid clusterId, string namespaceName, int windowMinutes = 60, CancellationToken ct = default);
 
     Task<KubernetesOperationResult<List<LokiLogStream>>> QueryAsync(
         Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int limit = 200, CancellationToken ct = default);
