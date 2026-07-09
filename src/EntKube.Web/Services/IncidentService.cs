@@ -83,7 +83,7 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         IQueryable<AlertIncident> query = db.AlertIncidents
-            .Include(i => i.Cluster)
+            .Include(i => i.Cluster).ThenInclude(c => c.Environment)
             .Include(i => i.Notes.OrderBy(n => n.CreatedAt))
             .Where(i => i.Cluster.TenantId == tenantId)
             .OrderByDescending(i => i.StartsAt);
@@ -266,7 +266,7 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.AlertIncidents
-            .Include(i => i.Cluster)
+            .Include(i => i.Cluster).ThenInclude(c => c.Environment)
             .Where(i => i.Cluster.TenantId == tenantId
                      && (i.Status == IncidentStatus.Active || i.Status == IncidentStatus.Acknowledged))
             .OrderByDescending(i => i.StartsAt)

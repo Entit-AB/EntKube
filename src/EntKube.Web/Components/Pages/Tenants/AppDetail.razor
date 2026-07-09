@@ -8,25 +8,20 @@
    metrics, external access) is handled by AppEnvironmentDetail.
    ═══════════════════════════════════════════════════════════════════ *@
 
-@if (selectedEnvironment is not null)
+@* --- Back button (hidden where a persistent nav — e.g. the resource tree — already
+       provides the way back). --- *@
+@if (ShowBackLink)
 {
-    <AppEnvironmentDetail App="App"
-                          Environment="selectedEnvironment"
-                          TenantId="TenantId"
-                          IsPortalView="false"
-                          OnBack="() => selectedEnvironment = null" />
-}
-else
-{
-    @* --- Back button --- *@
     <nav class="mb-3">
         <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="OnBack">
             <i class="bi bi-arrow-left me-1"></i>Back to @CustomerName
         </button>
     </nav>
+}
 
-    @* --- App header --- *@
-    <div class="card shadow-sm mb-4">
+@* --- App header (kept visible above the per-environment detail so app-level
+       actions — Import / Rename / Delete — stay reachable). --- *@
+<div class="card shadow-sm mb-4">
         <div class="card-body">
             <div class="d-flex align-items-start justify-content-between">
                 <div class="d-flex align-items-start">
@@ -74,6 +69,11 @@ else
                 </div>
 
                 <div class="d-flex gap-2">
+                    <button class="btn btn-sm @(showLinkPanel ? "btn-secondary" : "btn-outline-secondary")"
+                            @onclick="() => showLinkPanel = !showLinkPanel"
+                            title="Link or unlink environments for this app">
+                        <i class="bi @(showLinkPanel ? "bi-chevron-up" : "bi-link-45deg") me-1"></i>Link / Unlink
+                    </button>
                     <button class="btn btn-sm btn-outline-primary" @onclick="() => showImportWizard = true"
                             title="Adopt a running workload into this app">
                         <i class="bi bi-box-arrow-in-down me-1"></i>Import Deployment
@@ -103,17 +103,9 @@ else
                                 OnClose="OnImportClosed" />
     }
 
-    @* --- Linked environments (clickable cards → per-env detail) --- *@
-    <div class="d-flex align-items-center justify-content-between mb-3">
-        <h6 class="mb-0 fw-semibold">
-            <i class="bi bi-layers me-2 text-primary"></i>Environments
-        </h6>
-        <button class="btn btn-sm btn-link p-0 text-muted" @onclick="() => showLinkPanel = !showLinkPanel">
-            <i class="bi @(showLinkPanel ? "bi-chevron-up" : "bi-link-45deg") me-1"></i>
-            @(showLinkPanel ? "Hide" : "Link / Unlink")
-        </button>
-    </div>
-
+    @* --- Link / Unlink environments — opened from the header, available whether or
+       not an environment is currently selected (so it survives the tree dropping the
+       env-cards view). --- *@
     @if (showLinkPanel)
     {
         <div class="card mb-3">
@@ -151,6 +143,28 @@ else
             </div>
         </div>
     }
+
+    @* When an environment is selected (from the resource tree, or a card below),
+       show its deployment detail right here under the app header — no second click. *@
+    @if (selectedEnvironment is not null)
+    {
+        <AppEnvironmentDetail App="App"
+                              Environment="selectedEnvironment"
+                              TenantId="TenantId"
+                              IsPortalView="false"
+                              ShowBackLink="ShowBackLink"
+                              OnBack="() => selectedEnvironment = null"
+                              @key="selectedEnvironment.Id" />
+    }
+    else
+    {
+
+    @* --- Linked environments (clickable cards → per-env detail) --- *@
+    <div class="d-flex align-items-center mb-3">
+        <h6 class="mb-0 fw-semibold">
+            <i class="bi bi-layers me-2 text-primary"></i>Environments
+        </h6>
+    </div>
 
     <LoadingPanel Loading="@(linkedEnvironments is null)">
     @if (linkedEnvironments is not null && linkedEnvironments.Count == 0)
@@ -212,6 +226,10 @@ else
     [Parameter] public string CustomerName { get; set; } = "";
     [Parameter] public EventCallback OnBack { get; set; }
     [Parameter] public EventCallback OnDeleted { get; set; }
+
+    /// <summary>Show the "Back to {customer}" link. Off when a persistent navigation
+    /// (the resource tree) already handles going back, so it isn't a redundant step.</summary>
+    [Parameter] public bool ShowBackLink { get; set; } = true;
 
     /// <summary>When set (e.g. opened from the resource tree under an environment),
     /// jump straight into that environment's detail instead of the env-cards list.</summary>

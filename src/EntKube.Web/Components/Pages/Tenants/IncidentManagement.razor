@@ -1,8 +1,8 @@
 @using System.ComponentModel.DataAnnotations
+@using System.Text.Json
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject IncidentService IncidentService
-@inject IncidentCorrelationService IncidentCorrelation
 @inject OnCallService OnCallService
 @inject NotificationService NotificationService
 @inject ToastService Toasts
@@ -26,68 +26,83 @@
 
 @if (stats is not null)
 {
-    <div class="row g-2 mb-3">
-        <div class="col-auto">
-            <div class="card border-0 bg-light text-center px-3 py-2">
-                <div class="fw-bold fs-5 @(stats.Active > 0 ? "text-danger" : "text-success")">@stats.Active</div>
-                <div class="text-muted small">Active</div>
-            </div>
-        </div>
-        <div class="col-auto">
-            <div class="card border-0 bg-light text-center px-3 py-2">
-                <div class="fw-bold fs-5 text-warning">@stats.Acknowledged</div>
-                <div class="text-muted small">Acknowledged</div>
-            </div>
-        </div>
-        <div class="col-auto">
-            <div class="card border-0 bg-light text-center px-3 py-2">
-                <div class="fw-bold fs-5">@stats.Total</div>
-                <div class="text-muted small">Total (@stats.WindowDays)d</div>
-            </div>
-        </div>
-        <div class="col-auto">
-            <div class="card border-0 bg-light text-center px-3 py-2">
-                <div class="fw-bold fs-5 text-danger">@stats.Critical</div>
-                <div class="text-muted small">Critical</div>
-            </div>
-        </div>
-        <div class="col-auto">
-            <div class="card border-0 bg-light text-center px-3 py-2">
-                <div class="fw-bold fs-5">@stats.FormatMttr()</div>
-                <div class="text-muted small">MTTR</div>
-            </div>
-        </div>
-        <div class="col-auto">
-            <div class="card border-0 bg-light text-center px-3 py-2">
-                <div class="fw-bold fs-5">@stats.FormatMtta()</div>
-                <div class="text-muted small">MTTA</div>
-            </div>
-        </div>
-        @{
-            int unassignedActive = incidents.Count(i =>
-                i.AssignedTo is null && i.Status != IncidentStatus.Resolved);
-        }
-        @if (unassignedActive > 0)
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+        <span class="badge rounded-pill @(stats.Active > 0 ? "bg-danger" : "bg-success")">@stats.Active active</span>
+        @if (stats.Acknowledged > 0)
         {
-            <div class="col-auto">
-                <div class="card border-0 bg-warning-subtle text-center px-3 py-2"
-                     style="cursor:pointer" @onclick="() => { filterUnassigned = true; _ = LoadIncidents(); }">
-                    <div class="fw-bold fs-5 text-warning">@unassignedActive</div>
-                    <div class="text-muted small">Unassigned</div>
-                </div>
-            </div>
+            <span class="badge rounded-pill bg-warning text-dark">@stats.Acknowledged ack</span>
         }
-        @if (stats.Daily.Count > 1)
+        @if (stats.Critical > 0)
+        {
+            <span class="badge rounded-pill bg-danger-subtle text-danger border border-danger-subtle">@stats.Critical critical</span>
+        }
+        @if (UnassignedActiveCount > 0)
+        {
+            <span class="badge rounded-pill bg-warning-subtle text-warning-emphasis border border-warning-subtle"
+                  style="cursor:pointer" title="Show unassigned only"
+                  @onclick="() => { filterUnassigned = true; showFilters = true; _ = LoadIncidents(); }">@UnassignedActiveCount unassigned</span>
+        }
+        <span class="text-muted small ms-1">MTTR @stats.FormatMttr() · MTTA @stats.FormatMtta() · @stats.Total in @(stats.WindowDays)d</span>
+    </div>
+}
+
+@* Compact control bar — only the most-used controls; everything else lives behind "Filters". *@
+<div class="mb-2 d-flex flex-wrap gap-2 align-items-center">
+    <select class="form-select form-select-sm" style="width:auto" @bind="filterStatus" @bind:after="LoadIncidents">
+        <option value="Open">Open (Active + Acknowledged)</option>
+        <option value="Active">Active</option>
+        <option value="Acknowledged">Acknowledged</option>
+        <option value="">All (including resolved)</option>
+        <option value="Resolved">Resolved only</option>
+    </select>
+    <input class="form-control form-control-sm" style="max-width:200px"
+           @bind="searchText" @bind:after="LoadIncidents" placeholder="Search alerts…" />
+    <button class="btn btn-sm @(showFilters ? "btn-secondary" : "btn-outline-secondary")" @onclick="() => showFilters = !showFilters">
+        <span class="bi bi-funnel me-1"></span>Filters@(ActiveFilterCount() > 0 ? $" ({ActiveFilterCount()})" : "")
+    </button>
+    <button class="btn btn-sm btn-outline-secondary" @onclick="LoadIncidents" title="Refresh">
+        <span class="bi bi-arrow-clockwise"></span>
+    </button>
+    <span class="ms-auto text-muted small">@incidents.Count incident@(incidents.Count == 1 ? "" : "s")</span>
+</div>
+
+@if (showFilters)
+{
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-3 p-2 bg-light rounded border">
+        <select class="form-select form-select-sm" style="width:auto" @bind="filterSeverity" @bind:after="LoadIncidents">
+            <option value="">All severities</option>
+            <option value="critical">Critical</option>
+            <option value="warning">Warning</option>
+            <option value="info">Info</option>
+        </select>
+        <select class="form-select form-select-sm" style="width:auto" @bind="filterClusterId" @bind:after="LoadIncidents">
+            <option value="">All clusters</option>
+            @foreach (var c in clusters)
+            {
+                <option value="@c.Id">@c.Name</option>
+            }
+        </select>
+        <select class="form-select form-select-sm" style="width:auto" @bind="filterDays" @bind:after="LoadIncidents">
+            <option value="1">Last 24 hours</option>
+            <option value="7">Last 7 days</option>
+            <option value="30">Last 30 days</option>
+            <option value="90">Last 90 days</option>
+        </select>
+        <div class="form-check ms-1">
+            <input class="form-check-input" type="checkbox" id="chkUnassigned" @bind="filterUnassigned" @bind:after="LoadIncidents" />
+            <label class="form-check-label small" for="chkUnassigned">Unassigned only</label>
+        </div>
+        @if (stats is not null && stats.Daily.Count > 1)
         {
             int maxCount = stats.Daily.Max(d => d.Count);
-            <div class="col-auto align-self-center">
-                <div class="text-muted small mb-1">Alert volume (30d)</div>
-                <div class="d-flex align-items-end gap-px" style="height:32px;gap:2px">
+            <div class="ms-auto d-flex align-items-center gap-2">
+                <span class="text-muted small">Alert volume (30d)</span>
+                <div class="d-flex align-items-end" style="height:28px;gap:2px">
                     @foreach (DailyAlertCount day in stats.Daily)
                     {
-                        int h = maxCount > 0 ? (int)Math.Max(2, day.Count * 32.0 / maxCount) : 2;
+                        int h = maxCount > 0 ? (int)Math.Max(2, day.Count * 28.0 / maxCount) : 2;
                         string color = day.Count == 0 ? "#dee2e6" : "#dc3545";
-                        <div style="width:5px;height:@(h)px;background:@color;border-radius:1px"
+                        <div style="width:4px;height:@(h)px;background:@color;border-radius:1px"
                              title="@day.Date.ToString("MMM d"): @day.Count alert@(day.Count == 1 ? "" : "s")"></div>
                     }
                 </div>
@@ -96,93 +111,11 @@
     </div>
 }
 
-<div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
-    <select class="form-select form-select-sm" style="width:auto" @bind="filterStatus" @bind:after="LoadIncidents">
-        <option value="Open">Open (Active + Acknowledged)</option>
-        <option value="Active">Active</option>
-        <option value="Acknowledged">Acknowledged</option>
-        <option value="">All (including resolved)</option>
-        <option value="Resolved">Resolved only</option>
-    </select>
-    <select class="form-select form-select-sm" style="width:auto" @bind="filterSeverity" @bind:after="LoadIncidents">
-        <option value="">All severities</option>
-        <option value="critical">Critical</option>
-        <option value="warning">Warning</option>
-        <option value="info">Info</option>
-    </select>
-    <select class="form-select form-select-sm" style="width:auto" @bind="filterClusterId" @bind:after="LoadIncidents">
-        <option value="">All clusters</option>
-        @foreach (var c in clusters)
-        {
-            <option value="@c.Id">@c.Name</option>
-        }
-    </select>
-    <select class="form-select form-select-sm" style="width:auto" @bind="filterDays" @bind:after="LoadIncidents">
-        <option value="1">Last 24 hours</option>
-        <option value="7">Last 7 days</option>
-        <option value="30">Last 30 days</option>
-        <option value="90">Last 90 days</option>
-    </select>
-    <div class="form-check ms-1">
-        <input class="form-check-input" type="checkbox" id="chkUnassigned" @bind="filterUnassigned" @bind:after="LoadIncidents" />
-        <label class="form-check-label small" for="chkUnassigned">Unassigned only</label>
-    </div>
-    <input class="form-control form-control-sm ms-1" style="max-width:200px"
-           @bind="searchText" @bind:event="oninput" placeholder="Search alerts…" />
-    @if (selectedIds.Count > 0)
-    {
-        <span class="text-muted small">@selectedIds.Count selected</span>
-        <button class="btn btn-sm btn-outline-warning" @onclick="BulkAcknowledge">
-            <span class="bi bi-check-all me-1"></span>Ack
-        </button>
-        <button class="btn btn-sm btn-outline-success" @onclick="BulkResolve">
-            <span class="bi bi-check-circle me-1"></span>Resolve
-        </button>
-        <button class="btn btn-sm btn-outline-secondary" @onclick="() => selectedIds.Clear()">Clear</button>
-    }
-    <button class="btn btn-sm btn-outline-secondary" @onclick="LoadIncidents">
-        <span class="bi bi-arrow-clockwise"></span> Refresh
-    </button>
-    <span class="ms-auto text-muted small">@incidents.Count incident@(incidents.Count == 1 ? "" : "s")</span>
-</div>
-
-@if (storms.Count > 0)
-{
-    <div class="card border-warning mb-3">
-        <div class="card-header bg-warning-subtle d-flex align-items-center gap-2">
-            <i class="bi bi-tornado text-warning-emphasis"></i>
-            <span class="fw-semibold">Active storms</span>
-            <span class="badge bg-warning text-dark">@storms.Count</span>
-            <span class="text-muted small">correlated alerts firing together — each is likely one root cause</span>
-        </div>
-        <div class="list-group list-group-flush">
-            @foreach (IncidentGroup s in storms)
-            {
-                <div class="list-group-item d-flex justify-content-between align-items-center gap-3">
-                    <div>
-                        <span class="badge @StormSevBadge(s.Severity) me-1">@s.Severity</span>
-                        <span class="fw-semibold">@s.AlertName</span>
-                        <span class="badge bg-secondary ms-1">×@s.Count</span>
-                        <div class="small text-muted mt-1">
-                            <i class="bi bi-hdd-network me-1"></i>@s.ClusterName
-                            @if (s.Namespaces.Count > 0)
-                            {
-                                <span class="ms-2"><i class="bi bi-diagram-2 me-1"></i>@string.Join(", ", s.Namespaces)</span>
-                            }
-                            <span class="ms-2"><i class="bi bi-clock-history me-1"></i>since @s.EarliestStartsAt.ToLocalTime().ToString("MMM d HH:mm")</span>
-                        </div>
-                    </div>
-                    <button class="btn btn-sm btn-outline-secondary flex-shrink-0" @onclick="() => FilterToAlert(s.AlertName)">
-                        Show @s.Count <i class="bi bi-arrow-down ms-1"></i>
-                    </button>
-                </div>
-            }
-        </div>
-    </div>
-}
-
+@* ── One list: incidents grouped by environment, then collapsed by correlation. A storm
+      (same alert firing N times — the reason we don't send 26 notifications) is a single
+      expandable row; uncorrelated incidents are ordinary rows. ── *@
 <LoadingPanel Loading="@isLoading" LoadingText="Loading incidents…">
-@if (!isLoading && incidents.Count == 0)
+@if (!isLoading && displayEnv.Count == 0)
 {
     <EmptyState Icon="bi-check-circle"
                 Title="No incidents found"
@@ -190,237 +123,75 @@
 }
 else if (!isLoading)
 {
-    <div class="table-responsive">
-        <table class="table table-hover align-middle">
-            <thead class="table-light">
-                <tr>
-                    <th style="width:32px">
-                        <input type="checkbox" class="form-check-input"
-                               @onchange="e => ToggleSelectAll((bool)(e.Value ?? false))" />
-                    </th>
-                    <th style="width:90px">Severity</th>
-                    <th>Alert</th>
-                    <th>Cluster</th>
-                    <th>Started</th>
-                    <th>Duration</th>
-                    <th style="width:110px">Status</th>
-                    <th style="width:200px">Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (AlertIncident incident in incidents)
+    @foreach (EnvGroup env in displayEnv)
+    {
+        <div class="d-flex align-items-center gap-2 mt-3 mb-2 pb-1 border-bottom">
+            <i class="bi bi-layers text-primary"></i>
+            <span class="fw-semibold">@env.EnvironmentName</span>
+            <span class="text-muted small">@env.AlertCount alert@(env.AlertCount == 1 ? "" : "s")</span>
+            @if (env.CriticalCount > 0)
+            {
+                <span class="badge bg-danger">@env.CriticalCount critical</span>
+            }
+        </div>
+
+        <div class="list-group mb-2">
+            @foreach (IncidentGroup g in env.Groups)
+            {
+                @if (g.Count > 1)
                 {
-                    bool expanded = expandedId == incident.Id;
-                    bool selected = selectedIds.Contains(incident.Id);
-                    <tr class="@(expanded ? "table-active" : selected ? "table-warning" : "")"
-                        style="cursor:pointer" @onclick="() => ToggleExpand(incident.Id)">
-                        <td @onclick:stopPropagation="true">
-                            <input type="checkbox" class="form-check-input" checked="@selected"
-                                   @onchange="() => ToggleSelect(incident.Id)" />
-                        </td>
-                        <td>
-                            @SeverityBadge(incident.Severity)
-                            @if (incident.EscalatedAt.HasValue)
-                            {
-                                <div class="mt-1"><span class="badge bg-danger-subtle text-danger border border-danger small">Escalated</span></div>
-                            }
-                        </td>
-                        <td>
-                            <div class="fw-semibold small">@incident.AlertName</div>
-                            @if (incident.AssignedTo is not null)
-                            {
-                                <div class="text-muted" style="font-size:.77rem">
-                                    <span class="bi bi-person me-1"></span>@incident.AssignedTo
+                    bool sopen = expandedStormKey == g.Key;
+                    <div class="list-group-item">
+                        <div class="d-flex justify-content-between align-items-start gap-3" style="cursor:pointer"
+                             @onclick="() => ToggleStorm(g.Key)">
+                            <div>
+                                <i class="bi @(sopen ? "bi-chevron-down" : "bi-chevron-right") small text-muted me-1"></i>
+                                <i class="bi bi-tornado text-warning me-1" title="Correlated — @g.Count alerts, one root cause"></i>
+                                <span class="badge @StormSevBadge(g.Severity) me-1">@g.Severity</span>
+                                <span class="fw-semibold">@g.AlertName</span>
+                                <span class="badge bg-secondary ms-1">×@g.Count</span>
+                                @if (g.AnyAcknowledged)
+                                {
+                                    <span class="badge bg-warning text-dark ms-1">some ack’d</span>
+                                }
+                                <div class="small text-muted mt-1 ms-4">
+                                    <i class="bi bi-hdd-network me-1"></i>@g.ClusterName
+                                    @if (g.Namespaces.Count > 0)
+                                    {
+                                        <span class="ms-2"><i class="bi bi-diagram-2 me-1"></i>@string.Join(", ", g.Namespaces)</span>
+                                    }
+                                    <span class="ms-2"><i class="bi bi-clock-history me-1"></i>since @g.EarliestStartsAt.ToLocalTime().ToString("MMM d HH:mm")</span>
                                 </div>
-                            }
-                        </td>
-                        <td class="text-muted small">@incident.Cluster?.Name</td>
-                        <td class="text-muted small">@incident.StartsAt.ToLocalTime().ToString("MMM d HH:mm")</td>
-                        <td class="text-muted small">@FormatDuration(incident)</td>
-                        <td>@StatusBadge(incident.Status)</td>
-                        <td @onclick:stopPropagation="true">
-                            @if (incident.Status == IncidentStatus.Active)
-                            {
-                                <button class="btn btn-sm btn-outline-warning me-1" @onclick="() => Acknowledge(incident)">
-                                    Ack
-                                </button>
-                            }
-                            @if (incident.Status != IncidentStatus.Resolved)
-                            {
-                                <button class="btn btn-sm btn-outline-success me-1" @onclick="() => Resolve(incident)">
-                                    Resolve
-                                </button>
-                            }
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => ToggleExpand(incident.Id)">
-                                Details @(incident.Notes.Count > 0 ? $"({incident.Notes.Count})" : "")
-                            </button>
-                        </td>
-                    </tr>
-                    @if (expanded)
-                    {
-                        <tr>
-                            <td colspan="8" class="bg-light px-4 py-3">
-                                <div class="row g-4">
-
-                                    @* ── Left: Timeline ── *@
-                                    <div class="col-12 col-lg-5">
-                                        @if (!string.IsNullOrEmpty(incident.Summary))
-                                        {
-                                            <p class="mb-1 small"><strong>Summary:</strong> @incident.Summary</p>
-                                        }
-                                        @if (!string.IsNullOrEmpty(incident.Description))
-                                        {
-                                            <p class="mb-2 small text-muted">@incident.Description</p>
-                                        }
-                                        @if (!string.IsNullOrEmpty(incident.RunbookUrl))
-                                        {
-                                            <p class="mb-3">
-                                                <a href="@incident.RunbookUrl" target="_blank" rel="noopener noreferrer"
-                                                   class="btn btn-sm btn-outline-secondary">
-                                                    <span class="bi bi-book me-1"></span>Runbook
-                                                </a>
-                                            </p>
-                                        }
-
-                                        <strong class="small d-block mb-2">Timeline</strong>
-                                        <div style="position:relative;padding-left:28px">
-                                            <div style="position:absolute;left:9px;top:0;bottom:0;width:2px;background:#dee2e6"></div>
-                                            @foreach (TimelineEvent ev in BuildTimeline(incident))
-                                            {
-                                                <div style="position:relative;margin-bottom:14px">
-                                                    <span style="position:absolute;left:-19px;top:2px;width:20px;height:20px;border-radius:50%;background:white;border:2px solid #dee2e6;display:flex;align-items:center;justify-content:center;font-size:.72rem"
-                                                          class="@ev.IconColor">
-                                                        <i class="bi @ev.Icon"></i>
-                                                    </span>
-                                                    <div class="d-flex gap-2 align-items-baseline">
-                                                        <span class="small fw-semibold">@ev.Label</span>
-                                                        <span class="text-muted" style="font-size:.72rem">@ev.At.ToLocalTime().ToString("MMM d HH:mm")</span>
-                                                    </div>
-                                                    @if (!string.IsNullOrEmpty(ev.Detail))
-                                                    {
-                                                        <div class="text-muted small mt-1">@ev.Detail</div>
-                                                    }
-                                                </div>
-                                            }
-                                        </div>
+                            </div>
+                            <div class="d-flex gap-1 flex-shrink-0" @onclick:stopPropagation="true">
+                                <button class="btn btn-sm btn-outline-warning" @onclick="() => AckStorm(g)"
+                                        title="Acknowledge all @g.Count alerts in this storm">Ack all</button>
+                                <button class="btn btn-sm btn-outline-success" @onclick="() => ResolveStorm(g)"
+                                        title="Resolve all @g.Count alerts in this storm">Resolve all</button>
+                            </div>
+                        </div>
+                        @if (sopen)
+                        {
+                            <div class="mt-2 ms-4 ps-2 border-start">
+                                @foreach (AlertIncident m in MembersOf(g))
+                                {
+                                    <div class="py-1 border-top">
+                                        @RenderIncidentRow(m, true)
                                     </div>
-
-                                    @* ── Right: Actions ── *@
-                                    <div class="col-12 col-lg-7">
-
-                                        @* Assignment *@
-                                        <div class="mb-3">
-                                            <strong class="small d-block mb-2">Assignment</strong>
-                                            @if (incident.AssignedTo is not null)
-                                            {
-                                                <p class="mb-1 small text-muted">
-                                                    <span class="bi bi-person-check me-1"></span>
-                                                    Assigned to <strong>@incident.AssignedTo</strong>
-                                                    @if (incident.AssignedAt.HasValue)
-                                                    {
-                                                        <span>at @incident.AssignedAt.Value.ToLocalTime().ToString("MMM d HH:mm")</span>
-                                                    }
-                                                </p>
-                                            }
-                                            @if (assigningId == incident.Id)
-                                            {
-                                                <EditForm Model="assignForm" OnValidSubmit="() => SubmitAssign(incident)" class="mt-1">
-                                                    <DataAnnotationsValidator />
-                                                    <div class="d-flex gap-2 align-items-center">
-                                                        <div>
-                                                            <InputText class="form-control form-control-sm" style="max-width:220px"
-                                                                       @bind-Value="assignForm.Assignee" placeholder="Assignee name or email" />
-                                                            <ValidationMessage For="() => assignForm.Assignee" class="text-danger small" />
-                                                        </div>
-                                                        <button type="submit" class="btn btn-sm btn-primary">Assign</button>
-                                                        <button type="button" class="btn btn-sm btn-outline-secondary"
-                                                                @onclick="() => assigningId = null">Cancel</button>
-                                                    </div>
-                                                </EditForm>
-                                            }
-                                            else
-                                            {
-                                                <button class="btn btn-sm btn-outline-secondary mt-1"
-                                                        @onclick="() => StartAssign(incident)">
-                                                    <span class="bi bi-person-plus me-1"></span>
-                                                    @(incident.AssignedTo is null ? "Assign" : "Reassign")
-                                                </button>
-                                            }
-                                        </div>
-
-                                        @* Notification delivery history *@
-                                        @if (deliveriesByIncident.TryGetValue(incident.Id, out List<NotificationDelivery>? deliveries) && deliveries.Count > 0)
-                                        {
-                                            <div class="mb-3">
-                                                <strong class="small d-block mb-1">Notification history</strong>
-                                                <div class="table-responsive">
-                                                    <table class="table table-sm table-borderless mb-0" style="font-size:.77rem">
-                                                        <tbody>
-                                                            @foreach (NotificationDelivery d in deliveries)
-                                                            {
-                                                                <tr>
-                                                                    <td class="py-0 text-muted">@d.SentAt.ToLocalTime().ToString("MMM d HH:mm")</td>
-                                                                    <td class="py-0">@d.Channel?.Name</td>
-                                                                    <td class="py-0 text-muted">@(d.IsFiring ? "FIRING" : "RESOLVED")</td>
-                                                                    <td class="py-0">
-                                                                        @if (d.Success)
-                                                                        {
-                                                                            <span class="text-success"><span class="bi bi-check-circle me-1"></span>Sent</span>
-                                                                        }
-                                                                        else
-                                                                        {
-                                                                            <span class="text-danger" title="@d.Error"><span class="bi bi-x-circle me-1"></span>Failed</span>
-                                                                        }
-                                                                    </td>
-                                                                </tr>
-                                                            }
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                            </div>
-                                        }
-
-                                        @* Re-notify *@
-                                        <div class="mb-3 d-flex gap-2 align-items-center">
-                                            <button class="btn btn-sm btn-outline-info"
-                                                    @onclick="() => ReNotify(incident)"
-                                                    disabled="@(reNotifyingId == incident.Id)">
-                                                @if (reNotifyingId == incident.Id)
-                                                {
-                                                    <span class="spinner-border spinner-border-sm me-1"></span>
-                                                }
-                                                <span class="bi bi-send me-1"></span>Re-notify
-                                            </button>
-                                            @if (reNotifyResults.TryGetValue(incident.Id, out string? reNotifyMsg))
-                                            {
-                                                <span class="small @(reNotifyMsg.StartsWith("✓") ? "text-success" : "text-danger")">@reNotifyMsg</span>
-                                            }
-                                        </div>
-
-                                        @* Add note *@
-                                        <strong class="small d-block mb-1">Add note</strong>
-                                        <EditForm Model="noteForm" OnValidSubmit="() => AddNote(incident)">
-                                            <DataAnnotationsValidator />
-                                            <div class="d-flex gap-2">
-                                                <div style="max-width:360px">
-                                                    <InputTextArea class="form-control form-control-sm" rows="2"
-                                                                   placeholder="Add a note…"
-                                                                   @bind-Value="noteForm.Content" />
-                                                    <ValidationMessage For="() => noteForm.Content" class="text-danger small" />
-                                                </div>
-                                                <button type="submit" class="btn btn-sm btn-primary align-self-end">Add</button>
-                                            </div>
-                                        </EditForm>
-                                    </div>
-
-                                </div>
-                            </td>
-                        </tr>
-                    }
+                                }
+                            </div>
+                        }
+                    </div>
                 }
-            </tbody>
-        </table>
-    </div>
+                else
+                {
+                    <div class="list-group-item">
+                        @RenderIncidentRow(MembersOf(g).FirstOrDefault(), false)
+                    </div>
+                }
+            }
+        </div>
+    }
 }
 </LoadingPanel>
 
@@ -432,14 +203,60 @@ else if (!isLoading)
     [Parameter] public Guid? FocusIncidentId { get; set; }
 
     private List<AlertIncident> incidents = [];
-    private List<IncidentGroup> storms = [];
+    private Dictionary<Guid, AlertIncident> incidentsById = [];
+    private List<EnvGroup> displayEnv = [];
+    private string? expandedStormKey;
     private bool initialized;
     private Guid? focusApplied;
 
-    private async Task FilterToAlert(string alertName)
+    /// <summary>A tenant's environment with its correlated incident groups, for the grouped list.</summary>
+    private sealed record EnvGroup(
+        Guid? EnvironmentId, string EnvironmentName, List<IncidentGroup> Groups, int AlertCount, int CriticalCount);
+
+    private void ToggleStorm(string key) => expandedStormKey = expandedStormKey == key ? null : key;
+
+    // A group's member incidents, resolved from the loaded list (which was itself correlated).
+    private List<AlertIncident> MembersOf(IncidentGroup g) =>
+        g.IncidentIds
+            .Select(id => incidentsById.GetValueOrDefault(id))
+            .Where(i => i is not null).Select(i => i!)
+            .OrderBy(i => SeverityRank(i.Severity)).ThenBy(i => i.StartsAt)
+            .ToList();
+
+    private static int SeverityRank(string? severity) => severity?.ToLowerInvariant() switch
     {
-        searchText = alertName;
-        await LoadIncidents();
+        "critical" => 0,
+        "warning" => 1,
+        _ => 2,
+    };
+
+    // The distinguishing resource within a group (members share the alert name): namespace / pod.
+    private static string ResourceLabel(AlertIncident i)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(i.LabelsJson);
+            JsonElement root = doc.RootElement;
+            string? ns = root.TryGetProperty("namespace", out JsonElement n) ? n.GetString() : null;
+            string? pod = root.TryGetProperty("pod", out JsonElement p) ? p.GetString()
+                        : root.TryGetProperty("instance", out JsonElement inst) ? inst.GetString() : null;
+            string label = string.Join(" / ", new[] { ns, pod }.Where(x => !string.IsNullOrEmpty(x)));
+            if (!string.IsNullOrEmpty(label)) return label;
+        }
+        catch { /* fall through to summary */ }
+        return string.IsNullOrWhiteSpace(i.Summary) ? "—" : i.Summary;
+    }
+
+    private async Task AckStorm(IncidentGroup g)
+    {
+        await IncidentService.BulkAcknowledgeAsync(g.IncidentIds, currentUser!);
+        await Task.WhenAll(LoadIncidents(), LoadStats());
+    }
+
+    private async Task ResolveStorm(IncidentGroup g)
+    {
+        await IncidentService.BulkResolveAsync(g.IncidentIds);
+        await Task.WhenAll(LoadIncidents(), LoadStats());
     }
 
     private static string StormSevBadge(string? severity) => severity?.ToLowerInvariant() switch
@@ -448,6 +265,7 @@ else if (!isLoading)
         "warning" => "bg-warning text-dark",
         _ => "bg-secondary",
     };
+
     private List<KubernetesCluster> clusters = [];
     private AlertStats? stats;
     private Guid? expandedId;
@@ -459,11 +277,27 @@ else if (!isLoading)
     private bool isLoading = true;
     private string? currentUser;
 
-    private HashSet<Guid> selectedIds = [];
     private Guid? assigningId;
     private AssignForm assignForm = new();
     private bool filterUnassigned;
+    private bool showFilters;
     private string searchText = "";
+
+    private int UnassignedActiveCount =>
+        incidents.Count(i => i.AssignedTo is null && i.Status != IncidentStatus.Resolved);
+
+    // Count of advanced filters set away from their defaults — surfaced on the collapsed
+    // "Filters" button so hidden filtering is discoverable.
+    private int ActiveFilterCount()
+    {
+        int n = 0;
+        if (!string.IsNullOrEmpty(filterSeverity)) n++;
+        if (!string.IsNullOrEmpty(filterClusterId)) n++;
+        if (filterDays != 7) n++;
+        if (filterUnassigned) n++;
+        return n;
+    }
+
     private OnCallShift? currentOnCall;
     private Dictionary<Guid, List<NotificationDelivery>> deliveriesByIncident = new();
     private Guid? reNotifyingId;
@@ -490,7 +324,8 @@ else if (!isLoading)
 
     // Expand the targeted incident's detail. If the default "Open" filter would hide it
     // (e.g. it was resolved since the advisor computed the finding), widen the filters and
-    // reload so the row is still there to open.
+    // reload so the row is still there to open. If it lives inside a correlated storm,
+    // open that storm too so the row is visible.
     private async Task ApplyFocusAsync(Guid id)
     {
         focusApplied = id;
@@ -505,6 +340,9 @@ else if (!isLoading)
         }
         if (incidents.Any(i => i.Id == id))
         {
+            IncidentGroup? group = displayEnv.SelectMany(e => e.Groups)
+                .FirstOrDefault(g => g.IncidentIds.Contains(id));
+            if (group is { Count: > 1 }) expandedStormKey = group.Key;
             expandedId = id;
             await LoadDeliveriesAsync(id);
         }
@@ -575,16 +413,32 @@ else if (!isLoading)
                 .OrderBy(c => c.Name)
                 .ToList();
 
-            // Correlate active incidents into storms (same alert firing many times).
-            storms = (await IncidentCorrelation.GetActiveGroupsForTenantAsync(TenantId))
-                .Where(g => g.Count > 1)
-                .OrderByDescending(g => g.Count)
+            // Correlate the displayed incidents (same alert firing many times → one group) and
+            // arrange them by environment for the single grouped list.
+            incidentsById = incidents.ToDictionary(i => i.Id);
+            displayEnv = IncidentCorrelationService.Correlate(incidents)
+                .GroupBy(g => new { g.EnvironmentId, g.EnvironmentName })
+                .Select(envG => new EnvGroup(
+                    envG.Key.EnvironmentId,
+                    envG.Key.EnvironmentName,
+                    envG.OrderBy(g => SeverityRank(g.Severity))
+                        .ThenByDescending(g => g.Count)
+                        .ThenByDescending(g => g.LatestStartsAt)
+                        .ToList(),
+                    envG.Sum(g => g.Count),
+                    envG.SelectMany(g => g.IncidentIds)
+                        .Select(id => incidentsById.GetValueOrDefault(id))
+                        .Count(i => i is not null && i.Severity == "critical")))
+                .OrderByDescending(e => e.CriticalCount)
+                .ThenByDescending(e => e.AlertCount)
+                .ThenBy(e => e.EnvironmentName)
                 .ToList();
         }
         catch
         {
             incidents = [];
-            storms = [];
+            incidentsById = [];
+            displayEnv = [];
         }
         finally
         {
@@ -638,36 +492,6 @@ else if (!isLoading)
         {
             reNotifyingId = null;
         }
-    }
-
-    private void ToggleSelect(Guid id)
-    {
-        if (!selectedIds.Remove(id))
-            selectedIds.Add(id);
-    }
-
-    private void ToggleSelectAll(bool select)
-    {
-        selectedIds.Clear();
-        if (select)
-        {
-            foreach (AlertIncident incident in incidents)
-                selectedIds.Add(incident.Id);
-        }
-    }
-
-    private async Task BulkAcknowledge()
-    {
-        await IncidentService.BulkAcknowledgeAsync(selectedIds, currentUser!);
-        selectedIds.Clear();
-        await Task.WhenAll(LoadIncidents(), LoadStats());
-    }
-
-    private async Task BulkResolve()
-    {
-        await IncidentService.BulkResolveAsync(selectedIds);
-        selectedIds.Clear();
-        await Task.WhenAll(LoadIncidents(), LoadStats());
     }
 
     private void StartAssign(AlertIncident incident)
@@ -789,4 +613,205 @@ else if (!isLoading)
         IncidentStatus.Resolved     => @<span class="badge bg-success">Resolved</span>,
         _                           => @<span class="badge bg-secondary">@status</span>
     };
+
+    // One incident's summary row + (when expanded) its full detail. Reused for uncorrelated
+    // incidents and for the members inside a correlated storm.
+    private RenderFragment RenderIncidentRow(AlertIncident? incident, bool nested) => incident is null ? @<text></text> : @<div>
+        <div class="d-flex justify-content-between align-items-start gap-3" style="cursor:pointer"
+             @onclick="() => ToggleExpand(incident.Id)">
+            <div>
+                <i class="bi @(expandedId == incident.Id ? "bi-chevron-down" : "bi-chevron-right") small text-muted me-1"></i>
+                @SeverityBadge(incident.Severity)
+                <span class="fw-semibold ms-1 @(nested ? "small" : "")">@(nested ? ResourceLabel(incident) : incident.AlertName)</span>
+                @if (incident.EscalatedAt.HasValue)
+                {
+                    <span class="badge bg-danger-subtle text-danger border border-danger small ms-1">Escalated</span>
+                }
+                <div class="small text-muted mt-1 ms-4">
+                    @if (!nested)
+                    {
+                        <span><i class="bi bi-hdd-network me-1"></i>@incident.Cluster?.Name</span>
+                    }
+                    <span class="@(nested ? "" : "ms-2")"><i class="bi bi-clock-history me-1"></i>@incident.StartsAt.ToLocalTime().ToString("MMM d HH:mm") · @FormatDuration(incident)</span>
+                    @if (incident.AssignedTo is not null)
+                    {
+                        <span class="ms-2"><i class="bi bi-person me-1"></i>@incident.AssignedTo</span>
+                    }
+                </div>
+            </div>
+            <div class="d-flex align-items-center gap-1 flex-shrink-0" @onclick:stopPropagation="true">
+                @StatusBadge(incident.Status)
+                @if (incident.Status == IncidentStatus.Active)
+                {
+                    <button class="btn btn-sm btn-outline-warning" @onclick="() => Acknowledge(incident)">Ack</button>
+                }
+                @if (incident.Status != IncidentStatus.Resolved)
+                {
+                    <button class="btn btn-sm btn-outline-success" @onclick="() => Resolve(incident)">Resolve</button>
+                }
+            </div>
+        </div>
+        @if (expandedId == incident.Id)
+        {
+            <div class="mt-2 mb-1 p-2 bg-light rounded">
+                @RenderIncidentDetail(incident)
+            </div>
+        }
+    </div>;
+
+    // The expanded incident detail: summary, timeline, assignment, notification history, notes.
+    private RenderFragment RenderIncidentDetail(AlertIncident incident) => @<div class="row g-4">
+
+        @* ── Left: Timeline ── *@
+        <div class="col-12 col-lg-5">
+            @if (!string.IsNullOrEmpty(incident.Summary))
+            {
+                <p class="mb-1 small"><strong>Summary:</strong> @incident.Summary</p>
+            }
+            @if (!string.IsNullOrEmpty(incident.Description))
+            {
+                <p class="mb-2 small text-muted">@incident.Description</p>
+            }
+            @if (!string.IsNullOrEmpty(incident.RunbookUrl))
+            {
+                <p class="mb-3">
+                    <a href="@incident.RunbookUrl" target="_blank" rel="noopener noreferrer"
+                       class="btn btn-sm btn-outline-secondary">
+                        <span class="bi bi-book me-1"></span>Runbook
+                    </a>
+                </p>
+            }
+
+            <strong class="small d-block mb-2">Timeline</strong>
+            <div style="position:relative;padding-left:28px">
+                <div style="position:absolute;left:9px;top:0;bottom:0;width:2px;background:#dee2e6"></div>
+                @foreach (TimelineEvent ev in BuildTimeline(incident))
+                {
+                    <div style="position:relative;margin-bottom:14px">
+                        <span style="position:absolute;left:-19px;top:2px;width:20px;height:20px;border-radius:50%;background:white;border:2px solid #dee2e6;display:flex;align-items:center;justify-content:center;font-size:.72rem"
+                              class="@ev.IconColor">
+                            <i class="bi @ev.Icon"></i>
+                        </span>
+                        <div class="d-flex gap-2 align-items-baseline">
+                            <span class="small fw-semibold">@ev.Label</span>
+                            <span class="text-muted" style="font-size:.72rem">@ev.At.ToLocalTime().ToString("MMM d HH:mm")</span>
+                        </div>
+                        @if (!string.IsNullOrEmpty(ev.Detail))
+                        {
+                            <div class="text-muted small mt-1">@ev.Detail</div>
+                        }
+                    </div>
+                }
+            </div>
+        </div>
+
+        @* ── Right: Actions ── *@
+        <div class="col-12 col-lg-7">
+
+            @* Assignment *@
+            <div class="mb-3">
+                <strong class="small d-block mb-2">Assignment</strong>
+                @if (incident.AssignedTo is not null)
+                {
+                    <p class="mb-1 small text-muted">
+                        <span class="bi bi-person-check me-1"></span>
+                        Assigned to <strong>@incident.AssignedTo</strong>
+                        @if (incident.AssignedAt.HasValue)
+                        {
+                            <span>at @incident.AssignedAt.Value.ToLocalTime().ToString("MMM d HH:mm")</span>
+                        }
+                    </p>
+                }
+                @if (assigningId == incident.Id)
+                {
+                    <EditForm Model="assignForm" OnValidSubmit="() => SubmitAssign(incident)" class="mt-1">
+                        <DataAnnotationsValidator />
+                        <div class="d-flex gap-2 align-items-center">
+                            <div>
+                                <InputText class="form-control form-control-sm" style="max-width:220px"
+                                           @bind-Value="assignForm.Assignee" placeholder="Assignee name or email" />
+                                <ValidationMessage For="() => assignForm.Assignee" class="text-danger small" />
+                            </div>
+                            <button type="submit" class="btn btn-sm btn-primary">Assign</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => assigningId = null">Cancel</button>
+                        </div>
+                    </EditForm>
+                }
+                else
+                {
+                    <button class="btn btn-sm btn-outline-secondary mt-1"
+                            @onclick="() => StartAssign(incident)">
+                        <span class="bi bi-person-plus me-1"></span>
+                        @(incident.AssignedTo is null ? "Assign" : "Reassign")
+                    </button>
+                }
+            </div>
+
+            @* Notification delivery history *@
+            @if (deliveriesByIncident.TryGetValue(incident.Id, out List<NotificationDelivery>? deliveries) && deliveries.Count > 0)
+            {
+                <div class="mb-3">
+                    <strong class="small d-block mb-1">Notification history</strong>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-borderless mb-0" style="font-size:.77rem">
+                            <tbody>
+                                @foreach (NotificationDelivery d in deliveries)
+                                {
+                                    <tr>
+                                        <td class="py-0 text-muted">@d.SentAt.ToLocalTime().ToString("MMM d HH:mm")</td>
+                                        <td class="py-0">@d.Channel?.Name</td>
+                                        <td class="py-0 text-muted">@(d.IsFiring ? "FIRING" : "RESOLVED")</td>
+                                        <td class="py-0">
+                                            @if (d.Success)
+                                            {
+                                                <span class="text-success"><span class="bi bi-check-circle me-1"></span>Sent</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="text-danger" title="@d.Error"><span class="bi bi-x-circle me-1"></span>Failed</span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            }
+
+            @* Re-notify *@
+            <div class="mb-3 d-flex gap-2 align-items-center">
+                <button class="btn btn-sm btn-outline-info"
+                        @onclick="() => ReNotify(incident)"
+                        disabled="@(reNotifyingId == incident.Id)">
+                    @if (reNotifyingId == incident.Id)
+                    {
+                        <span class="spinner-border spinner-border-sm me-1"></span>
+                    }
+                    <span class="bi bi-send me-1"></span>Re-notify
+                </button>
+                @if (reNotifyResults.TryGetValue(incident.Id, out string? reNotifyMsg))
+                {
+                    <span class="small @(reNotifyMsg.StartsWith("✓") ? "text-success" : "text-danger")">@reNotifyMsg</span>
+                }
+            </div>
+
+            @* Add note *@
+            <strong class="small d-block mb-1">Add note</strong>
+            <EditForm Model="noteForm" OnValidSubmit="() => AddNote(incident)">
+                <DataAnnotationsValidator />
+                <div class="d-flex gap-2">
+                    <div style="max-width:360px">
+                        <InputTextArea class="form-control form-control-sm" rows="2"
+                                       placeholder="Add a note…"
+                                       @bind-Value="noteForm.Content" />
+                        <ValidationMessage For="() => noteForm.Content" class="text-danger small" />
+                    </div>
+                    <button type="submit" class="btn btn-sm btn-primary align-self-end">Add</button>
+                </div>
+            </EditForm>
+        </div>
+
+    </div>;
 }

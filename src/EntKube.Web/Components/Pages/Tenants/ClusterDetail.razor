@@ -22,12 +22,16 @@
    for future cluster-level features (health, logs, config, etc.).
    ═══════════════════════════════════════════════════════════════════ *@
 
-@* --- Back button --- *@
-<nav class="mb-3">
-    <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="OnBack">
-        <i class="bi bi-arrow-left me-1"></i>Back to clusters
-    </button>
-</nav>
+@* --- Back button (hidden where a persistent nav — the resource tree — already
+       provides the way back). --- *@
+@if (ShowBackLink)
+{
+    <nav class="mb-3">
+        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="OnBack">
+            <i class="bi bi-arrow-left me-1"></i>Back to clusters
+        </button>
+    </nav>
+}
 
 @* --- Cluster header --- *@
 <div class="card shadow-sm mb-4">
@@ -1532,6 +1536,10 @@ else if (section == "components")
     [Parameter] public required KubernetesCluster Cluster { get; set; }
     [Parameter] public Guid TenantId { get; set; }
     [Parameter] public EventCallback OnBack { get; set; }
+
+    /// <summary>Show the "Back to clusters" link. Off when a persistent navigation
+    /// (the resource tree) already handles going back.</summary>
+    [Parameter] public bool ShowBackLink { get; set; } = true;
     [Parameter] public EventCallback OnDeleted { get; set; }
 
     private string section = "monitoring";
