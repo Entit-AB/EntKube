@@ -101,15 +101,8 @@
 .node.selected .ico { color: #0d4d8f; }
 
 .node.indent-1 { padding-left: .4rem; }
-.node.indent-2 { padding-left: 1.6rem; }
-.node.indent-3 { padding-left: 2.8rem; }
-
-/* Environment and customer nodes are wrapped in .node-row (so they can carry an
-   inline "+"); the indent must live on the row, otherwise the button aligns hard
-   left and the customer doesn't read as nested under its environment. */
-.node-row.indent-1 { padding-left: 0; }
-.node-row.indent-2 { padding-left: 1.2rem; }
-.node-row.indent-3 { padding-left: 2.4rem; }
+.node.indent-2 { padding-left: 1.35rem; }
+.node.indent-3 { padding-left: 2.3rem; }
 
 .tree-empty {
     font-size: .78rem;
@@ -134,62 +127,6 @@
 }
 .tree-section-head .tree-section-label { padding: 0; }
 
-/* Rows that carry an inline add "+" become flex containers */
-.node-row {
-    display: flex;
-    align-items: center;
-    border-radius: 6px;
-}
-.node-row:hover { background: rgba(27,110,194,.06); }
-.node-row > .node { flex: 1 1 auto; min-width: 0; background: none; }
-.node-row > .node:hover { background: none; }
-
-.tree-add {
-    border: none;
-    background: none;
-    color: #9aa6b5;
-    padding: .15rem .35rem;
-    border-radius: 5px;
-    cursor: pointer;
-    font-size: .78rem;
-    line-height: 1;
-    flex: none;
-}
-.tree-add:hover { background: rgba(27,110,194,.14); color: #1b6ec2; }
-
-.tree-add-row {
-    display: flex;
-    align-items: center;
-    gap: .3rem;
-    padding: .25rem .4rem .3rem;
-}
-.tree-add-row.indent-1 { padding-left: .55rem; }
-.tree-add-row.indent-2 { padding-left: 1.6rem; }
-.tree-add-row.indent-3 { padding-left: 2.8rem; }
-.tree-add-row input {
-    flex: 1;
-    min-width: 0;
-    font-size: .8rem;
-    border: 1px solid rgba(27,110,194,.4);
-    border-radius: 6px;
-    padding: .22rem .45rem;
-    outline: none;
-    color: #1b2a3d;
-}
-.tree-add-row input:focus { border-color: #1b6ec2; }
-.tree-add-ok {
-    flex: none;
-    border: none;
-    background: #1b6ec2;
-    color: #fff;
-    border-radius: 6px;
-    padding: .22rem .45rem;
-    cursor: pointer;
-    line-height: 1;
-    font-size: .78rem;
-}
-.tree-add-ok:hover { background: #155a9e; }
-
 .tree-sub {
     font-size: .68rem;
     font-weight: 600;
@@ -199,29 +136,8 @@
     padding: .3rem .4rem .1rem;
 }
 .tree-sub.indent-1 { padding-left: .4rem; }
-.tree-sub.indent-2 { padding-left: 1.6rem; }
-.tree-sub.indent-3 { padding-left: 2.8rem; }
-
-.tree-subhead {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding-right: .35rem;
-}
-.tree-subhead.indent-2 { padding-left: 1.6rem; }
-.tree-subhead .tree-sub { padding-left: 0; }
-
-.node .label .sub {
-    color: #97a3b4;
-    font-size: .72rem;
-    margin-left: .25rem;
-}
-.node.selected .label .sub { color: #4d7bb0; }
-
-.tree-foot {
-    border-top: 1px solid rgba(0,0,0,.06);
-    padding: .5rem .6rem;
-}
+.tree-sub.indent-2 { padding-left: 1.35rem; }
+.tree-sub.indent-3 { padding-left: 2.3rem; }
 
 /* ── Detail pane ── */
 .detail-pane {
@@ -244,6 +160,10 @@
     color: #8a97a8;
 }
 .pane-placeholder i { font-size: 2.4rem; margin-bottom: .6rem; opacity: .55; }
+
+/* Portal environment card hover (kept from the old card view) */
+.portal-env-card { transition: box-shadow .14s, transform .1s; }
+.portal-env-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,.13) !important; transform: translateY(-1px); }
 
 /* Narrow screens: stack tree above pane */
 @media (max-width: 820px) {

@@ -16,6 +16,11 @@ public sealed record IncidentGroup
     public required string AlertName { get; init; }
     public required Guid ClusterId { get; init; }
     public required string ClusterName { get; init; }
+    /// <summary>Environment the storm's cluster belongs to. A cluster lives in exactly one
+    /// environment, so a storm is inherently environment-scoped; this surfaces it so the UI
+    /// can group and scope storms per environment.</summary>
+    public Guid? EnvironmentId { get; init; }
+    public string EnvironmentName { get; init; } = "—";
     /// <summary>Highest severity among the grouped incidents ("critical" &gt; "warning" &gt; "info").</summary>
     public required string Severity { get; init; }
     public required int Count { get; init; }
@@ -74,6 +79,8 @@ public class IncidentCorrelationService(IncidentService incidents)
                     AlertName = g.Key.AlertName,
                     ClusterId = g.Key.ClusterId,
                     ClusterName = lead.Cluster?.Name ?? "—",
+                    EnvironmentId = lead.Cluster?.EnvironmentId,
+                    EnvironmentName = lead.Cluster?.Environment?.Name ?? "—",
                     Severity = lead.Severity,
                     Count = g.Count(),
                     EarliestStartsAt = g.Min(i => i.StartsAt),

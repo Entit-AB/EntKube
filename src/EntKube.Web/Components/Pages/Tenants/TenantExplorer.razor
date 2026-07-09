@@ -117,8 +117,8 @@ else
                                 }
                                 @foreach (Data.App app in capps)
                                 {
-                                    <button type="button" class="node leaf indent-3 @(selectedApp?.Id == app.Id ? "selected" : "")"
-                                            @onclick="() => SelectApp(c, app)">
+                                    <button type="button" class="node leaf indent-3 @(selectedApp?.Id == app.Id && selectedAppEnvId == env.Id ? "selected" : "")"
+                                            @onclick="() => SelectApp(c, app, env)">
                                         <span class="caret"></span>
                                         <i class="ico bi bi-box-seam" aria-hidden="true"></i>
                                         <span class="label">@app.Name</span>
@@ -215,11 +215,12 @@ else
             @if (selectedApp is not null && selectedAppCustomer is not null)
             {
                 <AppDetail App="selectedApp" TenantId="tenant.Id" CustomerName="@selectedAppCustomer.Name"
-                           OnBack="ClearSelection" OnDeleted="OnAppDeleted" @key="selectedApp.Id" />
+                           InitialEnvironmentId="selectedAppEnvId" ShowBackLink="false"
+                           OnBack="ClearSelection" OnDeleted="OnAppDeleted" @key="(selectedApp.Id, selectedAppEnvId)" />
             }
             else if (selectedCluster is not null)
             {
-                <ClusterDetail Cluster="selectedCluster" TenantId="tenant.Id"
+                <ClusterDetail Cluster="selectedCluster" TenantId="tenant.Id" ShowBackLink="false"
                                OnBack="ClearSelection" OnDeleted="OnClusterDeleted" @key="selectedCluster.Id" />
             }
             else if (selectedSection is not null)
@@ -313,6 +314,7 @@ else
     private KubernetesCluster? selectedCluster;
     private string? selectedSection;
     private Guid? selectedServiceEnvId;   // environment a per-env service was opened under
+    private Guid? selectedAppEnvId;       // environment an app was opened under (from its tree path)
     private Guid? registerEnvId;
 
     private string? _loadedSlug;                              // tenant whose data is currently loaded
@@ -392,7 +394,7 @@ else
         // Derive the open pane entirely from the query string. Reset the URL-backed selections
         // first so switching (e.g. app → section via the mega menu) clears the previous pane.
         // registerEnvId is transient UI state not encoded in the URL, so it is left untouched.
-        selectedApp = null; selectedAppCustomer = null; selectedCluster = null;
+        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null;
         selectedSection = null; selectedServiceEnvId = null;
 
         if (AppParam is Guid appId)
@@ -400,6 +402,8 @@ else
             selectedApp = allApps.FirstOrDefault(a => a.Id == appId);
             if (selectedApp is not null)
             {
+                // The env the app was opened under drives which environment's detail shows.
+                selectedAppEnvId = EnvParam;
                 selectedAppCustomer = customerByAppId.GetValueOrDefault(selectedApp.Id);
                 if (selectedAppCustomer is not null)
                     foreach (AppEnvironment ae in selectedApp.AppEnvironments)
@@ -516,38 +520,38 @@ else
     }
 
     // ── Selection + deep-linking ──
-    private void SelectApp(Customer c, Data.App app)
+    private void SelectApp(Customer c, Data.App app, Data.Environment env)
     {
-        selectedApp = app; selectedAppCustomer = c;
+        selectedApp = app; selectedAppCustomer = c; selectedAppEnvId = env.Id;
         selectedCluster = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
-        UpdateUrl(app: app.Id, cluster: null, section: null, env: null);
+        UpdateUrl(app: app.Id, cluster: null, section: null, env: env.Id);
     }
     private void SelectCluster(KubernetesCluster cl)
     {
-        selectedCluster = cl; selectedApp = null; selectedAppCustomer = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        selectedCluster = cl; selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
         UpdateUrl(app: null, cluster: cl.Id, section: null, env: null);
     }
     private void SelectSection(string key)
     {
-        selectedSection = key; selectedApp = null; selectedAppCustomer = null; selectedCluster = null; selectedServiceEnvId = null; registerEnvId = null;
+        selectedSection = key; selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedServiceEnvId = null; registerEnvId = null;
         UpdateUrl(app: null, cluster: null, section: key, env: null);
     }
     private void SelectEnvService(Guid envId, string key)
     {
         selectedSection = key; selectedServiceEnvId = envId;
-        selectedApp = null; selectedAppCustomer = null; selectedCluster = null; registerEnvId = null;
+        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; registerEnvId = null;
         UpdateUrl(app: null, cluster: null, section: key, env: envId);
     }
     private void RegisterClusterInEnv(Guid envId)
     {
         registerEnvId = envId;
-        selectedApp = null; selectedAppCustomer = null; selectedCluster = null; selectedServiceEnvId = null;
+        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedServiceEnvId = null;
         selectedSection = "environments";
         UpdateUrl(app: null, cluster: null, section: "environments", env: null);
     }
     private void ClearSelection()
     {
-        selectedApp = null; selectedAppCustomer = null; selectedCluster = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
         UpdateUrl(null, null, null, null);
     }
     private void UpdateUrl(Guid? app, Guid? cluster, string? section, Guid? env)

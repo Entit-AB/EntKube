@@ -32,12 +32,15 @@
    single environment. Used in both tenant-admin and portal contexts.
    ═══════════════════════════════════════════════════════════════════ *@
 
-@* --- Back button --- *@
-<nav class="mb-3">
-    <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="OnBack">
-        <i class="bi bi-arrow-left me-1"></i>Back to @App.Name
-    </button>
-</nav>
+@* --- Back button (suppressed where a persistent nav already provides the way back). --- *@
+@if (ShowBackLink)
+{
+    <nav class="mb-3">
+        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="OnBack">
+            <i class="bi bi-arrow-left me-1"></i>Back to @App.Name
+        </button>
+    </nav>
+}
 
 @* --- Environment header --- *@
 <div class="card shadow-sm mb-4">
@@ -2335,6 +2338,10 @@
     [Parameter] public bool IsPortalView { get; set; }
     [Parameter] public CustomerAccessRole AccessRole { get; set; } = CustomerAccessRole.Admin;
     [Parameter] public EventCallback OnBack { get; set; }
+
+    /// <summary>Show the "Back to {app}" link. Off in the portal, where the resource
+    /// tree already provides navigation back to the app.</summary>
+    [Parameter] public bool ShowBackLink { get; set; } = true;
 
     /// When set, the view opens straight into this deployment's detail (used by the
     /// portal log viewer's "Go to deployment" action) instead of the deployment list.
