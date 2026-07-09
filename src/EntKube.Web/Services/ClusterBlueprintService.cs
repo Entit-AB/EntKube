@@ -81,6 +81,28 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
         }
     }
 
+    /// <summary>
+    /// Sets (or clears) a blueprint's cloud-provisioning configuration. Pass a null
+    /// provider to turn provisioning off (the blueprint then targets an existing cluster).
+    /// The config is validated when a provider is supplied.
+    /// </summary>
+    public async Task SetProvisioningAsync(
+        Guid blueprintId, string? provider, OpenStackProvisioningConfig? config, CancellationToken ct = default)
+    {
+        if (!string.IsNullOrWhiteSpace(provider))
+        {
+            if (config is null) throw new InvalidOperationException("Provisioning config is required.");
+            IReadOnlyList<string> errors = config.Validate();
+            if (errors.Count > 0) throw new InvalidOperationException(string.Join("; ", errors));
+        }
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        ClusterBlueprint blueprint = await db.ClusterBlueprints.FirstAsync(b => b.Id == blueprintId, ct);
+        blueprint.ProvisioningProvider = string.IsNullOrWhiteSpace(provider) ? null : provider;
+        blueprint.ProvisioningConfig = string.IsNullOrWhiteSpace(provider) ? null : config!.ToJson();
+        await db.SaveChangesAsync(ct);
+    }
+
     // ──────── Variable CRUD ────────
 
     /// <summary>Loads a blueprint's variables (each with its per-environment values).</summary>
@@ -282,6 +304,53 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
         => CreateRunAsync(clusterId, blueprintId, overrides, BootstrapRunMode.Bootstrap, null, triggeredBy, ct);
 
     /// <summary>
+    /// Parameter key under which the resolved provisioning config JSON is carried on a
+    /// synthesized <see cref="BlueprintStepType.ProvisionCluster"/> step.
+    /// </summary>
+    public const string ProvisioningConfigParam = "__provisioningConfig";
+
+    /// <summary>
+    /// Creates a placeholder <see cref="KubernetesCluster"/> (status Provisioning, no
+    /// kubeconfig yet) and starts a bootstrap run whose first step provisions the
+    /// underlying cluster on the blueprint's cloud provider before installing components.
+    /// The placeholder is named after the provisioning config's cluster name.
+    /// </summary>
+    public async Task<BootstrapRun> StartProvisioningBootstrapAsync(
+        Guid tenantId, Guid environmentId, Guid blueprintId,
+        IReadOnlyDictionary<Guid, Dictionary<string, string>>? overrides,
+        string? triggeredBy, CancellationToken ct = default)
+    {
+        ClusterBlueprint bp = await GetBlueprintAsync(blueprintId, ct)
+            ?? throw new InvalidOperationException("Blueprint not found.");
+        if (string.IsNullOrWhiteSpace(bp.ProvisioningProvider) || string.IsNullOrWhiteSpace(bp.ProvisioningConfig))
+            throw new InvalidOperationException("This blueprint does not define cluster provisioning.");
+
+        OpenStackProvisioningConfig config = OpenStackProvisioningConfig.FromJson(bp.ProvisioningConfig);
+        IReadOnlyList<string> configErrors = config.Validate();
+        if (configErrors.Count > 0)
+            throw new InvalidOperationException("Provisioning config is invalid: " + string.Join("; ", configErrors));
+
+        Guid clusterId;
+        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        {
+            KubernetesCluster cluster = new()
+            {
+                Id = Guid.NewGuid(),
+                TenantId = tenantId,
+                EnvironmentId = environmentId,
+                Name = config.ClusterName,
+                ApiServerUrl = "(provisioning)",
+                ProvisioningStatus = ClusterProvisioningStatus.Provisioning
+            };
+            db.KubernetesClusters.Add(cluster);
+            await db.SaveChangesAsync(ct);
+            clusterId = cluster.Id;
+        }
+
+        return await CreateRunAsync(clusterId, blueprintId, overrides, BootstrapRunMode.Bootstrap, null, triggeredBy, ct);
+    }
+
+    /// <summary>
     /// Creates a queued run that snapshots the blueprint's current steps for a cluster.
     /// Shared by the initial bootstrap and by staged rollout updates (mode = Update).
     /// </summary>
@@ -305,10 +374,11 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
         // Resolve ${var} tokens from the target cluster's environment so a single
         // blueprint reproduces correctly across environments (dev/staging/prod).
-        Guid environmentId = await db.KubernetesClusters
+        var clusterInfo = await db.KubernetesClusters
             .Where(c => c.Id == clusterId)
-            .Select(c => c.EnvironmentId)
+            .Select(c => new { c.EnvironmentId, c.ProvisioningStatus })
             .FirstAsync(ct);
+        Guid environmentId = clusterInfo.EnvironmentId;
         Dictionary<string, string> variableMap = BuildResolutionMap(blueprint.Variables, environmentId);
 
         // Guard against launching two active runs against the same cluster at once.
@@ -364,8 +434,55 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
             });
         }
 
+        // Prepend the provisioning phase (negative Orders sort first) when this is a fresh
+        // bootstrap of a blueprint that provisions its own cloud infrastructure and the
+        // target cluster is not already provisioned. Update/rollout runs never re-provision.
+        //   -3  provision the cluster (Cluster API + CAPO)   → registers the kubeconfig
+        //   -2  cloud-controller-manager                      → node lifecycle + Octavia LBs
+        //   -1  Cinder CSI                                     → dynamic PVCs (default StorageClass)
+        // The CNI is installed by the provisioning step itself (needed before the pivot), so it
+        // is not auto-appended here. User components follow at Order >= 0.
+        if (mode == BootstrapRunMode.Bootstrap
+            && !string.IsNullOrWhiteSpace(blueprint.ProvisioningProvider)
+            && !string.IsNullOrWhiteSpace(blueprint.ProvisioningConfig)
+            && clusterInfo.ProvisioningStatus != ClusterProvisioningStatus.Provisioned)
+        {
+            db.BootstrapStepRuns.Add(new BootstrapStepRun
+            {
+                Id = Guid.NewGuid(),
+                BootstrapRunId = run.Id,
+                Order = -3,
+                StepType = BlueprintStepType.ProvisionCluster,
+                Key = blueprint.ProvisioningProvider!,
+                Name = $"Provision cluster ({blueprint.ProvisioningProvider})",
+                ResolvedParametersJson = SerializeParams(
+                    new Dictionary<string, string> { [ProvisioningConfigParam] = blueprint.ProvisioningConfig! }),
+                Status = BootstrapStepStatus.Pending
+            });
+
+            AddSystemComponentStep(db, run.Id, -2, "openstack-ccm", "openstack-ccm", "kube-system");
+            AddSystemComponentStep(db, run.Id, -1, "openstack-cinder-csi", "cinder-csi", "kube-system");
+        }
+
         await db.SaveChangesAsync(ct);
         return run;
+    }
+
+    /// <summary>Adds a synthesized platform component step (CCM/CSI) to a provisioning run.</summary>
+    private static void AddSystemComponentStep(
+        ApplicationDbContext db, Guid runId, int order, string catalogKey, string releaseName, string @namespace)
+    {
+        db.BootstrapStepRuns.Add(new BootstrapStepRun
+        {
+            Id = Guid.NewGuid(),
+            BootstrapRunId = runId,
+            Order = order,
+            StepType = BlueprintStepType.Component,
+            Key = catalogKey,
+            Name = releaseName,
+            Namespace = @namespace,
+            Status = BootstrapStepStatus.Pending
+        });
     }
 
     /// <summary>Re-queues a failed run so the runner retries from the first non-succeeded step.</summary>

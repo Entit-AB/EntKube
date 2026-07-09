@@ -43,8 +43,9 @@ public class StorageServiceTests : IDisposable
         VaultEncryptionService encryption = new(TestRootKey);
         vaultService = new VaultService(dbFactory, encryption);
         Mock<IHttpClientFactory> httpFactory = new();
-        OpenStackS3Service openStackS3 = new(vaultService, httpFactory.Object);
-        sut = new StorageService(dbFactory, vaultService, openStackS3, new Mock<IKubernetesClientFactory>().Object);
+        OpenStackS3Service openStackS3 = new(vaultService, httpFactory.Object, new OpenStackKeystoneClient(httpFactory.Object));
+        StorageLinkClientFactory storageClientFactory = new(vaultService, dbFactory);
+        sut = new StorageService(dbFactory, vaultService, openStackS3, new Mock<IKubernetesClientFactory>().Object, storageClientFactory);
     }
 
     public void Dispose()

@@ -54,7 +54,7 @@ public class S3CorsRule
 /// - We use those credentials to call the S3 API and create the bucket
 /// - We store the credentials in the vault and return them
 /// </summary>
-public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory httpClientFactory)
+public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory httpClientFactory, OpenStackKeystoneClient keystone)
 {
     /// <summary>
     /// Provisions a new S3 bucket on Cleura using the given OpenStack connection.
@@ -79,12 +79,11 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
 
         // Step 2: Authenticate against Keystone to get a scoped token, user ID, and project ID.
 
-        (string token, string userId, string projectId, _) = await AuthenticateKeystoneAsync(connection, password, ct);
+        KeystoneSession session = await keystone.AuthenticateAsync(connection, password, ct);
 
         // Step 3: Create EC2 credentials for S3 access.
 
-        (string accessKey, string secretKey) = await CreateEc2CredentialsAsync(
-            token, userId, projectId, connection.AuthUrl, ct);
+        (string accessKey, string secretKey) = await keystone.CreateEc2CredentialsAsync(session, connection.AuthUrl, ct);
 
         // Step 4: Determine the S3 endpoint from the region.
 
@@ -118,125 +117,6 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
     }
 
     /// <summary>
-    /// Authenticates against OpenStack Keystone v3 using password auth.
-    /// Returns the scoped auth token and the user ID (needed for EC2 credential creation).
-    /// </summary>
-    private async Task<(string Token, string UserId, string ProjectId, string? SwiftEndpoint)> AuthenticateKeystoneAsync(
-        OpenStackConnection connection, string password, CancellationToken ct)
-    {
-        // Build the Keystone v3 auth request body.
-        // We request a project-scoped token so the EC2 credentials inherit the right scope.
-
-        object authBody = new
-        {
-            auth = new
-            {
-                identity = new
-                {
-                    methods = new[] { "password" },
-                    password = new
-                    {
-                        user = new
-                        {
-                            name = connection.Username,
-                            password,
-                            domain = new { name = connection.UserDomainName ?? "Default" }
-                        }
-                    }
-                },
-                scope = new
-                {
-                    project = connection.ProjectId is not null
-                        ? (object)new { id = connection.ProjectId }
-                        : new { name = connection.ProjectName, domain = new { name = connection.ProjectDomainName ?? "Default" } }
-                }
-            }
-        };
-
-        string json = JsonSerializer.Serialize(authBody);
-
-        using HttpClient client = httpClientFactory.CreateClient();
-        string authUrl = connection.AuthUrl.TrimEnd('/');
-
-        // Ensure the URL includes the Keystone v3 path segment.
-        // Users may store just the base (e.g. https://identity.example.com:5000)
-        // or the full path (https://identity.example.com:5000/v3).
-
-        if (!authUrl.EndsWith("/v3", StringComparison.OrdinalIgnoreCase))
-        {
-            authUrl += "/v3";
-        }
-
-        using HttpRequestMessage request = new(HttpMethod.Post, $"{authUrl}/auth/tokens")
-        {
-            Content = new StringContent(json, Encoding.UTF8, "application/json")
-        };
-
-        using HttpResponseMessage response = await client.SendAsync(request, ct);
-
-        if (!response.IsSuccessStatusCode)
-        {
-            string errorBody = await response.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException(
-                $"Keystone authentication failed ({response.StatusCode}): {errorBody}");
-        }
-
-        // The token is returned in the X-Subject-Token header.
-
-        string token = response.Headers.GetValues("X-Subject-Token").First();
-
-        // Extract the user ID, project ID, and Swift endpoint from the response body.
-
-        string body = await response.Content.ReadAsStringAsync(ct);
-        using JsonDocument doc = JsonDocument.Parse(body);
-        JsonElement tokenElement = doc.RootElement.GetProperty("token");
-
-        string userId = tokenElement
-            .GetProperty("user")
-            .GetProperty("id")
-            .GetString()!;
-
-        string projectId = tokenElement
-            .GetProperty("project")
-            .GetProperty("id")
-            .GetString()!;
-
-        // Find the public Swift (object-store) endpoint from the service catalog.
-        // This lets us list all containers regardless of which EC2 credential pair was used.
-
-        string? swiftEndpoint = null;
-
-        if (tokenElement.TryGetProperty("catalog", out JsonElement catalog))
-        {
-            foreach (JsonElement service in catalog.EnumerateArray())
-            {
-                if (service.TryGetProperty("type", out JsonElement typeEl)
-                    && typeEl.GetString() == "object-store"
-                    && service.TryGetProperty("endpoints", out JsonElement endpoints))
-                {
-                    foreach (JsonElement ep in endpoints.EnumerateArray())
-                    {
-                        if (ep.TryGetProperty("interface", out JsonElement iface)
-                            && iface.GetString() == "public"
-                            && ep.TryGetProperty("url", out JsonElement urlEl))
-                        {
-                            swiftEndpoint = urlEl.GetString();
-                            break;
-                        }
-                    }
-
-                    if (swiftEndpoint is not null)
-                    {
-                        break;
-                    }
-                }
-            }
-        }
-
-        return (token, userId, projectId, swiftEndpoint);
-    }
-
-    /// <summary>
     /// Lists all containers in the OpenStack project via the Swift REST API.
     /// More reliable than S3 ListBuckets against Ceph RADOS Gateway because it
     /// goes through the project-scoped object-store endpoint rather than the
@@ -245,13 +125,9 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
     public async Task<List<S3BucketInfo>> ListBucketsViaSwiftAsync(
         OpenStackConnection connection, string password, CancellationToken ct = default)
     {
-        (string token, _, _, string? swiftEndpoint) = await AuthenticateKeystoneAsync(connection, password, ct);
-
-        if (swiftEndpoint is null)
-        {
-            throw new InvalidOperationException(
-                "No public Swift (object-store) endpoint found in the Keystone service catalog.");
-        }
+        KeystoneSession session = await keystone.AuthenticateAsync(connection, password, ct);
+        string token = session.Token;
+        string swiftEndpoint = session.RequireEndpoint("object-store");
 
         // GET <swift_endpoint>?format=json lists all containers owned by this project.
 
@@ -299,59 +175,6 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
             })
             .Where(b => b.Name.Length > 0)
             .ToList();
-    }
-
-    /// <summary>
-    /// Creates EC2 credentials via the Keystone v3 credentials API.
-    /// EC2 credentials provide an access/secret key pair that can be used
-    /// with any S3-compatible client against the OpenStack Object Store.
-    /// </summary>
-    private async Task<(string AccessKey, string SecretKey)> CreateEc2CredentialsAsync(
-        string token, string userId, string projectId, string rawAuthUrl, CancellationToken ct)
-    {
-        // The EC2 credentials API lives at /v3/users/{userId}/credentials/OS-EC2
-
-        string authUrl = rawAuthUrl.TrimEnd('/');
-
-        if (!authUrl.EndsWith("/v3", StringComparison.OrdinalIgnoreCase))
-        {
-            authUrl += "/v3";
-        }
-
-        string url = $"{authUrl}/users/{userId}/credentials/OS-EC2";
-
-        object body = new
-        {
-            tenant_id = projectId
-        };
-
-        string json = JsonSerializer.Serialize(body);
-
-        using HttpClient client = httpClientFactory.CreateClient();
-
-        using HttpRequestMessage request = new(HttpMethod.Post, url)
-        {
-            Content = new StringContent(json, Encoding.UTF8, "application/json")
-        };
-
-        request.Headers.Add("X-Auth-Token", token);
-
-        using HttpResponseMessage response = await client.SendAsync(request, ct);
-
-        if (!response.IsSuccessStatusCode)
-        {
-            string errorBody = await response.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException(
-                $"Failed to create EC2 credentials ({response.StatusCode}): {errorBody}");
-        }
-
-        using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-        JsonElement credential = doc.RootElement.GetProperty("credential");
-
-        string accessKey = credential.GetProperty("access").GetString()!;
-        string secretKey = credential.GetProperty("secret").GetString()!;
-
-        return (accessKey, secretKey);
     }
 
     /// <summary>
@@ -740,8 +563,8 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
 
         // Authenticate and create fresh EC2 credentials.
 
-        (string token, string userId, string projectId, _) = await AuthenticateKeystoneAsync(connection, password, ct);
-        (string newAccessKey, string newSecretKey) = await CreateEc2CredentialsAsync(token, userId, projectId, connection.AuthUrl, ct);
+        KeystoneSession session = await keystone.AuthenticateAsync(connection, password, ct);
+        (string newAccessKey, string newSecretKey) = await keystone.CreateEc2CredentialsAsync(session, connection.AuthUrl, ct);
 
         // Verify the new credentials work by listing the bucket.
 

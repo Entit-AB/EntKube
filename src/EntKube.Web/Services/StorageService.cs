@@ -36,7 +36,7 @@ public class MinioBucketInfo
 /// External providers are registered manually — the service stores metadata
 /// in StorageLink entities and credentials in the VaultSecret table.
 /// </summary>
-public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, IKubernetesClientFactory k8sFactory)
+public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, IKubernetesClientFactory k8sFactory, StorageLinkClientFactory storageClientFactory)
 {
     // ──────── Operator Status ────────
 
@@ -51,6 +51,22 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
             .AnyAsync(c => c.Cluster.TenantId == tenantId
                 && (c.Name == "minio" || c.Name == "minio-operator")
                 && c.Status == ComponentStatus.Installed, ct);
+    }
+
+    /// <summary>
+    /// Lists installed CubeFS components across the tenant's clusters, so the UI can offer
+    /// them as the target for provisioning an S3 bucket on the CubeFS object gateway.
+    /// </summary>
+    public async Task<List<ClusterComponent>> GetCubeFSComponentsAsync(Guid tenantId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.ClusterComponents
+            .Include(c => c.Cluster)
+            .Where(c => c.Cluster.TenantId == tenantId
+                && c.Name == "cubefs"
+                && c.Status == ComponentStatus.Installed)
+            .OrderBy(c => c.Cluster.Name)
+            .ToListAsync(ct);
     }
 
     // ──────── MinIO Discovery ────────
@@ -497,6 +513,77 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         return link;
     }
 
+    // ──────── CubeFS Bucket Provisioning ────────
+
+    /// <summary>
+    /// Provisions an S3 bucket on a cluster-hosted CubeFS object gateway and registers it
+    /// as a <see cref="StorageProvider.CubeFS"/> storage link. The bucket is created through
+    /// CubeFS's S3-compatible gateway (reached via the K8s API-server proxy, like MinIO) using
+    /// the supplied CubeFS user credentials, which are then stored in the vault so any app,
+    /// component, or telemetry backend can consume it through the standard storage-link rails.
+    /// </summary>
+    /// <param name="componentId">The installed CubeFS <c>ClusterComponent</c> (used to resolve the cluster kubeconfig).</param>
+    /// <param name="endpoint">Cluster-internal ObjectNode service URL, e.g. "http://objectnode.cubefs-system.svc.cluster.local:17410".</param>
+    public async Task<StorageLink> ProvisionCubeFSBucketAsync(
+        Guid tenantId,
+        Guid environmentId,
+        Guid componentId,
+        string endpoint,
+        string accessKey,
+        string secretKey,
+        string bucketName,
+        string? displayName,
+        string? notes,
+        CancellationToken ct = default)
+    {
+        StorageLink link = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            EnvironmentId = environmentId,
+            Provider = StorageProvider.CubeFS,
+            Name = displayName ?? bucketName,
+            Endpoint = endpoint,
+            BucketName = bucketName,
+            Region = "us-east-1", // CubeFS ignores region; a value is required by the S3 client.
+            Notes = notes,
+            ComponentId = componentId
+        };
+
+        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        {
+            db.StorageLinks.Add(link);
+            await db.SaveChangesAsync(ct);
+        }
+
+        // Credentials must exist before we build the S3 client (the factory reads them back).
+        await vaultService.InitializeVaultAsync(tenantId, ct);
+        await vaultService.SetStorageLinkSecretAsync(tenantId, link.Id, "ACCESS_KEY", accessKey, ct);
+        await vaultService.SetStorageLinkSecretAsync(tenantId, link.Id, "SECRET_KEY", secretKey, ct);
+        await vaultService.SetStorageLinkSecretAsync(tenantId, link.Id, "ENDPOINT", endpoint, ct);
+        await vaultService.SetStorageLinkSecretAsync(tenantId, link.Id, "BUCKET_NAME", bucketName, ct);
+        await vaultService.SetStorageLinkSecretAsync(tenantId, link.Id, "REGION", link.Region!, ct);
+
+        // Create the bucket through CubeFS's S3 gateway (idempotent — tolerate "already exists").
+        (Amazon.S3.AmazonS3Client s3, IDisposable? cleanup) = await storageClientFactory.CreateClientAsync(tenantId, link, ct);
+        try
+        {
+            await s3.PutBucketAsync(new Amazon.S3.Model.PutBucketRequest { BucketName = bucketName }, ct);
+        }
+        catch (Amazon.S3.AmazonS3Exception ex) when (
+            ex.ErrorCode is "BucketAlreadyOwnedByYou" or "BucketAlreadyExists")
+        {
+            // Bucket already present — fine, the link still points at it.
+        }
+        finally
+        {
+            s3.Dispose();
+            cleanup?.Dispose();
+        }
+
+        return link;
+    }
+
     // ──────── Cleura S3 Bucket Management ────────
 
     /// <summary>
@@ -769,21 +856,23 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         return await db.StorageLinks
             .Include(l => l.Component).ThenInclude(c => c!.Cluster)
             .FirstOrDefaultAsync(l => l.Id == linkId && l.TenantId == tenantId
-                && (l.Provider == StorageProvider.CleuraS3 || l.Provider == StorageProvider.MinIO), ct)
+                && (l.Provider == StorageProvider.CleuraS3
+                    || l.Provider == StorageProvider.MinIO
+                    || l.Provider == StorageProvider.CubeFS), ct)
             ?? throw new InvalidOperationException("S3-compatible storage link not found.");
     }
 
     /// <summary>
-    /// Returns the kubeconfig for the cluster that hosts a MinIO StorageLink.
-    /// First checks the eagerly-loaded Component → Cluster navigation (set for links
-    /// registered after ComponentId tracking was added). Falls back to a DB query
-    /// for older links where ComponentId is null, matching by tenant + MinIO component
-    /// namespace derived from the stored internal endpoint.
-    /// Returns null for non-MinIO links.
+    /// Returns the kubeconfig for the cluster that hosts a cluster-local S3 gateway
+    /// (MinIO or CubeFS). First checks the eagerly-loaded Component → Cluster navigation
+    /// (set for links registered after ComponentId tracking was added). Falls back to a
+    /// DB query for older links where ComponentId is null, matching by tenant + the
+    /// gateway component namespace derived from the stored internal endpoint.
+    /// Returns null for external (non-cluster-hosted) links.
     /// </summary>
     private async Task<string?> ResolveMinioKubeconfigAsync(StorageLink link, CancellationToken ct)
     {
-        if (link.Provider != StorageProvider.MinIO)
+        if (link.Provider is not (StorageProvider.MinIO or StorageProvider.CubeFS))
             return null;
 
         // Only proxy through K8s for internal cluster-local endpoints.
@@ -805,7 +894,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         IQueryable<ClusterComponent> query = db.ClusterComponents
             .Include(c => c.Cluster)
             .Where(c => c.Cluster.TenantId == link.TenantId
-                && (c.Name == "minio-operator" || c.Name == "minio")
+                && (c.Name == "minio-operator" || c.Name == "minio" || c.Name == "cubefs")
                 && c.Status == ComponentStatus.Installed
                 && c.Cluster.KubeconfigSecretId != null);
 

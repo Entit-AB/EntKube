@@ -2,6 +2,7 @@
 @using EntKube.Web.Services
 @inject ClusterBlueprintService BlueprintService
 @inject TenantService TenantService
+@inject StorageService StorageService
 @inject ToastService Toasts
 
 @* Tenant-scoped cluster blueprints: reusable, ordered recipes of catalog
@@ -96,6 +97,110 @@
                     </div>
                 </div>
                 <div class="card-body">
+                    <!-- Cluster provisioning (Cluster API + CAPO) -->
+                    <div class="border rounded p-3 mb-3 @(provisioningEnabled ? "border-primary" : "")">
+                        <div class="form-check form-switch mb-2">
+                            <input class="form-check-input" type="checkbox" id="provToggle"
+                                   checked="@provisioningEnabled" @onchange="OnToggleProvisioning" />
+                            <label class="form-check-label fw-semibold" for="provToggle">
+                                <i class="bi bi-hdd-network me-1"></i>Provision underlying cluster on OpenStack
+                            </label>
+                            <div class="form-text small mb-0">
+                                Creates the cluster from scratch (Cluster API + CAPO) before installing components.
+                                Leave off to bootstrap an already-registered cluster.
+                            </div>
+                        </div>
+
+                        @if (provisioningEnabled)
+                        {
+                            <div class="row g-2 mt-1">
+                                <div class="col-md-6">
+                                    <label class="form-label small mb-0">OpenStack connection</label>
+                                    <select class="form-select form-select-sm" @bind="ProvConnectionId">
+                                        <option value="@Guid.Empty">— select a connection —</option>
+                                        @foreach (OpenStackConnection c in openStackConnections)
+                                        {
+                                            <option value="@c.Id">@c.Name</option>
+                                        }
+                                    </select>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-0">Cluster name</label>
+                                    <input class="form-control form-control-sm" @bind="provisioningConfig.ClusterName" />
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-0">Kubernetes version</label>
+                                    <input class="form-control form-control-sm" @bind="provisioningConfig.KubernetesVersion" />
+                                </div>
+
+                                <div class="col-md-4">
+                                    <label class="form-label small mb-0">Node image (Glance)</label>
+                                    <input class="form-control form-control-sm" @bind="provisioningConfig.NodeImageName" />
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label small mb-0">CP count</label>
+                                    <input type="number" min="1" class="form-control form-control-sm" @bind="provisioningConfig.ControlPlaneCount" />
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-0">CP flavor</label>
+                                    <input class="form-control form-control-sm" @bind="provisioningConfig.ControlPlaneFlavor" />
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-0">Failure domain / AZ</label>
+                                    <input class="form-control form-control-sm" @bind="provisioningConfig.FailureDomain" />
+                                </div>
+
+                                <div class="col-md-2">
+                                    <label class="form-label small mb-0">Worker count</label>
+                                    <input type="number" min="0" class="form-control form-control-sm" @bind="workerPool.Count" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small mb-0">Worker flavor</label>
+                                    <input class="form-control form-control-sm" @bind="workerPool.Flavor" />
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small mb-0">External network ID (floating IPs / API LB)</label>
+                                    <input class="form-control form-control-sm" @bind="provisioningConfig.ExternalNetworkId" />
+                                </div>
+
+                                <div class="col-12"><hr class="my-1" /><span class="small text-muted">Ephemeral bootstrap VM</span></div>
+                                <div class="col-md-4">
+                                    <label class="form-label small mb-0">Bootstrap image</label>
+                                    <input class="form-control form-control-sm" @bind="provisioningConfig.BootstrapImageName" />
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-0">Bootstrap flavor</label>
+                                    <input class="form-control form-control-sm" @bind="provisioningConfig.BootstrapFlavor" />
+                                </div>
+                                <div class="col-md-5">
+                                    <label class="form-label small mb-0">Bootstrap network ID</label>
+                                    <input class="form-control form-control-sm" @bind="provisioningConfig.BootstrapNetworkId" />
+                                </div>
+                            </div>
+
+                            <div class="d-flex align-items-center gap-2 mt-3">
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="SaveProvisioning">
+                                    <i class="bi bi-save me-1"></i>Save provisioning config
+                                </button>
+                                <div class="vr"></div>
+                                <select class="form-select form-select-sm" style="max-width: 12rem" @bind="provisionEnvironmentId">
+                                    <option value="@Guid.Empty">— environment —</option>
+                                    @foreach (Data.Environment env in environments)
+                                    {
+                                        <option value="@env.Id">@env.Name</option>
+                                    }
+                                </select>
+                                <button class="btn btn-sm btn-primary" disabled="@(provisionEnvironmentId == Guid.Empty)" @onclick="ProvisionAndBootstrap">
+                                    <i class="bi bi-rocket-takeoff me-1"></i>Provision &amp; bootstrap
+                                </button>
+                            </div>
+                            @if (provisioningMessage is not null)
+                            {
+                                <div class="alert alert-info py-1 px-2 mt-2 mb-0 small">@provisioningMessage</div>
+                            }
+                        }
+                    </div>
+
                     @if (selected.Steps.Count == 0)
                     {
                         <EmptyState Icon="bi-list-ol" Title="No steps yet"
@@ -376,6 +481,20 @@
     private ClusterBlueprint? selected;
     private string? error;
 
+    // Cluster provisioning (OpenStack / Cluster API)
+    private List<OpenStackConnection> openStackConnections = [];
+    private bool provisioningEnabled;
+    private OpenStackProvisioningConfig provisioningConfig = new();
+    private WorkerPool workerPool = new();
+    private Guid provisionEnvironmentId;
+    private string? provisioningMessage;
+
+    private Guid ProvConnectionId
+    {
+        get => provisioningConfig.OpenStackConnectionId;
+        set => provisioningConfig.OpenStackConnectionId = value;
+    }
+
     // Variables
     private List<Data.Environment> environments = [];
     private List<BlueprintVariable> variables = [];
@@ -411,6 +530,7 @@
     protected override async Task OnInitializedAsync()
     {
         environments = await TenantService.GetEnvironmentsAsync(TenantId);
+        openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
         await LoadBlueprints();
     }
 
@@ -425,6 +545,76 @@
         showVariableForm = false;
         selected = await BlueprintService.GetBlueprintAsync(id);
         variables = await BlueprintService.GetVariablesAsync(id);
+        LoadProvisioningState();
+    }
+
+    // ── Cluster provisioning ──
+
+    private void LoadProvisioningState()
+    {
+        provisioningMessage = null;
+        provisionEnvironmentId = Guid.Empty;
+        provisioningEnabled = !string.IsNullOrWhiteSpace(selected?.ProvisioningProvider);
+
+        if (provisioningEnabled && !string.IsNullOrWhiteSpace(selected!.ProvisioningConfig))
+        {
+            try { provisioningConfig = OpenStackProvisioningConfig.FromJson(selected.ProvisioningConfig); }
+            catch { provisioningConfig = new OpenStackProvisioningConfig(); }
+        }
+        else
+        {
+            provisioningConfig = new OpenStackProvisioningConfig { ClusterName = selected?.Name ?? "" };
+        }
+
+        // Bind the single worker-pool editor to the first pool (creating one if absent).
+        workerPool = provisioningConfig.WorkerPools.FirstOrDefault() ?? new WorkerPool();
+    }
+
+    private void OnToggleProvisioning(ChangeEventArgs e)
+    {
+        provisioningEnabled = e.Value is true;
+        if (provisioningEnabled && string.IsNullOrWhiteSpace(provisioningConfig.ClusterName))
+        {
+            provisioningConfig.ClusterName = selected?.Name ?? "";
+        }
+    }
+
+    private OpenStackProvisioningConfig BuildConfigForSave()
+    {
+        provisioningConfig.WorkerPools = workerPool.Count > 0 || !string.IsNullOrWhiteSpace(workerPool.Flavor)
+            ? [workerPool]
+            : [];
+        return provisioningConfig;
+    }
+
+    private async Task SaveProvisioning()
+    {
+        try
+        {
+            await BlueprintService.SetProvisioningAsync(
+                selected!.Id,
+                provisioningEnabled ? "openstack" : null,
+                provisioningEnabled ? BuildConfigForSave() : null);
+            selected = await BlueprintService.GetBlueprintAsync(selected.Id);
+            Toasts.Success("Provisioning configuration saved.");
+        }
+        catch (Exception ex) { Toasts.Error($"Could not save provisioning config: {ex.Message}"); }
+    }
+
+    private async Task ProvisionAndBootstrap()
+    {
+        provisioningMessage = null;
+        try
+        {
+            // Persist the latest edits first so the run uses them.
+            await BlueprintService.SetProvisioningAsync(selected!.Id, "openstack", BuildConfigForSave());
+            await BlueprintService.StartProvisioningBootstrapAsync(
+                TenantId, provisionEnvironmentId, selected.Id, overrides: null, triggeredBy: "portal");
+            provisioningMessage =
+                "Provisioning started. A placeholder cluster was created; watch its bootstrap run for live progress.";
+            Toasts.Success("Cluster provisioning queued.");
+        }
+        catch (Exception ex) { Toasts.Error($"Could not start provisioning: {ex.Message}"); }
     }
 
     private async Task CreateBlueprint()

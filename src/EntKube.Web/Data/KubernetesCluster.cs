@@ -3,6 +3,22 @@ using System.ComponentModel.DataAnnotations.Schema;
 namespace EntKube.Web.Data;
 
 /// <summary>
+/// Lifecycle of a cluster that EntKube provisions itself (Cluster API + CAPO).
+/// A registered (externally-created) cluster stays at <see cref="None"/>.
+/// </summary>
+public enum ClusterProvisioningStatus
+{
+    /// <summary>Not provisioned by EntKube — registered from an existing kubeconfig.</summary>
+    None = 0,
+    /// <summary>Placeholder created; infrastructure is being stood up on the cloud.</summary>
+    Provisioning = 1,
+    /// <summary>Infrastructure provisioned; kubeconfig registered.</summary>
+    Provisioned = 2,
+    /// <summary>Provisioning failed; may be resumed or torn down.</summary>
+    Failed = 3
+}
+
+/// <summary>
 /// A Kubernetes cluster registered in EntKube. Belongs to a tenant and is
 /// placed into an environment. One environment can host many clusters
 /// (e.g. for regional distribution or capacity scaling).
@@ -51,6 +67,19 @@ public class KubernetesCluster
     public string? Kubeconfig { get; set; }
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// Whether EntKube provisioned this cluster's infrastructure and, if so, where it is
+    /// in that lifecycle. <see cref="ClusterProvisioningStatus.None"/> for registered clusters.
+    /// </summary>
+    public ClusterProvisioningStatus ProvisioningStatus { get; set; } = ClusterProvisioningStatus.None;
+
+    /// <summary>
+    /// Opaque runner state for an in-flight provisioning (bootstrap VM ids, phase), as JSON.
+    /// Lets a resumed run re-attach to the ephemeral bootstrap VM instead of re-creating it.
+    /// Null once provisioning completes or for registered clusters.
+    /// </summary>
+    public string? ProvisioningStateJson { get; set; }
 
     // Navigation
     public Tenant Tenant { get; set; } = null!;

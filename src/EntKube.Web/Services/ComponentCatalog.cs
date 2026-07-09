@@ -3166,6 +3166,131 @@ public static class ComponentCatalog
                     Options = ["libreswan", "wireguard"]
                 }
             ]
+        },
+
+        // ── OpenStack platform (for EntKube-provisioned clusters) ──
+        // These make a freshly-provisioned OpenStack cluster fully functional: a CNI so
+        // nodes go Ready, the cloud-controller-manager for node lifecycle + Octavia
+        // LoadBalancers, and the Cinder CSI driver for dynamic PVCs. CCM + Cinder CSI read
+        // an in-cluster "cloud-config" Secret (cloud.conf) that ClusterProvisioningService
+        // writes into kube-system from the OpenStack application credential it mints, so no
+        // credential fields are needed here.
+
+        new CatalogEntry
+        {
+            Key = "cilium",
+            DisplayName = "Cilium (CNI)",
+            Description = "eBPF-based CNI providing pod networking, network policy, and load balancing. The default container network for EntKube-provisioned clusters; installable standalone on any cluster that has no CNI yet.",
+            Icon = "bi-bezier2",
+            Category = "Networking",
+            HelmRepoUrl = "https://helm.cilium.io/",
+            HelmChartName = "cilium",
+            HelmChartVersion = "1.16.5",
+            DefaultNamespace = "kube-system",
+            DefaultReleaseName = "cilium",
+            InstallTimeout = "15m0s",
+            DetectionCrds = ["ciliumnetworkpolicies.cilium.io"],
+            DefaultValues = """
+                ipam:
+                  mode: kubernetes
+                """,
+            FormFields = []
+        },
+
+        new CatalogEntry
+        {
+            Key = "openstack-ccm",
+            DisplayName = "OpenStack Cloud Controller Manager",
+            Description = "External cloud-controller-manager for OpenStack: initializes nodes, wires Service type=LoadBalancer to Octavia, and manages node lifecycle. Reads the in-cluster 'cloud-config' Secret written during provisioning.",
+            Icon = "bi-hdd-network",
+            Category = "Networking",
+            HelmRepoUrl = "https://kubernetes.github.io/cloud-provider-openstack",
+            HelmChartName = "openstack-cloud-controller-manager",
+            HelmChartVersion = "2.31.1",
+            DefaultNamespace = "kube-system",
+            DefaultReleaseName = "openstack-ccm",
+            InstallTimeout = "15m0s",
+            DetectionResource = new DetectionResource("apps", "v1", "daemonsets", "openstack-cloud-controller-manager"),
+            DefaultValues = """
+                # Reference the cloud-config Secret created by EntKube provisioning
+                # (do not let the chart create/overwrite it).
+                secret:
+                  enabled: true
+                  create: false
+                  name: cloud-config
+                # Run on control-plane nodes before the CNI/other add-ons are up.
+                tolerations:
+                  - key: node.cloudprovider.kubernetes.io/uninitialized
+                    value: "true"
+                    effect: NoSchedule
+                  - key: node-role.kubernetes.io/control-plane
+                    effect: NoSchedule
+                  - key: node-role.kubernetes.io/master
+                    effect: NoSchedule
+                """,
+            FormFields = []
+        },
+
+        new CatalogEntry
+        {
+            Key = "openstack-cinder-csi",
+            DisplayName = "OpenStack Cinder CSI",
+            Description = "CSI driver backing dynamic PersistentVolumeClaims with OpenStack Cinder block volumes. Installs a default StorageClass so ordinary RWO PVCs just work. Reads the in-cluster 'cloud-config' Secret written during provisioning.",
+            Icon = "bi-hdd-stack",
+            Category = "Storage",
+            HelmRepoUrl = "https://kubernetes.github.io/cloud-provider-openstack",
+            HelmChartName = "openstack-cinder-csi",
+            HelmChartVersion = "2.31.1",
+            DefaultNamespace = "kube-system",
+            DefaultReleaseName = "cinder-csi",
+            InstallTimeout = "15m0s",
+            Dependencies = ["openstack-ccm"],
+            DetectionCrds = ["volumesnapshotclasses.snapshot.storage.k8s.io"],
+            DefaultValues = """
+                secret:
+                  enabled: true
+                  create: false
+                  name: cloud-config
+                storageClass:
+                  enabled: true
+                  delete:
+                    isDefault: true
+                    allowVolumeExpansion: true
+                  retain:
+                    isDefault: false
+                    allowVolumeExpansion: true
+                """,
+            FormFields = []
+        },
+
+        new CatalogEntry
+        {
+            Key = "cubefs",
+            DisplayName = "CubeFS",
+            Description = "Cloud-native distributed storage providing an S3-compatible object gateway (buckets) and shared/RWX filesystem volumes. Layered on the Cinder block StorageClass, it gives a single portable S3 story on any OpenStack — independent of whether the cloud exposes Ceph RGW or Swift. Note: this is a distributed system you operate (master/meta/data nodes); size and tune per environment.",
+            Icon = "bi-hdd-stack-fill",
+            Category = "Storage",
+            HelmRepoUrl = "https://cubefs.github.io/cubefs-helm",
+            HelmChartName = "cubefs",
+            HelmChartVersion = "3.5.0",
+            DefaultNamespace = "cubefs-system",
+            DefaultReleaseName = "cubefs",
+            InstallTimeout = "20m0s",
+            Dependencies = ["openstack-cinder-csi"],
+            DetectionCrds = ["cubefsclusters.cubefs.io"],
+            DefaultValues = """
+                # CubeFS component toggles. Data/meta nodes are backed by the default
+                # (Cinder) StorageClass; tune replica counts, disk paths and capacity per
+                # environment before production use.
+                component:
+                  master: true
+                  metanode: true
+                  datanode: true
+                  objectnode: true   # the S3 gateway EntKube storage links consume
+                  client: false
+                  csi: true
+                """,
+            FormFields = []
         }
     ];
 

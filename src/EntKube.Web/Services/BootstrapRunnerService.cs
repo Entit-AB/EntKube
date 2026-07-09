@@ -77,6 +77,7 @@ public class BootstrapRunnerService(
         var redisService = scope.ServiceProvider.GetRequiredService<RedisService>();
         var rabbitService = scope.ServiceProvider.GetRequiredService<RabbitMQService>();
         var blueprintService = scope.ServiceProvider.GetRequiredService<ClusterBlueprintService>();
+        var provisioningService = scope.ServiceProvider.GetRequiredService<ClusterProvisioningService>();
 
         Guid tenantId;
         List<Guid> stepIds;
@@ -129,7 +130,7 @@ public class BootstrapRunnerService(
             if (stepStatus == BootstrapStepStatus.Succeeded) continue;
 
             (bool ok, string? error) = await ExecuteStepAsync(
-                dbFactory, registrar, orchestrator, cnpgService, redisService, rabbitService,
+                dbFactory, registrar, orchestrator, cnpgService, redisService, rabbitService, provisioningService,
                 runId, stepId, clusterId, tenantId, ct);
 
             if (!ok && !optional)
@@ -163,6 +164,7 @@ public class BootstrapRunnerService(
         CnpgService cnpgService,
         RedisService redisService,
         RabbitMQService rabbitService,
+        ClusterProvisioningService provisioningService,
         Guid runId, Guid stepId, Guid clusterId, Guid tenantId, CancellationToken ct)
     {
         // Load the step + mark it running.
@@ -198,7 +200,13 @@ public class BootstrapRunnerService(
 
         try
         {
-            if (stepType == BlueprintStepType.Component)
+            if (stepType == BlueprintStepType.ProvisionCluster)
+            {
+                (ok, output) = await ExecuteProvisionStepAsync(
+                    dbFactory, provisioningService, stepId, parameters, clusterId, tenantId, ct);
+                if (!ok) error = "Provisioning failed — see output.";
+            }
+            else if (stepType == BlueprintStepType.Component)
             {
                 (ok, output, createdComponentId) = await ExecuteComponentStepAsync(
                     registrar, orchestrator, key, name, ns, parameters,
@@ -232,6 +240,49 @@ public class BootstrapRunnerService(
         }
 
         return (ok, error);
+    }
+
+    /// <summary>
+    /// Provisions the underlying cluster (Cluster API + CAPO) as the run's first step,
+    /// streaming live progress into the step's Output so the bootstrap panel shows it.
+    /// </summary>
+    private static async Task<(bool ok, string? output)> ExecuteProvisionStepAsync(
+        IDbContextFactory<ApplicationDbContext> dbFactory,
+        ClusterProvisioningService provisioningService,
+        Guid stepId, Dictionary<string, string> parameters,
+        Guid clusterId, Guid tenantId, CancellationToken ct)
+    {
+        if (!parameters.TryGetValue(ClusterBlueprintService.ProvisioningConfigParam, out string? configJson)
+            || string.IsNullOrWhiteSpace(configJson))
+        {
+            return (false, "Provisioning step is missing its configuration.");
+        }
+
+        OpenStackProvisioningConfig config = OpenStackProvisioningConfig.FromJson(configJson);
+
+        // Throttle DB writes: only persist the streamed log every couple of seconds.
+        DateTime lastFlush = DateTime.MinValue;
+        string latest = "";
+
+        async void OnProgress(string log)
+        {
+            latest = log;
+            if ((DateTime.UtcNow - lastFlush) < TimeSpan.FromSeconds(2)) return;
+            lastFlush = DateTime.UtcNow;
+            try
+            {
+                using ApplicationDbContext db = dbFactory.CreateDbContext();
+                BootstrapStepRun s = await db.BootstrapStepRuns.FirstAsync(x => x.Id == stepId, ct);
+                s.Output = log;
+                await db.SaveChangesAsync(ct);
+            }
+            catch { /* best-effort live update */ }
+        }
+
+        ProvisioningResult result = await provisioningService.ProvisionAsync(
+            tenantId, clusterId, config, OnProgress, ct);
+
+        return (result.Success, string.IsNullOrEmpty(result.Log) ? latest : result.Log);
     }
 
     private static async Task<(bool ok, string? output, Guid? componentId)> ExecuteComponentStepAsync(

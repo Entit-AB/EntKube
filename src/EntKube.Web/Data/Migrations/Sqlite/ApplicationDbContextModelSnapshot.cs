@@ -3142,6 +3142,12 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ProvisioningStateJson")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ProvisioningStatus")
+                        .HasColumnType("INTEGER");
+
                     b.Property<Guid>("TenantId")
                         .HasColumnType("TEXT");
 

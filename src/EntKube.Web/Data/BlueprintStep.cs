@@ -8,7 +8,14 @@ public enum BlueprintStepType
     /// <summary>A catalog component installed via Helm/manifest (ComponentCatalog entry).</summary>
     Component,
     /// <summary>An operator-backed service instance (CNPG/Redis/RabbitMQ cluster) applied as a CRD.</summary>
-    Service
+    Service,
+    /// <summary>
+    /// Provisions the underlying cluster on a cloud provider (Cluster API + CAPO) before
+    /// any components are installed. Synthesized as the first step when a blueprint has a
+    /// <see cref="ClusterBlueprint.ProvisioningProvider"/>; its <c>Key</c> is the provider
+    /// ("openstack") and its parameters carry the resolved provisioning config.
+    /// </summary>
+    ProvisionCluster
 }
 
 /// <summary>
