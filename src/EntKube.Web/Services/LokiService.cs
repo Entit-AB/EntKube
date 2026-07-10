@@ -433,17 +433,7 @@ public class LokiService(
     // native OTLP parser via LogLevelMap so both backends classify severity identically.
     private static LogLevel? MapDetectedLevel(string? value) => LogLevelMap.FromText(value);
 
-    private static LogLevel DetectLevel(string line)
-    {
-        if (line.Contains("FATAL",    StringComparison.OrdinalIgnoreCase) ||
-            line.Contains("CRITICAL", StringComparison.OrdinalIgnoreCase)) return LogLevel.Fatal;
-        if (line.Contains("ERROR",    StringComparison.OrdinalIgnoreCase) ||
-            line.Contains(" ERR ",    StringComparison.OrdinalIgnoreCase)) return LogLevel.Error;
-        if (line.Contains("WARN",     StringComparison.OrdinalIgnoreCase)) return LogLevel.Warn;
-        if (line.Contains("DEBUG",    StringComparison.OrdinalIgnoreCase)) return LogLevel.Debug;
-        if (line.Contains("INFO",     StringComparison.OrdinalIgnoreCase)) return LogLevel.Info;
-        return LogLevel.None;
-    }
+    private static LogLevel DetectLevel(string line) => LogLevelMap.FromLine(line);
 
     private sealed record ResolvedLokiInfo(string Kubeconfig, string ClusterName, LokiConfig Config);
 

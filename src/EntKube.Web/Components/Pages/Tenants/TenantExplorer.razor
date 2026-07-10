@@ -258,6 +258,12 @@ else
     [SupplyParameterFromQuery(Name = "env")] private Guid? EnvParam { get; set; }
     [SupplyParameterFromQuery(Name = "incident")] private Guid? IncidentParam { get; set; }
     [SupplyParameterFromQuery(Name = "tab")] private string? TabParam { get; set; }
+    // Trace deep-link (from a resource-view log line): open the Traces section preselecting this
+    // cluster + trace. Uses a dedicated `tcluster` rather than `cluster` because a top-level
+    // `cluster` param selects the ClusterDetail pane (which has no Traces tab), short-circuiting
+    // the section branch below.
+    [SupplyParameterFromQuery(Name = "tcluster")] private Guid? TraceClusterParam { get; set; }
+    [SupplyParameterFromQuery(Name = "trace")] private string? TraceParam { get; set; }
 
     private sealed record SectionItem(string Key, string Label, string Icon);
     private sealed record TreeGroup(string Name, string Icon, SectionItem[] Items);
@@ -285,7 +291,7 @@ else
         new("Monitoring", "bi-speedometer2",
         [ new("overview", "Overview", "bi-speedometer2"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
         new("Alerting", "bi-bell",
-        [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
+        [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast"), new("notification-providers", "Notification providers", "bi-key") ]),
         new("Incidents", "bi-exclamation-octagon",
         [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon") ]),
         new("Reliability", "bi-check2-square",
@@ -645,6 +651,7 @@ else
             case "alert-rules": builder.OpenComponent<TenantAlertRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "alert-routing": builder.OpenComponent<AlertRoutingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "notifications": builder.OpenComponent<NotificationChannels>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "notification-providers": builder.OpenComponent<NotificationProviders>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "on-call": builder.OpenComponent<OnCallTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "incidents":
                 builder.OpenComponent<IncidentManagement>(0);
@@ -656,7 +663,8 @@ else
             case "traces":
                 builder.OpenComponent<TenantTracesTab>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);
-                builder.AddComponentParameter(2, "PresetClusterId", ClusterParam?.ToString());
+                builder.AddComponentParameter(2, "PresetClusterId", (TraceClusterParam ?? ClusterParam)?.ToString());
+                builder.AddComponentParameter(3, "PresetTraceId", TraceParam);
                 builder.CloseComponent();
                 break;
             case "metrics": builder.OpenComponent<TenantMetricsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;

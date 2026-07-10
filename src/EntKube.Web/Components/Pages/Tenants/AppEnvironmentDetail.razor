@@ -760,6 +760,7 @@
                                        Namespace="@selectedDeployment?.Namespace"
                                        DeploymentId="@(selectedDeployment?.Id ?? Guid.Empty)"
                                        AccessRole="@null"
+                                       EnableTraceLinks="@(!IsPortalView)"
                                        OnRefresh="OpenDeploymentResourcesTab"
                                        LastRefreshed="@resourceTreeRefreshedAt" />
                 </div>

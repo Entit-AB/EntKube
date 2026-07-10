@@ -1,8 +1,11 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject KubernetesOperationsService K8sOps
+@inject LogQueryService Logs
+@inject NavigationManager Nav
 @inject IJSRuntime JS
 @inject ToastService Toasts
+@implements IAsyncDisposable
 
 @* ═══════════════════════════════════════════════════════════════════
    ResourceTreePanel — proper ArgoCD-style graph.
@@ -199,6 +202,67 @@
         font-weight: 500;
     }
     .rg-panel-body { padding: 10px; }
+
+    /* ── Roomy log/events/yaml modal ── */
+    .rg-log-modal { max-width: 92vw; }
+    .rg-log-modal .modal-content {
+        background: #1e1e2e;
+        border: 1px solid #3a3a4e;
+        height: 88vh;
+    }
+    .rg-log-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: 10px;
+        padding: 8px 12px;
+        background: #2a2a3e;
+        border-bottom: 1px solid #3a3a4e;
+    }
+    .rg-log-toolbar .form-label { color: #9aa0b4; font-size: .66rem; margin-bottom: 2px; }
+    .rg-log-toolbar .form-select,
+    .rg-log-toolbar .form-control {
+        background: #1e1e2e;
+        border-color: #3a3a4e;
+        color: #e6e6ef;
+        font-size: .74rem;
+    }
+    .rg-log-lines {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        background: #181820;
+        font-family: var(--bs-font-monospace, monospace);
+    }
+    .rg-log-row {
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+        padding: 1px 14px;
+        border-bottom: 1px solid #23232e;
+        line-height: 1.45;
+    }
+    .rg-log-ts { color: #7a7a8c; font-size: .68rem; flex-shrink: 0; user-select: none; }
+    .rg-log-src {
+        font-size: .55rem;
+        text-transform: uppercase;
+        letter-spacing: .04em;
+        border-radius: 3px;
+        padding: 0 4px;
+        flex-shrink: 0;
+        user-select: none;
+    }
+    .rg-log-src.live { background: #14361f; color: #57d98a; }
+    .rg-log-src.ingested { background: #2a2136; color: #b98be0; }
+    .rg-log-msg { font-size: .76rem; white-space: pre-wrap; word-break: break-all; }
+    .rg-log-restart {
+        text-align: center;
+        color: #8a8a9c;
+        font-size: .66rem;
+        padding: 3px 0;
+        border-bottom: 1px solid #23232e;
+        background: #201a24;
+    }
 
     /* ── Global feedback bar ── */
     .rg-feedback {
@@ -397,8 +461,8 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                     </div>
                 </div>
 
-                @* ── Floating action panel for this node ── *@
-                @if (isActive && _panelMode is not null)
+                @* ── Floating action panel (small confirmations) for this node ── *@
+                @if (isActive && _panelMode is "scale" or "restart" or "delete" or "trigger")
                 {
                     @RenderPanel(nd.Node, ClampPanelX(cx), PanelY(cy))
                 }
@@ -409,6 +473,12 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
 </LoadingPanel>
 </div>
 
+@* ── Roomy modal for text-heavy views: Logs / Events / YAML ── *@
+@if (_activePanelNode is not null && _panelMode is "logs" or "events" or "yaml")
+{
+    @RenderResourceModal(_activePanelNode)
+}
+
 @code {
     [Parameter] public bool Loading { get; set; }
     [Parameter] public string? Error { get; set; }
@@ -418,6 +488,13 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
     [Parameter] public CustomerAccessRole? AccessRole { get; set; }
     [Parameter] public EventCallback OnRefresh { get; set; }
     [Parameter] public DateTime? LastRefreshed { get; set; }
+
+    /// <summary>
+    /// When true, ingested log lines that carry a trace id render a clickable badge that deep-links
+    /// to the cluster's Traces tab. Only enable in hosts whose page reads the tab/cluster/trace
+    /// query params (the tenant ops explorer) — left off in the customer portal.
+    /// </summary>
+    [Parameter] public bool EnableTraceLinks { get; set; }
 
     // ── Access gates ────────────────────────────────────────────────────────
 
@@ -460,6 +537,20 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
     private int _scaleValue = 1;
     private bool _opBusy;
 
+    // ── Log modal state (unified live pod + ingested backfill) ───────────────
+    private record LogRow(DateTime Timestamp, string Line, LogLevel Level, bool Live, string? TraceId);
+
+    private List<LogRow> _logRows = [];
+    private List<LogHistogramBucket> _logHistogram = [];
+    private Guid? _resolvedClusterId;
+    private bool _logIngestedAvailable;
+    private bool _logIncludeIngested = true;
+    private string _logLevelFilter = "";     // "", Info, Warn, Error
+    private string _logTextFilter = "";
+    private int _logRangeMinutes = 60;        // ingested backfill window
+    private bool _logFollow;
+    private CancellationTokenSource? _logFollowCts;
+
     private string? _feedback;
     private bool _feedbackOk;
     private bool _fullscreen;
@@ -469,8 +560,18 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
 
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
+    private Guid _lastDeploymentId;
+
     protected override void OnParametersSet()
     {
+        // Reset the cached cluster/backend probe when the panel is reused for a different
+        // deployment, so ingested backfill targets the right cluster.
+        if (DeploymentId != _lastDeploymentId)
+        {
+            _lastDeploymentId = DeploymentId;
+            _resolvedClusterId = null;
+            _logIngestedAvailable = false;
+        }
         ComputeLayout();
     }
 
@@ -595,6 +696,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
 
     private void ClosePanel()
     {
+        StopLogFollow();
         _activePanelNodeId = null;
         _activePanelNode   = null;
         _panelMode         = null;
@@ -602,14 +704,53 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
         _panelError        = null;
         _containers        = [];
         _selectedContainer = null;
+        _logRows           = [];
+        _logHistogram      = [];
+    }
+
+    // Deep-links a log line to its distributed trace: switches the tenant explorer to the Traces
+    // section with this cluster + trace preselected. Clears the app/cluster pane params so the
+    // section branch renders, and uses `tcluster` (not `cluster`, which would select a cluster
+    // pane instead). Only reachable when EnableTraceLinks is set by a host whose page reads these
+    // query params (the tenant ops explorer).
+    private void OpenTrace(string? traceId)
+    {
+        if (string.IsNullOrEmpty(traceId) || _resolvedClusterId is not Guid cid) return;
+        Nav.NavigateTo(Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["app"] = null,
+            ["env"] = null,
+            ["cluster"] = null,
+            ["tab"] = null,
+            ["section"] = "traces",
+            ["tcluster"] = cid.ToString(),
+            ["trace"] = traceId
+        }));
     }
 
     // ── Async operations (fire-and-forget from sync context) ─────────────────
 
     private async Task LoadLogsAsync(DeploymentResource node)
     {
-        _panelLoading = true; _panelText = null; _panelError = null;
+        _panelLoading = true; _logRows = []; _panelError = null;
         StateHasChanged();
+
+        // Resolve the deployment's cluster once, and probe whether an ingested log
+        // backend (native telemetry or Loki) is available to backfill history.
+        if (_resolvedClusterId is null)
+        {
+            AppDeployment? dep = await K8sOps.GetDeploymentWithClusterAsync(DeploymentId);
+            _resolvedClusterId = dep?.Cluster?.Id;
+            if (_resolvedClusterId is Guid cid)
+            {
+                try
+                {
+                    (bool native, bool loki) = await Logs.ProbeBackendsAsync(cid);
+                    _logIngestedAvailable = native || loki;
+                }
+                catch { _logIngestedAvailable = false; }
+            }
+        }
 
         var cr = await K8sOps.GetPodContainersAsync(DeploymentId, node.Name);
         if (!cr.IsSuccess) { _panelError = cr.Error; _panelLoading = false; StateHasChanged(); return; }
@@ -623,15 +764,155 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
     private ElementReference _logPreRef;
     private bool _pendingLogScroll;
 
+    // Fetches the live pod tail (primary) and, when enabled, ingested history, then merges
+    // them into one timeline: ingested lines older than the live tail become backfill; lines
+    // present in both prefer the live copy.
     private async Task FetchLogsAsync(string podName)
     {
-        _panelLoading = true; _panelText = null; _panelError = null;
+        _panelLoading = true; _panelError = null;
         StateHasChanged();
-        var r = await K8sOps.GetPodLogsAsync(DeploymentId, podName, _selectedContainer, _panelTailLines);
+
+        var live = await K8sOps.GetPodLogEntriesAsync(DeploymentId, podName, _selectedContainer, _panelTailLines);
+        if (!live.IsSuccess)
+        {
+            _panelError = live.Error; _panelLoading = false; StateHasChanged();
+            return;
+        }
+
+        List<LogRow> liveRows = (live.Data ?? [])
+            .Select(e => new LogRow(e.Timestamp, e.Line, e.DetectedLevel, true, e.TraceId))
+            .ToList();
+
+        List<LogRow> ingestedRows = [];
+        List<LogHistogramBucket> histogram = [];
+        if (_logIncludeIngested && _logIngestedAvailable && _resolvedClusterId is Guid cid)
+        {
+            DateTime to = DateTime.UtcNow;
+            DateTime from = to.AddMinutes(-_logRangeMinutes);
+            LogQueryFilter filter = BuildLogFilter(podName);
+            try
+            {
+                // Log page and volume histogram are independent queries over the same filter —
+                // issue them concurrently so the fetch waits on the slower, not the sum.
+                var queryTask = Logs.QueryAsync(cid, filter, from, to, Math.Max(_panelTailLines, 500));
+                var histTask = Logs.GetHistogramAsync(cid, filter, from, to);
+                await Task.WhenAll(queryTask, histTask);
+
+                if (queryTask.Result.IsSuccess && queryTask.Result.Data is not null)
+                    ingestedRows = queryTask.Result.Data
+                        .SelectMany(s => s.Entries)
+                        .Select(e => new LogRow(e.Timestamp, e.Line, e.DetectedLevel, false, e.TraceId))
+                        .ToList();
+
+                if (histTask.Result.IsSuccess && histTask.Result.Data is not null)
+                    histogram = histTask.Result.Data;
+            }
+            catch { /* ingested backfill is best-effort — never block the live tail */ }
+        }
+
+        _logRows = MergeLogRows(liveRows, ingestedRows);
+        _logHistogram = histogram;
         _panelLoading = false;
-        if (r.IsSuccess) { _panelText = r.Data ?? "(no output)"; _pendingLogScroll = true; }
-        else _panelError = r.Error;
+        _pendingLogScroll = true;
         StateHasChanged();
+    }
+
+    private LogQueryFilter BuildLogFilter(string podName) => new()
+    {
+        Namespaces = [Namespace ?? ""],
+        Pod = podName,
+        Container = string.IsNullOrEmpty(_selectedContainer) ? null : _selectedContainer,
+        Text = string.IsNullOrEmpty(_logTextFilter) ? null : _logTextFilter,
+        MinLevel = LogMinLevel
+    };
+
+    // Live pod logs are primary. Keep every live row; add ingested rows that are either older
+    // than the live window (true backfill) or not already present in the live tail (deduped by
+    // second + text). Result is ordered oldest→newest so backfill leads into the live stream.
+    private static List<LogRow> MergeLogRows(List<LogRow> live, List<LogRow> ingested)
+    {
+        if (ingested.Count == 0)
+            return live.OrderBy(r => r.Timestamp).ToList();
+
+        DateTime liveMin = live.Count > 0 ? live.Min(r => r.Timestamp) : DateTime.MaxValue;
+        HashSet<string> liveSigs = live.Select(Sig).ToHashSet();
+
+        List<LogRow> merged = new(live);
+        foreach (LogRow r in ingested)
+            if (r.Timestamp < liveMin || !liveSigs.Contains(Sig(r)))
+                merged.Add(r);
+
+        return merged.OrderBy(r => r.Timestamp).ToList();
+
+        static string Sig(LogRow r) => $"{r.Timestamp:yyyyMMddHHmmss}|{r.Line}";
+    }
+
+    private LogLevel LogMinLevel => _logLevelFilter switch
+    {
+        "Error" => LogLevel.Error,
+        "Warn"  => LogLevel.Warn,
+        "Info"  => LogLevel.Info,
+        _ => LogLevel.None
+    };
+
+    // Client-side severity/text filter, applied uniformly to live and ingested rows so the
+    // toolbar behaves the same regardless of source (ingested queries also push these down).
+    private IEnumerable<LogRow> FilteredLogRows => _logRows.Where(r =>
+        (LogMinLevel == LogLevel.None || r.Level >= LogMinLevel) &&
+        (string.IsNullOrEmpty(_logTextFilter) ||
+         r.Line.Contains(_logTextFilter, StringComparison.OrdinalIgnoreCase)));
+
+    private static string LogLineStyle(LogLevel level) => level switch
+    {
+        LogLevel.Fatal or LogLevel.Error => "color:#f48771",
+        LogLevel.Warn  => "color:#cca700",
+        LogLevel.Info  => "color:#9cdcfe",
+        LogLevel.Debug => "color:#808080",
+        _ => "color:#d4d4d4"
+    };
+
+    private async Task ToggleIngested(string podName)
+    {
+        _logIncludeIngested = !_logIncludeIngested;
+        await FetchLogsAsync(podName);
+    }
+
+    private void ToggleLogFollow(string podName)
+    {
+        _logFollow = !_logFollow;
+        if (_logFollow)
+        {
+            _logFollowCts = new CancellationTokenSource();
+            _ = LogFollowLoopAsync(podName, _logFollowCts.Token);
+        }
+        else
+        {
+            StopLogFollow();
+        }
+    }
+
+    private void StopLogFollow()
+    {
+        _logFollow = false;
+        _logFollowCts?.Cancel();
+        _logFollowCts?.Dispose();
+        _logFollowCts = null;
+    }
+
+    // Re-fetch the live tail (and ingested backfill) on a fixed cadence. Re-merging the whole
+    // window each tick keeps the timeline correct without tracking append cursors across sources.
+    private async Task LogFollowLoopAsync(string podName, CancellationToken ct)
+    {
+        try
+        {
+            using PeriodicTimer timer = new(TimeSpan.FromSeconds(3));
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                await FetchLogsAsync(podName);
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { /* stopped */ }
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -640,6 +921,15 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
         {
             _pendingLogScroll = false;
             try { await JS.InvokeVoidAsync("scrollToBottom", _logPreRef); } catch { }
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_logFollowCts is not null)
+        {
+            await _logFollowCts.CancelAsync();
+            _logFollowCts.Dispose();
         }
     }
 
@@ -799,9 +1089,6 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
 
     private static double EstimatedPanelHeight(string? mode) => mode switch
     {
-        "logs"    => 760,
-        "events"  => 580,
-        "yaml"    => 740,
         "scale"   => 120,
         "trigger" => 90,
         _         => 70      // restart / delete
@@ -822,25 +1109,13 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
         <div class="rg-panel" style="left:@(px.ToString("F0", System.Globalization.CultureInfo.InvariantCulture))px;top:@(py.ToString("F0", System.Globalization.CultureInfo.InvariantCulture))px;">
             <div class="rg-panel-header">
                 <span>
-                    @if (_panelMode == "logs")
-                    {
-                        <i class="bi bi-terminal me-1"></i><text>Logs — @node.Name</text>
-                    }
-                    else if (_panelMode == "events")
-                    {
-                        <i class="bi bi-list-ul me-1"></i><text>Events — @node.Name</text>
-                    }
-                    else if (_panelMode == "scale")
+                    @if (_panelMode == "scale")
                     {
                         <i class="bi bi-sliders me-1"></i><text>Scale — @node.Name</text>
                     }
                     else if (_panelMode == "restart")
                     {
                         <i class="bi bi-arrow-repeat me-1"></i><text>Restart — @node.Name</text>
-                    }
-                    else if (_panelMode == "yaml")
-                    {
-                        <i class="bi bi-file-code me-1"></i><text>YAML — @node.Kind/@node.Name</text>
                     }
                     else if (_panelMode == "trigger")
                     {
@@ -852,90 +1127,11 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                     }
                 </span>
                 <div class="d-flex align-items-center gap-1">
-                    @if (_panelMode is "logs" or "events" or "yaml")
-                    {
-                        <button class="btn btn-sm btn-link text-white py-0 px-1" title="Refresh"
-                                aria-label="Refresh panel"
-                                disabled="@_panelLoading"
-                                @onclick="() => _ = RefreshPanel(node)">
-                            <i class="bi bi-arrow-clockwise" style="font-size:.75rem;"></i>
-                        </button>
-                    }
                     <button class="btn btn-sm btn-link text-white py-0 px-1" aria-label="Close panel" @onclick="ClosePanel">
                         <i class="bi bi-x-lg" style="font-size:.75rem;"></i>
                     </button>
                 </div>
             </div>
-
-            @if (_panelMode == "logs")
-            {
-                @if (_containers.Count > 1)
-                {
-                    <div class="px-2 py-1 d-flex gap-2 align-items-center" style="background:#2a2a3e;border-bottom:1px solid #3a3a4e;">
-                        <span class="text-muted small">Container:</span>
-                        @foreach (string c in _containers)
-                        {
-                            <button class="btn btn-sm py-0 px-2 @(_selectedContainer == c ? "btn-primary" : "btn-outline-secondary")"
-                                    style="font-size:.68rem;"
-                                    @onclick="() => SwitchContainer(node.Name, c)">@c</button>
-                        }
-                    </div>
-                }
-                <div class="px-2 py-1 d-flex gap-2 align-items-center" style="background:#2a2a3e;border-bottom:1px solid #3a3a4e;">
-                    <span class="text-muted small">Lines:</span>
-                    @foreach (int tl in new[] { 100, 500, 1000 })
-                    {
-                        int tlCopy = tl;
-                        <button class="btn btn-sm py-0 px-2 @(_panelTailLines == tlCopy ? "btn-primary" : "btn-outline-secondary")"
-                                style="font-size:.68rem;"
-                                @onclick="() => { _panelTailLines = tlCopy; _ = FetchLogsAsync(node.Name); }">@tlCopy</button>
-                    }
-                </div>
-                @if (_panelLoading)
-                {
-                    <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-light"></div></div>
-                }
-                else if (_panelError is not null)
-                {
-                    <div class="alert alert-warning m-2 py-1 small">@_panelError</div>
-                }
-                else
-                {
-                    <pre @ref="_logPreRef" class="m-0 p-2 text-light" style="max-height:620px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-size:.7rem;background:transparent;">@_panelText</pre>
-                }
-            }
-
-            @if (_panelMode == "events")
-            {
-                @if (_panelLoading)
-                {
-                    <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-light"></div></div>
-                }
-                else if (_panelError is not null)
-                {
-                    <div class="alert alert-warning m-2 py-1 small">@_panelError</div>
-                }
-                else
-                {
-                    <pre class="m-0 p-2 text-light" style="max-height:520px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-size:.7rem;background:transparent;">@_panelText</pre>
-                }
-            }
-
-            @if (_panelMode == "yaml")
-            {
-                @if (_panelLoading)
-                {
-                    <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-light"></div></div>
-                }
-                else if (_panelError is not null)
-                {
-                    <div class="alert alert-warning m-2 py-1 small">@_panelError</div>
-                }
-                else
-                {
-                    <pre class="m-0 p-2 text-light" style="max-height:680px;overflow-y:auto;overflow-x:auto;white-space:pre;font-size:.68rem;background:transparent;tab-size:2;">@_panelText</pre>
-                }
-            }
 
             @if (_panelMode == "scale")
             {
@@ -1017,6 +1213,211 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                 </div>
             }
         </div>
+    };
+
+    // ── Roomy modal renderer (logs / events / yaml) ──────────────────────────
+
+    private RenderFragment RenderResourceModal(DeploymentResource node) => __builder =>
+    {
+        <div class="modal fade show d-block" tabindex="-1" style="background:rgba(0,0,0,.55);" @onclick="ClosePanel">
+            <div class="modal-dialog modal-dialog-centered rg-log-modal" @onclick:stopPropagation="true">
+                <div class="modal-content">
+                    <div class="modal-header py-2" style="background:#2a2a3e;border-bottom:1px solid #3a3a4e;">
+                        <h6 class="modal-title text-light mb-0 d-flex align-items-center">
+                            @if (_panelMode == "logs")
+                            {
+                                <i class="bi bi-terminal me-2"></i><text>Logs — @node.Name</text>
+                            }
+                            else if (_panelMode == "events")
+                            {
+                                <i class="bi bi-list-ul me-2"></i><text>Events — @node.Name</text>
+                            }
+                            else
+                            {
+                                <i class="bi bi-file-code me-2"></i><text>YAML — @node.Kind/@node.Name</text>
+                            }
+                        </h6>
+                        <div class="d-flex align-items-center gap-2">
+                            <button class="btn btn-sm btn-link text-white py-0 px-1" title="Refresh"
+                                    aria-label="Refresh" disabled="@_panelLoading"
+                                    @onclick="() => _ = RefreshPanel(node)">
+                                <i class="bi bi-arrow-clockwise"></i>
+                            </button>
+                            <button class="btn-close btn-close-white" aria-label="Close" @onclick="ClosePanel"></button>
+                        </div>
+                    </div>
+
+                    <div class="modal-body p-0 d-flex flex-column" style="min-height:0;">
+                        @if (_panelMode == "logs")
+                        {
+                            @RenderLogsBody(node)
+                        }
+                        else if (_panelError is not null)
+                        {
+                            <div class="alert alert-warning m-3 py-2 small">@_panelError</div>
+                        }
+                        else if (_panelLoading)
+                        {
+                            <div class="text-center py-4"><div class="spinner-border text-light"></div></div>
+                        }
+                        else if (_panelMode == "events")
+                        {
+                            <pre class="m-0 p-3 text-light flex-fill" style="overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:.76rem;background:#181820;">@_panelText</pre>
+                        }
+                        else
+                        {
+                            <pre class="m-0 p-3 text-light flex-fill" style="overflow:auto;white-space:pre;font-size:.74rem;background:#181820;tab-size:2;">@_panelText</pre>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    };
+
+    private RenderFragment RenderLogsBody(DeploymentResource node) => __builder =>
+    {
+        <div class="rg-log-toolbar">
+            @if (_containers.Count > 1)
+            {
+                <div>
+                    <label class="form-label d-block">Container</label>
+                    <select class="form-select form-select-sm" style="width:auto;"
+                            value="@_selectedContainer"
+                            @onchange="e => SwitchContainer(node.Name, e.Value?.ToString() ?? _selectedContainer!)">
+                        @foreach (string c in _containers)
+                        {
+                            <option value="@c">@c</option>
+                        }
+                    </select>
+                </div>
+            }
+            <div>
+                <label class="form-label d-block">Severity</label>
+                <select class="form-select form-select-sm" style="width:auto;"
+                        @bind="_logLevelFilter" @bind:after="() => _ = FetchLogsAsync(node.Name)">
+                    <option value="">All levels</option>
+                    <option value="Info">Info+</option>
+                    <option value="Warn">Warn+</option>
+                    <option value="Error">Error + Fatal</option>
+                </select>
+            </div>
+            <div>
+                <label class="form-label d-block">Ingested history</label>
+                <select class="form-select form-select-sm" style="width:auto;"
+                        @bind="_logRangeMinutes" @bind:after="() => _ = FetchLogsAsync(node.Name)"
+                        disabled="@(!_logIncludeIngested || !_logIngestedAvailable)">
+                    <option value="15">Last 15 min</option>
+                    <option value="60">Last 1 hour</option>
+                    <option value="180">Last 3 hours</option>
+                    <option value="720">Last 12 hours</option>
+                    <option value="1440">Last 24 hours</option>
+                </select>
+            </div>
+            <div>
+                <label class="form-label d-block">Tail (live)</label>
+                <select class="form-select form-select-sm" style="width:auto;"
+                        @bind="_panelTailLines" @bind:after="() => _ = FetchLogsAsync(node.Name)">
+                    <option value="100">100</option>
+                    <option value="500">500</option>
+                    <option value="1000">1000</option>
+                </select>
+            </div>
+            <div class="flex-fill" style="min-width:160px;">
+                <label class="form-label d-block">Filter text</label>
+                <input class="form-control form-control-sm" placeholder="e.g. error, timeout"
+                       @bind="_logTextFilter" @bind:after="() => _ = FetchLogsAsync(node.Name)" />
+            </div>
+            <div class="d-flex align-items-center gap-2">
+                @if (_logIngestedAvailable)
+                {
+                    <button class="btn btn-sm @(_logIncludeIngested ? "btn-primary" : "btn-outline-secondary")"
+                            title="Complete live pod logs with ingested telemetry history"
+                            @onclick="() => ToggleIngested(node.Name)">
+                        <i class="bi bi-hdd-network me-1"></i>Ingested
+                    </button>
+                }
+                <button class="btn btn-sm @(_logFollow ? "btn-success" : "btn-outline-secondary")"
+                        title="Live-tail new log lines" @onclick="() => ToggleLogFollow(node.Name)">
+                    <i class="bi @(_logFollow ? "bi-pause-fill" : "bi-play-fill") me-1"></i>@(_logFollow ? "Following" : "Follow")
+                </button>
+            </div>
+        </div>
+
+        @if (!_logIngestedAvailable)
+        {
+            <div class="px-3 py-1 small" style="color:#8a8a9c;background:#201a24;border-bottom:1px solid #23232e;">
+                <i class="bi bi-info-circle me-1"></i>No ingested log backend on this cluster — showing live pod logs only.
+            </div>
+        }
+
+        @* Log-volume histogram over the ingested window: one bar per bucket, height ∝ count,
+           error+fatal portion in red. Only present when an ingested backend returned buckets. *@
+        @if (_logHistogram.Count > 0)
+        {
+            <div class="d-flex align-items-end gap-1 px-3 py-2" style="height:52px;background:#181820;border-bottom:1px solid #23232e;">
+                @{ long maxTotal = _logHistogram.Max(b => b.Total); }
+                @foreach (LogHistogramBucket b in _logHistogram)
+                {
+                    int barPx = maxTotal > 0 ? (int)Math.Round(b.Total * 40.0 / maxTotal) : 0;
+                    int errPx = b.Total > 0 ? (int)Math.Round(b.Errors * (double)barPx / b.Total) : 0;
+                    <div style="flex:1 1 0;display:flex;flex-direction:column;justify-content:flex-end;height:40px;"
+                         title="@b.Start.ToLocalTime().ToString("HH:mm:ss") · @b.Total logs (@b.Errors err)">
+                        <div style="background:#f48771;height:@(errPx)px;"></div>
+                        <div style="background:#4a90d9;height:@(barPx - errPx)px;"></div>
+                    </div>
+                }
+            </div>
+        }
+
+        @if (_panelError is not null)
+        {
+            <div class="alert alert-warning m-3 py-2 small">@_panelError</div>
+        }
+        else if (_panelLoading && _logRows.Count == 0)
+        {
+            <div class="text-center py-4"><div class="spinner-border text-light"></div></div>
+        }
+        else
+        {
+            <div @ref="_logPreRef" class="rg-log-lines">
+                @{ var rows = FilteredLogRows.ToList(); }
+                @if (rows.Count == 0)
+                {
+                    <div class="text-center py-5" style="color:#8a8a9c;">
+                        <i class="bi bi-journal d-block mb-2" style="font-size:1.6rem;"></i>
+                        No log lines match the current filters.
+                    </div>
+                }
+                else
+                {
+                    bool prevLive = rows[0].Live;
+                    bool first = true;
+                    @foreach (LogRow row in rows)
+                    {
+                        @if (!first && row.Live && !prevLive)
+                        {
+                            <div class="rg-log-restart"><i class="bi bi-arrow-repeat me-1"></i>live pod stream</div>
+                        }
+                        first = false;
+                        prevLive = row.Live;
+                        <div class="rg-log-row">
+                            <span class="rg-log-ts">@row.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")</span>
+                            <span class="rg-log-src @(row.Live ? "live" : "ingested")">@(row.Live ? "live" : "ing")</span>
+                            <span class="rg-log-msg" style="@LogLineStyle(row.Level)">@row.Line</span>
+                            @if (EnableTraceLinks && !string.IsNullOrEmpty(row.TraceId))
+                            {
+                                <a class="badge bg-primary text-decoration-none ms-1" style="font-size:.55rem;cursor:pointer;flex-shrink:0;"
+                                   title="Open trace @row.TraceId" @onclick="() => OpenTrace(row.TraceId)">trace</a>
+                            }
+                        </div>
+                    }
+                }
+            </div>
+            <div class="px-3 py-1 small d-flex justify-content-between" style="color:#8a8a9c;background:#2a2a3e;border-top:1px solid #3a3a4e;">
+                <span>@FilteredLogRows.Count() lines · @_logRows.Count(r => r.Live) live · @_logRows.Count(r => !r.Live) ingested</span>
+                @if (_panelLoading) { <span><span class="spinner-border spinner-border-sm me-1" style="width:.7rem;height:.7rem;"></span>refreshing…</span> }
+            </div>
+        }
     };
 
     // ── Visual helpers ───────────────────────────────────────────────────────

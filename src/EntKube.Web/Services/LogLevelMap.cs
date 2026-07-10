@@ -18,4 +18,21 @@ public static class LogLevelMap
         "DEBUG" or "TRACE" => LogLevel.Debug,
         _ => null
     };
+
+    /// <summary>
+    /// Heuristic severity of a raw log line, used when no structured <c>detected_level</c> /
+    /// <c>severityText</c> is available (e.g. live <c>kubectl logs</c> output). Shared so that
+    /// live pod logs and ingested logs are coloured/filtered by the same rules.
+    /// </summary>
+    public static LogLevel FromLine(string line)
+    {
+        if (line.Contains("FATAL",    StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("CRITICAL", StringComparison.OrdinalIgnoreCase)) return LogLevel.Fatal;
+        if (line.Contains("ERROR",    StringComparison.OrdinalIgnoreCase) ||
+            line.Contains(" ERR ",    StringComparison.OrdinalIgnoreCase)) return LogLevel.Error;
+        if (line.Contains("WARN",     StringComparison.OrdinalIgnoreCase)) return LogLevel.Warn;
+        if (line.Contains("DEBUG",    StringComparison.OrdinalIgnoreCase)) return LogLevel.Debug;
+        if (line.Contains("INFO",     StringComparison.OrdinalIgnoreCase)) return LogLevel.Info;
+        return LogLevel.None;
+    }
 }
