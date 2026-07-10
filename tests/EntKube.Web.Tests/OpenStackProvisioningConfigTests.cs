@@ -58,6 +58,37 @@ public class OpenStackProvisioningConfigTests
     }
 
     [Fact]
+    public void WorkerPool_Autoscale_RoundTripsAndReportsBounds()
+    {
+        OpenStackProvisioningConfig config = ValidConfig();
+        config.WorkerPools = [new WorkerPool { Name = "md-0", Count = 3, Flavor = "b.8c16gb", MinCount = 2, MaxCount = 6 }];
+
+        OpenStackProvisioningConfig restored = OpenStackProvisioningConfig.FromJson(config.ToJson());
+
+        restored.WorkerPools[0].MinCount.Should().Be(2);
+        restored.WorkerPools[0].MaxCount.Should().Be(6);
+        restored.WorkerPools[0].Autoscale.Should().BeTrue();
+    }
+
+    [Fact]
+    public void WorkerPool_Autoscale_FalseWhenBoundsUnset()
+    {
+        new WorkerPool { Count = 3, Flavor = "b" }.Autoscale.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Validate_FlagsIncompleteOrInvalidAutoscaleBounds()
+    {
+        OpenStackProvisioningConfig onlyMin = ValidConfig();
+        onlyMin.WorkerPools = [new WorkerPool { Count = 3, Flavor = "b", MinCount = 2 }];
+        onlyMin.Validate().Should().Contain(e => e.Contains("min and a max"));
+
+        OpenStackProvisioningConfig maxLessThanMin = ValidConfig();
+        maxLessThanMin.WorkerPools = [new WorkerPool { Count = 3, Flavor = "b", MinCount = 5, MaxCount = 2 }];
+        maxLessThanMin.Validate().Should().Contain(e => e.Contains("min ≤ max"));
+    }
+
+    [Fact]
     public void TotalWorkerCount_SumsAllPools()
     {
         OpenStackProvisioningConfig config = ValidConfig();
@@ -190,5 +221,36 @@ public class OpenStackCatalogTests
             e.DefaultValues.Should().Contain("name: cloud-config");
             e.DefaultValues.Should().Contain("create: false");
         }
+    }
+
+    [Theory]
+    [InlineData("velero")]
+    [InlineData("cluster-autoscaler")]
+    public void Catalog_ContainsBaselineEntries_WithValidHelmCoords(string key)
+    {
+        CatalogEntry e = ComponentCatalog.GetByKey(key)!;
+        e.Should().NotBeNull();
+        e.HelmRepoUrl.Should().StartWith("http");
+        e.HelmChartName.Should().NotBeNullOrWhiteSpace();
+        e.HelmChartVersion.Should().NotBeNullOrWhiteSpace();
+        e.DefaultNamespace.Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Fact]
+    public void ClusterAutoscaler_UsesClusterApiProviderInCluster()
+    {
+        CatalogEntry e = ComponentCatalog.GetByKey("cluster-autoscaler")!;
+        e.DefaultValues.Should().Contain("cloudProvider: clusterapi");
+        e.DefaultValues.Should().Contain("clusterAPIMode: incluster-incluster");
+    }
+
+    [Fact]
+    public void ClusterAutoscaler_GrantsRbacForClusterApiResources()
+    {
+        // The clusterapi provider must read + scale MachineDeployments; the chart's default
+        // ClusterRole doesn't cover the CAPI group, so extra RBAC is appended.
+        CatalogEntry e = ComponentCatalog.GetByKey("cluster-autoscaler")!;
+        e.DefaultValues.Should().Contain("cluster.x-k8s.io");
+        e.DefaultValues.Should().Contain("machinedeployments/scale");
     }
 }

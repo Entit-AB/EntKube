@@ -36,8 +36,16 @@ public class MinioBucketInfo
 /// External providers are registered manually — the service stores metadata
 /// in StorageLink entities and credentials in the VaultSecret table.
 /// </summary>
-public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, IKubernetesClientFactory k8sFactory, StorageLinkClientFactory storageClientFactory)
+public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, IKubernetesClientFactory k8sFactory, StorageLinkClientFactory storageClientFactory, Microsoft.Extensions.Configuration.IConfiguration? configuration = null)
 {
+    // CubeFS service coordinates for in-cluster access, overridable per deployment via config
+    // (the CubeFS Helm chart's service names/ports can differ). Defaults match the chart's
+    // conventional master (client port 17010) and object-gateway (17410) services.
+    private string CubeFsMasterService => configuration?["CubeFS:MasterService"] ?? "master";
+    private int CubeFsMasterPort => int.TryParse(configuration?["CubeFS:MasterPort"], out int p) ? p : 17010;
+    private string CubeFsObjectNodeService => configuration?["CubeFS:ObjectNodeService"] ?? "objectnode";
+    private int CubeFsObjectNodePort => int.TryParse(configuration?["CubeFS:ObjectNodePort"], out int p) ? p : 17410;
+
     // ──────── Operator Status ────────
 
     /// <summary>
@@ -582,6 +590,117 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         }
 
         return link;
+    }
+
+    /// <summary>
+    /// Zero-touch backup target: mints a fresh CubeFS object-store user on the cluster's CubeFS
+    /// master, then provisions a bucket for it and registers a <see cref="StorageProvider.CubeFS"/>
+    /// storage link — all without any pre-existing credentials. This is what lets a freshly
+    /// provisioned cluster wire Velero to CubeFS with nothing supplied by the operator.
+    ///
+    /// The CubeFS master API is reached through the Kubernetes API-server service proxy (same
+    /// mechanism as the object gateway). The access/secret keys are generated here and passed to
+    /// the master so we know them regardless of the master's response shape; on a resumed run the
+    /// user already exists and its stored keys are read back via <c>/user/info</c>.
+    /// </summary>
+    public async Task<StorageLink> ProvisionCubeFSBackupTargetAsync(
+        Guid tenantId, Guid environmentId, Guid cubefsComponentId, string bucketName,
+        string? displayName = null, string? notes = null, CancellationToken ct = default)
+    {
+        ClusterComponent component;
+        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        {
+            component = await db.ClusterComponents
+                .Include(c => c.Cluster)
+                .FirstOrDefaultAsync(c => c.Id == cubefsComponentId && c.Cluster.TenantId == tenantId, ct)
+                ?? throw new InvalidOperationException("CubeFS component not found.");
+        }
+
+        string kubeconfig = component.Cluster.Kubeconfig
+            ?? throw new InvalidOperationException("CubeFS component's cluster has no kubeconfig.");
+        string ns = string.IsNullOrWhiteSpace(component.Namespace) ? "cubefs-system" : component.Namespace;
+        string endpoint = $"http://{CubeFsObjectNodeService}.{ns}.svc.cluster.local:{CubeFsObjectNodePort}";
+
+        // Mint (or read back) a dedicated object user for this backup target.
+        (string accessKey, string secretKey) = await MintCubeFSObjectUserAsync(
+            kubeconfig, ns, bucketName, CubeFsMasterService, CubeFsMasterPort, ct);
+
+        return await ProvisionCubeFSBucketAsync(
+            tenantId, environmentId, cubefsComponentId, endpoint, accessKey, secretKey, bucketName,
+            displayName ?? bucketName, notes, ct);
+    }
+
+    /// <summary>
+    /// Creates a CubeFS object-store user (or returns the existing one's keys) via the CubeFS
+    /// master API, proxied through the Kubernetes API server. CubeFS requires access keys to be
+    /// 16 chars and secret keys 32 chars; we generate compliant keys and pass them on create so
+    /// the caller always knows them. Idempotent: a "user already exists" response falls back to
+    /// <c>/user/info</c> to read the persisted keys.
+    /// </summary>
+    private static async Task<(string AccessKey, string SecretKey)> MintCubeFSObjectUserAsync(
+        string kubeconfig, string masterNamespace, string userId,
+        string masterService, int masterPort, CancellationToken ct)
+    {
+        using MemoryStream stream = new(Encoding.UTF8.GetBytes(kubeconfig));
+        KubernetesClientConfiguration cfg = KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
+        using Kubernetes k8s = new(cfg);
+        // The master client-facing service is reached via the K8s API-server service proxy.
+        string proxyBase =
+            $"{k8s.BaseUri.ToString().TrimEnd('/')}/api/v1/namespaces/{masterNamespace}/services/{masterService}:{masterPort}/proxy";
+
+        string accessKey = GenerateCubeFsKey(16);
+        string secretKey = GenerateCubeFsKey(32);
+
+        // type 3 = a normal (non-admin) object-store user.
+        string createBody = JsonSerializer.Serialize(new
+        {
+            id = userId,
+            type = 3,
+            access_key = accessKey,
+            secret_key = secretKey,
+        });
+
+        using HttpContent content = new StringContent(createBody, Encoding.UTF8, "application/json");
+        using HttpResponseMessage createResp = await k8s.HttpClient.PostAsync($"{proxyBase}/user/create", content, ct);
+        string createJson = await createResp.Content.ReadAsStringAsync(ct);
+
+        using JsonDocument createDoc = JsonDocument.Parse(createJson);
+        int code = createDoc.RootElement.TryGetProperty("code", out JsonElement codeEl) ? codeEl.GetInt32() : -1;
+
+        if (createResp.IsSuccessStatusCode && code == 0)
+        {
+            // Trust the keys we supplied (the response echoes them under data).
+            return (accessKey, secretKey);
+        }
+
+        // Already exists (or the master rejected our keys) — read the persisted user back.
+        using HttpResponseMessage infoResp = await k8s.HttpClient.GetAsync(
+            $"{proxyBase}/user/info?user={Uri.EscapeDataString(userId)}", ct);
+        string infoJson = await infoResp.Content.ReadAsStringAsync(ct);
+        using JsonDocument infoDoc = JsonDocument.Parse(infoJson);
+
+        if (infoResp.IsSuccessStatusCode
+            && infoDoc.RootElement.TryGetProperty("data", out JsonElement data)
+            && data.TryGetProperty("access_key", out JsonElement ak)
+            && data.TryGetProperty("secret_key", out JsonElement sk))
+        {
+            return (ak.GetString() ?? accessKey, sk.GetString() ?? secretKey);
+        }
+
+        throw new InvalidOperationException(
+            $"CubeFS user provisioning failed (create code {code}): {createJson.Trim()}");
+    }
+
+    private static readonly char[] CubeFsKeyAlphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".ToCharArray();
+
+    private static string GenerateCubeFsKey(int length)
+    {
+        char[] buffer = new char[length];
+        byte[] randomBytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(length);
+        for (int i = 0; i < length; i++)
+            buffer[i] = CubeFsKeyAlphabet[randomBytes[i] % CubeFsKeyAlphabet.Length];
+        return new string(buffer);
     }
 
     // ──────── Cleura S3 Bucket Management ────────

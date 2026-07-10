@@ -60,6 +60,31 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
         return blueprint;
     }
 
+    /// <summary>
+    /// One-shot authoring of a provisioning blueprint for the New Cluster wizard: creates the
+    /// blueprint, attaches the OpenStack provisioning config, and appends the chosen production
+    /// baseline components (in order). The result is an ordinary, reusable blueprint — launch it
+    /// with <see cref="StartProvisioningBootstrapAsync"/>. The CNI/CCM/Cinder steps are NOT added
+    /// here; the run auto-prepends them (see <see cref="CreateRunAsync"/>).
+    /// </summary>
+    public async Task<ClusterBlueprint> CreateProvisioningBlueprintAsync(
+        Guid tenantId, string name, OpenStackProvisioningConfig config,
+        IEnumerable<BaselineStep> baseline, CancellationToken ct = default)
+    {
+        IReadOnlyList<string> errors = config.Validate();
+        if (errors.Count > 0) throw new InvalidOperationException(string.Join("; ", errors));
+
+        ClusterBlueprint blueprint = await CreateBlueprintAsync(tenantId, name, null, ct);
+        await SetProvisioningAsync(blueprint.Id, "openstack", config, ct);
+        foreach (BaselineStep step in baseline)
+        {
+            await AddStepAsync(
+                blueprint.Id, BlueprintStepType.Component, step.CatalogKey,
+                step.ResolvedReleaseName, step.ResolvedNamespace, step.Parameters, ct);
+        }
+        return blueprint;
+    }
+
     public async Task UpdateBlueprintAsync(
         Guid blueprintId, string name, string? description, CancellationToken ct = default)
     {

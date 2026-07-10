@@ -3292,6 +3292,117 @@ public static class ComponentCatalog
                   csi: true
                 """,
             FormFields = []
+        },
+
+        // ── Backup ──
+
+        new CatalogEntry
+        {
+            Key = "velero",
+            DisplayName = "Velero (Cluster Backup)",
+            Description = "Cluster-wide backup and restore: snapshots Kubernetes resources (and, with the CSI plugin, persistent volumes) to an S3-compatible object store on a schedule. Pick an S3 storage link as the backup target and EntKube wires the bucket, endpoint and credentials automatically. On an EntKube-provisioned cluster with CubeFS, a backup bucket + user are auto-provisioned with nothing to fill in.",
+            Icon = "bi-archive",
+            Category = "Backup",
+            HelmRepoUrl = "https://vmware-tanzu.github.io/helm-charts",
+            HelmChartName = "velero",
+            HelmChartVersion = "8.1.0",
+            DefaultNamespace = "velero",
+            DefaultReleaseName = "velero",
+            InstallTimeout = "15m0s",
+            DetectionCrds = ["backupstoragelocations.velero.io"],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "storage-link", Label = "Backup Target (S3)",
+                    YamlPath = "velero:storage-link-id", Type = FormFieldType.StorageLink,
+                    HelpText = "S3-compatible bucket Velero backs up to. On a CubeFS-equipped cluster, leave empty to auto-provision a CubeFS bucket + user."
+                },
+                // Hidden secret — the AWS-plugin credentials INI, written by
+                // VeleroService.WriteStorageHelmValuesAsync and injected at install time
+                // via ComponentLifecycleService.InjectSecretsIntoValuesAsync.
+                new ComponentFormField
+                {
+                    Key = "velero-s3-credentials", Label = "S3 Credentials",
+                    YamlPath = "credentials.secretContents.cloud", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "velero-s3-credentials", Hidden = true
+                }
+            ],
+            DefaultValues = """
+                # Velero with the AWS plugin (works against any S3-compatible endpoint, e.g. a CubeFS
+                # object gateway). The backup storage location's bucket/endpoint/region and the
+                # credentials secret are filled in by EntKube from the chosen (or auto-provisioned)
+                # S3 storage link — see VeleroService.
+                initContainers:
+                  - name: velero-plugin-for-aws
+                    image: velero/velero-plugin-for-aws:v1.11.0
+                    imagePullPolicy: IfNotPresent
+                    volumeMounts:
+                      - mountPath: /target
+                        name: plugins
+                configuration:
+                  backupStorageLocation:
+                    - name: default
+                      provider: aws
+                      default: true
+                      config:
+                        s3ForcePathStyle: "true"
+                  volumeSnapshotLocation:
+                    - name: default
+                      provider: aws
+                      config: {}
+                credentials:
+                  useSecret: true
+                # Enable the CSI data mover / file-system backup for PVs.
+                deployNodeAgent: true
+                snapshotsEnabled: true
+                """
+        },
+
+        // ── Autoscaling ──
+
+        new CatalogEntry
+        {
+            Key = "cluster-autoscaler",
+            DisplayName = "Cluster Autoscaler (Nodes)",
+            Description = "Scales the number of worker nodes up and down based on pending/underused pods, driving the cluster's Cluster API MachineDeployments. Because EntKube-provisioned clusters pivot to self-managed (their CAPI resources live in-cluster), the autoscaler runs in-cluster in clusterapi mode. Per-pool bounds come from the min/max you set on each worker pool, applied as MachineDeployment annotations during provisioning.",
+            Icon = "bi-arrows-expand",
+            Category = "Autoscaling",
+            HelmRepoUrl = "https://kubernetes.github.io/autoscaler",
+            HelmChartName = "cluster-autoscaler",
+            HelmChartVersion = "9.43.2",
+            DefaultNamespace = "kube-system",
+            DefaultReleaseName = "cluster-autoscaler",
+            InstallTimeout = "15m0s",
+            DetectionResource = new DetectionResource("apps", "v1", "deployments", "cluster-autoscaler"),
+            DefaultValues = """
+                # Drive Cluster API MachineDeployments. The cluster is self-managed after the
+                # provisioning pivot, so both the CAPI resources and the workloads are in this
+                # same cluster (incluster-incluster). Node-group bounds are read from the
+                # MachineDeployment autoscaler annotations EntKube writes during provisioning.
+                cloudProvider: clusterapi
+                clusterAPIMode: incluster-incluster
+                extraArgs:
+                  balance-similar-node-groups: "true"
+                  skip-nodes-with-system-pods: "false"
+                  scale-down-unneeded-time: 10m
+                # The chart's default ClusterRole doesn't grant access to Cluster API resources,
+                # which the clusterapi provider must read and scale. Append those rules so the
+                # autoscaler can drive MachineDeployments (and their scale subresource).
+                rbac:
+                  create: true
+                  additionalRules:
+                    - apiGroups: ["cluster.x-k8s.io"]
+                      resources:
+                        - machinedeployments
+                        - machinedeployments/scale
+                        - machines
+                        - machinesets
+                        - machinepools
+                        - machinepools/scale
+                      verbs: ["get", "list", "update", "watch", "patch"]
+                """,
+            FormFields = []
         }
     ];
 

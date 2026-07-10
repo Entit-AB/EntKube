@@ -25,6 +25,7 @@ public class CatalogComponentRegistrar(
     LokiService lokiService,
     MimirService mimirService,
     TempoService tempoService,
+    VeleroService veleroService,
     ExternalRouteService routeService)
 {
     /// <summary>
@@ -92,6 +93,7 @@ public class CatalogComponentRegistrar(
         await SaveLokiConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveMimirConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveTempoConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
+        await SaveVeleroConfigIfNeededAsync(tenantId, component.Id, formValues, entry, ct);
 
         return component;
     }
@@ -128,7 +130,8 @@ public class CatalogComponentRegistrar(
 
             if (field.YamlPath.StartsWith("cnpg:", StringComparison.Ordinal)
                 || field.YamlPath.StartsWith("harbor:", StringComparison.Ordinal)
-                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal))
+                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal)
+                || field.YamlPath.StartsWith("velero:", StringComparison.Ordinal))
             {
                 continue;
             }
@@ -319,6 +322,17 @@ public class CatalogComponentRegistrar(
         {
             await tempoService.WriteStorageHelmValuesAsync(tenantId, componentId, storageLinkId);
         }
+    }
+
+    private async Task SaveVeleroConfigIfNeededAsync(
+        Guid tenantId, Guid componentId, IReadOnlyDictionary<string, string> fieldValues, CatalogEntry catalogEntry,
+        CancellationToken ct)
+    {
+        if (catalogEntry.Key != "velero") return;
+        // An explicit storage link wires directly; otherwise Velero auto-provisions a CubeFS
+        // backup target from a CubeFS component installed earlier in the same run.
+        Guid? explicitLink = TryGetStorageLink(fieldValues, out Guid slId) ? slId : null;
+        await veleroService.ConfigureFromRegistrationAsync(tenantId, componentId, explicitLink, ct);
     }
 
     private static bool TryGetStorageLink(IReadOnlyDictionary<string, string> fieldValues, out Guid storageLinkId)

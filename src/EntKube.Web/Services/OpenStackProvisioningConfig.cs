@@ -14,6 +14,20 @@ public sealed class WorkerPool
 
     /// <summary>OpenStack flavor name for the workers in this pool (e.g. "b.4c8gb").</summary>
     public string Flavor { get; set; } = "";
+
+    /// <summary>
+    /// When set (together with <see cref="MaxCount"/>), the pool's MachineDeployment is annotated
+    /// for cluster-autoscaler so node count scales between <see cref="MinCount"/>..<see cref="MaxCount"/>.
+    /// Null on both means a fixed-size pool (no autoscaling).
+    /// </summary>
+    public int? MinCount { get; set; }
+
+    /// <summary>Upper bound of nodes when autoscaling is enabled (see <see cref="MinCount"/>).</summary>
+    public int? MaxCount { get; set; }
+
+    /// <summary>True when this pool is configured to autoscale (both bounds set and Max ≥ Min ≥ 0).</summary>
+    [JsonIgnore]
+    public bool Autoscale => MinCount is int min && MaxCount is int max && min >= 0 && max >= min && max > 0;
 }
 
 /// <summary>
@@ -107,6 +121,13 @@ public sealed class OpenStackProvisioningConfig
         if (ControlPlaneCount < 1) errors.Add("At least one control-plane node is required.");
         if (WorkerPools.Count == 0) errors.Add("At least one worker pool is required.");
         if (WorkerPools.Any(p => string.IsNullOrWhiteSpace(p.Flavor))) errors.Add("Every worker pool needs a flavor.");
+        foreach (WorkerPool p in WorkerPools.Where(p => p.MinCount is not null || p.MaxCount is not null))
+        {
+            if (p.MinCount is null || p.MaxCount is null)
+                errors.Add($"Worker pool '{p.Name}': autoscaling needs both a min and a max node count.");
+            else if (p.MinCount < 0 || p.MaxCount < p.MinCount || p.MaxCount < 1)
+                errors.Add($"Worker pool '{p.Name}': autoscale bounds must satisfy 0 ≤ min ≤ max and max ≥ 1.");
+        }
         if (string.IsNullOrWhiteSpace(ExternalNetworkId)) errors.Add("External network ID is required.");
         if (string.IsNullOrWhiteSpace(BootstrapImageName)) errors.Add("Bootstrap VM image name is required.");
         if (string.IsNullOrWhiteSpace(BootstrapFlavor)) errors.Add("Bootstrap VM flavor is required.");
