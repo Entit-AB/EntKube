@@ -3582,6 +3582,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(30)
                         .HasColumnType("nvarchar(30)");
 
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("datetime2");
 
@@ -3591,7 +3594,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasKey("Id");
 
-                    b.HasIndex("ProviderType")
+                    b.HasIndex("TenantId", "ProviderType")
                         .IsUnique();
 
                     b.ToTable("NotificationProviderConfigs");
@@ -6354,6 +6357,17 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Channel");
 
                     b.Navigation("Incident");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.NotificationProviderConfig", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OnCallSchedule", b =>

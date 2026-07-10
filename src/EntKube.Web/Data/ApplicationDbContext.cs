@@ -2043,9 +2043,14 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
         builder.Entity<NotificationProviderConfig>(entity =>
         {
             entity.HasKey(c => c.Id);
-            entity.HasIndex(c => c.ProviderType).IsUnique();
+            entity.HasIndex(c => new { c.TenantId, c.ProviderType }).IsUnique();
             entity.Property(c => c.ProviderType).HasConversion<string>().HasMaxLength(30);
             entity.Property(c => c.UpdatedByUserId).HasMaxLength(450);
+
+            entity.HasOne(c => c.Tenant)
+                .WithMany()
+                .HasForeignKey(c => c.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         // ClusterServer — inventory record for physical/VM nodes behind a K8s cluster.

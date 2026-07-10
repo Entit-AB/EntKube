@@ -3580,6 +3580,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(30)
                         .HasColumnType("character varying(30)");
 
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -3589,7 +3592,7 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.HasKey("Id");
 
-                    b.HasIndex("ProviderType")
+                    b.HasIndex("TenantId", "ProviderType")
                         .IsUnique();
 
                     b.ToTable("NotificationProviderConfigs");
@@ -6350,6 +6353,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Channel");
 
                     b.Navigation("Incident");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.NotificationProviderConfig", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OnCallSchedule", b =>
