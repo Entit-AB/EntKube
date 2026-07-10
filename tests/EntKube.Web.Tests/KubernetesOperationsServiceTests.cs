@@ -185,17 +185,17 @@ public class KubernetesOperationsServiceTests : IDisposable
     }
 
     // ════════════════════════════════════════════════════════════════
-    //  GetPodLogsAsync
+    //  GetPodLogEntriesAsync
     // ════════════════════════════════════════════════════════════════
 
     [Fact]
-    public async Task GetPodLogsAsync_WithoutKubeconfig_ReturnsError()
+    public async Task GetPodLogEntriesAsync_WithoutKubeconfig_ReturnsError()
     {
         // Arrange
         (AppDeployment deployment, _) = CreateDeploymentWithCluster();
 
         // Act
-        KubernetesOperationResult<string> result = await sut.GetPodLogsAsync(
+        KubernetesOperationResult<List<LokiLogEntry>> result = await sut.GetPodLogEntriesAsync(
             deployment.Id, "billing-api-abc123");
 
         // Assert

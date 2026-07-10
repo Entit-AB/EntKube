@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using EntKube.Web.Data;
@@ -323,11 +324,13 @@ public class KubernetesOperationsService(
     }
 
     /// <summary>
-    /// Retrieves log output from a specific pod. Optionally targets a
-    /// specific container in multi-container pods. Returns the last
-    /// tailLines lines to keep output manageable.
+    /// Retrieves the last <paramref name="tailLines"/> log lines from a specific pod as
+    /// structured entries — each line carries the Kubernetes-emitted timestamp and a
+    /// heuristic severity, so live pod logs can be merged with ingested telemetry in a
+    /// single timeline and filtered by level/time. Optionally targets a specific container
+    /// in multi-container pods.
     /// </summary>
-    public async Task<KubernetesOperationResult<string>> GetPodLogsAsync(
+    public async Task<KubernetesOperationResult<List<LokiLogEntry>>> GetPodLogEntriesAsync(
         Guid deploymentId,
         string podName,
         string? containerName = null,
@@ -338,12 +341,12 @@ public class KubernetesOperationsService(
 
         if (deployment is null)
         {
-            return KubernetesOperationResult<string>.Failure("Deployment not found.");
+            return KubernetesOperationResult<List<LokiLogEntry>>.Failure("Deployment not found.");
         }
 
         if (string.IsNullOrEmpty(deployment.Cluster.Kubeconfig))
         {
-            return KubernetesOperationResult<string>.Failure(
+            return KubernetesOperationResult<List<LokiLogEntry>>.Failure(
                 "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
         }
 
@@ -351,23 +354,65 @@ public class KubernetesOperationsService(
         {
             using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
 
-            // Fetch the last N lines of logs from the pod.
+            // timestamps:true prefixes every line with an RFC3339Nano timestamp + space,
+            // which we parse out so the modal can order pod logs against ingested logs.
             using Stream logStream = await client.CoreV1.ReadNamespacedPodLogAsync(
                 podName,
                 deployment.Namespace,
                 container: containerName,
                 tailLines: tailLines,
+                timestamps: true,
                 cancellationToken: ct);
 
             using StreamReader reader = new(logStream);
-            string logs = await reader.ReadToEndAsync(ct);
+            string raw = await reader.ReadToEndAsync(ct);
 
-            return KubernetesOperationResult<string>.Success(logs);
+            List<LokiLogEntry> entries = ParsePodLogLines(raw);
+            return KubernetesOperationResult<List<LokiLogEntry>>.Success(entries);
         }
         catch (Exception ex)
         {
-            return KubernetesOperationResult<string>.Failure($"Failed to fetch logs: {ex.Message}");
+            return KubernetesOperationResult<List<LokiLogEntry>>.Failure($"Failed to fetch logs: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Splits raw <c>kubectl logs --timestamps</c> output into structured entries, parsing the
+    /// leading RFC3339Nano timestamp off each line and detecting a severity from the remainder.
+    /// Lines without a parseable timestamp keep the previous line's time (multi-line stack traces).
+    /// </summary>
+    private static List<LokiLogEntry> ParsePodLogLines(string raw)
+    {
+        List<LokiLogEntry> entries = [];
+        if (string.IsNullOrEmpty(raw)) return entries;
+
+        DateTime lastTs = DateTime.UtcNow;
+        foreach (string rawLine in raw.Split('\n'))
+        {
+            string line = rawLine.TrimEnd('\r');
+            if (line.Length == 0) continue;
+
+            string text = line;
+            DateTime ts = lastTs;
+            int sp = line.IndexOf(' ');
+            if (sp > 0 && DateTime.TryParse(
+                    line[..sp], CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out DateTime parsed))
+            {
+                ts = parsed;
+                lastTs = parsed;
+                text = line[(sp + 1)..];
+            }
+
+            entries.Add(new LokiLogEntry
+            {
+                Timestamp = ts,
+                Line = text,
+                DetectedLevel = LogLevelMap.FromLine(text)
+            });
+        }
+
+        return entries;
     }
 
     /// <summary>
