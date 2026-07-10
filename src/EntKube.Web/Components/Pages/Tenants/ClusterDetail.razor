@@ -1542,6 +1542,9 @@ else if (section == "components")
     [Parameter] public bool ShowBackLink { get; set; } = true;
     [Parameter] public EventCallback OnDeleted { get; set; }
 
+    /// <summary>Tab to open on first render (e.g. "bootstrap" when deep-linked from the New Cluster wizard).</summary>
+    [Parameter] public string? InitialTab { get; set; }
+
     private string section = "monitoring";
     private bool confirmDelete;
 
@@ -1632,6 +1635,10 @@ else if (section == "components")
 
     protected override async Task OnInitializedAsync()
     {
+        if (!string.IsNullOrWhiteSpace(InitialTab))
+        {
+            section = InitialTab;
+        }
         await LoadComponents();
     }
 

@@ -1,0 +1,443 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.AspNetCore.Components.Authorization
+@inject ClusterBlueprintService BlueprintService
+@inject StorageService StorageService
+@inject TenantService TenantService
+@inject ToastService Toasts
+@inject NavigationManager Nav
+@inject AuthenticationStateProvider AuthStateProvider
+
+@* Guided 0 → production journey. Provision a new cluster on OpenStack (Cluster API + CAPO) and
+   pick a production baseline, or register an existing cluster. Authors a reusable blueprint and
+   launches a provisioning bootstrap, then hands off to the cluster's live Bootstrap panel. *@
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+    <div>
+        <h4 class="mb-0"><i class="bi bi-hexagon-fill me-2"></i>New cluster</h4>
+        <small class="text-muted">From zero to a production-ready Kubernetes cluster.</small>
+    </div>
+</div>
+
+@* Step indicator (provision path) *@
+@if (mode == Mode.Provision)
+{
+    <div class="d-flex flex-wrap gap-2 mb-3">
+        @foreach ((Step s, string label, int n) in ProvisionSteps)
+        {
+            <span class="badge rounded-pill @(step == Step.Done && s == Step.Review ? "bg-success" : step >= s ? "bg-primary" : "bg-secondary")">
+                @n. @label
+            </span>
+        }
+    </div>
+}
+
+@if (error is not null)
+{
+    <div class="alert alert-danger py-2"><i class="bi bi-exclamation-triangle me-1"></i>@error</div>
+}
+
+<div class="card">
+    <div class="card-body">
+
+        @* ── Step: Target ── *@
+        @if (step == Step.Target)
+        {
+            <p class="text-muted">How do you want to add this cluster?</p>
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <button class="btn btn-outline-primary w-100 h-100 text-start p-3" @onclick="ChooseProvision">
+                        <div class="fs-5 mb-1"><i class="bi bi-cloud-arrow-up me-2"></i>Provision on OpenStack</div>
+                        <div class="small text-muted">
+                            Stand up a brand-new cluster from your OpenStack credentials (Cluster API + CAPO),
+                            then install a production baseline. From nothing to running nodes.
+                        </div>
+                    </button>
+                </div>
+                <div class="col-md-6">
+                    <button class="btn btn-outline-secondary w-100 h-100 text-start p-3" @onclick="() => { mode = Mode.Register; step = Step.RegisterExisting; }">
+                        <div class="fs-5 mb-1"><i class="bi bi-link-45deg me-2"></i>Register existing cluster</div>
+                        <div class="small text-muted">
+                            Already have a cluster? Add it by kubeconfig and manage it here. You can bootstrap
+                            a blueprint onto it afterwards.
+                        </div>
+                    </button>
+                </div>
+            </div>
+        }
+
+        @* ── Step: Cloud & environment ── *@
+        else if (step == Step.Cloud)
+        {
+            <h6 class="mb-3">Cloud &amp; environment</h6>
+
+            <div class="row g-2 mb-2">
+                <div class="col-md-6">
+                    <label class="form-label small mb-0">OpenStack connection</label>
+                    <div class="input-group input-group-sm">
+                        <select class="form-select" @bind="config.OpenStackConnectionId">
+                            <option value="@Guid.Empty">— select a connection —</option>
+                            @foreach (OpenStackConnection c in connections)
+                            {
+                                <option value="@c.Id">@c.Name</option>
+                            }
+                        </select>
+                        <button class="btn btn-outline-secondary" @onclick="() => showAddConnection = !showAddConnection">
+                            <i class="bi bi-plus-lg"></i> Add
+                        </button>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label small mb-0">Environment</label>
+                    <select class="form-select form-select-sm" @bind="environmentId">
+                        <option value="@Guid.Empty">— select an environment —</option>
+                        @foreach (Data.Environment env in environments)
+                        {
+                            <option value="@env.Id">@env.Name</option>
+                        }
+                    </select>
+                </div>
+            </div>
+
+            @if (showAddConnection)
+            {
+                <div class="border rounded p-2 mb-2 bg-body-tertiary">
+                    <div class="small text-muted mb-2">New OpenStack connection (password is stored in the vault)</div>
+                    <div class="row g-2">
+                        <div class="col-md-4"><input class="form-control form-control-sm" placeholder="Name" @bind="cxName" /></div>
+                        <div class="col-md-8"><input class="form-control form-control-sm" placeholder="Auth URL (Keystone v3)" @bind="cxAuthUrl" /></div>
+                        <div class="col-md-3"><input class="form-control form-control-sm" placeholder="Region" @bind="cxRegion" /></div>
+                        <div class="col-md-3"><input class="form-control form-control-sm" placeholder="Project name" @bind="cxProjectName" /></div>
+                        <div class="col-md-3"><input class="form-control form-control-sm" placeholder="User domain" @bind="cxUserDomain" /></div>
+                        <div class="col-md-3"><input class="form-control form-control-sm" placeholder="Project domain" @bind="cxProjectDomain" /></div>
+                        <div class="col-md-6"><input class="form-control form-control-sm" placeholder="Username" @bind="cxUsername" /></div>
+                        <div class="col-md-6"><input type="password" class="form-control form-control-sm" placeholder="Password" @bind="cxPassword" /></div>
+                    </div>
+                    <div class="mt-2">
+                        <button class="btn btn-sm btn-primary" disabled="@busy" @onclick="AddConnection">Save connection</button>
+                    </div>
+                </div>
+            }
+        }
+
+        @* ── Step: Sizing ── *@
+        else if (step == Step.Sizing)
+        {
+            <h6 class="mb-3">Cluster sizing</h6>
+            <ProvisioningConfigForm Config="config" ShowConnection="false" />
+        }
+
+        @* ── Step: Baseline ── *@
+        else if (step == Step.Baseline)
+        {
+            <h6 class="mb-1">Production baseline</h6>
+            <p class="text-muted small">
+                Installed after provisioning. The CNI, cloud-controller-manager and Cinder CSI
+                (default StorageClass) are always included.
+            </p>
+            <div class="list-group">
+                @foreach (BaselineCapability cap in ProductionBaseline.Capabilities)
+                {
+                    bool disabled = cap.RequiresStorage && !selectedBaseline.Contains("storage");
+                    <label class="list-group-item d-flex gap-2 @(disabled ? "opacity-50" : "")">
+                        <input class="form-check-input flex-shrink-0" type="checkbox"
+                               checked="@selectedBaseline.Contains(cap.Key)" disabled="@disabled"
+                               @onchange="e => ToggleBaseline(cap, e.Value is true)" />
+                        <span>
+                            <span class="fw-semibold"><i class="bi @cap.Icon me-1"></i>@cap.Label</span>
+                            <span class="d-block small text-muted">@cap.Description</span>
+                            @if (cap.RequiresStorage && disabled)
+                            {
+                                <span class="d-block small text-warning">Needs the storage baseline for its backup target.</span>
+                            }
+                            @if (cap.Key == ProductionBaseline.NodeAutoscalingKey && selectedBaseline.Contains(cap.Key) && !AnyPoolAutoscales)
+                            {
+                                <span class="d-block small text-warning">
+                                    Enable “Autoscale this pool” in the sizing step so the autoscaler has bounds to work with.
+                                </span>
+                            }
+                        </span>
+                    </label>
+                }
+            </div>
+        }
+
+        @* ── Step: Review ── *@
+        else if (step == Step.Review)
+        {
+            <h6 class="mb-3">Review &amp; launch</h6>
+            <dl class="row mb-0 small">
+                <dt class="col-sm-3">Cluster</dt><dd class="col-sm-9">@config.ClusterName (@config.KubernetesVersion)</dd>
+                <dt class="col-sm-3">Connection</dt><dd class="col-sm-9">@(connections.FirstOrDefault(c => c.Id == config.OpenStackConnectionId)?.Name ?? "—")</dd>
+                <dt class="col-sm-3">Environment</dt><dd class="col-sm-9">@(environments.FirstOrDefault(e => e.Id == environmentId)?.Name ?? "—")</dd>
+                <dt class="col-sm-3">Control plane</dt><dd class="col-sm-9">@config.ControlPlaneCount × @config.ControlPlaneFlavor</dd>
+                <dt class="col-sm-3">Workers</dt>
+                <dd class="col-sm-9">
+                    @foreach (WorkerPool p in config.WorkerPools)
+                    {
+                        <div>@p.Count × @p.Flavor @(p.Autoscale ? $"(autoscale {p.MinCount}–{p.MaxCount})" : "")</div>
+                    }
+                </dd>
+                <dt class="col-sm-3">Baseline</dt>
+                <dd class="col-sm-9">
+                    <span class="text-muted">CNI, cloud-controller-manager, Cinder CSI</span>
+                    @foreach (BaselineCapability cap in ProductionBaseline.Capabilities.Where(c => selectedBaseline.Contains(c.Key)))
+                    {
+                        <span class="badge bg-primary-subtle text-primary-emphasis ms-1">@cap.Label</span>
+                    }
+                </dd>
+            </dl>
+            <div class="alert alert-info py-2 mt-3 mb-0 small">
+                A reusable blueprint <strong>@BlueprintName</strong> will be created, a placeholder cluster added,
+                and provisioning queued. You'll land on the cluster's Bootstrap tab to watch live progress.
+            </div>
+        }
+
+        @* ── Register existing ── *@
+        else if (step == Step.RegisterExisting)
+        {
+            <h6 class="mb-3">Register an existing cluster</h6>
+            <div class="row g-2">
+                <div class="col-md-6">
+                    <label class="form-label small mb-0">Cluster name</label>
+                    <input class="form-control form-control-sm" @bind="regName" />
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label small mb-0">Environment</label>
+                    <select class="form-select form-select-sm" @bind="environmentId">
+                        <option value="@Guid.Empty">— select an environment —</option>
+                        @foreach (Data.Environment env in environments)
+                        {
+                            <option value="@env.Id">@env.Name</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-md-12">
+                    <label class="form-label small mb-0">API server URL</label>
+                    <input class="form-control form-control-sm" placeholder="https://…:6443" @bind="regApiUrl" />
+                </div>
+                <div class="col-md-12">
+                    <label class="form-label small mb-0">Kubeconfig (optional — stored encrypted in the vault)</label>
+                    <textarea class="form-control form-control-sm font-monospace" rows="8" @bind="regKubeconfig"></textarea>
+                </div>
+            </div>
+        }
+
+        @* ── Done ── *@
+        else if (step == Step.Done)
+        {
+            <div class="text-center py-4">
+                <div class="fs-1 text-success mb-2"><i class="bi bi-check-circle-fill"></i></div>
+                <h5>@doneMessage</h5>
+            </div>
+        }
+    </div>
+
+    @* ── Footer ── *@
+    @if (step != Step.Done)
+    {
+        <div class="card-footer d-flex justify-content-between">
+            <button class="btn btn-sm btn-outline-secondary" disabled="@(busy || step == Step.Target)" @onclick="Back">
+                <i class="bi bi-arrow-left me-1"></i>Back
+            </button>
+            <div>
+                @if (step == Step.Cloud || step == Step.Sizing)
+                {
+                    <button class="btn btn-sm btn-primary" @onclick="Next">Next<i class="bi bi-arrow-right ms-1"></i></button>
+                }
+                else if (step == Step.Baseline)
+                {
+                    <button class="btn btn-sm btn-primary" @onclick="() => step = Step.Review">Review<i class="bi bi-arrow-right ms-1"></i></button>
+                }
+                else if (step == Step.Review)
+                {
+                    <button class="btn btn-sm btn-success" disabled="@busy" @onclick="Launch">
+                        @if (busy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        <i class="bi bi-rocket-takeoff me-1"></i>Provision &amp; bootstrap
+                    </button>
+                }
+                else if (step == Step.RegisterExisting)
+                {
+                    <button class="btn btn-sm btn-primary" disabled="@busy" @onclick="RegisterExisting">
+                        @if (busy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Register cluster
+                    </button>
+                }
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter] public string? TenantSlug { get; set; }
+    [Parameter] public Guid? InitialEnvironmentId { get; set; }
+
+    private enum Mode { Provision, Register }
+    private enum Step { Target, Cloud, Sizing, Baseline, Review, RegisterExisting, Done }
+
+    private Mode mode = Mode.Provision;
+    private Step step = Step.Target;
+    private bool busy;
+    private string? error;
+    private string? doneMessage;
+
+    private List<Data.Environment> environments = [];
+    private List<OpenStackConnection> connections = [];
+    private Guid environmentId;
+
+    private OpenStackProvisioningConfig config = new() { WorkerPools = [new WorkerPool()] };
+    private readonly HashSet<string> selectedBaseline = new(ProductionBaseline.DefaultSelectedKeys, StringComparer.OrdinalIgnoreCase);
+
+    // Inline connection add
+    private bool showAddConnection;
+    private string cxName = "", cxAuthUrl = "", cxRegion = "", cxProjectName = "", cxUserDomain = "Default", cxProjectDomain = "Default", cxUsername = "", cxPassword = "";
+
+    // Register existing
+    private string regName = "", regApiUrl = "", regKubeconfig = "";
+
+    private static readonly (Step, string, int)[] ProvisionSteps =
+    [
+        (Step.Cloud, "Cloud", 1), (Step.Sizing, "Sizing", 2),
+        (Step.Baseline, "Baseline", 3), (Step.Review, "Review", 4),
+    ];
+
+    private bool AnyPoolAutoscales => config.WorkerPools.Any(p => p.Autoscale);
+    private string BlueprintName => $"{(string.IsNullOrWhiteSpace(config.ClusterName) ? "cluster" : config.ClusterName)}-baseline";
+
+    protected override async Task OnInitializedAsync()
+    {
+        environments = await TenantService.GetEnvironmentsAsync(TenantId);
+        connections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+        if (InitialEnvironmentId is Guid env && env != Guid.Empty) environmentId = env;
+    }
+
+    private void ChooseProvision()
+    {
+        mode = Mode.Provision;
+        step = Step.Cloud;
+    }
+
+    private void ToggleBaseline(BaselineCapability cap, bool on)
+    {
+        if (on) selectedBaseline.Add(cap.Key);
+        else
+        {
+            selectedBaseline.Remove(cap.Key);
+            // Dropping storage invalidates capabilities that depend on it.
+            if (cap.Key == "storage")
+            {
+                foreach (BaselineCapability dep in ProductionBaseline.Capabilities.Where(c => c.RequiresStorage))
+                    selectedBaseline.Remove(dep.Key);
+            }
+        }
+    }
+
+    private void Back()
+    {
+        error = null;
+        step = step switch
+        {
+            Step.Cloud => Step.Target,
+            Step.Sizing => Step.Cloud,
+            Step.Baseline => Step.Sizing,
+            Step.Review => Step.Baseline,
+            Step.RegisterExisting => Step.Target,
+            _ => Step.Target
+        };
+        if (step == Step.Target) mode = Mode.Provision;
+    }
+
+    private void Next()
+    {
+        error = null;
+        if (step == Step.Cloud)
+        {
+            if (config.OpenStackConnectionId == Guid.Empty) { error = "Select an OpenStack connection."; return; }
+            if (environmentId == Guid.Empty) { error = "Select an environment."; return; }
+            step = Step.Sizing;
+        }
+        else if (step == Step.Sizing)
+        {
+            IReadOnlyList<string> errs = config.Validate();
+            if (errs.Count > 0) { error = string.Join(" ", errs); return; }
+            step = Step.Baseline;
+        }
+    }
+
+    private async Task AddConnection()
+    {
+        error = null;
+        if (string.IsNullOrWhiteSpace(cxName) || string.IsNullOrWhiteSpace(cxAuthUrl))
+        {
+            error = "Connection name and auth URL are required.";
+            return;
+        }
+        busy = true;
+        try
+        {
+            OpenStackConnection c = await StorageService.CreateOpenStackConnectionAsync(
+                TenantId, cxName.Trim(), cxAuthUrl.Trim(), NullIfBlank(cxRegion),
+                NullIfBlank(cxProjectName), null, NullIfBlank(cxUserDomain), NullIfBlank(cxProjectDomain),
+                NullIfBlank(cxUsername), NullIfBlank(cxPassword));
+            connections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+            config.OpenStackConnectionId = c.Id;
+            showAddConnection = false;
+            Toasts.Success($"Added connection \"{c.Name}\".");
+        }
+        catch (Exception ex) { error = $"Could not add connection: {ex.Message}"; }
+        finally { busy = false; }
+    }
+
+    private async Task Launch()
+    {
+        error = null;
+        busy = true;
+        try
+        {
+            IReadOnlyList<BaselineStep> steps = ProductionBaseline.BuildSteps(selectedBaseline);
+            ClusterBlueprint bp = await BlueprintService.CreateProvisioningBlueprintAsync(
+                TenantId, BlueprintName, config, steps);
+            BootstrapRun run = await BlueprintService.StartProvisioningBootstrapAsync(
+                TenantId, environmentId, bp.Id, overrides: null, triggeredBy: "new-cluster-wizard");
+
+            Toasts.Success("Cluster provisioning queued.");
+            GoToCluster(run.ClusterId, $"Provisioning {config.ClusterName} — opening live progress…", tab: "bootstrap");
+        }
+        catch (Exception ex) { error = $"Could not start provisioning: {ex.Message}"; busy = false; }
+    }
+
+    private async Task RegisterExisting()
+    {
+        error = null;
+        if (string.IsNullOrWhiteSpace(regName)) { error = "Cluster name is required."; return; }
+        if (environmentId == Guid.Empty) { error = "Select an environment."; return; }
+        if (string.IsNullOrWhiteSpace(regApiUrl)) { error = "API server URL is required."; return; }
+        busy = true;
+        try
+        {
+            AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
+            KubernetesCluster cluster = await TenantService.CreateClusterAsync(
+                TenantId, environmentId, regName.Trim(), regApiUrl.Trim(),
+                kubeconfig: NullIfBlank(regKubeconfig), updatedBy: authState.User.Identity?.Name);
+            Toasts.Success($"Registered cluster \"{cluster.Name}\".");
+            GoToCluster(cluster.Id, $"Registered {cluster.Name}.");
+        }
+        catch (Exception ex) { error = $"Could not register cluster: {ex.Message}"; busy = false; }
+    }
+
+    private void GoToCluster(Guid clusterId, string message, string? tab = null)
+    {
+        doneMessage = message;
+        step = Step.Done;
+        string basePath = string.IsNullOrWhiteSpace(TenantSlug) ? "" : $"tenants/{TenantSlug}";
+        if (basePath.Length > 0)
+        {
+            // Full reload so the explorer re-queries clusters and the new placeholder resolves.
+            string tabQuery = string.IsNullOrWhiteSpace(tab) ? "" : $"&tab={tab}";
+            Nav.NavigateTo($"{basePath}?cluster={clusterId}{tabQuery}", forceLoad: true);
+        }
+    }
+
+    private static string? NullIfBlank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+}

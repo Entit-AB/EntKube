@@ -21,6 +21,7 @@ public class ComponentInstallOrchestrator(
     ComponentLifecycleService lifecycleService,
     KeycloakService keycloakService,
     HarborService harborService,
+    VeleroService veleroService,
     HeadscaleService headscaleService)
 {
     /// <summary>
@@ -43,6 +44,8 @@ public class ComponentInstallOrchestrator(
         await keycloakService.FixRealmUrlsIfConfiguredAsync(tenantId, componentId);
         // Refresh Harbor CNPG + S3 credentials in Helm values before install/upgrade.
         await harborService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId);
+        // Refresh Velero's S3 backup-target values + credentials before install/upgrade.
+        await veleroService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId, ct);
 
         HelmCommand command = await lifecycleService.GetInstallCommandAsync(componentId, ct);
 

@@ -284,6 +284,7 @@ public class Program
         builder.Services.AddScoped<LokiService>();
         builder.Services.AddScoped<MimirService>();
         builder.Services.AddScoped<TempoService>();
+        builder.Services.AddScoped<VeleroService>();
         builder.Services.AddScoped<BackupService>();
         builder.Services.AddScoped<VpnService>();
         builder.Services.AddScoped<KyvernoPolicyService>();

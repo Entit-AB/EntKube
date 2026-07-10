@@ -142,12 +142,22 @@ else
                         @* Clusters under this environment *@
                         <div class="tree-subhead indent-2">
                             <span class="tree-sub">Clusters</span>
-                            <button type="button" class="tree-add" title="Register cluster in @env.Name" aria-label="Register cluster"
+                            <button type="button" class="tree-add" title="New cluster in @env.Name" aria-label="New cluster"
                                     @onclick="() => RegisterClusterInEnv(env.Id)"><i class="bi bi-plus-lg"></i></button>
                         </div>
                         @if (VisibleClustersInEnv(env).Count == 0)
                         {
-                            <div class="tree-empty" style="padding-left:2.3rem">@(HasFilter ? "—" : "No clusters")</div>
+                            @if (HasFilter)
+                            {
+                                <div class="tree-empty" style="padding-left:2.3rem">—</div>
+                            }
+                            else
+                            {
+                                <button type="button" class="tree-empty btn btn-link btn-sm text-decoration-none p-0" style="padding-left:2.3rem !important"
+                                        @onclick="() => RegisterClusterInEnv(env.Id)">
+                                    <i class="bi bi-plus-circle me-1"></i>New cluster
+                                </button>
+                            }
                         }
                         @foreach (KubernetesCluster cl in VisibleClustersInEnv(env))
                         {
@@ -221,6 +231,7 @@ else
             else if (selectedCluster is not null)
             {
                 <ClusterDetail Cluster="selectedCluster" TenantId="tenant.Id" ShowBackLink="false"
+                               InitialTab="@TabParam"
                                OnBack="ClearSelection" OnDeleted="OnClusterDeleted" @key="selectedCluster.Id" />
             }
             else if (selectedSection is not null)
@@ -246,6 +257,7 @@ else
     [SupplyParameterFromQuery(Name = "section")] private string? SectionParam { get; set; }
     [SupplyParameterFromQuery(Name = "env")] private Guid? EnvParam { get; set; }
     [SupplyParameterFromQuery(Name = "incident")] private Guid? IncidentParam { get; set; }
+    [SupplyParameterFromQuery(Name = "tab")] private string? TabParam { get; set; }
 
     private sealed record SectionItem(string Key, string Label, string Icon);
     private sealed record TreeGroup(string Name, string Icon, SectionItem[] Items);
@@ -546,8 +558,8 @@ else
     {
         registerEnvId = envId;
         selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedServiceEnvId = null;
-        selectedSection = "environments";
-        UpdateUrl(app: null, cluster: null, section: "environments", env: null);
+        selectedSection = "new-cluster";
+        UpdateUrl(app: null, cluster: null, section: "new-cluster", env: envId);
     }
     private void ClearSelection()
     {
@@ -607,6 +619,13 @@ else
             case "groups": builder.OpenComponent<GroupTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "networking": builder.OpenComponent<NetworkingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "blueprints": builder.OpenComponent<BlueprintsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "new-cluster":
+                builder.OpenComponent<NewClusterWizard>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.AddComponentParameter(2, "TenantSlug", tenant!.Slug);
+                builder.AddComponentParameter(3, "InitialEnvironmentId", EnvParam);
+                builder.CloseComponent();
+                break;
             case "databases": OpenEnvScoped<DatabaseTab>(builder, tid); break;
             case "cache": OpenEnvScoped<CacheTab>(builder, tid); break;
             case "messaging": OpenEnvScoped<MessagingTab>(builder, tid); break;
