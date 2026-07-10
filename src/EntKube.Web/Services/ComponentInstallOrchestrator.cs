@@ -35,6 +35,7 @@ public class ComponentInstallOrchestrator(
     KeycloakService keycloakService,
     HarborService harborService,
     OpenLdapService openLdapService,
+    Dr.VeleroService veleroService,
     HeadscaleService headscaleService)
 {
     /// <summary>
@@ -78,6 +79,8 @@ public class ComponentInstallOrchestrator(
         // For ClusterIssuer TLS, provision the cert-manager Certificate → tls Secret BEFORE the
         // install so the StatefulSet's init container can mount it (chart does not self-sign).
         await openLdapService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId);
+        // Refresh Velero's S3 backup-target values + credentials before install/upgrade.
+        await veleroService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId, ct);
 
         HelmCommand command = await lifecycleService.GetInstallCommandAsync(componentId, ct);
         command.NoWait = options.NoWait;

@@ -163,6 +163,9 @@ public class ClusterProvisioningService(
                 timeout: TimeSpan.FromMinutes(10));
             Log("CAPI state pivoted into the target cluster (self-managed).");
 
+            // Annotate autoscaling worker pools so a cluster-autoscaler add-on can drive them.
+            await AnnotateWorkerAutoscalingAsync(config, targetKubeconfigPath, workDir, Log, ct);
+
             // ── 9. Register the target cluster ──
             string targetKubeconfig = await File.ReadAllTextAsync(targetKubeconfigPath, ct);
             string apiServerUrl = ExtractApiServer(targetKubeconfig) ?? $"https://{config.ClusterName}:6443";
@@ -395,6 +398,40 @@ public class ClusterProvisioningService(
         catch (Exception ex)
         {
             log($"Node inventory skipped: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Annotates the worker MachineDeployment(s) with cluster-autoscaler node-group bounds for any
+    /// pool that opted into autoscaling. The cluster-autoscaler add-on (installed day-2 as a baseline
+    /// component) reads these annotations to size each group. Best-effort: a failure here does not
+    /// fail provisioning — the operator can re-annotate or set fixed sizing instead.
+    ///
+    /// clusterctl's default template emits one MachineDeployment named <c>{cluster}-md-0</c> in the
+    /// <c>default</c> namespace; pool names map to that suffix (the first pool defaults to "md-0").
+    /// </summary>
+    private async Task AnnotateWorkerAutoscalingAsync(
+        OpenStackProvisioningConfig config, string targetKubeconfig, string workDir, Action<string> log, CancellationToken ct)
+    {
+        List<WorkerPool> pools = config.WorkerPools.Where(p => p.Autoscale).ToList();
+        if (pools.Count == 0) return;
+
+        const string minKey = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size";
+        const string maxKey = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size";
+
+        foreach (WorkerPool pool in pools)
+        {
+            string mdName = $"{config.ClusterName}-{pool.Name}";
+            CliResult r = await RunAsync(
+                "kubectl",
+                $"annotate machinedeployment {mdName} -n default --overwrite " +
+                $"{minKey}={pool.MinCount} {maxKey}={pool.MaxCount}",
+                workDir, EnvFor(targetKubeconfig), _ => { }, ct, timeout: TimeSpan.FromSeconds(30), quiet: true);
+
+            if (r.Success)
+                log($"Enabled autoscaling on {mdName} ({pool.MinCount}–{pool.MaxCount} nodes).");
+            else
+                log($"Could not annotate {mdName} for autoscaling (continuing): {r.Stderr.Trim()}");
         }
     }
 

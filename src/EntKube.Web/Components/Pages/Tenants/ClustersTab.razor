@@ -23,9 +23,16 @@
         </div>
         @if (!loading && envNames.Count > 0 && !showRegister)
         {
-            <button class="btn btn-sm btn-primary" @onclick="() => showRegister = true">
-                <i class="bi bi-plus-lg me-1"></i>Register cluster
-            </button>
+            <div class="d-flex gap-2">
+                @* Provisioning comes first: a cluster can be created here from OpenStack
+                   credentials, not only adopted after someone else built it elsewhere. *@
+                <a class="btn btn-sm btn-primary" href="tenants/@TenantSlug?section=new-cluster">
+                    <i class="bi bi-cloud-arrow-up me-1"></i>New cluster
+                </a>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showRegister = true">
+                    <i class="bi bi-link-45deg me-1"></i>Register existing
+                </button>
+            </div>
         }
     </div>
 
@@ -92,7 +99,10 @@
             }
             else
             {
-                <div class="small">Use “Register cluster” above to add one.</div>
+                <div class="small">
+                    <a href="tenants/@TenantSlug?section=new-cluster">Provision one on OpenStack</a>
+                    from your cloud credentials, or use “Register existing” above to add a cluster you already run.
+                </div>
             }
         </div>
     }

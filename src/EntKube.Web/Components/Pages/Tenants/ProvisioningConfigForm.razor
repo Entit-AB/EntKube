@@ -1,0 +1,153 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+
+@* Shared editor for an OpenStackProvisioningConfig (Cluster API + CAPO). Used both by the
+   blueprint editor and the New Cluster wizard so the sizing form lives in one place. The
+   parent owns the Config object; this form writes directly into it (worker-pool edits are
+   synced into Config.WorkerPools on every change). *@
+
+<div class="row g-2">
+    @if (ShowConnection)
+    {
+        <div class="col-md-6">
+            <label class="form-label small mb-0">OpenStack connection</label>
+            <select class="form-select form-select-sm" @bind="ConnectionId">
+                <option value="@Guid.Empty">— select a connection —</option>
+                @foreach (OpenStackConnection c in Connections)
+                {
+                    <option value="@c.Id">@c.Name</option>
+                }
+            </select>
+        </div>
+    }
+    <div class="col-md-3">
+        <label class="form-label small mb-0">Cluster name</label>
+        <input class="form-control form-control-sm" @bind="Config.ClusterName" />
+    </div>
+    <div class="col-md-3">
+        <label class="form-label small mb-0">Kubernetes version</label>
+        <input class="form-control form-control-sm" @bind="Config.KubernetesVersion" />
+    </div>
+
+    <div class="col-md-4">
+        <label class="form-label small mb-0">Node image (Glance)</label>
+        <input class="form-control form-control-sm" @bind="Config.NodeImageName" />
+    </div>
+    <div class="col-md-2">
+        <label class="form-label small mb-0">CP count</label>
+        <input type="number" min="1" class="form-control form-control-sm" @bind="Config.ControlPlaneCount" />
+    </div>
+    <div class="col-md-3">
+        <label class="form-label small mb-0">CP flavor</label>
+        <input class="form-control form-control-sm" @bind="Config.ControlPlaneFlavor" />
+    </div>
+    <div class="col-md-3">
+        <label class="form-label small mb-0">Failure domain / AZ</label>
+        <input class="form-control form-control-sm" @bind="Config.FailureDomain" />
+    </div>
+
+    <div class="col-12"><hr class="my-1" /><span class="small text-muted">Worker pool</span></div>
+    <div class="col-md-2">
+        <label class="form-label small mb-0">Worker count</label>
+        <input type="number" min="0" class="form-control form-control-sm" @bind="workerPool.Count" @bind:after="SyncPool" />
+    </div>
+    <div class="col-md-4">
+        <label class="form-label small mb-0">Worker flavor</label>
+        <input class="form-control form-control-sm" @bind="workerPool.Flavor" @bind:after="SyncPool" />
+    </div>
+    <div class="col-md-6">
+        <label class="form-label small mb-0">External network ID (floating IPs / API LB)</label>
+        <input class="form-control form-control-sm" @bind="Config.ExternalNetworkId" />
+    </div>
+
+    <div class="col-12">
+        <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="ppf-autoscale" checked="@autoscale" @onchange="OnToggleAutoscale" />
+            <label class="form-check-label small" for="ppf-autoscale">
+                Autoscale this pool (drives cluster-autoscaler node bounds)
+            </label>
+        </div>
+    </div>
+    @if (autoscale)
+    {
+        <div class="col-md-2">
+            <label class="form-label small mb-0">Min nodes</label>
+            <input type="number" min="0" class="form-control form-control-sm" @bind="workerPool.MinCount" @bind:after="SyncPool" />
+        </div>
+        <div class="col-md-2">
+            <label class="form-label small mb-0">Max nodes</label>
+            <input type="number" min="1" class="form-control form-control-sm" @bind="workerPool.MaxCount" @bind:after="SyncPool" />
+        </div>
+        <div class="col-md-8 d-flex align-items-end">
+            <div class="form-text small mb-1">
+                The initial worker count is used as the starting size; the autoscaler then keeps it within min–max.
+            </div>
+        </div>
+    }
+
+    <div class="col-12"><hr class="my-1" /><span class="small text-muted">Ephemeral bootstrap VM</span></div>
+    <div class="col-md-4">
+        <label class="form-label small mb-0">Bootstrap image</label>
+        <input class="form-control form-control-sm" @bind="Config.BootstrapImageName" />
+    </div>
+    <div class="col-md-3">
+        <label class="form-label small mb-0">Bootstrap flavor</label>
+        <input class="form-control form-control-sm" @bind="Config.BootstrapFlavor" />
+    </div>
+    <div class="col-md-5">
+        <label class="form-label small mb-0">Bootstrap network ID</label>
+        <input class="form-control form-control-sm" @bind="Config.BootstrapNetworkId" />
+    </div>
+</div>
+
+@code {
+    /// <summary>The config being edited. The parent owns it; this form mutates it in place.</summary>
+    [Parameter, EditorRequired] public OpenStackProvisioningConfig Config { get; set; } = new();
+
+    /// <summary>OpenStack connections to choose from (when <see cref="ShowConnection"/> is true).</summary>
+    [Parameter] public List<OpenStackConnection> Connections { get; set; } = [];
+
+    /// <summary>Whether to render the connection picker (the wizard picks it in an earlier step).</summary>
+    [Parameter] public bool ShowConnection { get; set; } = true;
+
+    // The single worker-pool editor, bound to the first pool (created if absent), then synced
+    // back into Config.WorkerPools on every change so the parent can read Config directly.
+    private WorkerPool workerPool = new();
+    private bool autoscale;
+
+    private Guid ConnectionId
+    {
+        get => Config.OpenStackConnectionId;
+        set => Config.OpenStackConnectionId = value;
+    }
+
+    protected override void OnParametersSet()
+    {
+        workerPool = Config.WorkerPools.FirstOrDefault() ?? new WorkerPool();
+        autoscale = workerPool.Autoscale;
+        SyncPool();
+    }
+
+    private void OnToggleAutoscale(ChangeEventArgs e)
+    {
+        autoscale = e.Value is true;
+        if (!autoscale)
+        {
+            workerPool.MinCount = null;
+            workerPool.MaxCount = null;
+        }
+        else
+        {
+            workerPool.MinCount ??= Math.Max(1, workerPool.Count);
+            workerPool.MaxCount ??= Math.Max(workerPool.MinCount ?? 1, workerPool.Count + 2);
+        }
+        SyncPool();
+    }
+
+    private void SyncPool()
+    {
+        Config.WorkerPools = workerPool.Count > 0 || !string.IsNullOrWhiteSpace(workerPool.Flavor)
+            ? [workerPool]
+            : [];
+    }
+}
