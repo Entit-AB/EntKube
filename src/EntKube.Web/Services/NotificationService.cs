@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using MailKit.Net.Smtp;
 using MailKit.Security;
 using Microsoft.EntityFrameworkCore;
@@ -405,7 +406,7 @@ public class NotificationService(
         {
             string teamId = teamIdEl.GetString() ?? throw new InvalidOperationException("teamId is empty");
             string channelId = channelIdEl.GetString() ?? throw new InvalidOperationException("channelId is empty");
-            return await SendTeamsViaGraphAsync(message, teamId, channelId, isFiring, ct);
+            return await SendTeamsViaGraphAsync(message, channel.TenantId, teamId, channelId, isFiring, ct);
         }
 
         string webhookUrl = config.RootElement.GetProperty("webhookUrl").GetString()
@@ -414,17 +415,17 @@ public class NotificationService(
     }
 
     private async Task<bool> SendTeamsViaGraphAsync(
-        NotificationMessage message, string teamId, string channelId, bool isFiring, CancellationToken ct)
+        NotificationMessage message, Guid ownerTenantId, string teamId, string channelId, bool isFiring, CancellationToken ct)
     {
         NotificationProviderConfig? providerConfig;
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
             providerConfig = await db.NotificationProviderConfigs
-                .FirstOrDefaultAsync(c => c.ProviderType == NotificationProviderType.MsTeamsGraph, ct);
+                .FirstOrDefaultAsync(c => c.TenantId == ownerTenantId && c.ProviderType == NotificationProviderType.MsTeamsGraph, ct);
         }
 
         if (providerConfig is null || !providerConfig.IsEnabled)
-            throw new InvalidOperationException("MS Teams Graph provider is not configured or disabled");
+            throw new InvalidOperationException("MS Teams Graph provider is not configured or disabled for this tenant");
 
         using JsonDocument graphConfig = JsonDocument.Parse(providerConfig.ConfigurationJson);
         string tenantId = graphConfig.RootElement.GetProperty("tenantId").GetString()
@@ -528,7 +529,7 @@ public class NotificationService(
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
             NotificationProviderConfig? providerConfig = await db.NotificationProviderConfigs
-                .FirstOrDefaultAsync(c => c.ProviderType == NotificationProviderType.Smtp);
+                .FirstOrDefaultAsync(c => c.TenantId == channel.TenantId && c.ProviderType == NotificationProviderType.Smtp);
 
             if (providerConfig?.IsEnabled == true)
             {
@@ -588,34 +589,115 @@ public class NotificationService(
         NotificationMessage message, NotificationChannel channel, bool isFiring, CancellationToken ct)
     {
         using JsonDocument config = JsonDocument.Parse(channel.ConfigurationJson);
-        string url = config.RootElement.GetProperty("url").GetString()
+        JsonElement root = config.RootElement;
+
+        string url = root.GetProperty("url").GetString()
             ?? throw new InvalidOperationException("Webhook url missing");
 
-        string? token = config.RootElement.TryGetProperty("token", out JsonElement t)
-            ? t.GetString()
-            : null;
+        string? token = root.TryGetProperty("token", out JsonElement t) ? t.GetString() : null;
 
-        object payload = new
+        // Custom headers the webhook provider requires (e.g. X-Api-Key, a bespoke
+        // Content-Type, or its own Authorization scheme). Object of string→string.
+        Dictionary<string, string> headers = new(StringComparer.OrdinalIgnoreCase);
+        if (root.TryGetProperty("headers", out JsonElement headersEl) && headersEl.ValueKind == JsonValueKind.Object)
         {
-            firing = isFiring,
-            alertName = message.Title,
-            severity = message.Severity,
-            summary = message.Summary,
-            description = message.Description,
-            clusterName = message.ScopeLabel,
-            startsAt = message.Timestamp,
-            endsAt = message.EndsAt,
-            status = message.StatusLabel
-        };
+            foreach (JsonProperty h in headersEl.EnumerateObject())
+            {
+                string? v = h.Value.ValueKind == JsonValueKind.String ? h.Value.GetString() : h.Value.ToString();
+                if (!string.IsNullOrEmpty(h.Name) && v is not null)
+                    headers[h.Name] = v;
+            }
+        }
+
+        // Body: a caller-supplied template (rendered with alert fields) when set,
+        // otherwise the default EntKube JSON payload for backward compatibility.
+        string? bodyTemplate = root.TryGetProperty("bodyTemplate", out JsonElement bt) ? bt.GetString() : null;
+        string body;
+        if (!string.IsNullOrWhiteSpace(bodyTemplate))
+        {
+            body = RenderWebhookTemplate(bodyTemplate, message, isFiring);
+        }
+        else
+        {
+            body = JsonSerializer.Serialize(new
+            {
+                firing = isFiring,
+                alertName = message.Title,
+                severity = message.Severity,
+                summary = message.Summary,
+                description = message.Description,
+                clusterName = message.ScopeLabel,
+                startsAt = message.Timestamp,
+                endsAt = message.EndsAt,
+                status = message.StatusLabel
+            });
+        }
+
+        // Content-Type is a content header, so it must live on the content, not the
+        // request. Honor an override from the custom headers; default to JSON.
+        string contentType = headers.TryGetValue("Content-Type", out string? ctVal) && !string.IsNullOrWhiteSpace(ctVal)
+            ? ctVal
+            : "application/json";
+
+        using HttpRequestMessage request = new(HttpMethod.Post, url);
+        using StringContent content = new(body, Encoding.UTF8);
+        content.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(contentType);
+        request.Content = content;
+
+        // Bearer token convenience — a custom Authorization header takes precedence.
+        if (!string.IsNullOrEmpty(token) && !headers.ContainsKey("Authorization"))
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+        foreach ((string name, string value) in headers)
+        {
+            if (name.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
+                continue; // already applied to the content above
+            // Most headers belong on the request; fall back to the content for content headers.
+            if (!request.Headers.TryAddWithoutValidation(name, value))
+                content.Headers.TryAddWithoutValidation(name, value);
+        }
 
         using HttpClient http = httpClientFactory.CreateClient("Notifications");
-        if (!string.IsNullOrEmpty(token))
-            http.DefaultRequestHeaders.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
-
-        using StringContent content = new(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-        HttpResponseMessage response = await http.PostAsync(url, content, ct);
+        HttpResponseMessage response = await http.SendAsync(request, ct);
         return response.IsSuccessStatusCode;
+    }
+
+    private static readonly Regex WebhookTokenRegex =
+        new(@"\{\{\s*([A-Za-z]+)\s*\}\}", RegexOptions.Compiled);
+
+    // Placeholders are {{token}} (case-insensitive). Substituted values are
+    // JSON-string-escaped so a JSON body template like {"text":"{{summary}}"}
+    // stays valid even when a field contains quotes or newlines.
+    internal static string RenderWebhookTemplate(string template, NotificationMessage message, bool isFiring)
+    {
+        Dictionary<string, string> tokens = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["title"]       = message.Title,
+            ["alertName"]   = message.Title,
+            ["severity"]    = message.Severity,
+            ["status"]      = message.StatusLabel,
+            ["firing"]      = isFiring ? "true" : "false",
+            ["summary"]     = message.Summary,
+            ["description"] = message.Description,
+            ["scope"]       = message.ScopeLabel,
+            ["clusterName"] = message.ScopeLabel,
+            ["scopeField"]  = message.ScopeFieldName,
+            ["startsAt"]    = message.Timestamp.ToString("o"),
+            ["timestamp"]   = message.Timestamp.ToString("o"),
+            ["endsAt"]      = message.EndsAt?.ToString("o") ?? ""
+        };
+
+        return WebhookTokenRegex.Replace(template, match =>
+        {
+            string key = match.Groups[1].Value.Trim();
+            if (!tokens.TryGetValue(key, out string? value))
+                return match.Value; // leave unknown tokens untouched
+
+            // Escape as a JSON string then strip the surrounding quotes, yielding a
+            // fragment safe to drop inside an existing JSON string literal.
+            string escaped = JsonSerializer.Serialize(value);
+            return escaped.Length >= 2 ? escaped[1..^1] : escaped;
+        });
     }
 
     private static bool MeetsSeverityFilter(string severity, AlertSeverityFilter filter) => filter switch

@@ -2,6 +2,7 @@
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @using System.ComponentModel.DataAnnotations
+@using System.Text.Json
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject NotificationService NotificationService
 @inject NotificationProviderConfigService ProviderConfigService
@@ -74,6 +75,9 @@ else
                                 }
                                 Test
                             </button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => ShowEditModal(channel)">
+                                Edit
+                            </button>
                             <button class="btn btn-sm btn-outline-danger ms-auto"
                                     @onclick='() => pendingConfirm = new PendingConfirm($"Delete the notification channel \"{channel.Name}\"? It will stop receiving alerts. This cannot be undone.", "Delete", () => DeleteChannel(channel))'>
                                 Delete
@@ -98,7 +102,7 @@ else
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title">Add Notification Channel</h5>
+                    <h5 class="modal-title">@(editingChannelId is null ? "Add" : "Edit") Notification Channel</h5>
                     <button type="button" class="btn-close" @onclick="CloseModal"></button>
                 </div>
                 <EditForm Model="addForm" OnValidSubmit="SaveChannel">
@@ -157,8 +161,8 @@ else
                             {
                                 <div class="alert alert-warning py-2 small mb-3">
                                     <i class="bi bi-exclamation-triangle me-1"></i>
-                                    Teams Graph API is not configured. Using legacy incoming webhook.
-                                    <a href="/admin/notifications" target="_blank">Configure it here</a>.
+                                    Teams Graph API is not configured for this tenant. Using legacy incoming webhook.
+                                    <a href="?section=notification-providers">Configure it in Notification providers</a>.
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label">Webhook URL</label>
@@ -185,6 +189,43 @@ else
                             <div class="mb-3">
                                 <label class="form-label">Bearer Token (optional)</label>
                                 <InputText class="form-control" type="password" @bind-Value="addForm.BearerToken" />
+                                <div class="form-text">Sent as <code>Authorization: Bearer …</code>. Overridden by a custom Authorization header below.</div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label d-flex justify-content-between align-items-center">
+                                    <span>Headers (optional)</span>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="AddHeader">
+                                        <span class="bi bi-plus-lg"></span> Add header
+                                    </button>
+                                </label>
+                                @if (addForm.Headers.Count == 0)
+                                {
+                                    <div class="form-text">No custom headers. <code>Content-Type</code> defaults to <code>application/json</code>.</div>
+                                }
+                                @foreach (WebhookHeader header in addForm.Headers)
+                                {
+                                    <div class="input-group input-group-sm mb-2">
+                                        <input class="form-control" placeholder="Header name (e.g. X-Api-Key)" @bind="header.Key" />
+                                        <input class="form-control" placeholder="Value" @bind="header.Value" />
+                                        <button type="button" class="btn btn-outline-danger" @onclick="() => RemoveHeader(header)">
+                                            <span class="bi bi-trash"></span>
+                                        </button>
+                                    </div>
+                                }
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Body template (optional)</label>
+                                <textarea class="form-control font-monospace" rows="6"
+                                          placeholder='Leave empty for the default JSON payload, or e.g.&#10;{"text": "[{{severity}}] {{title}} — {{summary}}"}'
+                                          @bind="addForm.BodyTemplate"></textarea>
+                                <div class="form-text">
+                                    Placeholders (JSON-escaped): <code>{{title}}</code> <code>{{severity}}</code> <code>{{status}}</code>
+                                    <code>{{firing}}</code> <code>{{summary}}</code> <code>{{description}}</code> <code>{{scope}}</code>
+                                    <code>{{scopeField}}</code> <code>{{startsAt}}</code> <code>{{endsAt}}</code>.
+                                    Set a matching <code>Content-Type</code> header if not JSON.
+                                </div>
                             </div>
                         }
 
@@ -222,7 +263,14 @@ else
                 <div class="modal-footer">
                     @if (modalStep == 2)
                     {
-                        <button type="button" class="btn btn-secondary" @onclick="() => modalStep = 1">Back</button>
+                        @if (editingChannelId is null)
+                        {
+                            <button type="button" class="btn btn-secondary" @onclick="() => modalStep = 1">Back</button>
+                        }
+                        else
+                        {
+                            <button type="button" class="btn btn-secondary" @onclick="CloseModal">Cancel</button>
+                        }
                         <button type="submit" class="btn btn-primary">Save Channel</button>
                     }
                     else
@@ -244,6 +292,7 @@ else
     private bool showModal;
     private int modalStep = 1;
     private NotificationChannelType newType;
+    private Guid? editingChannelId;   // null = adding a new channel
     private AddChannelForm addForm = new();
     private string? modalError;
     private Guid? testingId;
@@ -269,6 +318,11 @@ else
         public string BearerToken { get; set; } = "";
         public string TeamId { get; set; } = "";
         public string ChannelId { get; set; } = "";
+
+        // Webhook body customization: an optional template (empty = default payload)
+        // and provider-required headers.
+        public string BodyTemplate { get; set; } = "";
+        public List<WebhookHeader> Headers { get; set; } = new();
 
         public AlertSeverityFilter SeverityFilter { get; set; } = AlertSeverityFilter.All;
         public AlertFiringFilter FiringFilter { get; set; } = AlertFiringFilter.All;
@@ -304,6 +358,12 @@ else
         }
     }
 
+    private sealed class WebhookHeader
+    {
+        public string Key { get; set; } = "";
+        public string Value { get; set; } = "";
+    }
+
     // A destructive action awaiting user confirmation.
     private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
     private PendingConfirm? pendingConfirm;
@@ -319,7 +379,7 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        NotificationProviderConfig? graphConfig = await ProviderConfigService.GetAsync(NotificationProviderType.MsTeamsGraph);
+        NotificationProviderConfig? graphConfig = await ProviderConfigService.GetAsync(TenantId, NotificationProviderType.MsTeamsGraph);
         teamsGraphConfigured = graphConfig?.IsEnabled == true;
         await LoadChannels();
     }
@@ -345,13 +405,68 @@ else
 
     private void ShowAddModal()
     {
+        editingChannelId = null;
         showModal = true;
         modalStep = 1;
         addForm = new AddChannelForm { TeamsGraphConfigured = teamsGraphConfigured };
         modalError = null;
     }
 
-    private void CloseModal() => showModal = false;
+    private void ShowEditModal(NotificationChannel channel)
+    {
+        editingChannelId = channel.Id;
+        newType = channel.Type;
+        modalError = null;
+        addForm = new AddChannelForm
+        {
+            Type = channel.Type,
+            TeamsGraphConfigured = teamsGraphConfigured,
+            Name = channel.Name,
+            SeverityFilter = channel.SeverityFilter,
+            FiringFilter = channel.FiringFilter,
+            AcknowledgeFilter = channel.AcknowledgeFilter
+        };
+        PopulateFormFromConfig(channel.ConfigurationJson);
+        showModal = true;
+        modalStep = 2;   // type is fixed when editing — skip the type picker
+    }
+
+    // Parse a channel's stored ConfigurationJson back into the editable form fields.
+    private void PopulateFormFromConfig(string configJson)
+    {
+        using JsonDocument doc = JsonDocument.Parse(configJson);
+        JsonElement root = doc.RootElement;
+
+        string? Str(string name) => root.TryGetProperty(name, out JsonElement e) && e.ValueKind == JsonValueKind.String
+            ? e.GetString() : null;
+
+        // Slack / Teams-webhook use "webhookUrl"; generic webhook uses "url".
+        addForm.WebhookUrl = Str("webhookUrl") ?? Str("url") ?? "";
+        addForm.TeamId = Str("teamId") ?? "";
+        addForm.ChannelId = Str("channelId") ?? "";
+        addForm.Email = Str("to") ?? "";
+        addForm.BearerToken = Str("token") ?? "";
+        addForm.BodyTemplate = Str("bodyTemplate") ?? "";
+
+        addForm.Headers = new();
+        if (root.TryGetProperty("headers", out JsonElement headersEl) && headersEl.ValueKind == JsonValueKind.Object)
+        {
+            foreach (JsonProperty h in headersEl.EnumerateObject())
+            {
+                addForm.Headers.Add(new WebhookHeader
+                {
+                    Key = h.Name,
+                    Value = h.Value.ValueKind == JsonValueKind.String ? h.Value.GetString() ?? "" : h.Value.ToString()
+                });
+            }
+        }
+    }
+
+    private void CloseModal()
+    {
+        showModal = false;
+        editingChannelId = null;
+    }
 
     private void SelectType(NotificationChannelType type)
     {
@@ -359,6 +474,9 @@ else
         addForm.Type = type;
         modalStep = 2;
     }
+
+    private void AddHeader() => addForm.Headers.Add(new WebhookHeader());
+    private void RemoveHeader(WebhookHeader header) => addForm.Headers.Remove(header);
 
     private async Task SaveChannel()
     {
@@ -378,25 +496,49 @@ else
         try
         {
             using ApplicationDbContext db = DbFactory.CreateDbContext();
-            db.NotificationChannels.Add(new NotificationChannel
+            string name = addForm.Name.Trim();
+
+            if (editingChannelId is Guid id)
             {
-                TenantId = TenantId,
-                Name = addForm.Name.Trim(),
-                Type = newType,
-                ConfigurationJson = configJson,
-                SeverityFilter = addForm.SeverityFilter,
-                FiringFilter = addForm.FiringFilter,
-                AcknowledgeFilter = addForm.AcknowledgeFilter
-            });
-            await db.SaveChangesAsync();
-            CloseModal();
-            await LoadChannels();
-            Toasts.Success($"Added channel \"{addForm.Name.Trim()}\".");
+                NotificationChannel? existing = await db.NotificationChannels
+                    .FirstOrDefaultAsync(c => c.Id == id && c.TenantId == TenantId);
+                if (existing is null)
+                {
+                    modalError = "Channel no longer exists.";
+                    return;
+                }
+                existing.Name = name;
+                existing.ConfigurationJson = configJson;
+                existing.SeverityFilter = addForm.SeverityFilter;
+                existing.FiringFilter = addForm.FiringFilter;
+                existing.AcknowledgeFilter = addForm.AcknowledgeFilter;
+                await db.SaveChangesAsync();
+                CloseModal();
+                await LoadChannels();
+                Toasts.Success($"Updated channel \"{name}\".");
+            }
+            else
+            {
+                db.NotificationChannels.Add(new NotificationChannel
+                {
+                    TenantId = TenantId,
+                    Name = name,
+                    Type = newType,
+                    ConfigurationJson = configJson,
+                    SeverityFilter = addForm.SeverityFilter,
+                    FiringFilter = addForm.FiringFilter,
+                    AcknowledgeFilter = addForm.AcknowledgeFilter
+                });
+                await db.SaveChangesAsync();
+                CloseModal();
+                await LoadChannels();
+                Toasts.Success($"Added channel \"{name}\".");
+            }
         }
         catch (Exception ex)
         {
             modalError = ex.Message;
-            Toasts.Error($"Failed to add channel: {ex.Message}");
+            Toasts.Error($"Failed to save channel: {ex.Message}");
         }
     }
 
@@ -420,11 +562,27 @@ else
                 System.Text.Json.JsonSerializer.Serialize(new
                 {
                     url = addForm.WebhookUrl.Trim(),
-                    token = string.IsNullOrWhiteSpace(addForm.BearerToken) ? null : addForm.BearerToken.Trim()
+                    token = string.IsNullOrWhiteSpace(addForm.BearerToken) ? null : addForm.BearerToken.Trim(),
+                    bodyTemplate = string.IsNullOrWhiteSpace(addForm.BodyTemplate) ? null : addForm.BodyTemplate,
+                    headers = BuildHeadersObject()
                 }),
 
             _ => "{}"
         };
+    }
+
+    // Collapse the header rows into a name→value object, dropping rows with a blank
+    // name. Returns null when none are set so the config JSON stays clean.
+    private Dictionary<string, string>? BuildHeadersObject()
+    {
+        Dictionary<string, string> result = new();
+        foreach (WebhookHeader h in addForm.Headers)
+        {
+            string key = h.Key.Trim();
+            if (key.Length == 0) continue;
+            result[key] = h.Value.Trim();
+        }
+        return result.Count == 0 ? null : result;
     }
 
     private async Task ToggleEnabled(NotificationChannel channel)

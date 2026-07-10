@@ -1,17 +1,11 @@
-@page "/admin/notifications"
-@using Microsoft.AspNetCore.Authorization
 @using System.Text.Json
 @using System.Security.Claims
 @using EntKube.Web.Data
 @using EntKube.Web.Services
-@rendermode InteractiveServer
-@attribute [Authorize(Roles = "Admin")]
 
 @inject NotificationProviderConfigService ProviderConfigService
 @inject AuthenticationStateProvider AuthState
 @inject ToastService Toasts
-
-<PageTitle>Notification Settings</PageTitle>
 
 <ConfirmDialog Visible="@(pendingConfirm is not null)"
                Message="@(pendingConfirm?.Message ?? "")"
@@ -20,10 +14,10 @@
                OnConfirm="RunPendingConfirmAsync"
                OnCancel="() => pendingConfirm = null" />
 
-<div class="d-flex align-items-center justify-content-between mb-4">
+<div class="d-flex align-items-center justify-content-between mb-3">
     <div>
-        <h1 class="mb-0"><i class="bi bi-bell-fill me-2 text-primary"></i>Notification Settings</h1>
-        <p class="text-muted small mb-0 mt-1">Configure global notification providers used by tenant alert channels.</p>
+        <h6 class="mb-0">Notification Providers</h6>
+        <p class="text-muted small mb-0 mt-1">Configure this tenant's SMTP server and Microsoft Graph app registration. Notification channels in this tenant deliver alerts using these credentials.</p>
     </div>
 </div>
 
@@ -53,7 +47,7 @@ else
                     }
                 </div>
                 <div class="card-body">
-                    <p class="text-muted small">Configure an SMTP server so email notification channels can deliver alerts.</p>
+                    <p class="text-muted small">Configure an SMTP server so this tenant's email notification channels can deliver alerts.</p>
 
                     <div class="mb-3">
                         <label class="form-label fw-semibold">Host</label>
@@ -132,17 +126,18 @@ else
                 </div>
                 <div class="card-body">
                     <p class="text-muted small">
-                        Send alerts directly to Teams channels using the Microsoft Graph API.
+                        Send alerts directly to Teams channels using this tenant's own Microsoft Graph app registration.
                         Requires an Azure AD app registration with <code>ChannelMessage.Send</code> application permission.
                     </p>
                     <div class="alert alert-info py-2 small mb-3">
                         <i class="bi bi-info-circle me-1"></i>
-                        Once configured, add a Teams notification channel to a tenant and supply a <strong>Team ID</strong> and <strong>Channel ID</strong> instead of a webhook URL.
+                        Once configured, add a Teams notification channel to this tenant and supply a <strong>Team ID</strong> and <strong>Channel ID</strong> instead of a webhook URL.
                     </div>
 
                     <div class="mb-3">
-                        <label class="form-label fw-semibold">Tenant ID (Directory ID)</label>
+                        <label class="form-label fw-semibold">Directory (tenant) ID</label>
                         <input class="form-control font-monospace" @bind="teamsTenantId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+                        <div class="form-text">The Azure AD directory ID of the app registration — not the EntKube tenant.</div>
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-semibold">Client ID (Application ID)</label>
@@ -195,8 +190,8 @@ else
                         <span class="badge bg-success ms-auto">Ready</span>
                     </div>
                     <p class="text-muted small mb-0">
-                        Slack notifications use <strong>Incoming Webhooks</strong> — no global configuration needed.
-                        Each tenant notification channel stores its own webhook URL.
+                        Slack notifications use <strong>Incoming Webhooks</strong> — no provider configuration needed.
+                        Each notification channel stores its own webhook URL.
                         Create webhooks at <strong>api.slack.com/apps</strong>.
                     </p>
                 </div>
@@ -214,7 +209,7 @@ else
                     </div>
                     <p class="text-muted small mb-0">
                         Webhook channels post a JSON payload to any URL and optionally authenticate with a Bearer token.
-                        No global configuration required — configure per-channel in the tenant settings.
+                        No provider configuration required — configure per-channel in the Notifications tab.
                     </p>
                 </div>
             </div>
@@ -224,6 +219,8 @@ else
 }
 
 @code {
+    [Parameter] public required Guid TenantId { get; set; }
+
     private bool loading = true;
     private string? currentUserId;
 
@@ -275,8 +272,8 @@ else
 
     private async Task LoadAsync()
     {
-        smtpConfig = await ProviderConfigService.GetAsync(NotificationProviderType.Smtp);
-        teamsConfig = await ProviderConfigService.GetAsync(NotificationProviderType.MsTeamsGraph);
+        smtpConfig = await ProviderConfigService.GetAsync(TenantId, NotificationProviderType.Smtp);
+        teamsConfig = await ProviderConfigService.GetAsync(TenantId, NotificationProviderType.MsTeamsGraph);
 
         if (smtpConfig is not null)
         {
@@ -290,6 +287,10 @@ else
             smtpEnabled = smtpConfig.IsEnabled;
             smtpPassword = "";
         }
+        else
+        {
+            smtpHost = ""; smtpPort = 587; smtpFrom = ""; smtpUsername = ""; smtpPassword = ""; smtpEnableSsl = true; smtpEnabled = true;
+        }
 
         if (teamsConfig is not null)
         {
@@ -299,6 +300,10 @@ else
             teamsClientId = root.TryGetProperty("clientId", out var c) ? c.GetString() ?? "" : "";
             teamsEnabled = teamsConfig.IsEnabled;
             teamsClientSecret = "";
+        }
+        else
+        {
+            teamsTenantId = ""; teamsClientId = ""; teamsClientSecret = ""; teamsEnabled = true;
         }
     }
 
@@ -332,7 +337,7 @@ else
                 enableSsl = smtpEnableSsl
             });
 
-            await ProviderConfigService.SaveAsync(NotificationProviderType.Smtp, configJson, smtpEnabled, currentUserId);
+            await ProviderConfigService.SaveAsync(TenantId, NotificationProviderType.Smtp, configJson, smtpEnabled, currentUserId);
             smtpSuccess = "SMTP configuration saved.";
             await LoadAsync();
         }
@@ -396,8 +401,8 @@ else
         smtpSuccess = null;
         try
         {
-            await ProviderConfigService.DeleteAsync(NotificationProviderType.Smtp);
-            smtpHost = ""; smtpPort = 587; smtpFrom = ""; smtpUsername = ""; smtpPassword = ""; smtpEnableSsl = true; smtpEnabled = true;
+            await ProviderConfigService.DeleteAsync(TenantId, NotificationProviderType.Smtp);
+            smtpConfig = null;
             await LoadAsync();
             smtpSuccess = "SMTP configuration removed.";
             Toasts.Success("SMTP configuration removed.");
@@ -419,7 +424,7 @@ else
         teamsSuccess = null;
         if (string.IsNullOrWhiteSpace(teamsTenantId) || string.IsNullOrWhiteSpace(teamsClientId))
         {
-            teamsError = "Tenant ID and Client ID are required.";
+            teamsError = "Directory (tenant) ID and Client ID are required.";
             return;
         }
 
@@ -446,7 +451,7 @@ else
                 clientSecret = secret
             });
 
-            await ProviderConfigService.SaveAsync(NotificationProviderType.MsTeamsGraph, configJson, teamsEnabled, currentUserId);
+            await ProviderConfigService.SaveAsync(TenantId, NotificationProviderType.MsTeamsGraph, configJson, teamsEnabled, currentUserId);
             teamsSuccess = "Teams Graph configuration saved.";
             await LoadAsync();
         }
@@ -466,7 +471,7 @@ else
         teamsSuccess = null;
         if (string.IsNullOrWhiteSpace(teamsTenantId) || string.IsNullOrWhiteSpace(teamsClientId))
         {
-            teamsError = "Tenant ID and Client ID are required.";
+            teamsError = "Directory (tenant) ID and Client ID are required.";
             return;
         }
 
@@ -513,8 +518,8 @@ else
         teamsSuccess = null;
         try
         {
-            await ProviderConfigService.DeleteAsync(NotificationProviderType.MsTeamsGraph);
-            teamsTenantId = ""; teamsClientId = ""; teamsClientSecret = ""; teamsEnabled = true;
+            await ProviderConfigService.DeleteAsync(TenantId, NotificationProviderType.MsTeamsGraph);
+            teamsConfig = null;
             await LoadAsync();
             teamsSuccess = "Teams Graph configuration removed.";
             Toasts.Success("Teams Graph configuration removed.");
