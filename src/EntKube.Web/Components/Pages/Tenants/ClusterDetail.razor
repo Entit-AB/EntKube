@@ -53,21 +53,22 @@
 
             @if (!confirmDelete)
             {
-                <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDelete = true" title="Delete cluster">
-                    <i class="bi bi-trash me-1"></i>Delete
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDelete = true"
+                        title="Forget this cluster in EntKube. The cluster and its workloads keep running.">
+                    <i class="bi bi-box-arrow-right me-1"></i>Unregister
                 </button>
             }
         </div>
 
         @if (confirmDelete)
         {
-            <div class="mt-3 p-2 bg-danger bg-opacity-10 rounded d-flex align-items-center justify-content-between">
-                <span class="text-danger small">
-                    <i class="bi bi-exclamation-triangle me-1"></i>
-                    Permanently delete <strong>@Cluster.Name</strong> and all its components?
+            <div class="mt-3 p-2 bg-body-secondary rounded d-flex align-items-center justify-content-between">
+                <span class="small">
+                    <i class="bi bi-info-circle me-1"></i>
+                    Unregister <strong>@Cluster.Name</strong> from EntKube? EntKube forgets its kubeconfig, components and routes — the cluster itself and everything running on it are left untouched.
                 </span>
                 <div>
-                    <button class="btn btn-sm btn-danger me-1" @onclick="DeleteCluster">Yes, delete</button>
+                    <button class="btn btn-sm btn-secondary me-1" @onclick="DeleteCluster">Unregister</button>
                     <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDelete = false">Cancel</button>
                 </div>
             </div>

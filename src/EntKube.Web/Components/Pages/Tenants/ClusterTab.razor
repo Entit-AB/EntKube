@@ -94,7 +94,8 @@ else
                         <button class="btn btn-sm btn-outline-primary me-1" @onclick="() => ToggleComponents(cluster.Id)">
                             Components
                         </button>
-                        <button class="btn btn-sm btn-outline-danger" @onclick='() => pendingConfirm = new PendingConfirm($"Delete cluster \"{cluster.Name}\"? It will be unregistered from this tenant. This cannot be undone.", "Delete", () => Delete(cluster.Id, cluster.Name))'>Delete</button>
+                        <button class="btn btn-sm btn-outline-secondary" title="Forget this cluster in EntKube. The cluster and its workloads keep running."
+                                @onclick='() => pendingConfirm = new PendingConfirm($"Unregister cluster \"{cluster.Name}\" from this tenant? EntKube forgets the cluster (kubeconfig, components, routes) — the cluster itself and everything running on it are left untouched.", "Unregister", () => Delete(cluster.Id, cluster.Name))'>Unregister</button>
                     </td>
                 </tr>
 
@@ -372,12 +373,12 @@ else
         {
             await TenantService.DeleteClusterAsync(id);
             await Load();
-            Toasts.Success($"Deleted cluster \"{name}\".");
+            Toasts.Success($"Unregistered cluster \"{name}\" from EntKube. The cluster was left running.");
         }
         catch (Exception ex)
         {
             errorMessage = ex.Message;
-            Toasts.Error($"Failed to delete cluster \"{name}\": {ex.Message}");
+            Toasts.Error($"Failed to unregister cluster \"{name}\": {ex.Message}");
         }
     }
 }

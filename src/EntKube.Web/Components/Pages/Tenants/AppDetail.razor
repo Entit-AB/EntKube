@@ -1,6 +1,8 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject TenantService TenantService
+@inject KubernetesOperationsService K8sOps
+@inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
    App Detail — app-level header + environment cards.
@@ -78,21 +80,34 @@
                             title="Adopt a running workload into this app">
                         <i class="bi bi-box-arrow-in-down me-1"></i>Import Deployment
                     </button>
-                    @if (!confirmDelete)
-                    {
-                        <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDelete = true" title="Delete app">
-                            <i class="bi bi-trash me-1"></i>Delete
-                        </button>
-                    }
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmUnregister = true"
+                            title="Remove this app from EntKube. Any deployed workloads keep running in the cluster.">
+                        <i class="bi bi-box-arrow-right me-1"></i>Unregister
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmClusterDelete = true"
+                            title="Delete this app's workloads from the cluster, then remove it from EntKube.">
+                        <i class="bi bi-trash me-1"></i>Delete from cluster
+                    </button>
                 </div>
             </div>
 
-            <ConfirmDialog Visible="confirmDelete"
-                           Message="@($"Permanently delete {App.Name} and all its data?")"
-                           ConfirmText="Yes, delete"
+            @* Unregister: pure EntKube-side removal — the cluster is never touched. *@
+            <ConfirmDialog Visible="confirmUnregister"
+                           Message="@($"Unregister {App.Name} from EntKube? This removes it from EntKube only — any workloads it deployed keep running in the cluster.")"
+                           ConfirmText="Unregister"
+                           Variant="secondary"
                            IsBusy="deleting"
-                           OnConfirm="DeleteApp"
-                           OnCancel="() => confirmDelete = false" />
+                           OnConfirm="UnregisterApp"
+                           OnCancel="() => confirmUnregister = false" />
+
+            @* Delete from cluster: destructive. This confirms intent; the change-ack dialog then
+               shows the exact dry-run of what will be removed from the cluster before it happens. *@
+            <ConfirmDialog Visible="confirmClusterDelete"
+                           Message="@($"Delete {App.Name}'s resources from the cluster? You will review the exact changes before they are applied. This also unregisters the app from EntKube.")"
+                           ConfirmText="Delete from cluster"
+                           IsBusy="deleting"
+                           OnConfirm="DeleteAppFromCluster"
+                           OnCancel="() => confirmClusterDelete = false" />
         </div>
     </div>
 
@@ -235,7 +250,8 @@
     /// jump straight into that environment's detail instead of the env-cards list.</summary>
     [Parameter] public Guid? InitialEnvironmentId { get; set; }
 
-    private bool confirmDelete;
+    private bool confirmUnregister;
+    private bool confirmClusterDelete;
     private bool deleting;
     private bool showLinkPanel;
     private bool showImportWizard;
@@ -316,13 +332,62 @@
         }
     }
 
-    private async Task DeleteApp()
+    // Unregister — remove from EntKube only. The cluster is never contacted; any
+    // workloads the app deployed keep running under their current owner.
+    private async Task UnregisterApp()
     {
         deleting = true;
-        await TenantService.DeleteAppAsync(App.Id);
-        deleting = false;
-        confirmDelete = false;
-        await OnDeleted.InvokeAsync();
+        try
+        {
+            await TenantService.DeleteAppAsync(App.Id);
+            Toasts.Success($"Unregistered {App.Name} from EntKube. Cluster workloads were left running.");
+            confirmUnregister = false;
+            await OnDeleted.InvokeAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to unregister {App.Name}: {ex.Message}");
+        }
+        finally
+        {
+            deleting = false;
+        }
+    }
+
+    // Delete from cluster — destructive. Removes the app's resources from the cluster
+    // (each removal is reviewed in the change-ack dialog), then unregisters it from EntKube.
+    private async Task DeleteAppFromCluster()
+    {
+        deleting = true;
+        try
+        {
+            List<string> errors = await K8sOps.DeleteAppFromClusterAsync(App.Id, performedBy: null);
+            if (errors.Count > 0)
+            {
+                // Cluster cleanup hit problems — surface them and keep the app registered so
+                // the operator can retry rather than losing track of orphaned resources.
+                Toasts.Error($"Some cluster resources could not be removed: {string.Join("; ", errors)}");
+                return;
+            }
+
+            await TenantService.DeleteAppAsync(App.Id);
+            Toasts.Success($"Deleted {App.Name} from the cluster and unregistered it from EntKube.");
+            confirmClusterDelete = false;
+            await OnDeleted.InvokeAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            // Operator cancelled at the change-ack dialog — nothing was applied.
+            Toasts.Info($"Cluster deletion of {App.Name} was cancelled. Nothing was changed.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete {App.Name} from the cluster: {ex.Message}");
+        }
+        finally
+        {
+            deleting = false;
+        }
     }
 
     private async Task LoadEnvironments()

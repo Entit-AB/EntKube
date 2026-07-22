@@ -63,7 +63,8 @@
                                 <button class="btn btn-sm btn-link p-0 ms-2" @onclick="() => ToggleEnvPicker(app.Id)">Edit</button>
                             </td>
                             <td>
-                                <button class="btn btn-sm btn-outline-danger" @onclick='() => pendingConfirm = new PendingConfirm($"Delete app \"{app.Name}\"? This cannot be undone.", "Delete", () => DeleteApp(app.Id, app.Name))'>Delete</button>
+                                <button class="btn btn-sm btn-outline-secondary" title="Remove from EntKube. Any deployed workloads keep running in the cluster."
+                                        @onclick='() => pendingConfirm = new PendingConfirm($"Unregister app \"{app.Name}\" from EntKube? This removes it from EntKube only — any deployed cluster workloads keep running. Open the app to also delete its cluster resources.", "Unregister", () => DeleteApp(app.Id, app.Name))'>Unregister</button>
                             </td>
                         </tr>
 
@@ -148,12 +149,12 @@
         {
             await TenantService.DeleteAppAsync(id);
             await Load();
-            Toasts.Success($"Deleted app \"{name}\".");
+            Toasts.Success($"Unregistered app \"{name}\" from EntKube.");
         }
         catch (Exception ex)
         {
             errorMessage = ex.Message;
-            Toasts.Error($"Failed to delete app \"{name}\": {ex.Message}");
+            Toasts.Error($"Failed to unregister app \"{name}\": {ex.Message}");
         }
     }
 

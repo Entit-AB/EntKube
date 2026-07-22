@@ -299,7 +299,7 @@
                         </button>
                         @if (!confirmDeleteDeployment)
                         {
-                            <button class="btn btn-sm btn-outline-danger" aria-label="Delete deployment"
+                            <button class="btn btn-sm btn-outline-danger" aria-label="Remove deployment" title="Remove deployment"
                                     @onclick="() => confirmDeleteDeployment = true">
                                 <i class="bi bi-trash"></i>
                             </button>
@@ -362,15 +362,24 @@
 
                 @if (confirmDeleteDeployment)
                 {
-                    <div class="mt-3 p-2 bg-danger bg-opacity-10 rounded d-flex align-items-center justify-content-between">
-                        <span class="text-danger small">
-                            <i class="bi bi-exclamation-triangle me-1"></i>
-                            Permanently delete <strong>@selectedDeployment.Name</strong>?
-                        </span>
-                        <div>
-                            <button class="btn btn-sm btn-danger me-1" @onclick="DeleteDeployment">Yes, delete</button>
-                            <button class="btn btn-sm btn-outline-secondary"
-                                    @onclick="() => confirmDeleteDeployment = false">Cancel</button>
+                    <div class="mt-3 p-3 bg-body-secondary rounded">
+                        <div class="small mb-2">
+                            Remove <strong>@selectedDeployment.Name</strong> — choose how far the removal goes:
+                        </div>
+                        <div class="d-flex flex-wrap gap-2">
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="UnregisterDeployment" disabled="@deploymentRemoving"
+                                    title="Remove from EntKube only. Its cluster workloads keep running.">
+                                <i class="bi bi-box-arrow-right me-1"></i>Unregister
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger" @onclick="DeleteDeploymentFromCluster" disabled="@deploymentRemoving"
+                                    title="Delete its resources from the cluster (reviewed in the change dialog), then unregister.">
+                                @if (deploymentRemoving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                <i class="bi bi-trash me-1"></i>Delete from cluster
+                            </button>
+                            <button class="btn btn-sm btn-link text-secondary" @onclick="() => confirmDeleteDeployment = false" disabled="@deploymentRemoving">Cancel</button>
+                        </div>
+                        <div class="form-text small mt-2">
+                            <i class="bi bi-info-circle me-1"></i>Unregister leaves the running workload untouched; Delete from cluster removes it.
                         </div>
                     </div>
                 }
@@ -2360,6 +2369,7 @@
     private bool IsGitManaged => selectedDeployment?.Type is
         DeploymentType.GitYaml or DeploymentType.GitHelm or DeploymentType.GitAppOfApps;
     private bool confirmDeleteDeployment;
+    private bool deploymentRemoving;
 
     // Create deployment form
     private bool showCreateDeployment;
@@ -2679,14 +2689,67 @@
         }
     }
 
-    private async Task DeleteDeployment()
+    // Unregister — remove from EntKube only. The cluster is never contacted; the
+    // deployed workload keeps running under its current owner.
+    private async Task UnregisterDeployment()
     {
-        if (selectedDeployment is not null)
+        if (selectedDeployment is null) return;
+        deploymentRemoving = true;
+        try
         {
+            string name = selectedDeployment.Name;
             await DeploymentService.DeleteDeploymentAsync(selectedDeployment.Id);
             selectedDeployment = null;
             confirmDeleteDeployment = false;
             await LoadDeployments();
+            Toasts.Success($"Unregistered {name} from EntKube. Cluster workloads were left running.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to unregister deployment: {ex.Message}");
+        }
+        finally
+        {
+            deploymentRemoving = false;
+        }
+    }
+
+    // Delete from cluster — destructive. Removes the deployment's resources from the cluster
+    // (reviewed in the change-ack dialog), then unregisters it from EntKube.
+    private async Task DeleteDeploymentFromCluster()
+    {
+        if (selectedDeployment is null) return;
+        deploymentRemoving = true;
+        try
+        {
+            string name = selectedDeployment.Name;
+            KubernetesOperationResult<string> result =
+                await K8sOps.DeleteDeploymentFromClusterAsync(selectedDeployment.Id, performedBy: null);
+
+            if (!result.IsSuccess)
+            {
+                // Keep the deployment registered so orphaned cluster resources stay visible for a retry.
+                Toasts.Error($"Could not remove cluster resources: {result.Error}");
+                return;
+            }
+
+            await DeploymentService.DeleteDeploymentAsync(selectedDeployment.Id);
+            selectedDeployment = null;
+            confirmDeleteDeployment = false;
+            await LoadDeployments();
+            Toasts.Success($"Deleted {name} from the cluster and unregistered it from EntKube.");
+        }
+        catch (OperationCanceledException)
+        {
+            Toasts.Info("Cluster deletion was cancelled. Nothing was changed.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete deployment from cluster: {ex.Message}");
+        }
+        finally
+        {
+            deploymentRemoving = false;
         }
     }
 

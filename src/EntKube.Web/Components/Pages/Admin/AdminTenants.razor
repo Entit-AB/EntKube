@@ -87,8 +87,8 @@ else
                                         disabled="@(editingId == t.Id)" title="Rename">
                                     <i class="bi bi-pencil"></i>
                                 </button>
-                                <button class="btn btn-sm btn-outline-danger" @onclick="() => StartDelete(t)" title="Remove from app">
-                                    <i class="bi bi-trash"></i>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => StartDelete(t)" title="Unregister from EntKube (infrastructure untouched)">
+                                    <i class="bi bi-box-arrow-right"></i>
                                 </button>
                             </td>
                         </tr>
@@ -135,7 +135,7 @@ else
                                                     disabled="@(deleting || confirmNameInput?.Trim() != t.Name)"
                                                     @onclick="() => DeleteTenant(t.Id)">
                                                 @if (deleting) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                                                Remove from app
+                                                Unregister
                                             </button>
                                             <button class="btn btn-sm btn-outline-secondary" @onclick="CancelDelete">Cancel</button>
                                         </div>
