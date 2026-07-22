@@ -1,8 +1,10 @@
 using EntKube.Web.Data;
 using EntKube.Web.Services;
+using EntKube.Web.Services.ClusterChanges;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 
@@ -36,8 +38,12 @@ public class KubernetesOperationsServiceTests : IDisposable
         dbFactory = new TestDbContextFactory(connection);
         db.Database.EnsureCreated();
 
+        // A gate with no interactive sink registered passes straight through (background/test scope).
+        ClusterChangeGate gate = new(new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
+
         sut = new KubernetesOperationsService(dbFactory, new AuditService(dbFactory),
-            new KyvernoPolicyService(dbFactory, new Mock<IKubernetesClientFactory>().Object, NullLogger<KyvernoPolicyService>.Instance),
+            new KyvernoPolicyService(dbFactory, new Mock<IKubernetesClientFactory>().Object, gate, NullLogger<KyvernoPolicyService>.Instance),
+            gate,
             NullLogger<KubernetesOperationsService>.Instance);
     }
 

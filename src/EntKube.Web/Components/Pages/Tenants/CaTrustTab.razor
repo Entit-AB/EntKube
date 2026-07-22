@@ -1,0 +1,380 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject TrustBundleService TrustService
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   CaTrustTab — CA trust-bundle management at tenant+cluster scope.
+
+   Renders trust-manager Bundle CRs that distribute public CA certificates
+   (no keys) into a ConfigMap/Secret in every selected namespace, continuously
+   reconciled by trust-manager. Serving/TLS certificates (with or without a
+   key) are managed in the tenant-level Certificates tab, not here.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex align-items-center mb-3 mt-2">
+    <i class="bi bi-patch-check fs-4 me-2 text-primary"></i>
+    <div>
+        <h5 class="mb-0">CA &amp; Trust</h5>
+        <small class="text-muted">Distribute trusted CA certificates to all workloads on <strong>@ClusterName</strong>.</small>
+    </div>
+</div>
+
+@if (loading)
+{
+    <div class="alert alert-secondary py-2 small d-flex align-items-center">
+        <span class="spinner-border spinner-border-sm me-2"></span>
+        <span>Checking trust-manager status on <strong>@ClusterName</strong>…</span>
+    </div>
+}
+else if (trustManagerAvailable)
+{
+    <div class="alert alert-success py-2 small d-flex align-items-center">
+        <i class="bi bi-check-circle-fill me-2"></i>
+        <span>
+            <strong>trust-manager</strong> is installed on <strong>@ClusterName</strong> — trust bundles will reconcile automatically.
+            Distributing a bundle as a <em>Secret</em> additionally needs trust-manager's <code>secretTargets</code> enabled.
+        </span>
+    </div>
+}
+else
+{
+    <div class="alert alert-warning py-2 small d-flex align-items-center">
+        <i class="bi bi-exclamation-triangle-fill me-2"></i>
+        <span>
+            <strong>trust-manager is not installed on @ClusterName.</strong>
+            Trust bundles below won't be distributed until you install it from the
+            <em>Certificate Management</em> catalog (Components tab).
+        </span>
+    </div>
+}
+
+@if (loading)
+{
+    <div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+}
+else if (loadError is not null)
+{
+    <div class="alert alert-danger py-2 small">
+        <i class="bi bi-exclamation-triangle me-1"></i><strong>Failed to load:</strong> @loadError
+        <button class="btn btn-sm btn-outline-danger ms-2" @onclick="LoadAsync">Retry</button>
+    </div>
+}
+else
+{
+    <div class="card shadow-sm mb-4">
+        <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+            <div>
+                <i class="bi bi-shield-check me-2 text-success"></i><strong>Trust bundles (CA distribution)</strong>
+                <span class="text-muted small ms-2">Public CA certificates pushed to selected namespaces via trust-manager.</span>
+            </div>
+            <button class="btn btn-sm btn-outline-primary" @onclick="() => showAddBundle = !showAddBundle">
+                <i class="bi bi-plus-circle me-1"></i>New bundle
+            </button>
+        </div>
+        <div class="card-body pt-2">
+
+            @if (showAddBundle)
+            {
+                <div class="border rounded p-3 mb-3 bg-light-subtle">
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <label class="form-label small mb-1">Name</label>
+                            <input class="form-control form-control-sm" @bind="nbName" placeholder="Corporate trust store" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small mb-1">Target resource name</label>
+                            <input class="form-control form-control-sm" @bind="nbTargetName" placeholder="entkube-trust-bundle" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small mb-1">Data key</label>
+                            <input class="form-control form-control-sm" @bind="nbTargetKey" placeholder="ca-certificates.crt" />
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small mb-1">Target kind</label>
+                            <select class="form-select form-select-sm" @bind="nbTargetKind">
+                                <option value="@TrustBundleTargetKind.ConfigMap">ConfigMap</option>
+                                <option value="@TrustBundleTargetKind.Secret">Secret (needs secretTargets)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-5">
+                            <label class="form-label small mb-1">Distribution scope</label>
+                            <select class="form-select form-select-sm" @bind="nbScope">
+                                <option value="@TrustDistributionScope.TenantNamespaces">This tenant's namespaces</option>
+                                <option value="@TrustDistributionScope.AllNamespaces">All namespaces (cluster-wide)</option>
+                                <option value="@TrustDistributionScope.MatchLabels">Namespaces matching labels…</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4 d-flex align-items-end">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="nbDefaults" @bind="nbIncludeDefault" />
+                                <label class="form-check-label small" for="nbDefaults">Include default CAs</label>
+                            </div>
+                        </div>
+                        @if (nbScope == TrustDistributionScope.MatchLabels)
+                        {
+                            <div class="col-12">
+                                <label class="form-label small mb-1">Namespace labels (<code>key=value,key2=value2</code>)</label>
+                                <input class="form-control form-control-sm" @bind="nbLabels" placeholder="team=payments,tier=prod" />
+                            </div>
+                        }
+                    </div>
+                    <div class="mt-2 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="CreateBundle" disabled="@(busy || string.IsNullOrWhiteSpace(nbName))">
+                            @if (busy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Create bundle
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddBundle = false">Cancel</button>
+                    </div>
+                </div>
+            }
+
+            @if (bundles.Count == 0)
+            {
+                <p class="text-muted small mb-0">No trust bundles yet. Create one, add CA certificates, then apply it to the cluster.</p>
+            }
+            else
+            {
+                @foreach (CaTrustBundle b in bundles)
+                {
+                    <div class="border rounded p-3 mb-2">
+                        <div class="d-flex align-items-start justify-content-between">
+                            <div>
+                                <strong>@b.Name</strong>
+                                <span class="badge bg-light text-dark border ms-2">@ScopeLabel(b.Scope)</span>
+                                <span class="badge bg-light text-dark border ms-1">@b.TargetKind → @b.TargetName</span>
+                                @if (b.IncludeDefaultCAs)
+                                {
+                                    <span class="badge bg-info-subtle text-info border border-info-subtle ms-1">+ default CAs</span>
+                                }
+                                <div class="text-muted small mt-1">key: <code>@b.TargetKey</code></div>
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-sm btn-success" @onclick="() => ApplyBundle(b.Id)" disabled="@busy">
+                                    <i class="bi bi-cloud-upload me-1"></i>Apply
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteBundle(b.Id)" disabled="@busy">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        @* CA sources with validity *@
+                        <div class="mt-2">
+                            @if (b.Sources.Count == 0)
+                            {
+                                <span class="text-muted small">No CA certificates yet.</span>
+                            }
+                            else
+                            {
+                                <table class="table table-sm mb-2 align-middle">
+                                    <tbody>
+                                        @foreach (TrustSourceView v in TrustBundleService.ViewSources(b))
+                                        {
+                                            <tr>
+                                                <td style="width:30%"><i class="bi bi-file-earmark-lock me-1 text-muted"></i>@v.Source.Name</td>
+                                                <td><CertificateInfoDisplay Info="v.Info" Compact="true" /></td>
+                                                <td class="text-end">
+                                                    <button class="btn btn-sm btn-outline-danger border-0" @onclick="() => RemoveSource(v.Source.Id)" disabled="@busy">
+                                                        <i class="bi bi-x-lg"></i>
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+
+                            @if (addSourceBundleId == b.Id)
+                            {
+                                <div class="border-top pt-2">
+                                    <input class="form-control form-control-sm mb-1" @bind="asName" placeholder="CA name (e.g. Corp Root CA 2026)" />
+                                    <textarea class="form-control form-control-sm font-monospace" rows="4" @bind="asPem"
+                                              placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
+                                    <div class="mt-2 d-flex gap-2">
+                                        <button class="btn btn-sm btn-primary" @onclick="() => AddSource(b.Id)" disabled="@(busy || string.IsNullOrWhiteSpace(asPem))">Add CA</button>
+                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => addSourceBundleId = null">Cancel</button>
+                                    </div>
+                                </div>
+                            }
+                            else
+                            {
+                                <button class="btn btn-sm btn-outline-primary" @onclick="() => StartAddSource(b.Id)">
+                                    <i class="bi bi-plus-circle me-1"></i>Add CA certificate
+                                </button>
+                            }
+                        </div>
+                    </div>
+                }
+            }
+        </div>
+    </div>
+
+    <p class="text-muted small">
+        <i class="bi bi-info-circle me-1"></i>
+        Need to push a serving/TLS certificate (with or without its key) to apps or all namespaces?
+        Use the tenant-level <strong>Certificates</strong> tab.
+    </p>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter, EditorRequired] public Guid ClusterId { get; set; }
+    [Parameter] public string ClusterName { get; set; } = "cluster";
+
+    private bool loading = true;
+    private string? loadError;
+    private bool busy;
+    private bool trustManagerAvailable;
+
+    private List<CaTrustBundle> bundles = [];
+
+    // New-bundle form
+    private bool showAddBundle;
+    private string nbName = "";
+    private string nbTargetName = "entkube-trust-bundle";
+    private string nbTargetKey = "ca-certificates.crt";
+    private TrustBundleTargetKind nbTargetKind = TrustBundleTargetKind.ConfigMap;
+    private TrustDistributionScope nbScope = TrustDistributionScope.TenantNamespaces;
+    private bool nbIncludeDefault;
+    private string nbLabels = "";
+
+    // Add-source form
+    private Guid? addSourceBundleId;
+    private string asName = "";
+    private string asPem = "";
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!loading) await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        loadError = null;
+        try
+        {
+            trustManagerAvailable = await TrustService.IsTrustManagerAvailableAsync(ClusterId);
+            bundles = await TrustService.GetBundlesAsync(TenantId, ClusterId);
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private static string ScopeLabel(TrustDistributionScope s) => s switch
+    {
+        TrustDistributionScope.AllNamespaces => "all namespaces",
+        TrustDistributionScope.TenantNamespaces => "tenant namespaces",
+        TrustDistributionScope.MatchLabels => "label-matched",
+        TrustDistributionScope.App => "app namespaces",
+        _ => s.ToString(),
+    };
+
+    private static string? LabelsToJson(string input)
+    {
+        Dictionary<string, string> labels = new();
+        foreach (string pair in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int eq = pair.IndexOf('=');
+            if (eq <= 0) continue;
+            labels[pair[..eq].Trim()] = pair[(eq + 1)..].Trim();
+        }
+        return labels.Count == 0 ? null : TrustBundleService.SerializeSelector(labels);
+    }
+
+    private async Task CreateBundle()
+    {
+        busy = true;
+        try
+        {
+            await TrustService.CreateBundleAsync(new CaTrustBundle
+            {
+                TenantId = TenantId,
+                ClusterId = ClusterId,
+                Name = nbName.Trim(),
+                TargetName = string.IsNullOrWhiteSpace(nbTargetName) ? "entkube-trust-bundle" : nbTargetName.Trim(),
+                TargetKey = string.IsNullOrWhiteSpace(nbTargetKey) ? "ca-certificates.crt" : nbTargetKey.Trim(),
+                TargetKind = nbTargetKind,
+                Scope = nbScope,
+                IncludeDefaultCAs = nbIncludeDefault,
+                NamespaceSelectorJson = nbScope == TrustDistributionScope.MatchLabels ? LabelsToJson(nbLabels) : null,
+            });
+            Toasts.Success("Trust bundle created.");
+            showAddBundle = false;
+            nbName = ""; nbLabels = "";
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private void StartAddSource(Guid bundleId)
+    {
+        addSourceBundleId = bundleId;
+        asName = ""; asPem = "";
+    }
+
+    private async Task AddSource(Guid bundleId)
+    {
+        busy = true;
+        try
+        {
+            await TrustService.AddSourceAsync(bundleId, asName, asPem);
+            Toasts.Success("CA certificate added.");
+            addSourceBundleId = null;
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task RemoveSource(Guid sourceId)
+    {
+        busy = true;
+        try
+        {
+            await TrustService.RemoveSourceAsync(sourceId);
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task ApplyBundle(Guid bundleId)
+    {
+        busy = true;
+        try
+        {
+            (bool ok, string output) = await TrustService.ApplyBundleAsync(bundleId);
+            if (ok) Toasts.Success("Trust bundle applied to the cluster.");
+            else Toasts.Error(string.IsNullOrWhiteSpace(output) ? "Apply failed." : output);
+            await LoadAsync();
+        }
+        catch (OperationCanceledException) { Toasts.Info("Apply cancelled."); }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task DeleteBundle(Guid bundleId)
+    {
+        busy = true;
+        try
+        {
+            await TrustService.DeleteBundleAsync(bundleId);
+            Toasts.Success("Trust bundle removed.");
+            await LoadAsync();
+        }
+        catch (OperationCanceledException) { Toasts.Info("Removal cancelled."); }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+}

@@ -840,6 +840,72 @@ public class VaultServiceTests : IDisposable
         detected.IsCertificate.Should().BeFalse();
     }
 
+    // --- Tenant "library" certificates (app-less) ---
+
+    [Fact]
+    public async Task SetTenantCertificate_CreatesListsAndDecrypts()
+    {
+        Tenant tenant = CreateTenant();
+        (string certPem, string keyPem) = MakeSelfSignedCert("wildcard.example.com");
+        (bool built, CertificateBundle bundle) = TryBuild(certPem, keyPem);
+        built.Should().BeTrue();
+
+        (bool ok, string? error, Guid? id) = await sut.SetTenantCertificateAsync(tenant.Id, "wildcard", bundle);
+        ok.Should().BeTrue(error);
+        id.Should().NotBeNull();
+
+        List<TenantCertificateInfo> list = await sut.GetTenantCertificatesAsync(tenant.Id);
+        list.Should().ContainSingle();
+        list[0].Name.Should().Be("wildcard");
+        list[0].HasPrivateKey.Should().BeTrue();
+        list[0].Info.Should().NotBeNull();
+
+        // Decrypts back to a usable bundle.
+        CertificateBundle? loaded = await sut.GetCertificateBundleByIdAsync(id!.Value);
+        loaded!.HasPrivateKey.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task SetTenantCertificate_UpsertsByName()
+    {
+        Tenant tenant = CreateTenant();
+        (string c1, string k1) = MakeSelfSignedCert("a.example.com");
+        (string c2, string k2) = MakeSelfSignedCert("b.example.com");
+
+        (_, _, Guid? first) = await sut.SetTenantCertificateAsync(tenant.Id, "svc", TryBuild(c1, k1).Bundle);
+        (_, _, Guid? second) = await sut.SetTenantCertificateAsync(tenant.Id, "svc", TryBuild(c2, k2).Bundle);
+
+        second.Should().Be(first!.Value); // same row updated in place
+        (await sut.GetTenantCertificatesAsync(tenant.Id)).Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task DeleteTenantCertificate_Removes()
+    {
+        Tenant tenant = CreateTenant();
+        (string certPem, string keyPem) = MakeSelfSignedCert("x.example.com");
+        (_, _, Guid? id) = await sut.SetTenantCertificateAsync(tenant.Id, "x", TryBuild(certPem, keyPem).Bundle);
+
+        await sut.DeleteTenantCertificateAsync(id!.Value);
+
+        (await sut.GetTenantCertificatesAsync(tenant.Id)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task GetTenantCertificates_ExcludesAppScopedCerts()
+    {
+        (Tenant tenant, App app) = CreateTenantWithApp();
+        await sut.InitializeVaultAsync(tenant.Id);
+        (string certPem, string keyPem) = MakeSelfSignedCert("app.example.com");
+        CertificateBundle bundle = TryBuild(certPem, keyPem).Bundle;
+
+        await sut.SetAppCertificateAsync(tenant.Id, app.Id, "app-cert", bundle);
+        await sut.SetTenantCertificateAsync(tenant.Id, "tenant-cert", bundle);
+
+        List<TenantCertificateInfo> library = await sut.GetTenantCertificatesAsync(tenant.Id);
+        library.Should().ContainSingle(c => c.Name == "tenant-cert");
+    }
+
     private static (bool Ok, CertificateBundle Bundle) TryBuild(string certPem, string keyPem)
     {
         string combined = keyPem.Trim() + "\n" + certPem.Trim();

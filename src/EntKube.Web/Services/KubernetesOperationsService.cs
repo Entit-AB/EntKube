@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using EntKube.Web.Data;
+using EntKube.Web.Services.ClusterChanges;
 using k8s;
 using k8s.Models;
 using Microsoft.EntityFrameworkCore;
@@ -94,8 +95,27 @@ public class KubernetesOperationsService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     AuditService auditService,
     KyvernoPolicyService kyvernoPolicyService,
+    IClusterChangeGate gate,
     ILogger<KubernetesOperationsService> logger)
 {
+    /// <summary>
+    /// Requires operator acknowledgment (interactive scopes only) for a mutating cluster op that
+    /// this service performs directly via the k8s SDK or its own kubectl. Throws
+    /// <see cref="OperationCanceledException"/> if the operator cancels — callers surface that as a failure.
+    /// </summary>
+    private Task RequireAckAsync(
+        ChangeVerb verb, string kubeconfig, string clusterLabel, string? ns,
+        string summary, string? patch = null, CancellationToken ct = default)
+        => gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = verb,
+            Kubeconfig = kubeconfig,
+            ClusterLabel = string.IsNullOrWhiteSpace(clusterLabel) ? "cluster" : clusterLabel,
+            Namespace = ns,
+            Summary = summary,
+            Patch = patch,
+        }, ct);
+
     /// <summary>
     /// Applies the tenant+environment's enabled Kyverno policies to a deployment's namespace.
     /// Runs after a successful deploy so a newly-created customer app namespace inherits the same
@@ -396,6 +416,9 @@ public class KubernetesOperationsService(
 
         try
         {
+            await RequireAckAsync(ChangeVerb.Restart, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
+                deployment.Namespace, $"Restart Deployment/{k8sDeploymentName}", ct: ct);
+
             using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
 
             // Patching the pod template annotation forces a rollout restart,
@@ -453,6 +476,9 @@ public class KubernetesOperationsService(
 
         try
         {
+            await RequireAckAsync(ChangeVerb.Delete, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
+                deployment.Namespace, $"Delete Pod/{podName}", ct: ct);
+
             using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
 
             await client.CoreV1.DeleteNamespacedPodAsync(
@@ -501,6 +527,10 @@ public class KubernetesOperationsService(
 
         try
         {
+            await RequireAckAsync(ChangeVerb.Scale, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
+                deployment.Namespace, $"Scale Deployment/{k8sDeploymentName} to {replicas} replica(s)",
+                patch: $"spec.replicas = {replicas}", ct: ct);
+
             using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
 
             V1Patch patch = new(
@@ -619,6 +649,10 @@ public class KubernetesOperationsService(
 
         try
         {
+            await RequireAckAsync(ChangeVerb.Scale, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
+                deployment.Namespace, $"Scale {kind}/{name} to {replicas} replica(s)",
+                patch: $"spec.replicas = {replicas}", ct: ct);
+
             using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
             V1Patch patch = new(
                 $"{{\"spec\":{{\"replicas\":{replicas}}}}}",
@@ -673,6 +707,9 @@ public class KubernetesOperationsService(
 
         try
         {
+            await RequireAckAsync(ChangeVerb.Restart, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
+                deployment.Namespace, $"Restart {kind}/{name}", ct: ct);
+
             using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
             V1Patch patch = new(
                 "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":" +
@@ -728,6 +765,9 @@ public class KubernetesOperationsService(
 
         try
         {
+            await RequireAckAsync(ChangeVerb.Delete, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
+                deployment.Namespace, $"Delete {kind}/{name}", ct: ct);
+
             using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
 
             switch (kind)
@@ -799,6 +839,10 @@ public class KubernetesOperationsService(
             if (deployment.Type is DeploymentType.HelmChart or DeploymentType.GitHelm)
             {
                 string releaseName = ToHelmReleaseName(deployment.Name);
+
+                await RequireAckAsync(ChangeVerb.Helm, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
+                    deployment.Namespace, $"helm uninstall {releaseName} (removes all release resources)", ct: ct);
+
                 result = await RunCliAsync("helm",
                     $"uninstall {releaseName} --namespace {deployment.Namespace} --kubeconfig {tempKubeconfig}",
                     ct);
@@ -817,6 +861,17 @@ public class KubernetesOperationsService(
                         "No manifests found. Resources may have been applied outside of EntKube and must be removed manually.");
 
                 string combined = string.Join("\n---\n", manifests.Select(m => m.YamlContent));
+
+                await gate.AcknowledgeAsync(new PlannedClusterChange
+                {
+                    Verb = ChangeVerb.Delete,
+                    Kubeconfig = deployment.Cluster.Kubeconfig,
+                    ClusterLabel = deployment.Cluster.Name,
+                    Namespace = deployment.Namespace,
+                    Summary = $"Delete cluster resources for '{deployment.Name}' ({manifests.Count} manifest(s))",
+                    Manifest = combined,
+                }, ct);
+
                 string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-manifest-{Guid.NewGuid()}.yaml");
 
                 try
@@ -967,6 +1022,16 @@ public class KubernetesOperationsService(
 
         try
         {
+            await gate.AcknowledgeAsync(new PlannedClusterChange
+            {
+                Verb = ChangeVerb.Apply,
+                Kubeconfig = deployment.Cluster.Kubeconfig,
+                ClusterLabel = deployment.Cluster.Name,
+                Namespace = deployment.Namespace,
+                Summary = $"Apply '{deployment.Name}' ({manifests.Count} manifest(s)) to {deployment.Namespace}",
+                Manifest = combined,
+            }, ct);
+
             await File.WriteAllTextAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
             await File.WriteAllTextAsync(tempManifest, combined, ct);
 
@@ -1259,6 +1324,9 @@ public class KubernetesOperationsService(
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
+            await RequireAckAsync(ChangeVerb.Delete, kubeconfig, dr.AppDeployment.Cluster.Name, ns,
+                $"Delete HTTPRoute/{routeName} for {hostname}", ct: ct);
+
             await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
 
             HelmExecutionResult deleteResult = await RunCliAsync(
@@ -1541,6 +1609,18 @@ public class KubernetesOperationsService(
 
     private async Task DeleteResourceAsync(string kubeconfig, string kind, string name, string ns, CancellationToken ct)
     {
+        // Real kind/name/ns → the gate does a live lookup and auto-skips if the target is absent
+        // (mirrors --ignore-not-found), so this stays quiet for no-op deletes.
+        await gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Delete,
+            Kubeconfig = kubeconfig,
+            Kind = kind,
+            Name = name,
+            Namespace = ns,
+            Summary = $"Delete {kind}/{name} in {ns}",
+        }, ct);
+
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
@@ -1659,6 +1739,16 @@ public class KubernetesOperationsService(
     private async Task<KubernetesOperationResult<string>> ApplyRawYamlAsync(
         string kubeconfig, string yaml, CancellationToken ct)
     {
+        // Central raw-apply used by all route/gateway/Istio paths — gating here covers them once,
+        // and the gate's no-op-diff auto-skip collapses repeat applies of unchanged resources.
+        await gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Apply,
+            Kubeconfig = kubeconfig,
+            Manifest = yaml,
+            Summary = "Apply routing/gateway manifest",
+        }, ct);
+
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-manifest-{Guid.NewGuid()}.yaml");
 
@@ -1784,6 +1874,11 @@ public class KubernetesOperationsService(
             args.Add("--wait");
             args.Add("--timeout");
             args.Add("10m0s");
+
+            await RequireAckAsync(ChangeVerb.Helm, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
+                deployment.Namespace,
+                $"helm upgrade --install {releaseName} ({deployment.HelmChartName}@{deployment.HelmChartVersion}) in {deployment.Namespace}",
+                ct: ct);
 
             HelmExecutionResult result = await RunCliAsync("helm", string.Join(" ", args), ct);
 
@@ -2467,6 +2562,9 @@ public class KubernetesOperationsService(
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
+            await RequireAckAsync(ChangeVerb.Apply, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
+                deployment.Namespace, $"Create Job/{jobName} from CronJob/{cronJobName}", ct: ct);
+
             await File.WriteAllTextAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
             HelmExecutionResult result = await RunCliAsync(
                 "kubectl",
@@ -2507,8 +2605,13 @@ public class KubernetesOperationsService(
 
         try
         {
-            using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
             string suspendValue = suspend ? "true" : "false";
+
+            await RequireAckAsync(ChangeVerb.Patch, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
+                deployment.Namespace, $"{(suspend ? "Suspend" : "Resume")} CronJob/{name}",
+                patch: $"spec.suspend = {suspendValue}", ct: ct);
+
+            using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
             V1Patch patch = new(
                 $"{{\"spec\":{{\"suspend\":{suspendValue}}}}}",
                 V1Patch.PatchType.MergePatch);

@@ -1,0 +1,120 @@
+@using EntKube.Web.Services.ClusterChanges
+@implements IClusterChangeAckSink
+@implements IDisposable
+@inject IClusterChangeGate Gate
+
+@if (_change is not null && _diff is not null)
+{
+    <div class="ccack-backdrop" role="dialog" aria-modal="true" aria-labelledby="ccack-title">
+        <div class="ccack-modal shadow-lg">
+            <div class="ccack-head">
+                <div class="d-flex align-items-center gap-2">
+                    <i class="bi bi-shield-exclamation fs-5 text-warning" aria-hidden="true"></i>
+                    <h5 id="ccack-title" class="mb-0">Acknowledge cluster change</h5>
+                </div>
+                <span class="badge bg-secondary-subtle text-secondary-emphasis">@VerbLabel(_change.Verb)</span>
+            </div>
+
+            <div class="ccack-meta small text-body-secondary">
+                <div><span class="ccack-key">Cluster</span> <span class="fw-semibold text-body">@_change.ClusterLabel</span></div>
+                @if (!string.IsNullOrEmpty(_change.Namespace))
+                {
+                    <div><span class="ccack-key">Namespace</span> <span class="fw-semibold text-body">@_change.Namespace</span></div>
+                }
+                <div><span class="ccack-key">Action</span> <span class="fw-semibold text-body">@_change.Describe()</span></div>
+            </div>
+
+            @if (!string.IsNullOrEmpty(_diff.Warning))
+            {
+                <div class="alert alert-warning py-2 px-3 small mb-2">
+                    <i class="bi bi-exclamation-triangle me-1"></i>@_diff.Warning
+                </div>
+            }
+
+            <div class="ccack-diff">
+                <pre class="mb-0"><code>@RenderDiff(_diff.DiffText)</code></pre>
+            </div>
+
+            <div class="ccack-actions">
+                <button class="btn btn-outline-secondary" @onclick="Cancel" disabled="@_busy">Cancel</button>
+                <button class="btn btn-warning" @onclick="Acknowledge" disabled="@_busy">
+                    @if (_busy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                    Acknowledge &amp; Apply
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private IDisposable? _registration;
+    private PlannedClusterChange? _change;
+    private ClusterChangeDiff? _diff;
+    private TaskCompletionSource<ClusterChangeDecision>? _tcs;
+    private bool _busy;
+
+    protected override void OnInitialized() => _registration = Gate.RegisterSink(this);
+
+    public async Task<ClusterChangeDecision> RequestAsync(
+        PlannedClusterChange change, ClusterChangeDiff diff, CancellationToken ct)
+    {
+        // Serialize: if a prior request is somehow still open, cancel it first.
+        _tcs?.TrySetResult(ClusterChangeDecision.Cancelled);
+
+        _change = change;
+        _diff = diff;
+        _busy = false;
+        _tcs = new TaskCompletionSource<ClusterChangeDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await using CancellationTokenRegistration reg =
+            ct.Register(() => _tcs?.TrySetResult(ClusterChangeDecision.Cancelled));
+
+        await InvokeAsync(StateHasChanged);
+        ClusterChangeDecision decision = await _tcs.Task;
+
+        _change = null;
+        _diff = null;
+        _tcs = null;
+        await InvokeAsync(StateHasChanged);
+        return decision;
+    }
+
+    private void Acknowledge()
+    {
+        _busy = true;
+        _tcs?.TrySetResult(ClusterChangeDecision.Acknowledged);
+    }
+
+    private void Cancel() => _tcs?.TrySetResult(ClusterChangeDecision.Cancelled);
+
+    private static string VerbLabel(ChangeVerb verb) => verb switch
+    {
+        ChangeVerb.EnsureNamespace => "Namespace",
+        ChangeVerb.Scale => "Scale",
+        ChangeVerb.Restart => "Restart",
+        ChangeVerb.Helm => "Helm",
+        _ => verb.ToString(),
+    };
+
+    // Render the unified diff with per-line severity classes for +/- lines.
+    private static MarkupString RenderDiff(string diff)
+    {
+        System.Text.StringBuilder sb = new();
+        foreach (string raw in diff.Replace("\r\n", "\n").Split('\n'))
+        {
+            string cls = raw.StartsWith('+') && !raw.StartsWith("+++") ? "ccack-add"
+                : raw.StartsWith('-') && !raw.StartsWith("---") ? "ccack-del"
+                : raw.StartsWith("@@") ? "ccack-hunk"
+                : raw.StartsWith('#') ? "ccack-comment"
+                : "";
+            string escaped = System.Net.WebUtility.HtmlEncode(raw);
+            if (cls.Length > 0)
+                sb.Append($"<span class=\"{cls}\">{escaped}</span>\n");
+            else
+                sb.Append(escaped).Append('\n');
+        }
+        return new MarkupString(sb.ToString());
+    }
+
+    public void Dispose() => _registration?.Dispose();
+}

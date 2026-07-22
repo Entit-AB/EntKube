@@ -173,6 +173,15 @@ else if (selectedEnv is not null)
 
     @* --- Policy Enforcement (tenant-wide for this environment) --- *@
     <TenantKyvernoPoliciesTab TenantId="TenantId" EnvironmentId="selectedEnv.Id" />
+
+    @* --- CA & Trust (per cluster in this environment) --- *@
+    @if (envClusters is not null)
+    {
+        @foreach (KubernetesCluster cluster in envClusters)
+        {
+            <CaTrustTab TenantId="TenantId" ClusterId="cluster.Id" ClusterName="cluster.Name" />
+        }
+    }
 }
 else
 {

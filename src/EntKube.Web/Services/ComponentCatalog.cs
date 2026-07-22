@@ -659,6 +659,67 @@ public static class ComponentCatalog
                 """
         },
 
+        new CatalogEntry
+        {
+            Key = "trust-manager",
+            DisplayName = "trust-manager",
+            Description = "Distributes CA trust bundles across the cluster. Syncs a set of trusted CA certificates into a ConfigMap (or Secret) in every selected namespace so workloads can mount a common trust store. Companion to cert-manager; drives the CA & Trust management UI.",
+            Icon = "bi-patch-check",
+            Category = "Certificate Management",
+            HelmRepoUrl = "https://charts.jetstack.io",
+            HelmChartName = "trust-manager",
+            DefaultNamespace = "cert-manager",
+            DefaultReleaseName = "trust-manager",
+            Dependencies = ["cert-manager"],
+            // trust-manager ships the Bundle CRD; detect it directly so an out-of-band
+            // install (kubectl/Terraform) is still recognised by the component scan.
+            DetectionCrds = ["bundles.trust.cert-manager.io"],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "trust-namespace", Label = "Trust namespace",
+                    YamlPath = "app.trust.namespace", Type = FormFieldType.Text,
+                    DefaultValue = "cert-manager",
+                    HelpText = "Namespace trust-manager watches for source ConfigMaps/Secrets referenced by Bundles."
+                },
+                new ComponentFormField
+                {
+                    Key = "enable-secret-targets", Label = "Allow Secret targets",
+                    YamlPath = "secretTargets.enabled", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Permit Bundles to write their trust store to a Secret (not just a ConfigMap). Required if you distribute a bundle as a Secret."
+                },
+                new ComponentFormField
+                {
+                    Key = "cpu-request", Label = "CPU Request",
+                    YamlPath = "resources.requests.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "50m", Placeholder = "e.g. 50m, 100m"
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-request", Label = "Memory Request",
+                    YamlPath = "resources.requests.memory", Type = FormFieldType.Text,
+                    DefaultValue = "80Mi", Placeholder = "e.g. 80Mi, 128Mi"
+                }
+            ],
+            DefaultValues = """
+                # Namespace trust-manager watches for Bundle source material.
+                app:
+                  trust:
+                    namespace: cert-manager
+
+                # Only enable if you distribute trust bundles as Secrets rather than ConfigMaps.
+                secretTargets:
+                  enabled: false
+
+                resources:
+                  requests:
+                    memory: 80Mi
+                    cpu: 50m
+                """
+        },
+
         // ── Monitoring ──
 
         new CatalogEntry
@@ -1304,7 +1365,7 @@ public static class ComponentCatalog
                 {
                     Key = "memory-request", Label = "Memory Request",
                     YamlPath = "resources.requests.memory", Type = FormFieldType.Text,
-                    DefaultValue = "128Mi", Placeholder = "e.g. 128Mi, 256Mi"
+                    DefaultValue = "256Mi", Placeholder = "e.g. 256Mi, 512Mi"
                 },
                 new ComponentFormField
                 {
@@ -1317,8 +1378,8 @@ public static class ComponentCatalog
                 {
                     Key = "memory-limit", Label = "Memory Limit",
                     YamlPath = "resources.limits.memory", Type = FormFieldType.Text,
-                    DefaultValue = "256Mi", Placeholder = "e.g. 256Mi, 512Mi",
-                    HelpText = "Keep comfortably above the request to avoid OOMKills under log bursts."
+                    DefaultValue = "512Mi", Placeholder = "e.g. 512Mi, 1Gi",
+                    HelpText = "The memory_limiter processor sheds load at ~80% of this ceiling; keep it well above the request and raise to 1Gi+ on high-throughput nodes."
                 },
                 new ComponentFormField
                 {
@@ -1389,10 +1450,15 @@ public static class ComponentCatalog
                 resources:
                   requests:
                     cpu: 50m
-                    memory: 128Mi
+                    memory: 256Mi
                   limits:
                     cpu: 200m
-                    memory: 256Mi
+                    # Log-tailing DaemonSet: memory scales with log throughput and OTLP
+                    # ingest volume. Paired with the memory_limiter processor below, which
+                    # sheds load at ~80% of this ceiling instead of letting the batch queue
+                    # grow until the kubelet OOMKills the pod. Raise both together on busy
+                    # nodes (1Gi+).
+                    memory: 512Mi
 
                 config:
                   extensions:
@@ -1419,6 +1485,16 @@ public static class ComponentCatalog
                           endpoint: 0.0.0.0:4318
 
                   processors:
+                    # Backpressure guard — MUST be first in every pipeline. Checks heap against
+                    # the container's cgroup memory limit and, above spike/limit thresholds,
+                    # starts refusing new data (receivers return retryable errors) so the
+                    # collector sheds load gracefully instead of being OOMKilled by the kubelet.
+                    # Percentages track the resources.limits.memory ceiling above, so raising
+                    # that limit scales these automatically.
+                    memory_limiter:
+                      check_interval: 1s
+                      limit_percentage: 80
+                      spike_limit_percentage: 25
                     # Enrich with node name + the app.kubernetes.io/name pod label.
                     k8sattributes:
                       extract:
@@ -1456,12 +1532,12 @@ public static class ComponentCatalog
                     pipelines:
                       logs:
                         receivers: [filelog, otlp]
-                        processors: [k8sattributes, resource/short-labels, batch]
+                        processors: [memory_limiter, k8sattributes, resource/short-labels, batch]
                         exporters: [otlphttp/entkube]
                       # Traces from instrumented apps (OTLP receiver) → EntKube for APM/trace view.
                       traces:
                         receivers: [otlp]
-                        processors: [k8sattributes, batch]
+                        processors: [memory_limiter, k8sattributes, batch]
                         exporters: [otlphttp/entkube]
                       # NB: no metrics pipeline. EntKube has no native metrics ingest — app/host
                       # metrics go straight to Prometheus (there is no /ingest/otlp/v1/metrics
@@ -2252,6 +2328,13 @@ public static class ComponentCatalog
                     Key = "memory-request", Label = "Memory Request",
                     YamlPath = "admissionController.container.resources.requests.memory", Type = FormFieldType.Text,
                     DefaultValue = "256Mi", Placeholder = "e.g. 256Mi, 512Mi"
+                },
+                new ComponentFormField
+                {
+                    Key = "reports-memory-limit", Label = "Reports Controller Memory Limit",
+                    YamlPath = "reportsController.resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "1Gi", Placeholder = "e.g. 1Gi, 2Gi, 4Gi",
+                    HelpText = "Memory ceiling for the reports controller. It caches metadata for every scanned resource, so raise this (2Gi+) on clusters with many namespaces/workloads to avoid OOMKilled crash loops."
                 }
             ],
             DefaultValues = """
@@ -2279,12 +2362,18 @@ public static class ComponentCatalog
                       cpu: 50m
                       memory: 128Mi
 
-                # Reports controller — generates PolicyReport and ClusterPolicyReport objects
+                # Reports controller — generates PolicyReport and ClusterPolicyReport objects.
+                # Builds PartialObjectMetadata informer caches for every scanned resource kind,
+                # so memory scales with cluster object count. A limit is required to keep the
+                # kubelet from OOMKilling it right after cache sync on larger clusters; bump the
+                # limit further (2Gi+) for clusters with many namespaces/workloads.
                 reportsController:
                   resources:
                     requests:
                       cpu: 50m
-                      memory: 128Mi
+                      memory: 256Mi
+                    limits:
+                      memory: 1Gi
 
                 # Enable PolicyException resources so workloads can opt out of specific policies
                 features:

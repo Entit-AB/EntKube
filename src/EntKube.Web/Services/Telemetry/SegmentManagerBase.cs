@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.IO.Compression;
 using EntKube.Web.Data;
 using Lucene.Net.Analysis;
 using Lucene.Net.Documents;
@@ -26,11 +25,56 @@ public sealed class SegmentEngineOptions
     /// <summary>Drop sealed segments whose newest event is older than this. Default 90 days.</summary>
     public int RetentionDays { get; init; } = 90;
 
+    /// <summary>
+    /// Retention for the <c>spans</c> signal — the raw per-span waterfall data, which is by far the largest
+    /// telemetry volume (eBPF instruments everything). Raw spans are dropped after this window while the
+    /// per-trace SUMMARY index (which powers the trace list) follows the full <see cref="RetentionDays"/>,
+    /// so you keep 90 days of "what traces happened" but only this window of deep waterfalls + RED +
+    /// service-map. Cutting raw spans from 90→30 days roughly thirds the dominant span store. Clamped to at
+    /// most <see cref="RetentionDays"/>. Default 30. Raise toward RetentionDays for more waterfall history,
+    /// lower for less disk.</summary>
+    public int RawSpanRetentionDays { get; init; } = 30;
+
+    /// <summary>
+    /// Head-sampling rate (percent, 1..100) for "uninteresting" traces' raw spans: a deterministic
+    /// per-trace-id hash keeps this fraction. Traces with any error span or any span at/above
+    /// <see cref="TraceKeepMinDurationMs"/> are ALWAYS kept regardless. The trace list is unaffected — every
+    /// trace still gets a summary; only raw-span retention is thinned. 100 (default) = no sampling / current
+    /// behaviour. Set e.g. 10 to keep all errors+slow traces plus 10% of the rest.</summary>
+    public int TraceSampleRatePercent { get; init; } = 100;
+
+    /// <summary>A trace with any span whose duration is at least this (ms) is always kept when sampling is on
+    /// (see <see cref="TraceSampleRatePercent"/>) — slow traces are the ones worth a waterfall. Default 500.</summary>
+    public double TraceKeepMinDurationMs { get; init; } = 500;
+
+    /// <summary>
+    /// Split logs into two retention tiers by severity: WARN and above ("logs" signal) keep the full
+    /// <see cref="RetentionDays"/>; DEBUG/INFO ("logs_debug" signal) keep only
+    /// <see cref="VerboseLogRetentionDays"/>. Most log VOLUME is low-severity noise, so aging it out early is
+    /// a large disk win with nothing important lost — warnings and errors stay the full window. Writes are
+    /// routed by severity and queries union both tiers (skipping the verbose tier when a query's min level is
+    /// WARN+). Default true. Set false to keep the single-tier behaviour (all logs at RetentionDays).</summary>
+    public bool TieredLogRetention { get; init; } = true;
+
+    /// <summary>Retention (days) for the DEBUG/INFO log tier when <see cref="TieredLogRetention"/> is on.
+    /// Clamped to at most <see cref="RetentionDays"/>. Default 14.</summary>
+    public int VerboseLogRetentionDays { get; init; } = 14;
+
     /// <summary>Max number of sealed-segment readers kept open in memory per (tenant, signal). Least-
     /// recently-used readers beyond this are closed (they reopen on demand). Bounds file handles /
     /// heap so a long-running app with 90-day retention doesn't accumulate a reader per segment.
     /// Default 256.</summary>
     public int MaxCachedReaders { get; init; } = 256;
+
+    /// <summary>
+    /// zstd level used to compress a sealed segment's archive before it is uploaded to object storage
+    /// (see <see cref="SegmentArchive"/>). This is the dominant lever on at-rest telemetry size: sealing the
+    /// whole Lucene segment directory with zstd-19 instead of Deflate roughly halves the stored archive
+    /// versus the old zip, and zstd decompresses faster on the cold-query path too. 19 is the ratio/speed
+    /// sweet spot (22 is barely smaller but far slower); seal runs on a background timer so the CPU cost is
+    /// off the ingest/query path. Reads auto-detect the archive format, so already-sealed <c>.zip</c>
+    /// segments keep working — this is a forward-only change with no migration. Range 1..22, default 19.</summary>
+    public int ArchiveZstdLevel { get; init; } = 19;
 }
 
 /// <summary>
@@ -76,6 +120,14 @@ public abstract class SegmentManagerBase : IDisposable
 
     /// <summary>The tenant this manager serves — telemetry is tenant-scoped, one manager per (tenant, signal).</summary>
     protected Guid TenantId { get; }
+
+    /// <summary>Engine tunables — exposed so a signal-specific subclass can vary behaviour (e.g. retention).</summary>
+    protected SegmentEngineOptions Options => _options;
+
+    /// <summary>Retention window (days) for this signal's sealed segments. Base default is the global
+    /// <see cref="SegmentEngineOptions.RetentionDays"/>; <see cref="SpanSegmentManager"/> shortens it so raw
+    /// spans age out before the long-lived trace summaries.</summary>
+    protected virtual int RetentionDays => _options.RetentionDays;
 
     protected SegmentManagerBase(
         Guid tenantId,
@@ -263,14 +315,14 @@ public abstract class SegmentManagerBase : IDisposable
         sealing.Commit();
         sealing.Dispose(); // release file handles so the directory can be zipped/moved
 
-        string key = $"{TenantId:N}/{Signal}/{min:yyyy/MM/dd}/{segId:N}.zip";
-        string tmpZip = Path.Combine(_options.DataPath, "stage", segId.ToString("N") + ".zip");
-        Directory.CreateDirectory(Path.GetDirectoryName(tmpZip)!);
-        ZipFile.CreateFromDirectory(sealingDir, tmpZip, CompressionLevel.Optimal, includeBaseDirectory: false);
-        long size = new FileInfo(tmpZip).Length;
+        string key = $"{TenantId:N}/{Signal}/{min:yyyy/MM/dd}/{segId:N}{SegmentArchive.Extension}";
+        string tmpArchive = Path.Combine(_options.DataPath, "stage", segId.ToString("N") + SegmentArchive.Extension);
+        Directory.CreateDirectory(Path.GetDirectoryName(tmpArchive)!);
+        await SegmentArchive.PackAsync(sealingDir, tmpArchive, _options.ArchiveZstdLevel, ct);
+        long size = new FileInfo(tmpArchive).Length;
 
-        await _blobs.PutAsync(key, tmpZip, ct);
-        File.Delete(tmpZip);
+        await _blobs.PutAsync(key, tmpArchive, ct);
+        File.Delete(tmpArchive);
 
         var segment = new TelemetrySegment
         {
@@ -300,7 +352,7 @@ public abstract class SegmentManagerBase : IDisposable
     /// <summary>Drops sealed segments whose newest event is older than the retention window (S3 + catalog + cache).</summary>
     public async Task<int> DropExpiredAsync(CancellationToken ct = default)
     {
-        DateTime cutoff = DateTime.UtcNow.AddDays(-_options.RetentionDays);
+        DateTime cutoff = DateTime.UtcNow.AddDays(-RetentionDays);
         await using ApplicationDbContext db = await _catalog.CreateDbContextAsync(ct);
         List<TelemetrySegment> expired = await db.TelemetrySegments
             .Where(s => s.TenantId == TenantId && s.Signal == Signal && s.MaxTs < cutoff)

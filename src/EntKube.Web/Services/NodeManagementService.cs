@@ -60,8 +60,21 @@ public class NodeInfo
 public class NodeManagementService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     AuditService auditService,
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
     ILogger<NodeManagementService> logger)
 {
+    private Task RequireNodeAckAsync(
+        EntKube.Web.Services.ClusterChanges.ChangeVerb verb, string kubeconfig,
+        string clusterLabel, string summary, string? patch, CancellationToken ct)
+        => gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+        {
+            Verb = verb,
+            Kubeconfig = kubeconfig,
+            ClusterLabel = string.IsNullOrWhiteSpace(clusterLabel) ? "cluster" : clusterLabel,
+            Summary = summary,
+            Patch = patch,
+        }, ct);
+
     // ── Cluster lookup helper ─────────────────────────────────────────────────
 
     private async Task<(KubernetesCluster? Cluster, KubernetesOperationResult? Error)>
@@ -341,10 +354,16 @@ public class NodeManagementService(
 
         try
         {
-            using Kubernetes client = CreateClient(cluster!.Kubeconfig!);
-
             // Patch spec.unschedulable: null means schedulable, true means cordoned.
             string value = schedulable ? "null" : "true";
+
+            await RequireNodeAckAsync(EntKube.Web.Services.ClusterChanges.ChangeVerb.Patch,
+                cluster!.Kubeconfig!, cluster.Name,
+                $"{(schedulable ? "Uncordon" : "Cordon")} Node/{nodeName}",
+                $"spec.unschedulable = {value}", ct);
+
+            using Kubernetes client = CreateClient(cluster!.Kubeconfig!);
+
             V1Patch patch = new(
                 $"{{\"spec\":{{\"unschedulable\":{value}}}}}",
                 V1Patch.PatchType.MergePatch);
@@ -385,6 +404,10 @@ public class NodeManagementService(
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
+            await RequireNodeAckAsync(EntKube.Web.Services.ClusterChanges.ChangeVerb.Delete,
+                cluster!.Kubeconfig!, cluster.Name,
+                $"Drain Node/{nodeName} (cordon + evict all evictable pods)", null, ct);
+
             await File.WriteAllTextAsync(tempKubeconfig, cluster!.Kubeconfig, ct);
 
             List<string> args = ["drain", nodeName,
@@ -432,10 +455,16 @@ public class NodeManagementService(
 
         try
         {
-            using Kubernetes client = CreateClient(cluster!.Kubeconfig!);
-
             // JSON Merge Patch: null removes the key, a string value sets it.
             string labelValue = value is null ? "null" : $"\"{JsonEscape(value)}\"";
+
+            await RequireNodeAckAsync(EntKube.Web.Services.ClusterChanges.ChangeVerb.Patch,
+                cluster!.Kubeconfig!, cluster.Name,
+                value is null ? $"Remove label {key} from Node/{nodeName}" : $"Set label {key}={value} on Node/{nodeName}",
+                $"metadata.labels.{key} = {(value is null ? "(removed)" : value)}", ct);
+
+            using Kubernetes client = CreateClient(cluster!.Kubeconfig!);
+
             V1Patch patch = new(
                 $"{{\"metadata\":{{\"labels\":{{\"{JsonEscape(key)}\":{labelValue}}}}}}}",
                 V1Patch.PatchType.MergePatch);
@@ -469,14 +498,19 @@ public class NodeManagementService(
 
         try
         {
-            using Kubernetes client = CreateClient(cluster!.Kubeconfig!);
-
             string taintsJson = JsonSerializer.Serialize(taints.Select(t => new
             {
                 key = t.Key,
                 value = t.Value,
                 effect = t.Effect
             }));
+
+            await RequireNodeAckAsync(EntKube.Web.Services.ClusterChanges.ChangeVerb.Patch,
+                cluster!.Kubeconfig!, cluster.Name,
+                $"Replace taints on Node/{nodeName} ({taints.Count} taint(s))",
+                $"spec.taints = {taintsJson}", ct);
+
+            using Kubernetes client = CreateClient(cluster!.Kubeconfig!);
 
             V1Patch patch = new(
                 $"{{\"spec\":{{\"taints\":{taintsJson}}}}}",

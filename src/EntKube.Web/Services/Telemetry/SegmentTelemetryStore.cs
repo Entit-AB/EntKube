@@ -10,26 +10,35 @@ namespace EntKube.Web.Services.Telemetry;
 /// they are served by Prometheus.
 /// </summary>
 public sealed class SegmentTelemetryStore(
-    SegmentManagerRegistry<LogSegmentManager> logs,
+    LogTierRegistries logs,
     SegmentManagerRegistry<SpanSegmentManager> spans,
     SegmentManagerRegistry<RumSegmentManager> rum,
-    SegmentManagerRegistry<TraceSummarySegmentManager> traceSummaries) : ITelemetryIngest
+    SegmentManagerRegistry<TraceSummarySegmentManager> traceSummaries,
+    SegmentEngineOptions options) : ITelemetryIngest
 {
     public bool IsEnabled => true;
 
     public Task<int> WriteLogsAsync(Guid tenantId, Guid clusterId, IReadOnlyList<LogIngestRecord> records, CancellationToken ct = default)
     {
         if (records.Count == 0) return Task.FromResult(0);
-        logs.For(tenantId).WriteLogs(tenantId, clusterId, records);
+        // Route by severity into the two retention tiers so each tier's segments stay single-tier and can
+        // expire independently. When tiering is off, Split returns everything as "important" (one stream).
+        (IReadOnlyList<LogIngestRecord> important, IReadOnlyList<LogIngestRecord> verbose) = logs.Split(records);
+        if (important.Count > 0) logs.Important.For(tenantId).WriteLogs(tenantId, clusterId, important);
+        if (verbose.Count > 0) logs.Verbose.For(tenantId).WriteLogs(tenantId, clusterId, verbose);
         return Task.FromResult(records.Count);
     }
 
     public Task<int> WriteSpansAsync(Guid tenantId, Guid clusterId, IReadOnlyList<SpanIngestRecord> records, CancellationToken ct = default)
     {
         if (records.Count == 0) return Task.FromResult(0);
-        spans.For(tenantId).WriteSpans(tenantId, clusterId, records);
-        // Also feed the trace-summary index (partials merged at query time for the fast trace list).
+        // Feed EVERY span to the trace-summary index first, so the trace list stays complete regardless of
+        // sampling (partials merged at query time). Only the raw spans (waterfall detail) are head-sampled.
         traceSummaries.For(tenantId).WriteFromSpanBatch(tenantId, clusterId, records);
+        IReadOnlyList<SpanIngestRecord> keep =
+            TraceSampler.Sample(records, options.TraceSampleRatePercent, options.TraceKeepMinDurationMs);
+        if (keep.Count > 0)
+            spans.For(tenantId).WriteSpans(tenantId, clusterId, keep);
         return Task.FromResult(records.Count);
     }
 

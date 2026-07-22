@@ -12,6 +12,7 @@ namespace EntKube.Web.Services;
 /// </summary>
 public class KedaScalerService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
     ILogger<KedaScalerService> logger)
 {
     // ── CRUD ──────────────────────────────────────────────────────────────────
@@ -240,6 +241,16 @@ public class KedaScalerService(
         string yaml = BuildManifest(scalers, ns);
         if (string.IsNullOrWhiteSpace(yaml))
             return (false, "No manifests generated (check configuration).");
+
+        await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+        {
+            Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+            Kubeconfig = cluster.Kubeconfig,
+            ClusterLabel = cluster.Name,
+            Namespace = ns,
+            Summary = $"Apply KEDA autoscalers to {ns}",
+            Manifest = yaml,
+        }, ct);
 
         string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-keda-{Guid.NewGuid():N}.kubeconfig");
         string manifestPath   = Path.Combine(Path.GetTempPath(), $"entkube-keda-{Guid.NewGuid():N}.yaml");

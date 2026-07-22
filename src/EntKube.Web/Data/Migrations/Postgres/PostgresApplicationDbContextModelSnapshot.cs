@@ -1314,6 +1314,83 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("BootstrapStepRuns");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.CaTrustBundle", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IncludeDefaultCAs")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("NamespaceSelectorJson")
+                        .HasColumnType("text");
+
+                    b.Property<int>("Scope")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("TargetKey")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("TargetKind")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("TargetName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("CaTrustBundles");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CaTrustBundleSource", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("BundleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Pem")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BundleId");
+
+                    b.ToTable("CaTrustBundleSources");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.CacheBinding", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1350,6 +1427,58 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("RedisClusterId");
 
                     b.ToTable("CacheBindings");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CertificateDistribution", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("EnvironmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("IncludeKey")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("LastSyncedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("NamespaceSelectorJson")
+                        .HasColumnType("text");
+
+                    b.Property<int>("Scope")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("TargetSecretName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("VaultSecretId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("CertificateDistributions");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
@@ -5491,6 +5620,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Run");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.CaTrustBundleSource", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.CaTrustBundle", "Bundle")
+                        .WithMany("Sources")
+                        .HasForeignKey("BundleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Bundle");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.CacheBinding", b =>
                 {
                     b.HasOne("EntKube.Web.Data.AppDeployment", "AppDeployment")
@@ -7026,6 +7166,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
             modelBuilder.Entity("EntKube.Web.Data.BootstrapRun", b =>
                 {
                     b.Navigation("StepRuns");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CaTrustBundle", b =>
+                {
+                    b.Navigation("Sources");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>

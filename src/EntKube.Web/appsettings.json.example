@@ -9,6 +9,10 @@
     "StaleAfterSeconds": 30,
     "RefreshSeconds": 10
   },
+  "ClusterChanges": {
+    "//": "When true (default), every human-triggered change to Kubernetes cluster state pauses to show a server-side dry-run diff that an operator must acknowledge before it is applied. Automated/background flows are never gated. Set false to disable the gate.",
+    "RequireAcknowledgment": true
+  },
   "ConnectionStrings": {
     "DefaultConnection": "DataSource=Data/app.db;Cache=Shared"
   },

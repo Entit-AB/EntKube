@@ -1,0 +1,73 @@
+.ccack-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1080;
+    padding: 1rem;
+}
+
+.ccack-modal {
+    background: var(--bs-body-bg);
+    color: var(--bs-body-color);
+    border: 1px solid var(--bs-border-color);
+    border-radius: 0.5rem;
+    width: min(860px, 96vw);
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    padding: 1rem 1.25rem;
+}
+
+.ccack-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.ccack-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.ccack-key {
+    display: inline-block;
+    min-width: 5.5rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    font-size: 0.7rem;
+}
+
+.ccack-diff {
+    flex: 1 1 auto;
+    overflow: auto;
+    background: var(--bs-tertiary-bg);
+    border: 1px solid var(--bs-border-color);
+    border-radius: 0.375rem;
+    padding: 0.5rem 0.75rem;
+    min-height: 4rem;
+}
+
+.ccack-diff pre {
+    font-size: 0.78rem;
+    line-height: 1.35;
+    white-space: pre;
+}
+
+.ccack-add { color: #1a7f37; display: block; background: rgba(46, 160, 67, 0.12); }
+.ccack-del { color: #cf222e; display: block; background: rgba(207, 34, 46, 0.12); }
+.ccack-hunk { color: #8250df; display: block; }
+.ccack-comment { color: var(--bs-secondary-color); display: block; }
+
+.ccack-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.9rem;
+}

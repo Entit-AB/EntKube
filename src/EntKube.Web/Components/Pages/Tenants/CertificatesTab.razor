@@ -1,0 +1,474 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject VaultService VaultService
+@inject CertificateDistributionService DistService
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   CertificatesTab — tenant-level serving/TLS certificate management.
+
+   Manage full-chain or plain TLS certificates (with or without a private
+   key), stored once per tenant, and deliver each to one or more targets:
+     • a specific customer app (synced to that app's namespaces), and/or
+     • tenant-wide (mirrored into every namespace on the tenant's clusters).
+   CA trust bundles are managed separately, per cluster, in the CA & Trust tab.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex align-items-center mb-3 mt-2">
+    <i class="bi bi-award fs-4 me-2 text-primary"></i>
+    <div>
+        <h5 class="mb-0">Certificates</h5>
+        <small class="text-muted">Serving/TLS certificates delivered to specific apps and/or tenant-wide to all namespaces.</small>
+    </div>
+    <button class="btn btn-sm btn-primary ms-auto" @onclick="() => showAddCert = !showAddCert">
+        <i class="bi bi-plus-circle me-1"></i>Add certificate
+    </button>
+</div>
+
+@if (showAddCert)
+{
+    <div class="card shadow-sm mb-3 border-primary-subtle">
+        <div class="card-header bg-white py-2"><strong>New certificate</strong></div>
+        <div class="card-body">
+            <div class="mb-2" style="max-width:420px;">
+                <label class="form-label small mb-1">Name</label>
+                <input class="form-control form-control-sm" @bind="newCertName" placeholder="wildcard-example-com" />
+            </div>
+            <CertificateFields Bundle="newCertBundle" />
+            <div class="mt-3 d-flex gap-2">
+                <button class="btn btn-sm btn-primary" @onclick="AddCertificate"
+                        disabled="@(busy || string.IsNullOrWhiteSpace(newCertName) || string.IsNullOrWhiteSpace(newCertBundle.Certificate))">
+                    @if (busy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                    Save certificate
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelAddCert">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (loading)
+{
+    <div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+}
+else if (loadError is not null)
+{
+    <div class="alert alert-danger py-2 small">
+        <i class="bi bi-exclamation-triangle me-1"></i><strong>Failed to load:</strong> @loadError
+        <button class="btn btn-sm btn-outline-danger ms-2" @onclick="LoadAsync">Retry</button>
+    </div>
+}
+else if (certs.Count == 0)
+{
+    <div class="text-muted small">No certificates yet. Click <strong>Add certificate</strong> to import a TLS or full-chain certificate (PEM or PFX).</div>
+}
+else
+{
+    @foreach (TenantCertificateInfo c in certs)
+    {
+        <div class="card shadow-sm mb-3">
+            <div class="card-body">
+                <div class="d-flex align-items-start justify-content-between">
+                    <div class="min-width-0">
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                            <strong>@c.Name</strong>
+                            @if (c.HasPrivateKey)
+                            {
+                                <span class="badge bg-success-subtle text-success border border-success-subtle">has key</span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-light text-dark border">cert only</span>
+                            }
+                            @if (c.HasChain)
+                            {
+                                <span class="badge bg-light text-dark border">full chain</span>
+                            }
+                            @if (c.HasCa)
+                            {
+                                <span class="badge bg-light text-dark border">+ CA</span>
+                            }
+                        </div>
+                        <div class="mt-1"><CertificateInfoDisplay Info="c.Info" /></div>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => ToggleTargets(c.Id)">
+                            <i class="bi bi-diagram-3 me-1"></i>Targets
+                            @if (targetCounts.TryGetValue(c.Id, out int tc) && tc > 0)
+                            {
+                                <span class="badge bg-primary ms-1">@tc</span>
+                            }
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => StartEditCert(c)" disabled="@busy">
+                            <i class="bi bi-pencil"></i>
+                        </button>
+                        @if (confirmDeleteCertId == c.Id)
+                        {
+                            <button class="btn btn-sm btn-danger" @onclick="() => DeleteCertificate(c.Id)" disabled="@busy">Confirm</button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDeleteCertId = null">Cancel</button>
+                        }
+                        else
+                        {
+                            <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteCertId = c.Id" disabled="@busy">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        }
+                    </div>
+                </div>
+
+                @if (editCertId == c.Id)
+                {
+                    <div class="border rounded p-3 mt-3 bg-light-subtle">
+                        <div class="fw-semibold small mb-2">Replace certificate material for <code>@c.Name</code></div>
+                        <CertificateFields Bundle="editCertBundle" />
+                        <div class="mt-2 d-flex gap-2">
+                            <button class="btn btn-sm btn-primary" @onclick="() => SaveEditCert(c)"
+                                    disabled="@(busy || string.IsNullOrWhiteSpace(editCertBundle.Certificate))">Save</button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => editCertId = null">Cancel</button>
+                        </div>
+                    </div>
+                }
+
+                @if (expandedCertId == c.Id)
+                {
+                    <hr />
+                    <div class="d-flex align-items-center justify-content-between mb-2">
+                        <div class="fw-semibold small">Delivery targets</div>
+                        <button class="btn btn-sm btn-outline-primary" @onclick="() => ToggleAddTarget(c.Id)">
+                            <i class="bi bi-plus-circle me-1"></i>Add target
+                        </button>
+                    </div>
+
+                    @if (showAddTargetFor == c.Id)
+                    {
+                        <div class="border rounded p-3 mb-2 bg-light-subtle">
+                            <div class="row g-2">
+                                <div class="col-md-4">
+                                    <label class="form-label small mb-1">Target</label>
+                                    <select class="form-select form-select-sm" @bind="tKind">
+                                        <option value="@TrustDistributionScope.App">Specific app</option>
+                                        <option value="@TrustDistributionScope.AllNamespaces">Tenant-wide (all namespaces)</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small mb-1">Target name</label>
+                                    <input class="form-control form-control-sm" @bind="tName" placeholder="wildcard-tls" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small mb-1">Secret name</label>
+                                    <input class="form-control form-control-sm" @bind="tSecretName" placeholder="wildcard-tls" />
+                                </div>
+                                @if (tKind == TrustDistributionScope.App)
+                                {
+                                    <div class="col-md-6">
+                                        <label class="form-label small mb-1">App</label>
+                                        <select class="form-select form-select-sm" @bind="tAppId">
+                                            <option value="@Guid.Empty">— select app —</option>
+                                            @foreach (TargetableApp a in apps)
+                                            {
+                                                <option value="@a.Id">@a.CustomerName / @a.Name</option>
+                                            }
+                                        </select>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label small mb-1">Environment</label>
+                                        <select class="form-select form-select-sm" @bind="tEnvId">
+                                            <option value="@Guid.Empty">All environments</option>
+                                            @foreach (TargetEnvironment e in envs)
+                                            {
+                                                <option value="@e.Id">@e.Name</option>
+                                            }
+                                        </select>
+                                    </div>
+                                }
+                                <div class="col-12">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="tKey_@c.Id" @bind="tIncludeKey" disabled="@(!c.HasPrivateKey)" />
+                                        <label class="form-check-label small" for="tKey_@c.Id">
+                                            Include private key (<code>kubernetes.io/tls</code> Secret)
+                                            @if (!c.HasPrivateKey) { <span class="text-muted">— this certificate has no key</span> }
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                            @if (tIncludeKey && c.HasPrivateKey)
+                            {
+                                <div class="alert alert-warning py-2 small mt-2 mb-0">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>
+                                    The private key will be written to a Secret in <strong>every target namespace</strong> — readable by any workload there.
+                                </div>
+                            }
+                            <div class="mt-2 d-flex gap-2">
+                                <button class="btn btn-sm btn-primary" @onclick="() => AddTarget(c)"
+                                        disabled="@(busy || string.IsNullOrWhiteSpace(tName) || (tKind == TrustDistributionScope.App && tAppId == Guid.Empty))">
+                                    Add target
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAddTargetFor = null">Cancel</button>
+                            </div>
+                        </div>
+                    }
+
+                    @if (currentTargets.Count == 0)
+                    {
+                        <p class="text-muted small mb-0">No targets yet. Add one to deliver this certificate.</p>
+                    }
+                    else
+                    {
+                        <table class="table table-sm align-middle mb-0">
+                            <thead><tr><th>Name</th><th>Delivery</th><th>Secret</th><th>Key</th><th>Last synced</th><th></th></tr></thead>
+                            <tbody>
+                                @foreach (CertificateDistribution t in currentTargets)
+                                {
+                                    <tr>
+                                        <td>@t.Name</td>
+                                        <td>@TargetLabel(t)</td>
+                                        <td><code>@t.TargetSecretName</code></td>
+                                        <td>
+                                            @if (t.IncludeKey)
+                                            {
+                                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">with key</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-light text-dark border">cert only</span>
+                                            }
+                                        </td>
+                                        <td class="small text-muted">@(t.LastSyncedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")</td>
+                                        <td class="text-end">
+                                            <button class="btn btn-sm btn-success" @onclick="() => ApplyTarget(t.Id)" disabled="@busy">
+                                                <i class="bi bi-cloud-upload me-1"></i>Apply
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-danger border-0" @onclick="() => DeleteTarget(c.Id, t.Id)" disabled="@busy">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                }
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private string? loadError;
+    private bool busy;
+
+    private List<TenantCertificateInfo> certs = [];
+    private List<TargetableApp> apps = [];
+    private List<TargetEnvironment> envs = [];
+    private readonly Dictionary<Guid, int> targetCounts = new();
+
+    // Add / edit certificate
+    private bool showAddCert;
+    private string newCertName = "";
+    private CertificateBundle newCertBundle = new();
+    private Guid? editCertId;
+    private string editCertName = "";
+    private CertificateBundle editCertBundle = new();
+    private Guid? confirmDeleteCertId;
+
+    // Targets
+    private Guid? expandedCertId;
+    private List<CertificateDistribution> currentTargets = [];
+    private Guid? showAddTargetFor;
+    private TrustDistributionScope tKind = TrustDistributionScope.App;
+    private string tName = "";
+    private string tSecretName = "";
+    private Guid tAppId = Guid.Empty;
+    private Guid tEnvId = Guid.Empty;
+    private bool tIncludeKey;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!loading) await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        loadError = null;
+        try
+        {
+            certs = await VaultService.GetTenantCertificatesAsync(TenantId);
+            apps = await DistService.ListTargetableAppsAsync(TenantId);
+            envs = await DistService.ListEnvironmentsAsync(TenantId);
+            targetCounts.Clear();
+            foreach (TenantCertificateInfo c in certs)
+                targetCounts[c.Id] = (await DistService.GetDistributionsForCertAsync(TenantId, c.Id)).Count;
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private string TargetLabel(CertificateDistribution t)
+    {
+        if (t.Scope == TrustDistributionScope.App)
+        {
+            string app = apps.FirstOrDefault(a => a.Id == t.AppId)?.Name ?? "app";
+            string env = t.EnvironmentId is null ? "all envs" : (envs.FirstOrDefault(e => e.Id == t.EnvironmentId)?.Name ?? "env");
+            return $"App: {app} / {env}";
+        }
+        return "Tenant-wide (all namespaces)";
+    }
+
+    // ── Certificate CRUD ──
+
+    private void CancelAddCert()
+    {
+        showAddCert = false;
+        newCertName = "";
+        newCertBundle = new();
+    }
+
+    private async Task AddCertificate()
+    {
+        busy = true;
+        try
+        {
+            (bool ok, string? error, _) = await VaultService.SetTenantCertificateAsync(TenantId, newCertName.Trim(), newCertBundle);
+            if (!ok) { Toasts.Error(error ?? "Could not save certificate."); return; }
+            Toasts.Success("Certificate saved.");
+            CancelAddCert();
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task StartEditCert(TenantCertificateInfo c)
+    {
+        editCertId = c.Id;
+        editCertName = c.Name;
+        editCertBundle = await VaultService.GetCertificateBundleByIdAsync(c.Id) ?? new();
+    }
+
+    private async Task SaveEditCert(TenantCertificateInfo c)
+    {
+        busy = true;
+        try
+        {
+            (bool ok, string? error, _) = await VaultService.SetTenantCertificateAsync(TenantId, c.Name, editCertBundle);
+            if (!ok) { Toasts.Error(error ?? "Could not save certificate."); return; }
+            Toasts.Success("Certificate updated. Re-apply its targets to roll out the new material.");
+            editCertId = null;
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task DeleteCertificate(Guid certId)
+    {
+        busy = true;
+        try
+        {
+            // Remove delivery targets first (also clears the mirrored secrets), then the cert.
+            foreach (CertificateDistribution t in await DistService.GetDistributionsForCertAsync(TenantId, certId))
+                await DistService.DeleteDistributionAsync(t.Id);
+            await VaultService.DeleteTenantCertificateAsync(certId);
+            Toasts.Success("Certificate deleted.");
+            confirmDeleteCertId = null;
+            if (expandedCertId == certId) expandedCertId = null;
+            await LoadAsync();
+        }
+        catch (OperationCanceledException) { Toasts.Info("Deletion cancelled."); }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    // ── Targets ──
+
+    private async Task ToggleTargets(Guid certId)
+    {
+        if (expandedCertId == certId) { expandedCertId = null; return; }
+        expandedCertId = certId;
+        showAddTargetFor = null;
+        await RefreshTargets(certId);
+    }
+
+    private async Task RefreshTargets(Guid certId)
+    {
+        currentTargets = await DistService.GetDistributionsForCertAsync(TenantId, certId);
+        targetCounts[certId] = currentTargets.Count;
+    }
+
+    private void ToggleAddTarget(Guid certId)
+    {
+        showAddTargetFor = showAddTargetFor == certId ? null : certId;
+        tKind = TrustDistributionScope.App;
+        tName = "";
+        tSecretName = "";
+        tAppId = Guid.Empty;
+        tEnvId = Guid.Empty;
+        tIncludeKey = false;
+    }
+
+    private async Task AddTarget(TenantCertificateInfo c)
+    {
+        busy = true;
+        try
+        {
+            await DistService.CreateDistributionAsync(new CertificateDistribution
+            {
+                TenantId = TenantId,
+                ClusterId = null, // resolved dynamically (app deployments / all tenant clusters)
+                VaultSecretId = c.Id,
+                Name = tName.Trim(),
+                TargetSecretName = string.IsNullOrWhiteSpace(tSecretName) ? tName.Trim() : tSecretName.Trim(),
+                Scope = tKind,
+                IncludeKey = tIncludeKey && c.HasPrivateKey,
+                AppId = tKind == TrustDistributionScope.App ? tAppId : null,
+                EnvironmentId = tKind == TrustDistributionScope.App && tEnvId != Guid.Empty ? tEnvId : null,
+            });
+            Toasts.Success("Target added. Click Apply to deliver it.");
+            showAddTargetFor = null;
+            await RefreshTargets(c.Id);
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task ApplyTarget(Guid targetId)
+    {
+        busy = true;
+        try
+        {
+            CertificateDistributionResult r = await DistService.ApplyDistributionAsync(targetId);
+            if (r.Success) Toasts.Success($"Delivered to {r.NamespaceCount} namespace(s).");
+            else Toasts.Error(string.IsNullOrWhiteSpace(r.Output) ? "Delivery failed." : r.Output);
+            if (expandedCertId is Guid id) await RefreshTargets(id);
+        }
+        catch (OperationCanceledException) { Toasts.Info("Apply cancelled."); }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task DeleteTarget(Guid certId, Guid targetId)
+    {
+        busy = true;
+        try
+        {
+            await DistService.DeleteDistributionAsync(targetId);
+            Toasts.Success("Target removed.");
+            await RefreshTargets(certId);
+        }
+        catch (OperationCanceledException) { Toasts.Info("Removal cancelled."); }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+}

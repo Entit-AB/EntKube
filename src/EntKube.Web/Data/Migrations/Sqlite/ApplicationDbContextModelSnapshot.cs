@@ -1309,6 +1309,83 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("BootstrapStepRuns");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.CaTrustBundle", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IncludeDefaultCAs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("NamespaceSelectorJson")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Scope")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("TargetKey")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("TargetKind")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("TargetName")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("CaTrustBundles");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CaTrustBundleSource", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("BundleId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Pem")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BundleId");
+
+                    b.ToTable("CaTrustBundleSources");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.CacheBinding", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1345,6 +1422,58 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("RedisClusterId");
 
                     b.ToTable("CacheBindings");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CertificateDistribution", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("ClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("EnvironmentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IncludeKey")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("LastSyncedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("NamespaceSelectorJson")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Scope")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("TargetSecretName")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("VaultSecretId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("CertificateDistributions");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
@@ -5482,6 +5611,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Run");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.CaTrustBundleSource", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.CaTrustBundle", "Bundle")
+                        .WithMany("Sources")
+                        .HasForeignKey("BundleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Bundle");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.CacheBinding", b =>
                 {
                     b.HasOne("EntKube.Web.Data.AppDeployment", "AppDeployment")
@@ -7017,6 +7157,11 @@ namespace EntKube.Web.Data.Migrations.Sqlite
             modelBuilder.Entity("EntKube.Web.Data.BootstrapRun", b =>
                 {
                     b.Navigation("StepRuns");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CaTrustBundle", b =>
+                {
+                    b.Navigation("Sources");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>

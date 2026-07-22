@@ -1,4 +1,3 @@
-using System.IO.Compression;
 using EntKube.Web.Data;
 
 namespace EntKube.Web.Services.Telemetry;
@@ -17,7 +16,7 @@ public sealed class SegmentCache(ISegmentBlobStore blobs, string cacheRoot)
 {
     private string DirFor(Guid id) => Path.Combine(cacheRoot, id.ToString("N"));
 
-    /// <summary>Ensures the segment's unzipped index dir exists locally (download+extract on miss); returns its path.</summary>
+    /// <summary>Ensures the segment's unpacked index dir exists locally (download+extract on miss); returns its path.</summary>
     public async Task<string> EnsureLocalAsync(TelemetrySegment seg, CancellationToken ct = default)
     {
         string dir = DirFor(seg.Id);
@@ -25,11 +24,13 @@ public sealed class SegmentCache(ISegmentBlobStore blobs, string cacheRoot)
             return dir;
 
         Directory.CreateDirectory(cacheRoot);
-        string tmpZip = Path.Combine(cacheRoot, seg.Id.ToString("N") + ".zip");
-        await blobs.GetAsync(seg.ObjectKey, tmpZip, ct);
+        // Keep the downloaded archive's real extension so the object key's format is obvious on disk; the
+        // unpacker sniffs the content anyway (new zstd-tar vs a legacy Deflate zip).
+        string tmpArchive = Path.Combine(cacheRoot, seg.Id.ToString("N") + Path.GetExtension(seg.ObjectKey));
+        await blobs.GetAsync(seg.ObjectKey, tmpArchive, ct);
         if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
-        ZipFile.ExtractToDirectory(tmpZip, dir);
-        File.Delete(tmpZip);
+        await SegmentArchive.UnpackAsync(tmpArchive, dir, ct);
+        File.Delete(tmpArchive);
         return dir;
     }
 

@@ -17,7 +17,7 @@ namespace EntKube.Web.Services.Telemetry;
 /// aggregate DocValues in C#.
 /// </summary>
 public sealed class SegmentLogService(
-    SegmentManagerRegistry<LogSegmentManager> logs,
+    LogTierRegistries tiers,
     ClusterTenantResolver tenants,
     ILogger<SegmentLogService> logger) : ILogBackend
 {
@@ -35,12 +35,17 @@ public sealed class SegmentLogService(
     {
         Guid? tenantId = await tenants.ResolveAsync(clusterId, ct);
         if (tenantId is null) return false;
-        LogSegmentManager segments = logs.For(tenantId.Value);
         // "Has recent data" is the routing signal — bound to a week so this doesn't open a reader for
-        // every segment across the (up to 90-day) retention window just to check existence.
+        // every segment across the (up to 90-day) retention window just to check existence. Either tier
+        // having data counts.
         DateTime from = DateTime.UtcNow.AddDays(-7);
-        return await segments.QueryAsync(from, null,
-            s => s.Search(ScopeQuery(tenantId.Value, clusterId), 1).TotalHits > 0, ct);
+        foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value))
+        {
+            bool any = await segments.QueryAsync(from, null,
+                s => s.Search(ScopeQuery(tenantId.Value, clusterId), 1).TotalHits > 0, ct);
+            if (any) return true;
+        }
+        return false;
     }
 
     public Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(
@@ -66,12 +71,16 @@ public sealed class SegmentLogService(
 
         try
         {
-            LogSegmentManager segments = logs.For(tenantId.Value);
-            Query q = LogSegmentSchema.BuildQuery(tenantId.Value, clusterId, filter, from, to, segments.Analyzer);
+            var all = new List<LokiLogStream>();
             var sort = new Sort(new SortField(LogSegmentSchema.Ts, SortFieldType.INT64, reverse: true)); // ts DESC
-            List<LokiLogStream> streams = await segments.QueryAsync(
-                from, to, s => MapStreams(s, s.Search(q, limit, sort)), ct);
-            return KubernetesOperationResult<List<LokiLogStream>>.Success(streams);
+            // Union the retention tiers that can match this min level, each returning its newest `limit`.
+            foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value, filter.MinLevel))
+            {
+                Query q = LogSegmentSchema.BuildQuery(tenantId.Value, clusterId, filter, from, to, segments.Analyzer);
+                all.AddRange(await segments.QueryAsync(
+                    from, to, s => MapStreams(s, s.Search(q, limit, sort)), ct));
+            }
+            return KubernetesOperationResult<List<LokiLogStream>>.Success(MergeStreams(all, limit));
         }
         catch (Exception ex)
         {
@@ -88,13 +97,14 @@ public sealed class SegmentLogService(
 
         try
         {
-            LogSegmentManager segments = logs.For(tenantId.Value);
+            var all = new List<LokiLogStream>();
             Query q = LogSegmentSchema.BuildTraceQuery(tenantId.Value, clusterId, traceId);
             var sort = new Sort(new SortField(LogSegmentSchema.Ts, SortFieldType.INT64, reverse: true));
-            // A trace can span any time; search all segments.
-            List<LokiLogStream> streams = await segments.QueryAsync(
-                null, null, s => MapStreams(s, s.Search(q, limit, sort)), ct);
-            return KubernetesOperationResult<List<LokiLogStream>>.Success(streams);
+            // A trace's lines can be any severity, so search both tiers; a trace can span any time (all segments).
+            foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value))
+                all.AddRange(await segments.QueryAsync(
+                    null, null, s => MapStreams(s, s.Search(q, limit, sort)), ct));
+            return KubernetesOperationResult<List<LokiLogStream>>.Success(MergeStreams(all, limit));
         }
         catch (Exception ex)
         {
@@ -118,10 +128,13 @@ public sealed class SegmentLogService(
 
         try
         {
-            LogSegmentManager segments = logs.For(tenantId.Value);
-            Query q = LogSegmentSchema.BuildQuery(tenantId.Value, clusterId, filter, from, to, segments.Analyzer);
+            // One collector accumulates across both tiers (each search adds into the same buckets).
             var collector = new HistogramCollector(fromMs, bucketMs);
-            await segments.QueryAsync(from, to, s => { s.Search(q, collector); return 0; }, ct);
+            foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value, filter.MinLevel))
+            {
+                Query q = LogSegmentSchema.BuildQuery(tenantId.Value, clusterId, filter, from, to, segments.Analyzer);
+                await segments.QueryAsync(from, to, s => { s.Search(q, collector); return 0; }, ct);
+            }
 
             List<LogHistogramBucket> result = collector.Buckets
                 .OrderBy(kv => kv.Key)
@@ -145,20 +158,23 @@ public sealed class SegmentLogService(
 
         try
         {
-            LogSegmentManager segments = logs.For(tenantId.Value);
             var filter = new LogQueryFilter
             {
                 Namespaces = string.IsNullOrEmpty(ns) ? [] : [ns],
                 Text = matchText,
                 MinLevel = minLevel,
             };
-            Query q = LogSegmentSchema.BuildQuery(tenantId.Value, clusterId, filter, from, to, segments.Analyzer);
-            long total = await segments.QueryAsync(from, to, s =>
+            long total = 0;
+            foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value, minLevel))
             {
-                var counter = new TotalHitCountCollector();
-                s.Search(q, counter);
-                return (long)counter.TotalHits;
-            }, ct);
+                Query q = LogSegmentSchema.BuildQuery(tenantId.Value, clusterId, filter, from, to, segments.Analyzer);
+                total += await segments.QueryAsync(from, to, s =>
+                {
+                    var counter = new TotalHitCountCollector();
+                    s.Search(q, counter);
+                    return (long)counter.TotalHits;
+                }, ct);
+            }
             return KubernetesOperationResult<long>.Success(total);
         }
         catch (Exception ex)
@@ -186,7 +202,6 @@ public sealed class SegmentLogService(
 
         try
         {
-            LogSegmentManager segments = logs.For(tenantId.Value);
             var scope = new BooleanQuery
             {
                 { new TermQuery(new Term(LogSegmentSchema.TenantId, tenantId.Value.ToString("N"))), Occur.MUST },
@@ -196,10 +211,12 @@ public sealed class SegmentLogService(
                 scope.Add(new TermQuery(new Term(LogSegmentSchema.Namespace, namespaceName)), Occur.MUST);
 
             // Scan only the requested window (default 1h) instead of ALL segments — with 90-day
-            // retention, unbounded discovery opened a reader per segment and visited every doc.
+            // retention, unbounded discovery opened a reader per segment and visited every doc. A label may
+            // exist in only one tier (e.g. a namespace that logs only INFO), so union both into one sink.
             DateTime from = DateTime.UtcNow.AddMinutes(-windowMinutes);
             var sink = new HashSet<string>(StringComparer.Ordinal);
-            await segments.QueryAsync(from, null, s => { s.Search(scope, new DistinctCollector(field, sink)); return 0; }, ct);
+            foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value))
+                await segments.QueryAsync(from, null, s => { s.Search(scope, new DistinctCollector(field, sink)); return 0; }, ct);
 
             List<string> values = sink.Where(v => v.Length > 0).OrderBy(v => v, StringComparer.Ordinal).ToList();
             LabelCache[cacheKey] = (DateTime.UtcNow, values);
@@ -252,6 +269,35 @@ public sealed class SegmentLogService(
             });
         }
         return [.. streams.Values];
+    }
+
+    // Merges per-tier stream lists into one: keeps the globally newest `limit` entries across both tiers
+    // (each tier already returned its own newest `limit`, so the union is correct), then regroups them by
+    // (namespace, pod, container). A single-tier result passes through unchanged apart from the truncation.
+    private static List<LokiLogStream> MergeStreams(List<LokiLogStream> streams, int limit)
+    {
+        if (streams.Count <= 1) return streams;
+
+        var flat = streams
+            .SelectMany(s => s.Entries.Select(e => (Labels: s.Labels, Entry: e)))
+            .OrderByDescending(x => x.Entry.Timestamp)
+            .Take(limit);
+
+        Dictionary<(string, string, string), LokiLogStream> merged = [];
+        foreach ((Dictionary<string, string> labels, LokiLogEntry entry) in flat)
+        {
+            (string, string, string) key = (
+                labels.GetValueOrDefault("namespace", ""),
+                labels.GetValueOrDefault("pod", ""),
+                labels.GetValueOrDefault("container", ""));
+            if (!merged.TryGetValue(key, out LokiLogStream? stream))
+            {
+                stream = new LokiLogStream { Labels = new Dictionary<string, string>(labels) };
+                merged[key] = stream;
+            }
+            stream.Entries.Add(entry);
+        }
+        return [.. merged.Values];
     }
 
     private static KubernetesOperationResult<T> Fail<T>(string message = "Segment telemetry store error.")

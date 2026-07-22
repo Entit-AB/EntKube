@@ -19,6 +19,10 @@ public sealed class SpanSegmentManager(
 {
     protected override string Signal => "spans";
 
+    // Raw spans age out on the shorter raw-span window (never longer than the global retention); the
+    // per-trace summary index keeps the trace list alive for the full retention independently.
+    protected override int RetentionDays => Math.Min(Options.RawSpanRetentionDays, Options.RetentionDays);
+
     /// <summary>Appends a batch of span records for a tenant/cluster to the active index.</summary>
     public void WriteSpans(Guid tenantId, Guid clusterId, IReadOnlyList<SpanIngestRecord> records)
     {

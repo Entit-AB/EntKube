@@ -41,6 +41,7 @@ public class KyvernoDiscoveryResult
 public class KyvernoPolicyService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     IKubernetesClientFactory k8s,
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
     ILogger<KyvernoPolicyService> logger)
 {
     // ── CRUD ──────────────────────────────────────────────────────────────────
@@ -592,6 +593,16 @@ public class KyvernoPolicyService(
         string yaml = BuildManifest(policies, ns);
         if (string.IsNullOrWhiteSpace(yaml))
             return (false, "No policies generated (check configuration).");
+
+        await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+        {
+            Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+            Kubeconfig = cluster.Kubeconfig,
+            ClusterLabel = cluster.Name,
+            Namespace = ns,
+            Summary = $"Apply Kyverno policies to {ns}",
+            Manifest = yaml,
+        }, ct);
 
         string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-kyverno-{Guid.NewGuid():N}.kubeconfig");
         string manifestPath   = Path.Combine(Path.GetTempPath(), $"entkube-kyverno-{Guid.NewGuid():N}.yaml");

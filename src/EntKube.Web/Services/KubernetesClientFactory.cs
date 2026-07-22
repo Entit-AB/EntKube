@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -8,15 +9,30 @@ namespace EntKube.Web.Services;
 /// Implements IKubernetesClientFactory using kubectl commands.
 /// Writes manifests to temporary files and applies/deletes them via kubectl,
 /// using the provided kubeconfig for authentication.
+///
+/// Every mutating primitive routes through <see cref="IClusterChangeGate"/> first, so an
+/// interactive operator acknowledges a server-side dry-run diff before the write happens.
+/// In non-interactive (background) scopes the gate passes through untouched.
 /// </summary>
 public class KubernetesClientFactory : IKubernetesClientFactory
 {
+    private readonly IClusterChangeGate _gate;
+
+    public KubernetesClientFactory(IClusterChangeGate gate) => _gate = gate;
+
     /// <summary>
     /// Applies a YAML manifest by writing it to a temp file and running kubectl apply.
     /// The kubeconfig is written to a separate temp file for authentication.
     /// </summary>
     public async Task ApplyManifestAsync(string manifest, string kubeconfig, CancellationToken ct = default)
     {
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Apply,
+            Manifest = manifest,
+            Kubeconfig = kubeconfig,
+        }, ct);
+
         string kubeconfigPath = Path.GetTempFileName();
         string manifestPath = Path.GetTempFileName();
 
@@ -41,6 +57,15 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     public async Task DeleteManifestAsync(
         string kind, string name, string ns, string kubeconfig, CancellationToken ct = default)
     {
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Delete,
+            Kind = kind,
+            Name = name,
+            Namespace = ns,
+            Kubeconfig = kubeconfig,
+        }, ct);
+
         string kubeconfigPath = Path.GetTempFileName();
 
         try
@@ -64,6 +89,16 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     public async Task PatchJsonAsync(
         string resource, string name, string ns, string jsonPatch, string kubeconfig, CancellationToken ct = default)
     {
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Patch,
+            Resource = resource,
+            Name = name,
+            Namespace = ns,
+            Patch = jsonPatch,
+            Kubeconfig = kubeconfig,
+        }, ct);
+
         string kubeconfigPath = Path.GetTempFileName();
         string patchPath = Path.GetTempFileName();
 
@@ -89,6 +124,17 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     public async Task PatchStrategicAsync(
         string resource, string name, string ns, string jsonPatch, string kubeconfig, CancellationToken ct = default)
     {
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Patch,
+            Resource = resource,
+            Name = name,
+            Namespace = ns,
+            Patch = jsonPatch,
+            StrategicPatch = true,
+            Kubeconfig = kubeconfig,
+        }, ct);
+
         string kubeconfigPath = Path.GetTempFileName();
         string patchPath = Path.GetTempFileName();
 

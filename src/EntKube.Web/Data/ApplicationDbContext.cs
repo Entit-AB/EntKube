@@ -116,6 +116,9 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<BlueprintRolloutTarget> BlueprintRolloutTargets => Set<BlueprintRolloutTarget>();
     public DbSet<BlueprintVariable> BlueprintVariables => Set<BlueprintVariable>();
     public DbSet<BlueprintVariableValue> BlueprintVariableValues => Set<BlueprintVariableValue>();
+    public DbSet<CaTrustBundle> CaTrustBundles => Set<CaTrustBundle>();
+    public DbSet<CaTrustBundleSource> CaTrustBundleSources => Set<CaTrustBundleSource>();
+    public DbSet<CertificateDistribution> CertificateDistributions => Set<CertificateDistribution>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {

@@ -319,6 +319,7 @@ else
     private static readonly SectionItem[] PlatformItems =
     [
         new("vault", "Vault", "bi-safe2"),
+        new("certificates", "Certificates", "bi-award"),
     ];
     private static readonly TreeGroup[] OpsGroups =
     [
@@ -678,6 +679,7 @@ else
             case "identity": OpenEnvScoped<IdentityTab>(builder, tid); break;
             case "registry": OpenEnvScoped<RegistryTab>(builder, tid); break;
             case "vault": builder.OpenComponent<VaultTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "certificates": builder.OpenComponent<CertificatesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "overview":
                 builder.OpenComponent<TenantMonitoringOverview>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);

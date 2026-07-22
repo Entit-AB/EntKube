@@ -77,8 +77,11 @@ public sealed class SegmentLogEngineTests : IDisposable
         return mgr;
     }
 
+    // Single-tier LogTierRegistries (no verbose registry) — matches these tests, which write every severity
+    // straight to the one LogSegmentManager. Tiering behaviour has its own coverage in SegmentLogTierTests.
     private SegmentLogService NewService()
-        => new(_registry!, _resolver, NullLogger<SegmentLogService>.Instance);
+        => new(new LogTierRegistries(_registry!, null, new SegmentEngineOptions()),
+               _resolver, NullLogger<SegmentLogService>.Instance);
 
     private SegmentManagerRegistry<LogSegmentManager> Registry(int retentionDays = 14)
     {

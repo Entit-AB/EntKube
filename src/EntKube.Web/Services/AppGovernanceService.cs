@@ -15,6 +15,7 @@ namespace EntKube.Web.Services;
 /// </summary>
 public class AppGovernanceService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
     ILogger<AppGovernanceService> logger)
 {
     // ── Namespace ─────────────────────────────────────────────────────────────
@@ -383,6 +384,16 @@ public class AppGovernanceService(
 
         AppGovernanceData data = await LoadAsync(appId, environmentId, ct);
         string yaml = BuildManifest(data, ns);
+
+        await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+        {
+            Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+            Kubeconfig = cluster.Kubeconfig,
+            ClusterLabel = cluster.Name,
+            Namespace = ns,
+            Summary = $"Apply governance (quota/limits/NetworkPolicy/RBAC) to {ns}",
+            Manifest = yaml,
+        }, ct);
 
         string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-gov-{Guid.NewGuid():N}.kubeconfig");
         string manifestPath   = Path.Combine(Path.GetTempPath(), $"entkube-gov-{Guid.NewGuid():N}.yaml");

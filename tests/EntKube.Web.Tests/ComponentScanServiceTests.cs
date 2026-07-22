@@ -45,7 +45,10 @@ public class ComponentScanServiceTests : IDisposable
         VaultEncryptionService encryption = new(TestRootKey);
         VaultService vaultService = new(dbFactory, encryption);
         IKubernetesClientFactory k8sFactory = new Mock<IKubernetesClientFactory>().Object;
-        KyvernoPolicyService kyvernoService = new(dbFactory, k8sFactory, NullLogger<KyvernoPolicyService>.Instance);
+        EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate = new(
+            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+            NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance);
+        KyvernoPolicyService kyvernoService = new(dbFactory, k8sFactory, gate, NullLogger<KyvernoPolicyService>.Instance);
         RabbitMQService rabbitMQService = new(dbFactory, k8sFactory, vaultService);
         sut = new ComponentScanService(dbFactory, vaultService, kyvernoService, rabbitMQService);
 

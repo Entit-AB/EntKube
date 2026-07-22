@@ -273,6 +273,109 @@ public class VaultService(
         return (true, null, secret);
     }
 
+    // ── Tenant-scoped "library" certificates ───────────────────────────────────
+    // A serving/TLS certificate that belongs to the whole tenant rather than one app.
+    // Stored once as an app-less Certificate secret (all scope FKs null) and delivered to
+    // apps and/or all namespaces via CertificateDistribution targets. This is the only
+    // supported "neither app nor component" secret scope, reserved for certificates.
+
+    /// <summary>
+    /// Creates or updates a tenant-scoped certificate (no app). Keyed on (tenant, name).
+    /// Validated, serialized, and stored encrypted with <see cref="VaultSecretType.Certificate"/>.
+    /// </summary>
+    public async Task<(bool Ok, string? Error, Guid? Id)> SetTenantCertificateAsync(
+        Guid tenantId, string name, CertificateBundle bundle,
+        string? updatedBy = null, CancellationToken ct = default)
+    {
+        (bool valid, string? validationError) = CertificateParser.Validate(bundle);
+        if (!valid)
+        {
+            return (false, validationError, null);
+        }
+
+        // Ensure the tenant has a vault (idempotent) before sealing the certificate.
+        await InitializeVaultAsync(tenantId, ct);
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+
+        VaultSecret? existing = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
+                && s.AppId == null && s.SecretType == VaultSecretType.Certificate
+                && s.Name == name, ct);
+
+        string json = JsonSerializer.Serialize(bundle, CertificateJsonOptions);
+        (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, json);
+
+        if (existing is not null)
+        {
+            await ArchiveVersionAsync(db, existing, ct);
+            existing.EncryptedValue = ciphertext;
+            existing.Nonce = nonce;
+            existing.UpdatedAt = DateTime.UtcNow;
+            existing.UpdatedBy = updatedBy;
+            await db.SaveChangesAsync(ct);
+            return (true, null, existing.Id);
+        }
+
+        SecretVault vault = (await GetVaultAsync(tenantId, ct))!;
+        VaultSecret secret = new()
+        {
+            Id = Guid.NewGuid(),
+            VaultId = vault.Id,
+            Name = name,
+            SecretType = VaultSecretType.Certificate,
+            EncryptedValue = ciphertext,
+            Nonce = nonce,
+            UpdatedBy = updatedBy,
+            // No scope FKs set → tenant-library certificate.
+        };
+        db.Set<VaultSecret>().Add(secret);
+        await db.SaveChangesAsync(ct);
+        return (true, null, secret.Id);
+    }
+
+    /// <summary>Lists the tenant's app-less "library" certificates with parsed validity.</summary>
+    public async Task<List<TenantCertificateInfo>> GetTenantCertificatesAsync(
+        Guid tenantId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        List<VaultSecret> secrets = await db.Set<VaultSecret>()
+            .Include(s => s.Vault)
+            .Where(s => s.Vault.TenantId == tenantId
+                && s.SecretType == VaultSecretType.Certificate
+                && s.AppId == null)
+            .OrderBy(s => s.Name)
+            .ToListAsync(ct);
+
+        List<TenantCertificateInfo> result = [];
+        foreach (VaultSecret s in secrets)
+        {
+            CertificateBundle? bundle = await GetCertificateBundleByIdAsync(s.Id, ct);
+            CertificateInfo? info = bundle is null ? null : CertificateParser.TryParse(bundle.Certificate);
+            result.Add(new TenantCertificateInfo(
+                s.Id, s.Name,
+                bundle?.HasPrivateKey ?? false,
+                bundle?.HasChain ?? false,
+                bundle?.HasCaCertificate ?? false,
+                info));
+        }
+        return result;
+    }
+
+    /// <summary>Deletes a tenant-scoped certificate. No-op if the id is not an app-less certificate.</summary>
+    public async Task DeleteTenantCertificateAsync(Guid secretId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        VaultSecret? secret = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Id == secretId
+                && s.AppId == null && s.SecretType == VaultSecretType.Certificate, ct);
+        if (secret is null) return;
+        db.Set<VaultSecret>().Remove(secret);
+        await db.SaveChangesAsync(ct);
+    }
+
     /// <summary>
     /// Idempotent backfill for secrets imported before TLS detection existed: opaque app
     /// secrets that are really the split keys of one TLS Secret (names <c>tls.crt</c>

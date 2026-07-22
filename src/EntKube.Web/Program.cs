@@ -250,6 +250,12 @@ public class Program
             RollMaxDocs = builder.Configuration.GetValue<long?>("Telemetry:SegmentMaxDocs") ?? 1_000_000,
             RollMaxAge = TimeSpan.FromMinutes(builder.Configuration.GetValue<int?>("Telemetry:SegmentMaxAgeMinutes") ?? 60),
             RetentionDays = builder.Configuration.GetValue<int?>("Telemetry:RetentionDays") ?? 90,
+            ArchiveZstdLevel = builder.Configuration.GetValue<int?>("Telemetry:ArchiveZstdLevel") ?? 19,
+            RawSpanRetentionDays = builder.Configuration.GetValue<int?>("Telemetry:RawSpanRetentionDays") ?? 30,
+            TraceSampleRatePercent = builder.Configuration.GetValue<int?>("Telemetry:TraceSampleRatePercent") ?? 100,
+            TraceKeepMinDurationMs = builder.Configuration.GetValue<double?>("Telemetry:TraceKeepMinDurationMs") ?? 500,
+            TieredLogRetention = builder.Configuration.GetValue<bool?>("Telemetry:TieredLogRetention") ?? true,
+            VerboseLogRetentionDays = builder.Configuration.GetValue<int?>("Telemetry:VerboseLogRetentionDays") ?? 14,
         };
         builder.Services.AddSingleton(segmentOptions);
         // Per-tenant setting for which StorageLink backs a tenant's telemetry (edited in the tenant's
@@ -264,6 +270,17 @@ public class Program
                 sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<LogSegmentManager>>())));
+        // Verbose (DEBUG/INFO) log tier — its own signal + short retention; the important (WARN+) tier is the
+        // LogSegmentManager registry above. LogTierRegistries routes writes/queries between them.
+        builder.Services.AddSingleton(sp => new SegmentManagerRegistry<VerboseLogSegmentManager>(tenantId =>
+            new VerboseLogSegmentManager(tenantId,
+                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
+                segmentOptions, sp.GetRequiredService<ILogger<LogSegmentManager>>())));
+        builder.Services.AddSingleton(sp => new LogTierRegistries(
+            sp.GetRequiredService<SegmentManagerRegistry<LogSegmentManager>>(),
+            sp.GetRequiredService<SegmentManagerRegistry<VerboseLogSegmentManager>>(),
+            segmentOptions));
         builder.Services.AddSingleton(sp => new SegmentManagerRegistry<SpanSegmentManager>(tenantId =>
             new SpanSegmentManager(tenantId,
                 sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
@@ -288,6 +305,9 @@ public class Program
         // One seal/retention loop per signal; each iterates that signal's live per-tenant managers.
         builder.Services.AddHostedService(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<LogSegmentManager>>(), segmentOptions,
+            sp.GetRequiredService<ILogger<SegmentSealService>>()));
+        builder.Services.AddHostedService(sp => new SegmentSealService(
+            sp.GetRequiredService<SegmentManagerRegistry<VerboseLogSegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
         builder.Services.AddHostedService(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<SpanSegmentManager>>(), segmentOptions,
@@ -321,6 +341,7 @@ public class Program
         builder.Services.AddScoped<CnpgService>();
         builder.Services.AddScoped<MongoService>();
         builder.Services.AddScoped<RegisteredPostgresService>();
+        builder.Services.AddScoped<EntKube.Web.Services.ClusterChanges.IClusterChangeGate, EntKube.Web.Services.ClusterChanges.ClusterChangeGate>();
         builder.Services.AddScoped<IKubernetesClientFactory, KubernetesClientFactory>();
         builder.Services.AddScoped<OpenStackKeystoneClient>();
         builder.Services.AddScoped<OpenStackS3Service>();
@@ -352,6 +373,11 @@ public class Program
         builder.Services.AddScoped<VpnService>();
         builder.Services.AddScoped<KyvernoPolicyService>();
         builder.Services.AddScoped<KedaScalerService>();
+        builder.Services.AddScoped<TrustBundleService>();
+        builder.Services.AddScoped<CertificateDistributionService>();
+        builder.Services.Configure<CertificateDistributionReconcileOptions>(
+            builder.Configuration.GetSection("CertificateDistribution"));
+        builder.Services.AddHostedService<CertificateDistributionReconcileService>();
         builder.Services.AddScoped<SecretExpiryService>();
         builder.Services.AddScoped<IncidentCorrelationService>();
         builder.Services.AddScoped<StormSuppressionService>();

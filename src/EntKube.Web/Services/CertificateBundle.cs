@@ -62,6 +62,13 @@ public sealed class CertificateBundle
 }
 
 /// <summary>
+/// A tenant-scoped "library" certificate summarised for management UIs: its id, name,
+/// whether it carries a private key / intermediate chain / CA, and parsed validity.
+/// </summary>
+public sealed record TenantCertificateInfo(
+    Guid Id, string Name, bool HasPrivateKey, bool HasChain, bool HasCa, CertificateInfo? Info);
+
+/// <summary>
 /// Parsed, human-readable metadata extracted from a certificate's leaf cert.
 /// Used to show subject/issuer/SANs/validity in the UI and to warn on expiry.
 /// </summary>

@@ -50,7 +50,7 @@ public sealed class SegmentTraceEngineTests : IDisposable
         _resolver = new ClusterTenantResolver(_factory);
     }
 
-    private SpanSegmentManager NewManager(int retentionDays = 90, int maxCachedReaders = 256)
+    private SpanSegmentManager NewManager(int retentionDays = 90, int maxCachedReaders = 256, int rawSpanRetentionDays = 30)
     {
         string dataPath = Path.Combine(Path.GetTempPath(), "spantest-" + Guid.NewGuid().ToString("N"));
         _tempDirs.Add(dataPath);
@@ -59,6 +59,7 @@ public sealed class SegmentTraceEngineTests : IDisposable
         var options = new SegmentEngineOptions
         {
             DataPath = dataPath, RetentionDays = retentionDays, MaxCachedReaders = maxCachedReaders,
+            RawSpanRetentionDays = rawSpanRetentionDays,
         };
         var store = new LocalSegmentBlobStore(blobsDir);
         _registry = new SegmentManagerRegistry<SpanSegmentManager>(tid =>
@@ -104,6 +105,26 @@ public sealed class SegmentTraceEngineTests : IDisposable
         ]);
         var svc = TraceSvc();
         return (mgr, t0.AddMinutes(-1), t0.AddMinutes(5), svc);
+    }
+
+    [Fact]
+    public async Task RawSpans_DropOnShortRetention_WhileGlobalRetentionIsLong()
+    {
+        // Raw spans use RawSpanRetentionDays (7), NOT the 90-day global retention: a 30-day-old sealed span
+        // segment is expired. This is the tiered-retention win — raw waterfalls age out fast; the long-lived
+        // trace-summary index (a separate signal/manager) is unaffected.
+        SpanSegmentManager mgr = NewManager(retentionDays: 90, rawSpanRetentionDays: 7);
+        DateTime old = DateTime.UtcNow.AddDays(-30);
+        mgr.WriteSpans(_tenantId, _clusterId, [Span(old, "t-old", "s1", null, "GET /", "frontend", 2, 100, 0)]);
+        await mgr.RollAndSealAsync();
+
+        await using (ApplicationDbContext db = _factory.CreateDbContext())
+            (await db.TelemetrySegments.CountAsync(s => s.Signal == "spans")).Should().Be(1);
+
+        (await mgr.DropExpiredAsync()).Should().Be(1); // dropped under the 7-day raw-span window
+
+        await using (ApplicationDbContext db = _factory.CreateDbContext())
+            (await db.TelemetrySegments.CountAsync(s => s.Signal == "spans")).Should().Be(0);
     }
 
     [Fact]
