@@ -700,10 +700,6 @@ else
         switch (key)
         {
             case "secrets": selectedSecrets = new(app, "app"); break;
-            case "databases": selectedSecrets = new(app, "database"); break;
-            case "messaging": selectedSecrets = new(app, "messaging"); break;
-            case "cache": selectedSecrets = new(app, "cache"); break;
-            case "registries": selectedSecrets = new(app, "docker"); break;
             case "identity":
                 if (appRealms.TryGetValue(app.Id, out KeycloakRealm? realm)) selectedIdentityRealm = realm;
                 break;
@@ -815,15 +811,13 @@ else
         selectedPortalApp?.Id == app.Id && selectedPortalEnvironment?.Id == env.Id;
 
     // Per-app service leaves; Identity/Registry only when the app has one linked.
+    // Databases/Messaging/Cache live as tabs under each Environment (see AppEnvironmentDetail),
+    // so they are not repeated here — only app-level services belong in this flat group.
     private List<(string Key, string Label, string Icon)> AppServiceItems(Data.App app)
     {
         var items = new List<(string Key, string Label, string Icon)>
         {
             ("secrets", "App Secrets", "bi-key"),
-            ("databases", "Databases", "bi-database"),
-            ("messaging", "Messaging", "bi-send"),
-            ("cache", "Cache", "bi-lightning"),
-            ("registries", "Registries", "bi-box-seam"),
         };
         if (appRealms.ContainsKey(app.Id)) items.Add(("identity", "Identity", "bi-shield-lock"));
         if (appHarborProjects.ContainsKey(app.Id)) items.Add(("registry", "Registry", "bi-archive"));
