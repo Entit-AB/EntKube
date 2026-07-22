@@ -461,9 +461,9 @@
                                 {
                                     <span class="ms-1 text-muted">→ <code>@selectedDeployment.GitPath</code></span>
                                 }
-                                @if (selectedDeployment.GitLastSyncedCommit is not null)
+                                @if (!string.IsNullOrEmpty(selectedDeployment.GitLastSyncedCommit))
                                 {
-                                    <span class="ms-2 badge bg-secondary">@selectedDeployment.GitLastSyncedCommit[..7]</span>
+                                    <span class="ms-2 badge bg-secondary">@selectedDeployment.GitLastSyncedCommit[..Math.Min(7, selectedDeployment.GitLastSyncedCommit.Length)]</span>
                                 }
                                 @if (selectedDeployment.GitAutoSync)
                                 {

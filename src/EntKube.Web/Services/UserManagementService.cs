@@ -34,7 +34,8 @@ public class UserManagementService(
                 user,
                 IsOnline: online.Contains(user.Id),
                 TwoFactorEnabled: user.TwoFactorEnabled,
-                PasskeyCount: passkeys));
+                PasskeyCount: passkeys,
+                HasAuthenticator: await userManager.GetAuthenticatorKeyAsync(user) is not null));
         }
         return result;
     }
@@ -49,7 +50,53 @@ public class UserManagementService(
             user,
             IsOnline: await presence.IsOnlineAsync(user.Id),
             TwoFactorEnabled: user.TwoFactorEnabled,
-            PasskeyCount: passkeys);
+            PasskeyCount: passkeys,
+            HasAuthenticator: await userManager.GetAuthenticatorKeyAsync(user) is not null);
+    }
+
+    // Identity's internal token coordinates for the authenticator key + recovery codes.
+    // UserManager stores both under this fixed pseudo-provider; deleting the token rows is the
+    // only way back to a truly "no authenticator configured" state — ResetAuthenticatorKeyAsync
+    // merely regenerates a key, which the user's 2FA page still reads as configured.
+    private const string InternalLoginProvider = "[AspNetUserStore]";
+    private const string AuthenticatorKeyTokenName = "AuthenticatorKey";
+    private const string RecoveryCodesTokenName = "RecoveryCodes";
+
+    /// <summary>
+    /// Forcibly clears ALL multi-factor state for a user, whatever half-finished state it is in:
+    /// disables the two-factor flag, deletes the authenticator-key and recovery-code tokens, and
+    /// optionally removes every registered passkey. Rotates the security stamp so existing
+    /// sessions and remembered-browser 2FA are invalidated. Idempotent — safe to run even when
+    /// nothing is configured. This resolves the mismatch where the admin flag reads "off" but the
+    /// user's own page still sees a leftover authenticator key from an abandoned setup.
+    /// </summary>
+    public async Task<(bool Success, string? Error, int PasskeysRemoved)> ResetAndDisableMfaAsync(
+        string userId, bool alsoRemovePasskeys = false)
+    {
+        ApplicationUser? user = await userManager.FindByIdAsync(userId);
+        if (user is null) return (false, "User not found.", 0);
+
+        // Disable the persisted two-factor flag (what the admin views read).
+        await userManager.SetTwoFactorEnabledAsync(user, false);
+
+        // Delete the authenticator-key and recovery-code token rows outright, so the user's own
+        // 2FA page (which keys off GetAuthenticatorKeyAsync) returns to a clean "not configured".
+        await userManager.RemoveAuthenticationTokenAsync(user, InternalLoginProvider, AuthenticatorKeyTokenName);
+        await userManager.RemoveAuthenticationTokenAsync(user, InternalLoginProvider, RecoveryCodesTokenName);
+
+        int passkeysRemoved = 0;
+        if (alsoRemovePasskeys)
+        {
+            foreach (UserPasskeyInfo passkey in await userManager.GetPasskeysAsync(user))
+            {
+                IdentityResult removed = await userManager.RemovePasskeyAsync(user, passkey.CredentialId);
+                if (removed.Succeeded) passkeysRemoved++;
+            }
+        }
+
+        // Rotate the security stamp → invalidates auth cookies and remembered-browser 2FA.
+        await userManager.UpdateSecurityStampAsync(user);
+        return (true, null, passkeysRemoved);
     }
 
     public async Task<ApplicationUser?> GetUserByIdAsync(string userId)
@@ -209,4 +256,13 @@ public record UserSecurityInfo(
     ApplicationUser User,
     bool IsOnline,
     bool TwoFactorEnabled,
-    int PasskeyCount);
+    int PasskeyCount,
+    bool HasAuthenticator = false)
+{
+    /// <summary>
+    /// An authenticator key exists but two-factor was never switched on — an abandoned/
+    /// half-finished TOTP setup. This is exactly the state where the admin flag says "off"
+    /// yet the user's own 2FA page insists it is "configured".
+    /// </summary>
+    public bool MfaSetupIncomplete => HasAuthenticator && !TwoFactorEnabled;
+}

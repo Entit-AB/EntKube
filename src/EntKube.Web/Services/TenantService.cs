@@ -97,20 +97,105 @@ public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory, Va
         return tenant;
     }
 
+    /// <summary>
+    /// Removes a tenant and every app-side record tied to it — environments, customers,
+    /// apps and their deployments, registered clusters and components, vault secrets
+    /// (including kubeconfigs), blueprints, incidents, telemetry segments, dashboards, and
+    /// all the rest.
+    ///
+    /// This is a PURE APP-DATABASE purge and never touches the tenant's real infrastructure:
+    /// no Helm uninstall, no kubectl, no vault→cluster sync. Deleting a stored kubeconfig or
+    /// secret row only makes EntKube forget it locally; the workloads keep running untouched.
+    /// (All cluster-touching flows — ComponentLifecycleService uninstall, route/secret sync —
+    /// are UI-triggered and decoupled from row deletion, so simply not calling them is enough.)
+    ///
+    /// A naive <c>Tenants.Remove()</c> that leans on cascade is NOT sufficient:
+    ///   1. Many FKs are Restrict (Environment/Cluster/Role back-references,
+    ///      ConnectivityRule.PeerApp) and would throw an FK violation on any non-trivial tenant.
+    ///   2. A few telemetry/dashboard tables carry a TenantId with no FK to Tenant, so cascade
+    ///      never reaches them and would leave them orphaned.
+    /// So we delete child→parent in one transaction, clearing the Restrict boundaries and the
+    /// FK-less orphans first, then let the tenant cascade sweep everything that remains.
+    /// </summary>
     public async Task<bool> DeleteTenantAsync(Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        Tenant? tenant = await db.Tenants.FindAsync([id], ct);
-
-        if (tenant is null)
+        if (!await db.Tenants.AnyAsync(t => t.Id == id, ct))
         {
             return false;
         }
 
-        db.Tenants.Remove(tenant);
-        await db.SaveChangesAsync(ct);
+        await using Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx =
+            await db.Database.BeginTransactionAsync(ct);
+
+        // 1. Orphan tables — a TenantId column with no FK to Tenant, so cascade never reaches
+        //    them. Purge explicitly. Keep this list in sync with any new tenant-keyed table
+        //    that deliberately opts out of a Tenant FK (see the telemetry/dashboard entities).
+        await db.RumSites.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.TelemetrySegments.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.TelemetryStorageSettings.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.TelemetryAlertRules.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.Dashboards.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+
+        // 2. Restrict-FK boundaries, cleared child→parent so the final tenant cascade can drop
+        //    Environments / Clusters / Roles without tripping a NO ACTION constraint.
+
+        // Connectivity rules that reference a tenant app as a peer (PeerApp is Restrict). Rules
+        // an app owns cascade with it; these cross-references must go first.
+        await db.ConnectivityRules.Where(r => r.PeerApp!.Customer.TenantId == id).ExecuteDeleteAsync(ct);
+        // Apps → cascades deployments and every app-scoped child that Restrict-refs Env/Cluster.
+        await db.Apps.Where(a => a.Customer.TenantId == id).ExecuteDeleteAsync(ct);
+        // VPN tunnels → cascades local endpoints that Restrict-ref Cluster.
+        await db.VpnTunnels.Where(v => v.TenantId == id).ExecuteDeleteAsync(ct);
+        // Kyverno policies Restrict-ref Environment.
+        await db.KyvernoPolicies.Where(k => k.TenantId == id).ExecuteDeleteAsync(ct);
+        // Customers → cascades git creds/policies that Restrict-ref Environment.
+        await db.Customers.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);
+        // Clusters → cascades components, routes, incidents, managed DB clusters, and the
+        // encrypted kubeconfig secrets. Nothing Restrict-refs Cluster any more at this point.
+        await db.KubernetesClusters.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);
+        // Memberships Restrict-ref Role; clear before the roles cascade with the tenant.
+        await db.TenantMemberships.Where(m => m.TenantId == id).ExecuteDeleteAsync(ct);
+
+        // 3. The tenant itself. Cascade now safely sweeps environments, roles, groups, the
+        //    vault + remaining shared secrets, blueprints, git repos, notification/alert
+        //    config, SLA/maintenance/on-call, advisor state, and everything else tenant-keyed.
+        Tenant? tenant = await db.Tenants.FindAsync([id], ct);
+        if (tenant is not null)
+        {
+            db.Tenants.Remove(tenant);
+            await db.SaveChangesAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
         return true;
+    }
+
+    /// <summary>
+    /// Counts the main things <see cref="DeleteTenantAsync"/> will remove, for a confirmation
+    /// dialog. Read-only. Returns null if the tenant doesn't exist.
+    /// </summary>
+    public async Task<TenantPurgePreview?> GetTenantPurgePreviewAsync(Guid id, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        Tenant? tenant = await db.Tenants.FindAsync([id], ct);
+        if (tenant is null)
+        {
+            return null;
+        }
+
+        return new TenantPurgePreview(
+            tenant.Name,
+            Environments: await db.Environments.CountAsync(e => e.TenantId == id, ct),
+            Customers: await db.Customers.CountAsync(c => c.TenantId == id, ct),
+            Apps: await db.Apps.CountAsync(a => a.Customer.TenantId == id, ct),
+            Deployments: await db.AppDeployments.CountAsync(d => d.App.Customer.TenantId == id, ct),
+            Clusters: await db.KubernetesClusters.CountAsync(c => c.TenantId == id, ct),
+            Components: await db.ClusterComponents.CountAsync(cc => cc.Cluster.TenantId == id, ct),
+            Secrets: await db.VaultSecrets.CountAsync(s => s.Vault.TenantId == id, ct),
+            Dashboards: await db.Dashboards.CountAsync(x => x.TenantId == id, ct));
     }
 
     // --- Environment CRUD ---
@@ -423,4 +508,20 @@ public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory, Va
         return await db.Users
             .FirstOrDefaultAsync(u => u.Email == email, ct);
     }
+}
+
+/// <summary>Headline counts of what removing a tenant from the app will delete.</summary>
+public record TenantPurgePreview(
+    string TenantName,
+    int Environments,
+    int Customers,
+    int Apps,
+    int Deployments,
+    int Clusters,
+    int Components,
+    int Secrets,
+    int Dashboards)
+{
+    public int Total => Environments + Customers + Apps + Deployments
+        + Clusters + Components + Secrets + Dashboards;
 }

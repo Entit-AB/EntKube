@@ -56,6 +56,12 @@
                                         <a class="mega-title" href="@($"tenants/{t.Slug}")">
                                             <i class="bi bi-building"></i> @t.Name
                                         </a>
+                                        <a class="mega-link" href="@($"tenants/{t.Slug}?section=environments")">
+                                            <i class="bi bi-diagram-3-fill"></i> Environments
+                                        </a>
+                                        <a class="mega-link" href="@($"tenants/{t.Slug}?section=clusters")">
+                                            <i class="bi bi-hexagon-fill"></i> Clusters
+                                        </a>
                                         <a class="mega-link" href="@($"tenants/{t.Slug}?section=customers")">
                                             <i class="bi bi-people"></i> Customers
                                         </a>
@@ -74,7 +80,7 @@
                             <div class="mega-foot">
                                 @if (isAdmin)
                                 {
-                                    <a href="tenants"><i class="bi bi-plus-lg"></i> New tenant</a>
+                                    <a href="admin/tenants"><i class="bi bi-plus-lg"></i> New tenant</a>
                                 }
                                 <a class="ms-auto" href="tenants">All tenants <i class="bi bi-arrow-right"></i></a>
                             </div>
@@ -123,6 +129,7 @@
                             <a class="nav-link dropdown-toggle @(IsActive("admin"))" href="#" role="button"
                                data-bs-toggle="dropdown" aria-expanded="false">Admin</a>
                             <ul class="dropdown-menu">
+                                <li><a class="dropdown-item" href="admin/tenants"><i class="bi bi-building me-2"></i>Tenants</a></li>
                                 <li><a class="dropdown-item" href="admin/users"><i class="bi bi-people me-2"></i>Users</a></li>
                                 <li><a class="dropdown-item" href="admin/roles"><i class="bi bi-shield-lock me-2"></i>Roles</a></li>
                                 <li><a class="dropdown-item" href="admin/backup"><i class="bi bi-arrow-repeat me-2"></i>Backup</a></li>

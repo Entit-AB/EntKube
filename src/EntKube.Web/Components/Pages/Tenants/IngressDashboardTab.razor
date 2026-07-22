@@ -1,0 +1,436 @@
+@using EntKube.Web.Services
+@rendermode InteractiveServer
+@inject IngressDashboardService IngressService
+
+@* ═══════════════════════════════════════════════════════════════════════════
+   IngressDashboardTab — tenant-wide "Routes & Ingress": a live, cross-cluster
+   picture of every north-south route (Gateway API HTTPRoutes, Traefik
+   IngressRoute CRDs, core Ingresses), enriched with backend health, TLS/cert
+   state, drift flags, and lazy per-route traffic. Organised status-first: a
+   segmented summary that doubles as the filter, then routes grouped under
+   collapsible per-cluster sections. Operations → Networking → Routes & Ingress.
+   ═══════════════════════════════════════════════════════════════════════════ *@
+
+<div class="ingress-dash">
+    <div class="d-flex justify-content-between align-items-start mb-3 flex-wrap gap-2">
+        <div>
+            <h4 class="mb-1"><i class="bi bi-signpost-split me-2"></i>Routes &amp; Ingress</h4>
+            <div class="text-muted small">Live north-south routing across every cluster in this tenant.</div>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+            <select class="form-select form-select-sm" style="width:auto" @bind="metricWindow" @bind:after="OnWindowChanged">
+                <option value="15">15m</option>
+                <option value="60">1h</option>
+                <option value="360">6h</option>
+                <option value="1440">24h</option>
+            </select>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="Reload" disabled="@loading">
+                <i class="bi bi-arrow-clockwise @(loading ? "spin" : "")"></i> Refresh
+            </button>
+        </div>
+    </div>
+
+    @if (loading && data is null)
+    {
+        <div class="text-center py-5">
+            <div class="spinner-border text-primary" role="status"></div>
+            <p class="text-muted mt-2 mb-0">Querying clusters…</p>
+        </div>
+    }
+    else if (data is null)
+    {
+        <div class="alert alert-danger">Failed to load ingress data.</div>
+    }
+    else if (data.Total == 0)
+    {
+        <div class="text-center text-muted py-5">
+            <i class="bi bi-hexagon fs-1 d-block mb-2"></i>
+            <div class="fw-semibold">No routes found</div>
+            @if (data.Clusters.Count == 0)
+            {
+                <div class="small">Register a cluster with a stored kubeconfig to see its routes here.</div>
+            }
+            else if (UnreachableClusters.Count == data.Clusters.Count)
+            {
+                <div class="small">All @data.Clusters.Count cluster(s) were unreachable: @string.Join(", ", UnreachableClusters.Select(c => c.ClusterName)).</div>
+            }
+            else
+            {
+                <div class="small">Scanned @data.Clusters.Count cluster(s) — no Ingress, HTTPRoute or Traefik routes are defined yet.</div>
+            }
+        </div>
+    }
+    else
+    {
+        @* ── Summary bar: segmented status filter (= the KPIs) + TLS meter + clusters ── *@
+        <div class="summary-bar mb-3">
+            <div class="seg" role="tablist" aria-label="Filter by status">
+                <button class="seg-btn @(statusFilter == "all" ? "active" : "")" @onclick='() => statusFilter = "all"'>
+                    All <span class="n">@data.Total</span>
+                </button>
+                <button class="seg-btn crit @(statusFilter == "critical" ? "active" : "")" @onclick='() => statusFilter = "critical"'
+                        disabled="@(CriticalCount == 0)">
+                    <i class="bi bi-x-octagon-fill"></i> Critical <span class="n">@CriticalCount</span>
+                </button>
+                <button class="seg-btn warn @(statusFilter == "warning" ? "active" : "")" @onclick='() => statusFilter = "warning"'
+                        disabled="@(WarningCount == 0)">
+                    <i class="bi bi-exclamation-triangle-fill"></i> Warnings <span class="n">@WarningCount</span>
+                </button>
+                <button class="seg-btn ok @(statusFilter == "healthy" ? "active" : "")" @onclick='() => statusFilter = "healthy"'
+                        disabled="@(HealthyCount == 0)">
+                    <i class="bi bi-check-circle-fill"></i> Healthy <span class="n">@HealthyCount</span>
+                </button>
+            </div>
+
+            <div class="summary-facts">
+                <div class="tls-meter" title="@data.Secured of @data.Total routes served over TLS">
+                    <div class="bar"><span class="@TlsMeterClass" style="width:@data.TlsCoverage.ToString("F0")%"></span></div>
+                    <span class="lbl">@data.TlsCoverage.ToString("F0")% TLS</span>
+                </div>
+                <span class="clusters-fact" title="@ClustersTooltip">
+                    <i class="bi bi-hexagon-fill"></i> @ReachableClusters/@data.Clusters.Count clusters
+                </span>
+            </div>
+
+            <div class="summary-search ms-auto">
+                <i class="bi bi-search"></i>
+                <input placeholder="Filter host, service, namespace…" @bind="search" @bind:event="oninput" />
+            </div>
+        </div>
+
+        @* ── Only-when-wrong banners (kept out of the way otherwise) ── *@
+        @if (UnreachableClusters.Count > 0)
+        {
+            <div class="notice warn mb-2">
+                <i class="bi bi-exclamation-triangle me-1"></i>
+                @UnreachableClusters.Count of @data.Clusters.Count clusters unreachable:
+                @string.Join(", ", UnreachableClusters.Select(c => c.ClusterName))
+            </div>
+        }
+        @if (data.Orphans.Count > 0)
+        {
+            <div class="notice muted mb-2">
+                <i class="bi bi-diagram-2 me-1"></i>
+                <strong>@data.Orphans.Count</strong> stored route(s) no longer resolve to a live object (drift):
+                <span class="mono">@string.Join(", ", data.Orphans.Take(6).Select(o => o.Hostname))</span>@(data.Orphans.Count > 6 ? " …" : "")
+            </div>
+        }
+
+        @if (Groups().Count == 0)
+        {
+            <div class="text-center text-muted py-4">
+                <i class="bi bi-inbox fs-3 d-block mb-1"></i>
+                No routes match this filter.
+            </div>
+        }
+        else
+        {
+            <div class="route-list">
+                @foreach (RouteGroup g in Groups())
+                {
+                    bool collapsed = collapsedClusters.Contains(g.ClusterId);
+                    <div class="cluster-block">
+                        <button type="button" class="cluster-head" @onclick="() => ToggleCluster(g.ClusterId)" aria-expanded="@(!collapsed)">
+                            <i class="bi @(collapsed ? "bi-chevron-right" : "bi-chevron-down") caret"></i>
+                            <i class="bi bi-hexagon-fill hx"></i>
+                            <span class="name">@g.ClusterName</span>
+                            <span class="env">@g.EnvironmentName</span>
+                            <span class="gw">@g.GatewayClass</span>
+                            <span class="count">@g.Routes.Count route@(g.Routes.Count == 1 ? "" : "s")</span>
+                            @if (g.Issues > 0)
+                            {
+                                <span class="issues"><i class="bi bi-exclamation-triangle-fill"></i> @g.Issues</span>
+                            }
+                        </button>
+
+                        @if (!collapsed)
+                        {
+                            <table class="route-table">
+                                <tbody>
+                                    @foreach (IngressRouteView r in g.Routes)
+                                    {
+                                        string rid = RowId(r);
+                                        bool open = expanded.Contains(rid);
+                                        List<(string Cls, string Label)> issues = Issues(r);
+                                        <tr class="route-row tier-@Tier(issues) @(open ? "open" : "")" @onclick="() => Toggle(r)">
+                                            <td class="c-caret"><i class="bi @(open ? "bi-chevron-down" : "bi-chevron-right")"></i></td>
+                                            <td class="c-host">
+                                                <div class="host-line">
+                                                    <span class="host">@r.PrimaryHost</span>
+                                                    @if (r.Hostnames.Count > 1) { <span class="dim">+@(r.Hostnames.Count - 1)</span> }
+                                                    @if (ShowPath(r)) { <span class="path">@r.Paths[0]</span> }
+                                                    @if (!r.IsManaged) { <span class="tag-ext" title="Not created by EntKube">external</span> }
+                                                </div>
+                                                @if (issues.Count > 0)
+                                                {
+                                                    <div class="issue-line @issues[0].Cls">
+                                                        <i class="bi @IssueIcon(issues[0].Label)"></i> @issues[0].Label
+                                                        @if (issues.Count > 1) { <span class="more">· +@(issues.Count - 1)</span> }
+                                                    </div>
+                                                }
+                                            </td>
+                                            <td class="c-backend">
+                                                @if (r.Backends.Count > 0)
+                                                {
+                                                    <span class="health-dot @BackendClass(r.WorstBackend)"></span>
+                                                    <span class="mono">@r.Backends[0].Display</span>
+                                                    @if (r.Backends.Count > 1) { <span class="dim">+@(r.Backends.Count - 1)</span> }
+                                                    @if (r.Backends[0].TotalEndpoints >= 0)
+                                                    {
+                                                        <span class="ready">@r.Backends[0].ReadyEndpoints/@r.Backends[0].TotalEndpoints</span>
+                                                    }
+                                                }
+                                                else { <span class="dim">—</span> }
+                                            </td>
+                                            <td class="c-tls text-center">
+                                                @if (r.TlsEnabled) { <i class="bi bi-lock-fill text-success" title="TLS terminated"></i> }
+                                                else { <i class="bi bi-unlock text-danger" title="Served over plain HTTP"></i> }
+                                            </td>
+                                        </tr>
+                                        @if (open)
+                                        {
+                                            <tr class="detail-row">
+                                                <td></td>
+                                                <td colspan="3">
+                                                    <div class="detail-grid">
+                                                        <div>
+                                                            <div class="detail-h">Object</div>
+                                                            <div class="mono small">@KindLabel(r.Kind) · @r.Namespace/@r.Name</div>
+                                                            @if (r.Hostnames.Count > 1)
+                                                            {
+                                                                <div class="detail-h mt-2">Hostnames</div>
+                                                                @foreach (string h in r.Hostnames) { <div class="mono small">@h</div> }
+                                                            }
+                                                            @if (r.Paths.Count > 0)
+                                                            {
+                                                                <div class="detail-h mt-2">Paths</div>
+                                                                <div class="mono small">@string.Join("  ", r.Paths)</div>
+                                                            }
+                                                        </div>
+                                                        <div>
+                                                            <div class="detail-h">Backends</div>
+                                                            @foreach (IngressBackend b in r.Backends)
+                                                            {
+                                                                <div class="small">
+                                                                    <span class="health-dot @BackendClass(b.State)"></span>
+                                                                    <span class="mono">@b.Display</span>
+                                                                    <span class="text-muted">
+                                                                        @(b.TotalEndpoints < 0 ? "no endpoints" : $"{b.ReadyEndpoints}/{b.TotalEndpoints} ready")
+                                                                    </span>
+                                                                </div>
+                                                            }
+                                                            @if (r.Backends.Count == 0) { <div class="text-muted small">No backend resolved.</div> }
+
+                                                            <div class="detail-h mt-2">TLS</div>
+                                                            @if (r.Cert is { } c)
+                                                            {
+                                                                <div class="small">
+                                                                    <span class="mono">@c.Namespace/@c.Name</span>
+                                                                    @if (c.Expired) { <span class="pill bad">expired</span> }
+                                                                    else if (c.DaysToExpiry is int d) { <span class="@(c.ExpiringSoon ? "text-warning" : "text-muted")">@d days left</span> }
+                                                                    @if (!c.Ready) { <span class="pill warn">not ready</span> }
+                                                                </div>
+                                                            }
+                                                            else if (r.TlsEnabled) { <div class="text-muted small">Terminated (no cert-manager Certificate tracked).</div> }
+                                                            else { <div class="text-danger small">Served over plain HTTP.</div> }
+                                                        </div>
+                                                        <div>
+                                                            <div class="detail-h d-flex justify-content-between">
+                                                                <span>Traffic (req/s)</span>
+                                                                <span class="text-muted">@WindowLabel()</span>
+                                                            </div>
+                                                            @if (metrics.TryGetValue(rid, out List<TimeSeriesDataPoint>? series))
+                                                            {
+                                                                @if (series.Count >= 2)
+                                                                {
+                                                                    <MetricChart DataPoints="series" Color="#0d6efd" Unit="/s" HeightPx="70" ShowAxes="true" />
+                                                                }
+                                                                else
+                                                                {
+                                                                    <div class="text-muted small py-3">No traffic data
+                                                                        (@(r.GatewayClass) metrics unavailable or no requests).</div>
+                                                                }
+                                                            }
+                                                            else
+                                                            {
+                                                                <div class="text-muted small py-3"><span class="spinner-border spinner-border-sm me-1"></span>Loading…</div>
+                                                            }
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        }
+                                    }
+                                </tbody>
+                            </table>
+                        }
+                    </div>
+                }
+            </div>
+        }
+    }
+</div>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private IngressDashboard? data;
+    private bool loading;
+    private string search = "";
+    private string statusFilter = "all";   // all | critical | warning | healthy
+    private int metricWindow = 60;          // minutes
+
+    private readonly HashSet<string> expanded = [];
+    private readonly HashSet<Guid> collapsedClusters = [];
+    private readonly Dictionary<string, List<TimeSeriesDataPoint>> metrics = [];
+
+    private sealed record RouteGroup(Guid ClusterId, string ClusterName, string EnvironmentName,
+        string GatewayClass, int Issues, List<IngressRouteView> Routes);
+
+    protected override async Task OnInitializedAsync() => await Reload();
+
+    private async Task Reload()
+    {
+        loading = true;
+        expanded.Clear();
+        collapsedClusters.Clear();
+        metrics.Clear();
+        StateHasChanged();
+        try { data = await IngressService.LoadAsync(TenantId); }
+        catch (Exception) { data = null; }
+        finally { loading = false; }
+    }
+
+    // ── Severity: a route is Critical (2), Warning (1) or Healthy (0). ──
+    private static List<(string Cls, string Label)> Issues(IngressRouteView r)
+    {
+        List<(string, string)> list = [];
+        if (r.Cert?.Expired == true) list.Add(("crit", "Cert expired"));
+        if (r.WorstBackend == BackendState.NoBackend) list.Add(("crit", "No backend"));
+        else if (r.WorstBackend == BackendState.Down) list.Add(("crit", "Backend down"));
+        else if (r.WorstBackend == BackendState.Degraded) list.Add(("warn", "Backend degraded"));
+        if (r.Cert?.ExpiringSoon == true && r.Cert?.Expired != true)
+            list.Add(("warn", $"Cert expires in {r.Cert!.DaysToExpiry}d"));
+        if (!r.TlsEnabled) list.Add(("warn", "No TLS"));
+        return list;
+    }
+
+    private static int Tier(List<(string Cls, string Label)> issues) =>
+        issues.Any(i => i.Cls == "crit") ? 2 : issues.Count > 0 ? 1 : 0;
+
+    private static int TierOf(IngressRouteView r) => Tier(Issues(r));
+
+    private int CriticalCount => data?.Routes.Count(r => TierOf(r) == 2) ?? 0;
+    private int WarningCount => data?.Routes.Count(r => TierOf(r) == 1) ?? 0;
+    private int HealthyCount => data?.Routes.Count(r => TierOf(r) == 0) ?? 0;
+
+    private int ReachableClusters => data?.Clusters.Count(c => c.Reachable) ?? 0;
+    private List<ClusterProbe> UnreachableClusters => data?.Clusters.Where(c => !c.Reachable).ToList() ?? [];
+    private string ClustersTooltip => data is null ? "" :
+        string.Join(", ", data.Clusters.Select(c => $"{c.ClusterName} ({(c.Reachable ? c.GatewayClass : "unreachable")})"));
+
+    private string TlsMeterClass => (data?.TlsCoverage ?? 0) >= 100 ? "full" : (data?.TlsCoverage ?? 0) >= 80 ? "ok" : "low";
+
+    private IEnumerable<IngressRouteView> FilteredRoutes()
+    {
+        if (data is null) return [];
+        IEnumerable<IngressRouteView> q = data.Routes;
+
+        q = statusFilter switch
+        {
+            "critical" => q.Where(r => TierOf(r) == 2),
+            "warning" => q.Where(r => TierOf(r) == 1),
+            "healthy" => q.Where(r => TierOf(r) == 0),
+            _ => q
+        };
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            string s = search.Trim();
+            q = q.Where(r =>
+                r.Hostnames.Any(h => h.Contains(s, StringComparison.OrdinalIgnoreCase))
+                || r.Backends.Any(b => b.ServiceName.Contains(s, StringComparison.OrdinalIgnoreCase))
+                || r.Namespace.Contains(s, StringComparison.OrdinalIgnoreCase)
+                || r.Name.Contains(s, StringComparison.OrdinalIgnoreCase));
+        }
+        return q;
+    }
+
+    // Group the filtered routes by cluster, worst-first within each group.
+    private List<RouteGroup> Groups()
+    {
+        if (data is null) return [];
+        Dictionary<Guid, string> gwByCluster = data.Clusters.ToDictionary(c => c.ClusterId, c => c.GatewayClass);
+
+        return FilteredRoutes()
+            .GroupBy(r => r.ClusterId)
+            .Select(grp =>
+            {
+                List<IngressRouteView> routes = grp
+                    .OrderByDescending(TierOf).ThenBy(r => r.PrimaryHost)
+                    .ToList();
+                IngressRouteView first = routes[0];
+                return new RouteGroup(
+                    grp.Key, first.ClusterName, first.EnvironmentName,
+                    gwByCluster.GetValueOrDefault(grp.Key, first.GatewayClass),
+                    routes.Count(r => TierOf(r) > 0), routes);
+            })
+            .OrderBy(g => g.ClusterName)
+            .ToList();
+    }
+
+    private void ToggleCluster(Guid id) { if (!collapsedClusters.Remove(id)) collapsedClusters.Add(id); }
+
+    private static bool ShowPath(IngressRouteView r) =>
+        r.Paths.Count > 0 && !(r.Paths.Count == 1 && r.Paths[0] == "/");
+
+    private async Task Toggle(IngressRouteView r)
+    {
+        string id = RowId(r);
+        if (!expanded.Remove(id))
+        {
+            expanded.Add(id);
+            if (!metrics.ContainsKey(id)) await LoadMetrics(r, id);
+        }
+    }
+
+    private async Task LoadMetrics(IngressRouteView r, string id)
+    {
+        metrics[id] = await IngressService.GetRouteTrafficAsync(r, TimeSpan.FromMinutes(metricWindow));
+        StateHasChanged();
+    }
+
+    private async Task OnWindowChanged()
+    {
+        metrics.Clear();
+        if (data is null) return;
+        foreach (IngressRouteView r in data.Routes.Where(r => expanded.Contains(RowId(r))))
+            await LoadMetrics(r, RowId(r));
+    }
+
+    private static string RowId(IngressRouteView r) => $"{r.ClusterId}:{r.Namespace}:{r.Name}:{(int)r.Kind}";
+
+    private string WindowLabel() => metricWindow switch { 15 => "15m", 60 => "1h", 360 => "6h", _ => "24h" };
+
+    private static string KindLabel(IngressRouteKind k) => k switch
+    {
+        IngressRouteKind.HttpRoute => "HTTPRoute",
+        IngressRouteKind.TraefikIngressRoute => "IngressRoute",
+        _ => "Ingress"
+    };
+
+    private static string BackendClass(BackendState s) => s switch
+    {
+        BackendState.Healthy => "ok",
+        BackendState.Degraded => "warn",
+        BackendState.Down => "bad",
+        _ => "none"
+    };
+
+    private static string IssueIcon(string label) =>
+        label.StartsWith("Cert") ? "bi-shield-exclamation"
+        : label == "No backend" ? "bi-plug"
+        : label.StartsWith("Backend") ? "bi-x-octagon"
+        : label == "No TLS" ? "bi-unlock"
+        : "bi-exclamation-triangle";
+}

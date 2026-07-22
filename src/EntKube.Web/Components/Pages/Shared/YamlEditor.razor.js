@@ -1,5 +1,5 @@
-const MONACO_VERSION = '0.52.0';
-const MONACO_BASE = `https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/${MONACO_VERSION}/min/vs`;
+// Monaco is self-hosted under wwwroot/lib (absolute path so it resolves on deep routes).
+const MONACO_BASE = '/lib/monaco-editor/vs';
 
 let _monacoPromise = null;
 

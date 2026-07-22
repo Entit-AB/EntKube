@@ -68,7 +68,7 @@ else
                             <span class="caret">@(open ? "▾" : "▸")</span>
                             <i class="ico bi bi-diagram-3-fill" aria-hidden="true"></i>
                             <span class="label">@env.Name</span>
-                            <span class="badge-count">@ClustersInEnv(env).Count</span>
+                            <span class="badge-count">@customers.Sum(c => AppsOfInEnv(c, env).Count)</span>
                         </button>
                     </div>
                     @if (open)
@@ -127,37 +127,6 @@ else
                             }
                         }
 
-                        @* Services in this environment *@
-                        <div class="tree-subhead indent-2"><span class="tree-sub">Services</span></div>
-                        @foreach (SectionItem svc in VisibleEnvServices())
-                        {
-                            <button type="button" class="node leaf indent-3 @(selectedSection == svc.Key && selectedServiceEnvId == env.Id ? "selected" : "")"
-                                    @onclick="() => SelectEnvService(env.Id, svc.Key)">
-                                <span class="caret"></span>
-                                <i class="ico bi @svc.Icon" aria-hidden="true"></i>
-                                <span class="label">@svc.Label</span>
-                            </button>
-                        }
-
-                        @* Clusters under this environment *@
-                        <div class="tree-subhead indent-2">
-                            <span class="tree-sub">Clusters</span>
-                            <button type="button" class="tree-add" title="Register cluster in @env.Name" aria-label="Register cluster"
-                                    @onclick="() => RegisterClusterInEnv(env.Id)"><i class="bi bi-plus-lg"></i></button>
-                        </div>
-                        @if (VisibleClustersInEnv(env).Count == 0)
-                        {
-                            <div class="tree-empty" style="padding-left:2.3rem">@(HasFilter ? "—" : "No clusters")</div>
-                        }
-                        @foreach (KubernetesCluster cl in VisibleClustersInEnv(env))
-                        {
-                            <button type="button" class="node leaf indent-3 @(selectedCluster?.Id == cl.Id ? "selected" : "")"
-                                    @onclick="() => SelectCluster(cl)">
-                                <span class="caret"></span>
-                                <i class="ico bi bi-hexagon-fill" aria-hidden="true"></i>
-                                <span class="label">@cl.Name</span>
-                            </button>
-                        }
                     }
                 }
 
@@ -172,8 +141,93 @@ else
                     </button>
                 }
 
-                @* ── Operations ── *@
+                @* ── Operations (infrastructure: clusters + services, grouped by type) ── *@
                 <div class="tree-section-head"><span class="tree-section-label">Operations</span></div>
+
+                @{ bool opsClustersOpen = GroupOpen("ops:clusters"); }
+                <button type="button" class="node group indent-1" @onclick='() => ToggleGroup("ops:clusters")' aria-expanded="@opsClustersOpen">
+                    <span class="caret">@(opsClustersOpen ? "▾" : "▸")</span>
+                    <i class="ico bi bi-hexagon-fill" aria-hidden="true"></i>
+                    <span class="label">Clusters</span>
+                    <span class="badge-count">@clusters.Count</span>
+                </button>
+                @if (opsClustersOpen)
+                {
+                    @foreach (Data.Environment env in VisibleEnvironments())
+                    {
+                        List<KubernetesCluster> ecls = VisibleClustersInEnv(env);
+                        if (HasFilter && ecls.Count == 0) { continue; }
+                        string ck = $"ops:clusters:{env.Id}";
+                        bool cOpen = GroupOpen(ck);
+                        <div class="node-row indent-2">
+                            <button type="button" class="node group" @onclick="() => ToggleGroup(ck)" aria-expanded="@cOpen">
+                                <span class="caret">@(cOpen ? "▾" : "▸")</span>
+                                <i class="ico bi bi-diagram-3-fill" aria-hidden="true"></i>
+                                <span class="label">@env.Name</span>
+                                <span class="badge-count">@ecls.Count</span>
+                            </button>
+                            <button type="button" class="tree-add" title="Register cluster in @env.Name" aria-label="Register cluster"
+                                    @onclick="() => RegisterClusterInEnv(env.Id)"><i class="bi bi-plus-lg"></i></button>
+                        </div>
+                        @if (cOpen)
+                        {
+                            @if (ecls.Count == 0)
+                            {
+                                <div class="tree-empty" style="padding-left:3.2rem">@(HasFilter ? "—" : "No clusters")</div>
+                            }
+                            @foreach (KubernetesCluster cl in ecls)
+                            {
+                                <button type="button" class="node leaf indent-3 @(selectedCluster?.Id == cl.Id ? "selected" : "")"
+                                        @onclick="() => SelectCluster(cl)">
+                                    <span class="caret"></span>
+                                    <i class="ico bi bi-hexagon-fill" aria-hidden="true"></i>
+                                    <span class="label">@cl.Name</span>
+                                </button>
+                            }
+                        }
+                    }
+                }
+
+                @{ bool opsServicesOpen = GroupOpen("ops:services"); }
+                <button type="button" class="node group indent-1" @onclick='() => ToggleGroup("ops:services")' aria-expanded="@opsServicesOpen">
+                    <span class="caret">@(opsServicesOpen ? "▾" : "▸")</span>
+                    <i class="ico bi bi-hdd-stack" aria-hidden="true"></i>
+                    <span class="label">Services</span>
+                    <span class="badge-count">@EnvServiceItems.Length</span>
+                </button>
+                @if (opsServicesOpen)
+                {
+                    @foreach (Data.Environment env in VisibleEnvironments())
+                    {
+                        List<SectionItem> esvcs = VisibleEnvServices();
+                        if (HasFilter && esvcs.Count == 0) { continue; }
+                        string sk = $"ops:services:{env.Id}";
+                        bool sOpen = GroupOpen(sk);
+                        <div class="node-row indent-2">
+                            <button type="button" class="node group" @onclick="() => ToggleGroup(sk)" aria-expanded="@sOpen">
+                                <span class="caret">@(sOpen ? "▾" : "▸")</span>
+                                <i class="ico bi bi-diagram-3-fill" aria-hidden="true"></i>
+                                <span class="label">@env.Name</span>
+                                <span class="badge-count">@esvcs.Count</span>
+                            </button>
+                        </div>
+                        @if (sOpen)
+                        {
+                            @foreach (SectionItem svc in esvcs)
+                            {
+                                <button type="button" class="node leaf indent-3 @(selectedSection == svc.Key && selectedServiceEnvId == env.Id ? "selected" : "")"
+                                        @onclick="() => SelectEnvService(env.Id, svc.Key)">
+                                    <span class="caret"></span>
+                                    <i class="ico bi @svc.Icon" aria-hidden="true"></i>
+                                    <span class="label">@svc.Label</span>
+                                </button>
+                            }
+                        }
+                    }
+                }
+
+                @* ── Observability ── *@
+                <div class="tree-section-head"><span class="tree-section-label">Observability</span></div>
                 @foreach (TreeGroup g in OpsGroups)
                 {
                     List<SectionItem> gi = VisibleGroupItems(g);
@@ -276,6 +330,8 @@ else
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
         [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon") ]),
+        new("Networking", "bi-signpost-split",
+        [ new("ingress", "Routes & Ingress", "bi-signpost-split"), new("networking", "VPN mesh", "bi-hdd-network") ]),
         new("Reliability", "bi-check2-square",
         [ new("sla", "SLA", "bi-check2-square"), new("maintenance", "Maintenance", "bi-tools"), new("secret-expiry", "Secret expiry", "bi-clock-history") ]),
     ];
@@ -604,7 +660,14 @@ else
                 builder.CloseComponent();
                 break;
             case "customers": builder.OpenComponent<CustomerTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "clusters":
+                builder.OpenComponent<ClustersTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.AddComponentParameter(2, "TenantSlug", tenant!.Slug);
+                builder.CloseComponent();
+                break;
             case "groups": builder.OpenComponent<GroupTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "ingress": builder.OpenComponent<IngressDashboardTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "networking": builder.OpenComponent<NetworkingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "blueprints": builder.OpenComponent<BlueprintsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "databases": OpenEnvScoped<DatabaseTab>(builder, tid); break;

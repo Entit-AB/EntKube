@@ -433,3 +433,13 @@ CMKS - Infra/
 # These protect auth cookies and antiforgery tokens; persist them via a mounted
 # volume or key vault in production instead.
 src/EntKube.Web/keys/
+
+# Server app configuration — may carry secrets (Vault:RootKey, DB connection strings).
+# Committed as appsettings*.json.example templates instead: copy one to the real name
+# and fill locally, or supply values via `dotnet user-secrets` / env vars. The .example
+# files are NOT ignored (negated below). Anchored to the server project so the Blazor
+# client's wwwroot/appsettings*.json (client-side, no secrets) stay tracked.
+/src/EntKube.Web/appsettings.json
+/src/EntKube.Web/appsettings.Development.json
+/src/EntKube.Web/appsettings.Production.json
+!/src/EntKube.Web/appsettings*.json.example

@@ -78,9 +78,16 @@ else if (user is not null)
                                     <i class="bi bi-shield-check me-1"></i>Enabled
                                 </span>
                             }
+                            else if (security?.MfaSetupIncomplete == true)
+                            {
+                                <span class="badge bg-warning-subtle text-warning border border-warning-subtle"
+                                      title="An authenticator key exists from an unfinished setup, but two-factor was never turned on. This is why the user's own page says 'configured' while this flag reads off — use 'Reset & disable MFA' below to clear it.">
+                                    <i class="bi bi-shield-exclamation me-1"></i>Setup incomplete
+                                </span>
+                            }
                             else
                             {
-                                <span class="badge bg-warning-subtle text-warning border border-warning-subtle">
+                                <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">
                                     <i class="bi bi-shield-x me-1"></i>Not enabled
                                 </span>
                             }
@@ -105,6 +112,51 @@ else if (user is not null)
                             </span>
                         </div>
                     </div>
+
+                    @* ── Reset multi-factor auth (works in any half-finished state) ── *@
+                    <hr class="my-3" />
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <div class="me-auto">
+                            <div class="fw-semibold small">Reset multi-factor auth</div>
+                            <div class="text-muted small">
+                                Disables two-factor and deletes the authenticator app + recovery codes — whatever
+                                half-finished state it's in — then signs the user out so they can enroll again cleanly.
+                            </div>
+                        </div>
+                        @if (!confirmResetMfa)
+                        {
+                            <button class="btn btn-sm btn-outline-warning" @onclick="() => confirmResetMfa = true">
+                                <i class="bi bi-shield-slash me-1"></i>Reset &amp; disable MFA
+                            </button>
+                        }
+                    </div>
+                    @if (confirmResetMfa)
+                    {
+                        <div class="border border-warning-subtle bg-warning-subtle rounded p-3 mt-2">
+                            <div class="small mb-2">
+                                Reset MFA for <strong>@user.Email</strong>? This disables two-factor, deletes their
+                                authenticator key and recovery codes, and rotates their security stamp — any active
+                                sessions and remembered-browser 2FA are invalidated.
+                            </div>
+                            @if (security is { PasskeyCount: > 0 })
+                            {
+                                <div class="form-check mb-2">
+                                    <input class="form-check-input" type="checkbox" id="alsoPasskeys" @bind="alsoRemovePasskeys" />
+                                    <label class="form-check-label small" for="alsoPasskeys">
+                                        Also remove this user's @security.PasskeyCount passkey(s). They'll lose passwordless
+                                        sign-in and must re-register. Leave unchecked to reset only the authenticator/2FA.
+                                    </label>
+                                </div>
+                            }
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-sm btn-warning" @onclick="ResetMfa" disabled="@resettingMfa">
+                                    @if (resettingMfa) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Reset MFA
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelResetMfa" disabled="@resettingMfa">Cancel</button>
+                            </div>
+                        </div>
+                    }
                 </div>
             </div>
         </div>
@@ -408,6 +460,9 @@ else if (user is not null)
     private bool confirmDelete;
     private bool removingMembership;
     private bool deletingUser;
+    private bool confirmResetMfa;
+    private bool alsoRemovePasskeys;
+    private bool resettingMfa;
     private string? successMessage;
 
     protected override async Task OnInitializedAsync()
@@ -549,6 +604,36 @@ else if (user is not null)
         removingMembership = false;
         confirmRemoveGroupId = null;
         if (groupName is not null) _ = ShowSuccessAsync($"Removed from group '{groupName}'.");
+    }
+
+    private void CancelResetMfa()
+    {
+        confirmResetMfa = false;
+        alsoRemovePasskeys = false;
+    }
+
+    private async Task ResetMfa()
+    {
+        resettingMfa = true;
+        errorMessage = null;
+        (bool ok, string? error, int passkeysRemoved) =
+            await UserManagement.ResetAndDisableMfaAsync(UserId, alsoRemovePasskeys);
+        resettingMfa = false;
+        confirmResetMfa = false;
+
+        if (!ok)
+        {
+            errorMessage = error ?? "Failed to reset MFA.";
+            Toasts.Error(errorMessage);
+            alsoRemovePasskeys = false;
+            return;
+        }
+
+        // Reload so the badges reflect the cleared state immediately.
+        security = await UserManagement.GetUserSecurityAsync(UserId);
+        string extra = passkeysRemoved > 0 ? $" and removed {passkeysRemoved} passkey(s)" : "";
+        Toasts.Success($"Reset MFA for {user!.Email}{extra}. They have been signed out and can re-enroll.");
+        alsoRemovePasskeys = false;
     }
 
     private async Task DeleteUser()

@@ -27,11 +27,12 @@ function _loadPreviewFont(iframeId, doc, fontFamily) {
     const firstFont = fontFamily.split(',')[0].trim().replace(/['"]/g, '').toLowerCase();
     if (!GOOGLE_FONTS[firstFont]) return;
     if (!_loadedFonts[iframeId]) _loadedFonts[iframeId] = new Set();
-    if (_loadedFonts[iframeId].has(firstFont)) return;
-    _loadedFonts[iframeId].add(firstFont);
+    // All preview fonts live in the self-hosted lib/fonts/fonts.css — inject it once per iframe.
+    if (_loadedFonts[iframeId].has('__local__')) return;
+    _loadedFonts[iframeId].add('__local__');
     const link = doc.createElement('link');
     link.rel = 'stylesheet';
-    link.href = `https://fonts.googleapis.com/css2?family=${GOOGLE_FONTS[firstFont]}:wght@400;500;600&display=swap`;
+    link.href = '/lib/fonts/fonts.css';
     doc.head.appendChild(link);
 }
 

@@ -1,14 +1,10 @@
 @page "/tenants"
-@using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
-@using Microsoft.EntityFrameworkCore
 @rendermode InteractiveServer
-@inject TenantService TenantService
 @inject UserAccessService UserAccessService
 @inject AuthenticationStateProvider AuthStateProvider
 @inject NavigationManager Navigation
-@inject ToastService Toasts
 
 <PageTitle>Tenants</PageTitle>
 
@@ -18,37 +14,21 @@
     <div class="d-flex align-items-center justify-content-between mb-4">
         <div>
             <h1 class="mb-0"><i class="bi bi-building me-2 text-primary"></i>Tenants</h1>
-            <p class="text-muted small mb-0 mt-1">Organizations and workspaces in your platform.</p>
+            <p class="text-muted small mb-0 mt-1">Organizations and workspaces you can access.</p>
         </div>
+        @if (isAdmin)
+        {
+            <a href="admin/tenants" class="btn btn-outline-primary btn-sm">
+                <i class="bi bi-gear me-1"></i>Manage tenants
+            </a>
+        }
     </div>
-
-    @if (isAdmin)
-    {
-        <div class="card border-0 shadow-sm mb-4">
-            <div class="card-body py-2">
-                <EditForm Model="createModel" OnValidSubmit="CreateTenant">
-                    <DataAnnotationsValidator />
-                    <div class="input-group">
-                        <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-plus-circle"></i></span>
-                        <InputText class="form-control border-start-0" placeholder="New tenant name (e.g. Acme Corp)"
-                                   @bind-Value="createModel.Name" />
-                        <button type="submit" class="btn btn-primary" disabled="@creating">
-                            @if (creating) { <span class="spinner-border spinner-border-sm me-1"></span> }
-                            else { <i class="bi bi-plus-lg me-1"></i> }
-                            Create Tenant
-                        </button>
-                    </div>
-                    <ValidationMessage For="() => createModel.Name" class="text-danger small mt-1" />
-                </EditForm>
-            </div>
-        </div>
-    }
 
     @if (tenants is null || tenants.Count == 0)
     {
         <EmptyState Icon="bi-building"
                     Title="No tenants yet"
-                    Message="@(isAdmin ? "Create your first tenant above to get started." : "You have not been added to any tenants yet.")" />
+                    Message="@(isAdmin ? "Create your first tenant from Manage tenants." : "You have not been added to any tenants yet.")" />
     }
     else
     {
@@ -58,37 +38,13 @@
                 <div class="col">
                     <div class="card h-100 shadow-sm border-0 tenant-card">
                         <div class="card-body">
-                            <div class="d-flex align-items-start justify-content-between">
-                                <div>
-                                    <h5 class="card-title mb-1">
-                                        <i class="bi bi-building me-1 text-primary"></i>@tenant.Name
-                                    </h5>
-                                    <p class="card-text text-muted small mb-0">
-                                        <code>@tenant.Slug</code>
-                                    </p>
-                                </div>
-                                @if (isAdmin)
-                                {
-                                    <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteId = tenant.Id"
-                                            title="Delete tenant" aria-label="@($"Delete tenant {tenant.Name}")">
-                                        <i class="bi bi-trash"></i>
-                                    </button>
-                                }
-                            </div>
+                            <h5 class="card-title mb-1">
+                                <i class="bi bi-building me-1 text-primary"></i>@tenant.Name
+                            </h5>
+                            <p class="card-text text-muted small mb-0">
+                                <code>@tenant.Slug</code>
+                            </p>
                         </div>
-
-                        @if (isAdmin && confirmDeleteId == tenant.Id)
-                        {
-                            <div class="card-body py-2 border-top">
-                                <ConfirmDialog Visible="true"
-                                               Message="@($"Permanently delete tenant '{tenant.Name}' and all its data?")"
-                                               ConfirmText="Delete"
-                                               IsBusy="deleting"
-                                               OnConfirm="() => DeleteTenant(tenant.Id)"
-                                               OnCancel="() => confirmDeleteId = null" />
-                            </div>
-                        }
-
                         <div class="card-footer bg-transparent border-top-0 pt-0">
                             <a href="/tenants/@tenant.Slug" class="btn btn-primary btn-sm w-100">
                                 <i class="bi bi-gear me-1"></i>Manage
@@ -104,12 +60,8 @@
 
 @code {
     private List<Tenant>? tenants;
-    private readonly CreateTenantModel createModel = new();
-    private Guid? confirmDeleteId;
     private bool isAdmin;
     private bool loaded;
-    private bool creating;
-    private bool deleting;
     private string? userId;
 
     protected override async Task OnInitializedAsync()
@@ -139,62 +91,7 @@
             return;
         }
 
-        await LoadTenants();
-        loaded = true;
-    }
-
-    private async Task LoadTenants()
-    {
-        if (userId is null) return;
         tenants = await UserAccessService.GetAccessibleTenantsAsync(userId);
-    }
-
-    private async Task CreateTenant()
-    {
-        if (!isAdmin) return;
-        creating = true;
-
-        try
-        {
-            string name = createModel.Name.Trim();
-            await TenantService.CreateTenantAsync(name);
-            createModel.Name = "";
-            await LoadTenants();
-            Toasts.Success($"Tenant '{name}' created.");
-        }
-        catch (DbUpdateException)
-        {
-            Toasts.Error("A tenant with that name already exists.");
-        }
-        finally { creating = false; }
-    }
-
-    private async Task DeleteTenant(Guid id)
-    {
-        if (!isAdmin) return;
-        deleting = true;
-        try
-        {
-            string name = tenants?.FirstOrDefault(t => t.Id == id)?.Name ?? "Tenant";
-            await TenantService.DeleteTenantAsync(id);
-            await LoadTenants();
-            Toasts.Success($"Tenant '{name}' deleted.");
-        }
-        catch (Exception ex)
-        {
-            Toasts.Error($"Failed to delete tenant: {ex.Message}");
-        }
-        finally
-        {
-            deleting = false;
-            confirmDeleteId = null;
-        }
-    }
-
-    public sealed class CreateTenantModel
-    {
-        [Required(ErrorMessage = "Enter a tenant name.")]
-        [StringLength(100, MinimumLength = 2, ErrorMessage = "Name must be 2–100 characters.")]
-        public string Name { get; set; } = "";
+        loaded = true;
     }
 }

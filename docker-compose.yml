@@ -137,6 +137,16 @@ services:
       # Smtp__FromAddress: "alerts@entkube.io"
     restart: unless-stopped
 
+networks:
+  # Pin the default network to a fixed name so it never depends on the compose project
+  # (i.e. the directory you run from) or COMPOSE_PROJECT_NAME. Every service still joins
+  # this default network automatically, so all containers — entkube, postgres, caddy —
+  # share one predictable network named "entkube". This avoids the "<dir>_default" naming
+  # ambiguity and prevents services ending up on split/orphaned networks (which is what
+  # broke DNS resolution of the "postgres" hostname).
+  default:
+    name: entkube
+
 volumes:
   # Named volumes are NOT removed by "docker compose down".
   # Data is only deleted if you explicitly run "docker compose down -v".

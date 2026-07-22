@@ -1,0 +1,272 @@
+@page "/admin/tenants"
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.EntityFrameworkCore
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = "Admin")]
+
+@inject TenantService TenantService
+@inject ToastService Toasts
+
+<PageTitle>Tenants · Admin</PageTitle>
+
+<div class="d-flex align-items-center justify-content-between mb-4">
+    <div>
+        <h1 class="mb-0 fs-3"><i class="bi bi-building me-2 text-primary"></i>Tenants</h1>
+        <p class="text-muted small mb-0 mt-1">Create, rename, and remove tenants (organizations / workspaces).</p>
+    </div>
+</div>
+
+@* ── Create ── *@
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body py-2">
+        <div class="input-group">
+            <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-plus-circle"></i></span>
+            <input class="form-control border-start-0" placeholder="New tenant name (e.g. Acme Corp)"
+                   @bind="newName" @bind:event="oninput" @onkeydown="OnCreateKey" />
+            <button class="btn btn-primary" @onclick="CreateTenant" disabled="@(creating || newName.Trim().Length < 2)">
+                @if (creating) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                else { <i class="bi bi-plus-lg me-1"></i> }
+                Create Tenant
+            </button>
+        </div>
+    </div>
+</div>
+
+@if (tenants is null)
+{
+    <div class="text-center py-5"><div class="spinner-border text-primary" role="status"></div></div>
+}
+else if (tenants.Count == 0)
+{
+    <EmptyState Icon="bi-building" Title="No tenants yet" Message="Create your first tenant above." />
+}
+else
+{
+    <div class="card border-0 shadow-sm">
+        <div class="table-responsive">
+            <table class="table align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Slug</th>
+                        <th class="text-end">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (Tenant t in tenants)
+                    {
+                        <tr>
+                            <td style="min-width:220px">
+                                @if (editingId == t.Id)
+                                {
+                                    <div class="input-group input-group-sm" style="max-width:320px">
+                                        <input class="form-control" @bind="editName" @bind:event="oninput"
+                                               @onkeydown="e => OnRenameKey(e, t.Id)" />
+                                        <button class="btn btn-success" @onclick="() => SaveRename(t.Id)"
+                                                disabled="@(savingRename || editName.Trim().Length < 2)" title="Save">
+                                            <i class="bi bi-check-lg"></i>
+                                        </button>
+                                        <button class="btn btn-outline-secondary" @onclick="CancelRename" title="Cancel">
+                                            <i class="bi bi-x-lg"></i>
+                                        </button>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <span class="fw-semibold"><i class="bi bi-building me-1 text-primary"></i>@t.Name</span>
+                                }
+                            </td>
+                            <td><code>@t.Slug</code></td>
+                            <td class="text-end">
+                                <a class="btn btn-sm btn-outline-primary" href="tenants/@t.Slug" title="Open tenant workspace">
+                                    <i class="bi bi-gear"></i>
+                                </a>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => StartRename(t)"
+                                        disabled="@(editingId == t.Id)" title="Rename">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => StartDelete(t)" title="Remove from app">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </td>
+                        </tr>
+
+                        @if (confirmDeleteId == t.Id)
+                        {
+                            <tr>
+                                <td colspan="3" class="p-0">
+                                    <div class="p-3 border-top border-danger-subtle bg-danger-subtle">
+                                        <div class="fw-semibold text-danger mb-1">
+                                            <i class="bi bi-exclamation-triangle me-1"></i>Remove '@t.Name' from EntKube?
+                                        </div>
+                                        <p class="small mb-2">
+                                            Deletes <strong>everything this app stores about the tenant</strong> — environments,
+                                            customers, apps &amp; deployments, registered clusters &amp; components, vault secrets
+                                            and kubeconfigs, blueprints, incidents, telemetry and dashboards.
+                                        </p>
+                                        <p class="small mb-2 text-success-emphasis">
+                                            <i class="bi bi-shield-check me-1"></i><strong>Your infrastructure is not touched.</strong>
+                                            No workloads are uninstalled and nothing is deleted from any cluster — EntKube simply
+                                            forgets the tenant. Re-register it any time to manage it again.
+                                        </p>
+                                        @if (deletePreview is { } p)
+                                        {
+                                            <div class="small text-body-secondary mb-2">
+                                                Will remove:
+                                                <strong>@p.Clusters</strong> clusters · <strong>@p.Components</strong> components ·
+                                                <strong>@p.Apps</strong> apps · <strong>@p.Deployments</strong> deployments ·
+                                                <strong>@p.Environments</strong> environments · <strong>@p.Customers</strong> customers ·
+                                                <strong>@p.Secrets</strong> secrets · <strong>@p.Dashboards</strong> dashboards.
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <div class="small text-body-secondary mb-2">
+                                                <span class="spinner-border spinner-border-sm me-1"></span>Tallying what will be removed…
+                                            </div>
+                                        }
+                                        <label class="form-label small mb-1">Type <code>@t.Name</code> to confirm:</label>
+                                        <div class="d-flex flex-wrap gap-2">
+                                            <input class="form-control form-control-sm" style="max-width:260px"
+                                                   placeholder="@t.Name" @bind="confirmNameInput" @bind:event="oninput" />
+                                            <button class="btn btn-sm btn-danger"
+                                                    disabled="@(deleting || confirmNameInput?.Trim() != t.Name)"
+                                                    @onclick="() => DeleteTenant(t.Id)">
+                                                @if (deleting) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Remove from app
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="CancelDelete">Cancel</button>
+                                        </div>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+}
+
+@code {
+    private List<Tenant>? tenants;
+
+    private string newName = "";
+    private bool creating;
+
+    private Guid? editingId;
+    private string editName = "";
+    private bool savingRename;
+
+    private Guid? confirmDeleteId;
+    private TenantPurgePreview? deletePreview;
+    private string? confirmNameInput;
+    private bool deleting;
+
+    protected override async Task OnInitializedAsync() => await Load();
+
+    private async Task Load() => tenants = await TenantService.GetAllTenantsAsync();
+
+    private async Task OnCreateKey(KeyboardEventArgs e) { if (e.Key == "Enter") await CreateTenant(); }
+
+    private async Task CreateTenant()
+    {
+        string name = newName.Trim();
+        if (name.Length < 2) return;
+        creating = true;
+        try
+        {
+            await TenantService.CreateTenantAsync(name);
+            newName = "";
+            await Load();
+            Toasts.Success($"Tenant '{name}' created.");
+        }
+        catch (DbUpdateException)
+        {
+            Toasts.Error("A tenant with that name already exists.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to create tenant: {ex.Message}");
+        }
+        finally { creating = false; }
+    }
+
+    private void StartRename(Tenant t)
+    {
+        CancelDelete();
+        editingId = t.Id;
+        editName = t.Name;
+    }
+
+    private void CancelRename() { editingId = null; editName = ""; }
+
+    private async Task OnRenameKey(KeyboardEventArgs e, Guid id) { if (e.Key == "Enter") await SaveRename(id); }
+
+    private async Task SaveRename(Guid id)
+    {
+        string name = editName.Trim();
+        if (name.Length < 2) return;
+        savingRename = true;
+        try
+        {
+            Tenant? updated = await TenantService.UpdateTenantAsync(id, name);
+            if (updated is null) { Toasts.Error("Tenant not found."); return; }
+            await Load();
+            Toasts.Success($"Renamed to '{updated.Name}'. Its URL slug is now '{updated.Slug}'.");
+            editingId = null;
+        }
+        catch (DbUpdateException)
+        {
+            Toasts.Error("A tenant with that name/slug already exists.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to rename: {ex.Message}");
+        }
+        finally { savingRename = false; }
+    }
+
+    private async Task StartDelete(Tenant t)
+    {
+        CancelRename();
+        confirmDeleteId = t.Id;
+        confirmNameInput = "";
+        deletePreview = null;
+        deletePreview = await TenantService.GetTenantPurgePreviewAsync(t.Id);
+    }
+
+    private void CancelDelete()
+    {
+        confirmDeleteId = null;
+        deletePreview = null;
+        confirmNameInput = "";
+    }
+
+    private async Task DeleteTenant(Guid id)
+    {
+        string name = tenants?.FirstOrDefault(t => t.Id == id)?.Name ?? "Tenant";
+        if (confirmNameInput?.Trim() != name) return;
+
+        deleting = true;
+        try
+        {
+            await TenantService.DeleteTenantAsync(id);
+            await Load();
+            Toasts.Success($"Tenant '{name}' removed from EntKube. No infrastructure was touched.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to remove tenant: {ex.Message}");
+        }
+        finally
+        {
+            deleting = false;
+            confirmDeleteId = null;
+            deletePreview = null;
+            confirmNameInput = "";
+        }
+    }
+}

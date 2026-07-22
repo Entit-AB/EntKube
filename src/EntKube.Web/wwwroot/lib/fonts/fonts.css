@@ -1,0 +1,62 @@
+/* Self-hosted web fonts (formerly loaded from Google Fonts).
+   Variable weight axis (100–900) for the variable families; Lato is static (400/700).
+   Latin subset (U+0000–00FF) — covers English + Western-European incl. Swedish å ä ö.
+   App UI: DM Sans, Space Grotesk. Keycloak theme-editor preview: Inter, Roboto, Open Sans,
+   Lato, Source Sans 3. */
+
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url(files/dm-sans-latin-wght-normal.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url(files/space-grotesk-latin-wght-normal.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url(files/inter-latin-wght-normal.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Roboto';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url(files/roboto-latin-wght-normal.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Open Sans';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url(files/open-sans-latin-wght-normal.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Source Sans 3';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url(files/source-sans-3-latin-wght-normal.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Lato';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(files/lato-latin-400-normal.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Lato';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url(files/lato-latin-700-normal.woff2) format('woff2');
+}

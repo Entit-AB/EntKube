@@ -1,0 +1,23 @@
+{
+  "//": "Copy to appsettings.Development.json and fill in. DO NOT commit the real file — it is gitignored. Prefer dotnet user-secrets / env vars (Vault__RootKey, ConnectionStrings__DefaultConnection) for anything sensitive.",
+  "DatabaseProvider": "Postgres",
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=localhost;Port=5432;Database=entkube;Username=postgres;Password=REPLACE_ME"
+  },
+  "Telemetry": {
+    "RetentionDays": 90
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "Vault": {
+    "//RootKey": "Master vault encryption key: 32-byte base64. NEVER commit a real value. Generate with: openssl rand -base64 32  — then set via: dotnet user-secrets set \"Vault:RootKey\" <key>  (or env var Vault__RootKey).",
+    "RootKey": "REPLACE_WITH_BASE64_32BYTE_KEY"
+  },
+  "Seed": {
+    "AdminEmail": "admin@example.com"
+  }
+}

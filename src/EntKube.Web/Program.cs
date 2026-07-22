@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
@@ -37,6 +38,46 @@ public class Program
             })
             .AddIdentityCookies();
 
+        // The app runs behind the Caddy reverse proxy which terminates TLS. Honor the
+        // X-Forwarded-Proto/For headers so the app knows the original request was HTTPS —
+        // otherwise Kestrel sees plain HTTP and cookies with the default SameAsRequest policy
+        // (the antiforgery cookie, auth cookies) never get the Secure attribute (finding L3).
+        // This is the real fix: once the forwarded scheme is honored, those cookies become
+        // Secure automatically. (We deliberately do NOT set antiforgery SecurePolicy = Always —
+        // that makes the antiforgery system *throw* on any non-SSL request, which would break
+        // internal/direct-HTTP traffic and health probes that render antiforgery-bearing pages.)
+        builder.Services.Configure<ForwardedHeadersOptions>(options =>
+        {
+            options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+            // The middleware only applies X-Forwarded-* when the immediate peer is a trusted
+            // source. Kestrel is only reachable via the Caddy proxy (network-isolated), and the
+            // proxy's IP isn't fixed (container networking), so trust all sources by adding the
+            // 0.0.0.0/0 and ::/0 ranges. (Merely clearing the lists does NOT trust all — the peer
+            // then matches nothing and the headers are ignored.) If Kestrel could ever be reached
+            // directly, replace these with the proxy's specific subnet to prevent header spoofing.
+            options.KnownNetworks.Clear();
+            options.KnownProxies.Clear();
+            options.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(System.Net.IPAddress.Any, 0));
+            options.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(System.Net.IPAddress.IPv6Any, 0));
+        });
+
+        // Force the antiforgery cookie to Secure (finding L3). The default SameAsRequest policy
+        // was observed NOT to mark it Secure even when the forwarded scheme is HTTPS, so set it
+        // explicitly. This is safe because every real request arrives via Caddy as HTTPS (see
+        // ForwardedHeaders above); Always only throws for genuinely non-SSL requests, which the
+        // network-isolated deployment does not serve. Keep health probes on a non-rendering
+        // endpoint (they hit the pod over plain HTTP and must not trigger antiforgery).
+        builder.Services.AddAntiforgery(options => options.Cookie.SecurePolicy = CookieSecurePolicy.Always);
+
+        // Strong HSTS: 1 year, all subdomains, preload-eligible — replaces the framework's
+        // 30-day default with no includeSubDomains/preload (security finding L5).
+        builder.Services.AddHsts(options =>
+        {
+            options.MaxAge = TimeSpan.FromDays(365);
+            options.IncludeSubDomains = true;
+            options.Preload = true;
+        });
+
         // Persist DataProtection keys to a stable location so antiforgery/auth cookies
         // survive container restarts. Without this the keys live in the container's
         // ephemeral filesystem (/app/.aspnet/DataProtection-Keys) and are regenerated on
@@ -55,9 +96,31 @@ public class Program
         // Each provider uses its own connection string and DbContext subclass so that
         // migrations are generated and applied independently per provider.
 
-        string databaseProvider = builder.Configuration.GetValue<string>("DatabaseProvider") ?? "Sqlite";
+        string? configuredProvider = builder.Configuration.GetValue<string>("DatabaseProvider");
+        string databaseProvider = configuredProvider ?? "Sqlite";
         string connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
             ?? throw new InvalidOperationException("Connection string 'DefaultConnection' not found.");
+
+        // Fail loudly on the silent Sqlite fallback in Production. appsettings.Production.json is
+        // gitignored (it can carry secrets), so a clean CI-built image ships only appsettings.json —
+        // whose DatabaseProvider default is "Sqlite". If a Production deployment neither bakes in
+        // appsettings.Production.json nor injects the config via environment variables, the app would
+        // otherwise start quietly against a throwaway Sqlite file at Data/app.db ("can't find its
+        // database") instead of the real Postgres/SqlServer. Turn that into an immediate startup error.
+        // The trigger is precise: DatabaseProvider unset *anywhere* (configuredProvider is null). Setting
+        // DatabaseProvider=Sqlite explicitly opts into Sqlite in Production without tripping this.
+        if (builder.Environment.IsProduction()
+            && configuredProvider is null
+            && string.Equals(databaseProvider, "Sqlite", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "DatabaseProvider is not configured in the Production environment, so the app fell back to the " +
+                "Sqlite dev default (DataSource=Data/app.db). This usually means appsettings.Production.json is " +
+                "missing from the image AND no environment variables were injected. Supply the database settings via " +
+                "environment variables (DatabaseProvider=Postgres and ConnectionStrings__DefaultConnection=\"Host=...\") " +
+                "or a mounted appsettings.Production.json. To intentionally run Sqlite in Production, set " +
+                "DatabaseProvider=Sqlite explicitly.");
+        }
 
         // Transparently decrypts a registered cluster's kubeconfig from the vault when the
         // cluster is materialized, so consumers can keep reading cluster.Kubeconfig even
@@ -253,6 +316,7 @@ public class Program
         builder.Services.AddScoped<AppRouteService>();
         builder.Services.AddScoped<AppL4RouteService>();
         builder.Services.AddScoped<ConnectivityGraphService>();
+        builder.Services.AddScoped<IngressDashboardService>();
         builder.Services.AddScoped<DatabaseService>();
         builder.Services.AddScoped<CnpgService>();
         builder.Services.AddScoped<MongoService>();
@@ -399,6 +463,50 @@ public class Program
         }
 
         // Configure the HTTP request pipeline.
+
+        // Must run first: apply X-Forwarded-* from the reverse proxy so the correct scheme/host
+        // is visible to HTTPS redirection, HSTS, and cookie Secure decisions downstream (L3).
+        app.UseForwardedHeaders();
+
+        // Global security response headers on every response (static assets, errors, and pages).
+        // CSP keeps 'unsafe-inline' for scripts/styles because the head renders an inline
+        // <script type="importmap"> (Blazor's <ImportMap/>) and the app uses inline style
+        // attributes — a nonce-less strict script-src would break module loading. It still
+        // restricts scripts to same-origin (blocking attacker-hosted script injection), forbids
+        // objects, and locks base-uri/frame-ancestors/form-action (findings L4 + L6). Set
+        // Security:EnableCsp=false or override Security:ContentSecurityPolicy to tune per-env.
+        // CSP on by default in production; off in Development (avoids dotnet-watch hot-reload
+        // friction). Set Security:EnableCsp explicitly to override either way.
+        bool enableCsp = app.Configuration.GetValue<bool?>("Security:EnableCsp") ?? !app.Environment.IsDevelopment();
+        string cspPolicy = app.Configuration["Security:ContentSecurityPolicy"] ?? string.Join("; ",
+            "default-src 'self'",
+            "base-uri 'self'",
+            "object-src 'none'",
+            "frame-ancestors 'self'",
+            "frame-src 'self'",
+            "form-action 'self'",
+            "img-src 'self' data:",
+            "font-src 'self' data:",
+            "style-src 'self' 'unsafe-inline'",
+            // blob: + worker-src for Monaco's web workers (self-hosted under wwwroot/lib/monaco-editor).
+            "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:",
+            "worker-src 'self' blob:",
+            "connect-src 'self'");
+
+        app.Use(async (context, next) =>
+        {
+            context.Response.OnStarting(() =>
+            {
+                IHeaderDictionary h = context.Response.Headers;
+                h["X-Content-Type-Options"] = "nosniff";
+                h["Referrer-Policy"] = "strict-origin-when-cross-origin";
+                h["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()";
+                if (enableCsp) h["Content-Security-Policy"] = cspPolicy;
+                return Task.CompletedTask;
+            });
+            await next();
+        });
+
         if (app.Environment.IsDevelopment())
         {
             app.UseWebAssemblyDebugging();
@@ -407,7 +515,6 @@ public class Program
         else
         {
             app.UseExceptionHandler("/Error");
-            // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
             app.UseHsts();
         }
 

@@ -1,0 +1,240 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Components.Pages.Shared
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.EntityFrameworkCore
+@inject TenantService TenantService
+@inject ToastService Toasts
+@inject AuthenticationStateProvider AuthStateProvider
+
+@* ═══════════════════════════════════════════════════════════════════════════
+   ClustersTab — a tenant-wide landing for registered Kubernetes clusters, grouped
+   by environment. Reached from the top-nav "Clusters" item (?section=clusters).
+   Each row opens the full ClusterDetail via ?cluster={id}. Registering a cluster
+   is available here (pick an environment + kubeconfig) as well as per-environment
+   in the resource tree.
+   ═══════════════════════════════════════════════════════════════════════════ *@
+
+<div class="clusters-tab">
+    <div class="d-flex justify-content-between align-items-start mb-3 flex-wrap gap-2">
+        <div>
+            <h4 class="mb-1"><i class="bi bi-hexagon-fill me-2 text-primary"></i>Clusters</h4>
+            <div class="text-muted small">Registered Kubernetes clusters across this tenant's environments.</div>
+        </div>
+        @if (!loading && envNames.Count > 0 && !showRegister)
+        {
+            <button class="btn btn-sm btn-primary" @onclick="() => showRegister = true">
+                <i class="bi bi-plus-lg me-1"></i>Register cluster
+            </button>
+        }
+    </div>
+
+    @if (showRegister)
+    {
+        <div class="card border-primary-subtle shadow-sm mb-4">
+            <div class="card-body">
+                <h6 class="mb-3"><i class="bi bi-hexagon me-2 text-primary"></i>Register a cluster</h6>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1">Environment</label>
+                        <select class="form-select form-select-sm" @bind="registerEnvId">
+                            <option value="">Select environment…</option>
+                            @foreach (KeyValuePair<Guid, string> kv in envNames.OrderBy(k => k.Value))
+                            {
+                                <option value="@kv.Key">@kv.Value</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1">Cluster name</label>
+                        <input class="form-control form-control-sm" placeholder="e.g. prod-eu-1"
+                               @bind="registerName" @bind:event="oninput" />
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label small mb-1">Kubeconfig</label>
+                        <KubeconfigPicker OnSelectionChanged="OnKubeconfigSelected" @ref="picker" />
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1">Kubeconfig expiry <span class="text-muted">(optional)</span></label>
+                        <input type="date" class="form-control form-control-sm" @bind="registerExpiry" />
+                    </div>
+                </div>
+                @if (!string.IsNullOrEmpty(registerError))
+                {
+                    <div class="text-danger small mt-2"><i class="bi bi-exclamation-triangle me-1"></i>@registerError</div>
+                }
+                <div class="d-flex gap-2 mt-3">
+                    <button class="btn btn-sm btn-primary" @onclick="RegisterCluster"
+                            disabled="@(registering || registerEnvId is null || selection is null || registerName.Trim().Length == 0)">
+                        @if (registering) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        Register
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="CancelRegister" disabled="@registering">Cancel</button>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (loading)
+    {
+        <div class="text-center py-5">
+            <div class="spinner-border text-primary" role="status"></div>
+        </div>
+    }
+    else if (clusters.Count == 0)
+    {
+        <div class="text-center text-muted py-5">
+            <i class="bi bi-hexagon fs-1 d-block mb-2"></i>
+            <div class="fw-semibold">No clusters registered</div>
+            @if (envNames.Count == 0)
+            {
+                <div class="small">Create an <a href="tenants/@TenantSlug?section=environments">environment</a> first, then register a cluster into it.</div>
+            }
+            else
+            {
+                <div class="small">Use “Register cluster” above to add one.</div>
+            }
+        </div>
+    }
+    else
+    {
+        @foreach (IGrouping<Guid, KubernetesCluster> group in clusters.GroupBy(c => c.EnvironmentId).OrderBy(g => EnvName(g.Key)))
+        {
+            <div class="mb-4">
+                <div class="text-uppercase small fw-semibold text-muted mb-2">
+                    <i class="bi bi-diagram-3-fill me-1"></i>@EnvName(group.Key)
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Status</th>
+                                <th>API server</th>
+                                <th class="text-end"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (KubernetesCluster cl in group.OrderBy(c => c.Name))
+                            {
+                                <tr>
+                                    <td class="fw-semibold"><i class="bi bi-hexagon-fill me-1 text-primary"></i>@cl.Name</td>
+                                    <td>
+                                        <span class="badge @StatusClass(cl.ProvisioningStatus)">@StatusLabel(cl.ProvisioningStatus)</span>
+                                    </td>
+                                    <td class="text-muted small"><code>@cl.ApiServerUrl</code></td>
+                                    <td class="text-end">
+                                        <a class="btn btn-sm btn-outline-primary" href="tenants/@TenantSlug?cluster=@cl.Id">
+                                            <i class="bi bi-box-arrow-in-right me-1"></i>Open
+                                        </a>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public string TenantSlug { get; set; } = "";
+
+    private List<KubernetesCluster> clusters = [];
+    private Dictionary<Guid, string> envNames = [];
+    private bool loading = true;
+
+    // ── Register-cluster form state ──
+    private bool showRegister;
+    private Guid? registerEnvId;
+    private string registerName = "";
+    private DateTime? registerExpiry;
+    private KubeconfigSelection? selection;
+    private string? registerError;
+    private bool registering;
+    private KubeconfigPicker? picker;
+
+    protected override async Task OnInitializedAsync()
+    {
+        List<Data.Environment> envs = await TenantService.GetEnvironmentsAsync(TenantId);
+        envNames = envs.ToDictionary(e => e.Id, e => e.Name);
+        clusters = await TenantService.GetClustersAsync(TenantId);
+        if (envNames.Count == 1) registerEnvId = envNames.Keys.First();
+        loading = false;
+    }
+
+    private void OnKubeconfigSelected(KubeconfigSelection? sel)
+    {
+        selection = sel;
+        // Default the cluster name to the chosen context, but don't clobber a name the user typed.
+        if (sel is not null && string.IsNullOrWhiteSpace(registerName))
+        {
+            registerName = sel.ContextName;
+        }
+        registerError = null;
+    }
+
+    private void CancelRegister()
+    {
+        showRegister = false;
+        ResetRegisterForm();
+    }
+
+    private void ResetRegisterForm()
+    {
+        registerEnvId = envNames.Count == 1 ? envNames.Keys.First() : null;
+        registerName = "";
+        registerExpiry = null;
+        selection = null;
+        registerError = null;
+        picker?.Reset();
+    }
+
+    private async Task RegisterCluster()
+    {
+        if (registerEnvId is null || selection is null || registerName.Trim().Length == 0) return;
+        registering = true;
+        registerError = null;
+        try
+        {
+            AuthenticationState authState = await AuthStateProvider.GetAuthenticationStateAsync();
+            KubernetesCluster created = await TenantService.CreateClusterAsync(
+                TenantId, registerEnvId.Value, registerName.Trim(), selection.ServerUrl,
+                contextName: selection.ContextName, kubeconfig: selection.Yaml,
+                kubeconfigExpiresAt: registerExpiry, updatedBy: authState.User.Identity?.Name);
+
+            clusters = await TenantService.GetClustersAsync(TenantId);
+            showRegister = false;
+            ResetRegisterForm();
+            Toasts.Success($"Registered cluster '{created.Name}'.");
+        }
+        catch (DbUpdateException)
+        {
+            registerError = "A cluster with that name already exists.";
+        }
+        catch (Exception ex)
+        {
+            registerError = $"Failed to register: {ex.Message}";
+        }
+        finally { registering = false; }
+    }
+
+    private string EnvName(Guid id) => envNames.GetValueOrDefault(id, "—");
+
+    private static string StatusLabel(ClusterProvisioningStatus s) => s switch
+    {
+        ClusterProvisioningStatus.Provisioning => "Provisioning",
+        ClusterProvisioningStatus.Provisioned => "Provisioned",
+        ClusterProvisioningStatus.Failed => "Failed",
+        _ => "Registered"
+    };
+
+    private static string StatusClass(ClusterProvisioningStatus s) => s switch
+    {
+        ClusterProvisioningStatus.Provisioning => "bg-info-subtle text-info border border-info-subtle",
+        ClusterProvisioningStatus.Failed => "bg-danger-subtle text-danger border border-danger-subtle",
+        _ => "bg-success-subtle text-success border border-success-subtle"
+    };
+}

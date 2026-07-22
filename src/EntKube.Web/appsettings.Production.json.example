@@ -1,0 +1,28 @@
+{
+  "//": "Copy to appsettings.Production.json and fill in, OR (preferred) supply everything below via environment variables / a secrets store. DO NOT commit the real file — it is gitignored. Env var form uses '__' for nesting, e.g. Vault__RootKey, ConnectionStrings__DefaultConnection, Telemetry__ObjectStorage__SecretKey.",
+  "DatabaseProvider": "Postgres",
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=REPLACE_ME;Port=5432;Database=entkube;Username=entkube;Password=REPLACE_ME"
+  },
+  "Vault": {
+    "//RootKey": "REQUIRED in production. 32-byte base64. Supply via env var Vault__RootKey or a mounted secret — never in a committed file.",
+    "RootKey": "REPLACE_WITH_BASE64_32BYTE_KEY"
+  },
+  "Telemetry": {
+    "RetentionDays": 90,
+    "PublicIngestUrl": "",
+    "IngestMaxRequestsPerMinute": 0,
+    "DataPath": "/app/Data/telemetry",
+    "SegmentMaxDocs": 1000000,
+    "SegmentMaxAgeMinutes": 60,
+    "// StorageLink": "PRIMARY object storage is chosen in the admin UI (Admin -> Telemetry Storage): pick a registered StorageLink (AWS S3 / Cleura S3 / MinIO). The flat ObjectStorage config below is only a fallback for setups without a storage link; if neither is set, sealed segments go to local disk under DataPath.",
+    "ObjectStorage": {
+      "Endpoint": "",
+      "Bucket": "",
+      "Region": "us-east-1",
+      "AccessKey": "",
+      "SecretKey": "",
+      "ForcePathStyle": true
+    }
+  }
+}
