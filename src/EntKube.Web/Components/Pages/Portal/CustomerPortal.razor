@@ -214,9 +214,35 @@ else
                                       IsPortalView="true"
                                       AccessRole="currentAccessRole"
                                       InitialDeploymentId="pendingPortalDeploymentId"
+                                      InitialSection="portalInitialSection"
                                       OnBack="BackFromEnv"
                                       ShowBackLink="false"
-                                      @key="(selectedPortalApp.Id, selectedPortalEnvironment.Id)" />
+                                      @key="(selectedPortalApp.Id, selectedPortalEnvironment.Id, portalInitialSection)" />
+            }
+            else if (portalInitialSection is not null && selectedPortalApp is not null)
+            {
+                @* Env-scoped service (Databases/Cache/Messaging) with more than one environment:
+                   let the user pick which environment's view to open. *@
+                <div class="d-flex align-items-center mb-3">
+                    <i class="bi @SectionIcon(portalInitialSection) fs-4 me-2 text-primary"></i>
+                    <h4 class="mb-0">@SectionLabel(portalInitialSection) — @selectedPortalApp.Name</h4>
+                </div>
+                <p class="text-muted small">Choose an environment to view its @SectionLabel(portalInitialSection).</p>
+                @if ((appLinkedEnvironments.GetValueOrDefault(selectedPortalApp.Id) ?? []).Count == 0)
+                {
+                    <div class="text-muted small">This app has no linked environments yet.</div>
+                }
+                else
+                {
+                    <div class="d-flex flex-wrap gap-2">
+                        @foreach (Data.Environment env in appLinkedEnvironments.GetValueOrDefault(selectedPortalApp.Id) ?? [])
+                        {
+                            <button class="btn btn-outline-primary" @onclick="() => PickSectionEnvironment(env)">
+                                <i class="bi bi-layers me-1"></i>@env.Name
+                            </button>
+                        }
+                    </div>
+                }
             }
             else if (selectedIdentityRealm is not null)
             {
@@ -505,6 +531,10 @@ else
     private sealed record SecretsNav(Data.App App, string Scope);
     private SecretsNav? selectedSecrets;
 
+    // Set when a per-app Databases/Cache/Messaging leaf is active: the section to open in the
+    // environment view. When an environment is chosen it is passed to AppEnvironmentDetail.
+    private string? portalInitialSection;
+
     // ── Per-customer loaded data (keyed by app id) ──
     private Dictionary<Guid, List<Data.Environment>> appLinkedEnvironments = new();
     private Dictionary<Guid, List<AppDeployment>> appDeployments = new();
@@ -586,7 +616,19 @@ else
         if (app is not null && EnvParam is Guid eid)
         {
             Data.Environment? env = appLinkedEnvironments.GetValueOrDefault(app.Id)?.FirstOrDefault(e => e.Id == eid);
-            if (env is not null) { selectedPortalApp = app; selectedPortalEnvironment = env; }
+            if (env is not null)
+            {
+                selectedPortalApp = app;
+                selectedPortalEnvironment = env;
+                // Preserve a deep-linked env-scoped section (portal Services leaf) so a reload
+                // reopens on the same tab and keeps the tree leaf highlighted.
+                if (SectionParam is "databases" or "messaging" or "cache")
+                {
+                    portalInitialSection = SectionParam;
+                    activeAppId = app.Id;
+                    activeAppServiceKey = SectionParam;
+                }
+            }
         }
         else if (app is not null && !string.IsNullOrEmpty(SectionParam))
         {
@@ -700,6 +742,16 @@ else
         switch (key)
         {
             case "secrets": selectedSecrets = new(app, "app"); break;
+            case "databases":
+            case "messaging":
+            case "cache":
+                // Env-scoped section. Land straight in when the app has a single environment;
+                // otherwise the render shows an environment picker for the chosen section.
+                selectedPortalApp = app;
+                portalInitialSection = key;
+                List<Data.Environment> sectionEnvs = appLinkedEnvironments.GetValueOrDefault(app.Id) ?? [];
+                if (sectionEnvs.Count == 1) selectedPortalEnvironment = sectionEnvs[0];
+                break;
             case "identity":
                 if (appRealms.TryGetValue(app.Id, out KeycloakRealm? realm)) selectedIdentityRealm = realm;
                 break;
@@ -709,6 +761,29 @@ else
             case "urls": selectedRoutesApp = app; break;
         }
     }
+
+    // Chosen an environment for an env-scoped service leaf (Databases/Cache/Messaging).
+    private void PickSectionEnvironment(Data.Environment env)
+    {
+        selectedPortalEnvironment = env;
+        UpdateUrl(app: selectedPortalApp?.Id, env: env.Id, section: portalInitialSection);
+    }
+
+    private static string SectionLabel(string? key) => key switch
+    {
+        "databases" => "Databases",
+        "messaging" => "Messaging",
+        "cache" => "Cache",
+        _ => "Section",
+    };
+
+    private static string SectionIcon(string? key) => key switch
+    {
+        "databases" => "bi-database",
+        "messaging" => "bi-send",
+        "cache" => "bi-lightning",
+        _ => "bi-grid",
+    };
 
     private void SelectOp(string key)
     {
@@ -750,6 +825,7 @@ else
         selectedPortalEnvironment = null;
         pendingPortalDeploymentId = null;
         selectedSecrets = null;
+        portalInitialSection = null;
         selectedIdentityRealm = null;
         selectedRegistryProject = null;
         selectedRoutesApp = null;
@@ -810,14 +886,17 @@ else
     private bool EnvNodeSelected(Data.App app, Data.Environment env) =>
         selectedPortalApp?.Id == app.Id && selectedPortalEnvironment?.Id == env.Id;
 
-    // Per-app service leaves; Identity/Registry only when the app has one linked.
-    // Databases/Messaging/Cache live as tabs under each Environment (see AppEnvironmentDetail),
-    // so they are not repeated here — only app-level services belong in this flat group.
+    // Per-app service leaves. Databases/Messaging/Cache are env-scoped; selecting one lets the
+    // user pick an environment (or jumps straight in when there is only one), then opens that
+    // environment's view focused on the section — keeping the app page's own tab bar uncluttered.
     private List<(string Key, string Label, string Icon)> AppServiceItems(Data.App app)
     {
         var items = new List<(string Key, string Label, string Icon)>
         {
             ("secrets", "App Secrets", "bi-key"),
+            ("databases", "Databases", "bi-database"),
+            ("messaging", "Messaging", "bi-send"),
+            ("cache", "Cache", "bi-lightning"),
         };
         if (appRealms.ContainsKey(app.Id)) items.Add(("identity", "Identity", "bi-shield-lock"));
         if (appHarborProjects.ContainsKey(app.Id)) items.Add(("registry", "Registry", "bi-archive"));

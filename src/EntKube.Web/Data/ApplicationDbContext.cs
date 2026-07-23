@@ -119,6 +119,11 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<CaTrustBundle> CaTrustBundles => Set<CaTrustBundle>();
     public DbSet<CaTrustBundleSource> CaTrustBundleSources => Set<CaTrustBundleSource>();
     public DbSet<CertificateDistribution> CertificateDistributions => Set<CertificateDistribution>();
+    public DbSet<OpenLdapComponentConfig> OpenLdapComponentConfigs => Set<OpenLdapComponentConfig>();
+    public DbSet<OpenLdapOrganizationalUnit> OpenLdapOrganizationalUnits => Set<OpenLdapOrganizationalUnit>();
+    public DbSet<OpenLdapUser> OpenLdapUsers => Set<OpenLdapUser>();
+    public DbSet<OpenLdapGroup> OpenLdapGroups => Set<OpenLdapGroup>();
+    public DbSet<OpenLdapGroupMember> OpenLdapGroupMembers => Set<OpenLdapGroupMember>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
@@ -842,6 +847,112 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithMany(t => t.Realms)
                 .HasForeignKey(r => r.KeycloakThemeId)
                 .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        // OpenLDAP — a managed directory attached to an installed ClusterComponent
+        // (mirrors KeycloakComponentConfig). Admin/config passwords live in the vault;
+        // the directory (OUs, users, groups) is authored here and seeded via Helm/LDIF.
+
+        builder.Entity<OpenLdapComponentConfig>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.BaseDn).HasMaxLength(400).IsRequired();
+            entity.Property(c => c.Organization).HasMaxLength(200).IsRequired();
+            entity.Property(c => c.AdminUsername).HasMaxLength(100).IsRequired();
+            entity.Property(c => c.DisplayName).HasMaxLength(200);
+            entity.Property(c => c.ClusterIssuer).HasMaxLength(200);
+            entity.Property(c => c.StorageSize).HasMaxLength(20).IsRequired();
+            entity.Property(c => c.StorageClass).HasMaxLength(100);
+            entity.Property(c => c.TlsMode).HasConversion<string>().HasMaxLength(20);
+
+            entity.HasOne(c => c.Tenant)
+                .WithMany()
+                .HasForeignKey(c => c.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(c => c.ClusterComponent)
+                .WithMany()
+                .HasForeignKey(c => c.ClusterComponentId)
+                .IsRequired(false)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<OpenLdapOrganizationalUnit>(entity =>
+        {
+            entity.HasKey(o => o.Id);
+            entity.Property(o => o.Name).HasMaxLength(100).IsRequired();
+            entity.Property(o => o.Description).HasMaxLength(500);
+            entity.HasIndex(o => new { o.ConfigId, o.Name }).IsUnique();
+
+            entity.HasOne(o => o.Config)
+                .WithMany(c => c.OrganizationalUnits)
+                .HasForeignKey(o => o.ConfigId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<OpenLdapUser>(entity =>
+        {
+            entity.HasKey(u => u.Id);
+            entity.Property(u => u.Uid).HasMaxLength(100).IsRequired();
+            entity.Property(u => u.Cn).HasMaxLength(200).IsRequired();
+            entity.Property(u => u.Sn).HasMaxLength(200);
+            entity.Property(u => u.GivenName).HasMaxLength(200);
+            entity.Property(u => u.Email).HasMaxLength(320);
+            entity.Property(u => u.DisplayName).HasMaxLength(200);
+            entity.Property(u => u.HomeDirectory).HasMaxLength(400);
+            entity.Property(u => u.LoginShell).HasMaxLength(100);
+            entity.Property(u => u.PasswordSsha).HasMaxLength(200);
+            entity.HasIndex(u => new { u.ConfigId, u.Uid }).IsUnique();
+
+            entity.HasOne(u => u.Config)
+                .WithMany(c => c.Users)
+                .HasForeignKey(u => u.ConfigId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // OU delete must not cascade-delete users; the seed builder falls back to the base DN.
+            entity.HasOne(u => u.OrganizationalUnit)
+                .WithMany()
+                .HasForeignKey(u => u.OrganizationalUnitId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<OpenLdapGroup>(entity =>
+        {
+            entity.HasKey(g => g.Id);
+            entity.Property(g => g.Cn).HasMaxLength(200).IsRequired();
+            entity.Property(g => g.Description).HasMaxLength(500);
+            entity.Property(g => g.GroupType).HasConversion<string>().HasMaxLength(20);
+            entity.HasIndex(g => new { g.ConfigId, g.Cn }).IsUnique();
+
+            entity.HasOne(g => g.Config)
+                .WithMany(c => c.Groups)
+                .HasForeignKey(g => g.ConfigId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(g => g.OrganizationalUnit)
+                .WithMany()
+                .HasForeignKey(g => g.OrganizationalUnitId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<OpenLdapGroupMember>(entity =>
+        {
+            entity.HasKey(m => m.Id);
+            entity.HasIndex(m => new { m.GroupId, m.UserId }).IsUnique();
+
+            entity.HasOne(m => m.Group)
+                .WithMany(g => g.Members)
+                .HasForeignKey(m => m.GroupId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Deleting a user removes its memberships; use Restrict + explicit cleanup would
+            // orphan; Cascade from both sides on the join needs one path to be NoAction to
+            // avoid multiple-cascade-paths on SQL Server — the group path cascades, the user
+            // path does not (the service deletes memberships before deleting a user).
+            entity.HasOne(m => m.User)
+                .WithMany()
+                .HasForeignKey(m => m.UserId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         builder.Entity<AdvisorFindingState>(entity =>

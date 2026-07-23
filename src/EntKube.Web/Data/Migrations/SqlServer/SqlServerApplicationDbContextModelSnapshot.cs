@@ -3795,6 +3795,277 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("OnCallShifts");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.OpenLdapComponentConfig", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("AdminUsername")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("BaseDn")
+                        .IsRequired()
+                        .HasMaxLength(400)
+                        .HasColumnType("nvarchar(400)");
+
+                    b.Property<Guid?>("ClusterComponentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ClusterIssuer")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("DisplayName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<int>("LdapPort")
+                        .HasColumnType("int");
+
+                    b.Property<int>("LdapsPort")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("MemberOfEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Organization")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<bool>("PasswordPolicyEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<int>("PpolicyInHistory")
+                        .HasColumnType("int");
+
+                    b.Property<int>("PpolicyLockoutDurationSeconds")
+                        .HasColumnType("int");
+
+                    b.Property<int>("PpolicyMaxAgeDays")
+                        .HasColumnType("int");
+
+                    b.Property<int>("PpolicyMaxFailure")
+                        .HasColumnType("int");
+
+                    b.Property<int>("PpolicyMinLength")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("RefIntEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<int>("ReplicaCount")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("ReplicationEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("StartTlsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("StorageClass")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("StorageSize")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("TlsMode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterComponentId");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("OpenLdapComponentConfigs");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OpenLdapGroup", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Cn")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<Guid>("ConfigId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<int?>("GidNumber")
+                        .HasColumnType("int");
+
+                    b.Property<string>("GroupType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<Guid?>("OrganizationalUnitId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationalUnitId");
+
+                    b.HasIndex("ConfigId", "Cn")
+                        .IsUnique();
+
+                    b.ToTable("OpenLdapGroups");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OpenLdapGroupMember", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("GroupId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("GroupId", "UserId")
+                        .IsUnique();
+
+                    b.ToTable("OpenLdapGroupMembers");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OpenLdapOrganizationalUnit", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ConfigId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConfigId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("OpenLdapOrganizationalUnits");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OpenLdapUser", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Cn")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<Guid>("ConfigId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("DisplayName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Email")
+                        .HasMaxLength(320)
+                        .HasColumnType("nvarchar(320)");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("bit");
+
+                    b.Property<int?>("GidNumber")
+                        .HasColumnType("int");
+
+                    b.Property<string>("GivenName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("HomeDirectory")
+                        .HasMaxLength(400)
+                        .HasColumnType("nvarchar(400)");
+
+                    b.Property<bool>("IsServiceAccount")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("LoginShell")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<Guid?>("OrganizationalUnitId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("PasswordSsha")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Sn")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Uid")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<int?>("UidNumber")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationalUnitId");
+
+                    b.HasIndex("ConfigId", "Uid")
+                        .IsUnique();
+
+                    b.ToTable("OpenLdapUsers");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.OpenStackConnection", b =>
                 {
                     b.Property<Guid>("Id")
@@ -6518,6 +6789,90 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Schedule");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.OpenLdapComponentConfig", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ClusterComponent", "ClusterComponent")
+                        .WithMany()
+                        .HasForeignKey("ClusterComponentId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ClusterComponent");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OpenLdapGroup", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.OpenLdapComponentConfig", "Config")
+                        .WithMany("Groups")
+                        .HasForeignKey("ConfigId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.OpenLdapOrganizationalUnit", "OrganizationalUnit")
+                        .WithMany()
+                        .HasForeignKey("OrganizationalUnitId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Config");
+
+                    b.Navigation("OrganizationalUnit");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OpenLdapGroupMember", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.OpenLdapGroup", "Group")
+                        .WithMany("Members")
+                        .HasForeignKey("GroupId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.OpenLdapUser", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Group");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OpenLdapOrganizationalUnit", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.OpenLdapComponentConfig", "Config")
+                        .WithMany("OrganizationalUnits")
+                        .HasForeignKey("ConfigId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Config");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OpenLdapUser", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.OpenLdapComponentConfig", "Config")
+                        .WithMany("Users")
+                        .HasForeignKey("ConfigId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.OpenLdapOrganizationalUnit", "OrganizationalUnit")
+                        .WithMany()
+                        .HasForeignKey("OrganizationalUnitId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Config");
+
+                    b.Navigation("OrganizationalUnit");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.OpenStackConnection", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
@@ -7287,6 +7642,20 @@ namespace EntKube.Web.Data.Migrations.SqlServer
             modelBuilder.Entity("EntKube.Web.Data.OnCallSchedule", b =>
                 {
                     b.Navigation("Shifts");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OpenLdapComponentConfig", b =>
+                {
+                    b.Navigation("Groups");
+
+                    b.Navigation("OrganizationalUnits");
+
+                    b.Navigation("Users");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OpenLdapGroup", b =>
+                {
+                    b.Navigation("Members");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OpenStackConnection", b =>

@@ -45,8 +45,10 @@ public class BackupService(
         }
 
         List<VaultSecretRecord> secretRecords = [];
+        Dictionary<Guid, Guid> vaultIdBySecretId = [];
         foreach (VaultSecret s in await db.VaultSecrets.AsNoTracking().ToListAsync())
         {
+            vaultIdBySecretId[s.Id] = s.VaultId;
             if (!dekByVaultId.TryGetValue(s.VaultId, out byte[]? dek))
             {
                 logger.LogWarning("VaultSecret {Id} references unknown vault {VaultId} — skipping.", s.Id, s.VaultId);
@@ -76,6 +78,20 @@ public class BackupService(
                 c.Id, c.VaultId, c.Name, c.RegistryType, c.Server, c.Username, plainPassword,
                 c.Email, c.AppId, c.KubernetesClusterId, c.KubernetesSecretName, c.KubernetesNamespace,
                 c.CreatedAt, c.UpdatedAt));
+        }
+
+        List<VaultSecretVersionRecord> versionRecords = [];
+        foreach (VaultSecretVersion v in await db.VaultSecretVersions.AsNoTracking().ToListAsync())
+        {
+            if (!vaultIdBySecretId.TryGetValue(v.SecretId, out Guid vaultId) ||
+                !dekByVaultId.TryGetValue(vaultId, out byte[]? dek))
+            {
+                logger.LogWarning("VaultSecretVersion {Id} references unknown secret {SecretId} — skipping.", v.Id, v.SecretId);
+                continue;
+            }
+            string plaintext = encryption.Decrypt(dek, v.EncryptedValue, v.Nonce);
+            versionRecords.Add(new VaultSecretVersionRecord(
+                v.Id, v.SecretId, v.VersionNumber, plaintext, v.CreatedBy, v.CreatedAt));
         }
 
         List<UserRecord> userRecords = (await db.Users.AsNoTracking().ToListAsync())
@@ -115,6 +131,17 @@ public class BackupService(
             AppQuotas = await db.AppQuotas.AsNoTracking().ToListAsync(),
             AppRbacPolicies = await db.AppRbacPolicies.AsNoTracking().ToListAsync(),
             AppRbacRules = await db.AppRbacRules.AsNoTracking().ToListAsync(),
+            KyvernoPolicies = await db.KyvernoPolicies.AsNoTracking().ToListAsync(),
+            KedaScalers = await db.KedaScalers.AsNoTracking().ToListAsync(),
+            AppRoutes = await db.AppRoutes.AsNoTracking().ToListAsync(),
+            AppDeploymentRoutes = await db.AppDeploymentRoutes.AsNoTracking().ToListAsync(),
+            AppL4Routes = await db.AppL4Routes.AsNoTracking().ToListAsync(),
+            AppServicePorts = await db.AppServicePorts.AsNoTracking().ToListAsync(),
+            ConnectivityRules = await db.ConnectivityRules.AsNoTracking().ToListAsync(),
+            ExternalDependencies = await db.ExternalDependencies.AsNoTracking().ToListAsync(),
+            AppAllowedDatabases = await db.AppAllowedDatabases.AsNoTracking().ToListAsync(),
+            AppAllowedCaches = await db.AppAllowedCaches.AsNoTracking().ToListAsync(),
+            AppAllowedStorages = await db.AppAllowedStorages.AsNoTracking().ToListAsync(),
             KubernetesClusters = await db.KubernetesClusters.AsNoTracking().ToListAsync(),
             ClusterComponents = await db.ClusterComponents.AsNoTracking().ToListAsync(),
             ExternalRoutes = await db.ExternalRoutes.AsNoTracking().ToListAsync(),
@@ -138,6 +165,10 @@ public class BackupService(
             CustomerGitRepoPolicies = await db.CustomerGitRepoPolicies.AsNoTracking().ToListAsync(),
             RedisClusters = await db.RedisClusters.AsNoTracking().ToListAsync(),
             CacheBindings = await db.CacheBindings.AsNoTracking().ToListAsync(),
+            KafkaClusters = await db.KafkaClusters.AsNoTracking().ToListAsync(),
+            KafkaTopics = await db.KafkaTopics.AsNoTracking().ToListAsync(),
+            KafkaUsers = await db.KafkaUsers.AsNoTracking().ToListAsync(),
+            KafkaBindings = await db.KafkaBindings.AsNoTracking().ToListAsync(),
             VpnTunnels = await db.VpnTunnels.AsNoTracking().ToListAsync(),
             VpnLocalEndpoints = await db.VpnLocalEndpoints.AsNoTracking().ToListAsync(),
             VpnRemoteEndpoints = await db.VpnRemoteEndpoints.AsNoTracking().ToListAsync(),
@@ -149,8 +180,33 @@ public class BackupService(
             NotificationChannels = await db.NotificationChannels.AsNoTracking().ToListAsync(),
             SlaTargets = await db.SlaTargets.AsNoTracking().ToListAsync(),
             MaintenanceWindows = await db.MaintenanceWindows.AsNoTracking().ToListAsync(),
+            AlertRoutingRules = await db.AlertRoutingRules.AsNoTracking().ToListAsync(),
+            OnCallSchedules = await db.OnCallSchedules.AsNoTracking().ToListAsync(),
+            OnCallShifts = await db.OnCallShifts.AsNoTracking().ToListAsync(),
+            Dashboards = await db.Dashboards.AsNoTracking().ToListAsync(),
+            RumSites = await db.RumSites.AsNoTracking().ToListAsync(),
+            TelemetryAlertRules = await db.TelemetryAlertRules.AsNoTracking().ToListAsync(),
+            TelemetryStorageSettings = await db.TelemetryStorageSettings.AsNoTracking().ToListAsync(),
+            AdvisorDigestConfigs = await db.AdvisorDigestConfigs.AsNoTracking().ToListAsync(),
+            NotificationProviderConfigs = await db.NotificationProviderConfigs.AsNoTracking().ToListAsync(),
+            SecretExpiryNotificationConfigs = await db.SecretExpiryNotificationConfigs.AsNoTracking().ToListAsync(),
+            ClusterServers = await db.ClusterServers.AsNoTracking().ToListAsync(),
+            IdentityBindings = await db.IdentityBindings.AsNoTracking().ToListAsync(),
+            ClusterBlueprints = await db.ClusterBlueprints.AsNoTracking().ToListAsync(),
+            BlueprintSteps = await db.BlueprintSteps.AsNoTracking().ToListAsync(),
+            BlueprintVariables = await db.BlueprintVariables.AsNoTracking().ToListAsync(),
+            BlueprintVariableValues = await db.BlueprintVariableValues.AsNoTracking().ToListAsync(),
+            CaTrustBundles = await db.CaTrustBundles.AsNoTracking().ToListAsync(),
+            CaTrustBundleSources = await db.CaTrustBundleSources.AsNoTracking().ToListAsync(),
+            CertificateDistributions = await db.CertificateDistributions.AsNoTracking().ToListAsync(),
+            OpenLdapComponentConfigs = await db.OpenLdapComponentConfigs.AsNoTracking().ToListAsync(),
+            OpenLdapOrganizationalUnits = await db.OpenLdapOrganizationalUnits.AsNoTracking().ToListAsync(),
+            OpenLdapUsers = await db.OpenLdapUsers.AsNoTracking().ToListAsync(),
+            OpenLdapGroups = await db.OpenLdapGroups.AsNoTracking().ToListAsync(),
+            OpenLdapGroupMembers = await db.OpenLdapGroupMembers.AsNoTracking().ToListAsync(),
             SecretVaults = vaultRecords,
             VaultSecrets = secretRecords,
+            VaultSecretVersions = versionRecords,
             DockerCredentials = credRecords,
         };
 
@@ -190,8 +246,8 @@ public class BackupService(
         BackupBundle? bundle = await JsonSerializer.DeserializeAsync<BackupBundle>(jsonStream, JsonOptions)
             ?? throw new InvalidDataException("Failed to deserialize backup bundle.");
 
-        if (bundle.Version != 1)
-            throw new InvalidDataException($"Unsupported backup version: {bundle.Version}. Only version 1 is supported.");
+        if (bundle.Version is not (1 or 2))
+            throw new InvalidDataException($"Unsupported backup version: {bundle.Version}. Only versions 1 and 2 are supported.");
 
         await using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -216,6 +272,10 @@ public class BackupService(
                 await db.Database.ExecuteSqlRawAsync(@"TRUNCATE ""Tenants"" CASCADE");
                 await db.Database.ExecuteSqlRawAsync(@"TRUNCATE ""AspNetUsers"" CASCADE");
                 await db.Database.ExecuteSqlRawAsync(@"TRUNCATE ""AspNetRoles"" CASCADE");
+                // NotificationProviderConfig is global (no TenantId), so it is NOT reached by the
+                // TRUNCATE ... CASCADE above. Clear it explicitly, otherwise re-inserting the bundle's
+                // rows would collide with the unique index on ProviderType.
+                await db.Database.ExecuteSqlRawAsync(@"TRUNCATE ""NotificationProviderConfigs""");
                 db.ChangeTracker.Clear();
             }
 
@@ -249,6 +309,20 @@ public class BackupService(
             await InsertEntities(db, db.Customers, bundle.Customers);
             await InsertEntities(db, db.CustomerAccesses, bundle.CustomerAccesses);
 
+            // Config that depends only on Tenant / Environment / Customer (no App or Cluster FKs).
+            await InsertEntities(db, db.SecretExpiryNotificationConfigs, bundle.SecretExpiryNotificationConfigs);
+            await InsertEntities(db, db.OnCallSchedules, bundle.OnCallSchedules);
+            await InsertEntities(db, db.OnCallShifts, bundle.OnCallShifts);
+            await InsertEntities(db, db.Dashboards, bundle.Dashboards);
+            await InsertEntities(db, db.AdvisorDigestConfigs, bundle.AdvisorDigestConfigs);
+            // NotificationProviderConfig is a global singleton set (no TenantId).
+            await InsertEntities(db, db.NotificationProviderConfigs, bundle.NotificationProviderConfigs);
+            // Cluster blueprints — blueprint before its steps/variables; values reference Environments (inserted above).
+            await InsertEntities(db, db.ClusterBlueprints, bundle.ClusterBlueprints);
+            await InsertEntities(db, db.BlueprintSteps, bundle.BlueprintSteps);
+            await InsertEntities(db, db.BlueprintVariables, bundle.BlueprintVariables);
+            await InsertEntities(db, db.BlueprintVariableValues, bundle.BlueprintVariableValues);
+
             // Customer git credentials must exist before GitRepositories and VaultSecrets reference them.
             await InsertEntities(db, db.CustomerGitCredentials, bundle.CustomerGitCredentials);
             await InsertEntities(db, db.CustomerGitRepoPolicies, bundle.CustomerGitRepoPolicies);
@@ -262,12 +336,39 @@ public class BackupService(
             await InsertEntities(db, db.AppRbacPolicies, bundle.AppRbacPolicies);
             await InsertEntities(db, db.AppRbacRules, bundle.AppRbacRules);
 
+            // Policy/scaling and connectivity that depend on App + Environment (targets of
+            // clusters/databases/deployments are wired later, so only these go here).
+            await InsertEntities(db, db.KyvernoPolicies, bundle.KyvernoPolicies);
+            await InsertEntities(db, db.KedaScalers, bundle.KedaScalers);
+            await InsertEntities(db, db.AppRoutes, bundle.AppRoutes);
+            await InsertEntities(db, db.ConnectivityRules, bundle.ConnectivityRules);
+            await InsertEntities(db, db.ExternalDependencies, bundle.ExternalDependencies);
+
             // Infrastructure — OpenStack and K8s clusters before storage links
             // (StorageLink.OpenStackConnectionId and StorageLink.ComponentId are optional
             // FKs that must exist when non-null).
             await InsertEntities(db, db.OpenStackConnections, bundle.OpenStackConnections);
             await InsertEntities(db, db.KubernetesClusters, bundle.KubernetesClusters);
             await InsertEntities(db, db.ClusterComponents, bundle.ClusterComponents);
+
+            // Cluster-scoped config — servers, CA trust, Kafka topology, RUM sites & telemetry
+            // alert rules. Kafka bindings/identity bindings that also need AppDeployments come later.
+            await InsertEntities(db, db.ClusterServers, bundle.ClusterServers);
+            await InsertEntities(db, db.CaTrustBundles, bundle.CaTrustBundles);
+            await InsertEntities(db, db.CaTrustBundleSources, bundle.CaTrustBundleSources);
+            await InsertEntities(db, db.KafkaClusters, bundle.KafkaClusters);
+            await InsertEntities(db, db.KafkaTopics, bundle.KafkaTopics);
+            await InsertEntities(db, db.KafkaUsers, bundle.KafkaUsers);
+            await InsertEntities(db, db.RumSites, bundle.RumSites);
+            await InsertEntities(db, db.TelemetryAlertRules, bundle.TelemetryAlertRules);
+
+            // OpenLDAP — config attaches to a ClusterComponent (inserted above); then OUs,
+            // users, groups, and group memberships (which reference both groups and users).
+            await InsertEntities(db, db.OpenLdapComponentConfigs, bundle.OpenLdapComponentConfigs);
+            await InsertEntities(db, db.OpenLdapOrganizationalUnits, bundle.OpenLdapOrganizationalUnits);
+            await InsertEntities(db, db.OpenLdapUsers, bundle.OpenLdapUsers);
+            await InsertEntities(db, db.OpenLdapGroups, bundle.OpenLdapGroups);
+            await InsertEntities(db, db.OpenLdapGroupMembers, bundle.OpenLdapGroupMembers);
 
             // Git repos, redis, and VPN depend on clusters/credentials already inserted above.
             await InsertEntities(db, db.GitKnownHosts, bundle.GitKnownHosts);
@@ -286,6 +387,11 @@ public class BackupService(
             await InsertEntities(db, db.ExternalRoutes, bundle.ExternalRoutes);
             await InsertEntities(db, db.StorageLinks, bundle.StorageLinks);
 
+            // Allowances/settings that reference Redis clusters and storage links (both inserted above).
+            await InsertEntities(db, db.AppAllowedCaches, bundle.AppAllowedCaches);
+            await InsertEntities(db, db.AppAllowedStorages, bundle.AppAllowedStorages);
+            await InsertEntities(db, db.TelemetryStorageSettings, bundle.TelemetryStorageSettings);
+
             // Build sets of IDs that are actually present in this bundle so we can null out
             // dangling FK references that arise from older bundles or deleted source records.
             var bundledRepoIds       = bundle.GitRepositories.Select(r => r.Id).ToHashSet();
@@ -303,6 +409,12 @@ public class BackupService(
             await InsertEntities(db, db.DeploymentManifests, bundle.DeploymentManifests);
             await InsertEntities(db, db.StorageBindings, bundle.StorageBindings);
 
+            // Routes/ports/bindings that reference AppDeployments (and AppRoutes/KafkaUsers inserted earlier).
+            await InsertEntities(db, db.AppDeploymentRoutes, bundle.AppDeploymentRoutes);
+            await InsertEntities(db, db.AppL4Routes, bundle.AppL4Routes);
+            await InsertEntities(db, db.AppServicePorts, bundle.AppServicePorts);
+            await InsertEntities(db, db.KafkaBindings, bundle.KafkaBindings);
+
             // Cache bindings — after AppDeployments and RedisClusters (both non-null FKs).
             await InsertEntities(db, db.CacheBindings, bundle.CacheBindings);
 
@@ -317,10 +429,16 @@ public class BackupService(
             await InsertEntities(db, db.DatabaseBindings, bundle.DatabaseBindings);
             await InsertEntities(db, db.MessagingBindings, bundle.MessagingBindings);
 
+            // App→database allowances reference CNPG / Mongo / registered-Postgres databases (all above).
+            await InsertEntities(db, db.AppAllowedDatabases, bundle.AppAllowedDatabases);
+
             // Identity/Auth providers — after cluster components and databases.
             await InsertEntities(db, db.KeycloakComponentConfigs, bundle.KeycloakComponentConfigs);
             await InsertEntities(db, db.KeycloakThemes, bundle.KeycloakThemes);
             await InsertEntities(db, db.KeycloakRealms, bundle.KeycloakRealms);
+
+            // Identity bindings link a Keycloak realm to an app deployment (both inserted above).
+            await InsertEntities(db, db.IdentityBindings, bundle.IdentityBindings);
 
             // Container registry.
             await InsertEntities(db, db.HarborComponentConfigs, bundle.HarborComponentConfigs);
@@ -330,6 +448,9 @@ public class BackupService(
             await InsertEntities(db, db.NotificationChannels, bundle.NotificationChannels);
             await InsertEntities(db, db.SlaTargets, bundle.SlaTargets);
             await InsertEntities(db, db.MaintenanceWindows, bundle.MaintenanceWindows);
+
+            // Alert routing references NotificationChannels + KubernetesClusters (both inserted above).
+            await InsertEntities(db, db.AlertRoutingRules, bundle.AlertRoutingRules);
 
             // Null out VaultSecret FKs that point to entities not present in this bundle
             // (backwards-compatible with bundles exported before these entity types were added).
@@ -400,6 +521,34 @@ public class BackupService(
                 await db.SaveChangesAsync();
                 db.ChangeTracker.Clear();
             }
+
+            // Secret version history — re-encrypt each historical value with the destination
+            // vault's fresh DEK, resolving the vault via the parent secret (recorded above).
+            Dictionary<Guid, Guid> vaultIdBySecretId = bundle.VaultSecrets.ToDictionary(s => s.Id, s => s.VaultId);
+            foreach (VaultSecretVersionRecord vr in bundle.VaultSecretVersions)
+            {
+                if (!vaultIdBySecretId.TryGetValue(vr.SecretId, out Guid vaultId) ||
+                    !newDekByVaultId.TryGetValue(vaultId, out byte[]? dek))
+                {
+                    logger.LogWarning("VaultSecretVersion {Id} secret {SecretId} not in bundle — skipping.", vr.Id, vr.SecretId);
+                    continue;
+                }
+                (byte[] ciphertext, byte[] vNonce) = encryption.Encrypt(dek, vr.PlaintextValue);
+                db.VaultSecretVersions.Add(new VaultSecretVersion
+                {
+                    Id = vr.Id, SecretId = vr.SecretId, VersionNumber = vr.VersionNumber,
+                    EncryptedValue = ciphertext, Nonce = vNonce,
+                    CreatedBy = vr.CreatedBy, CreatedAt = vr.CreatedAt,
+                });
+            }
+            if (bundle.VaultSecretVersions.Count > 0)
+            {
+                await db.SaveChangesAsync();
+                db.ChangeTracker.Clear();
+            }
+
+            // Certificate distributions reference a VaultSecret (source cert) — insert after secrets exist.
+            await InsertEntities(db, db.CertificateDistributions, bundle.CertificateDistributions);
 
             foreach (DockerCredentialRecord cr in bundle.DockerCredentials)
             {

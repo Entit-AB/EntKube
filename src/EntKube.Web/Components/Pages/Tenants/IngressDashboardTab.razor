@@ -3,271 +3,320 @@
 @inject IngressDashboardService IngressService
 
 @* ═══════════════════════════════════════════════════════════════════════════
-   IngressDashboardTab — tenant-wide "Routes & Ingress": a live, cross-cluster
-   picture of every north-south route (Gateway API HTTPRoutes, Traefik
-   IngressRoute CRDs, core Ingresses), enriched with backend health, TLS/cert
-   state, drift flags, and lazy per-route traffic. Organised status-first: a
-   segmented summary that doubles as the filter, then routes grouped under
-   collapsible per-cluster sections. Operations → Networking → Routes & Ingress.
+   IngressDashboardTab — a Traefik-dashboard-style view that adapts to each
+   cluster's actual gateway class (Traefik → Entrypoints/Routers/Middlewares,
+   Istio+Gateway API → Gateways/Routes/Filters). Dark navbar + light card
+   canvas, an overview strip (entrypoints/gateways + Routes/Services/Filters
+   donut charts), HTTP / TCP / UDP protocol tabs, and Routes / Services /
+   Middlewares tables. Rows expand into a Route → Filters → Service flow with
+   live backend/endpoint health, cert state and traffic. Operations → Networking.
+
+   NOTE: table rows use class "tk-row", NOT "row" — Bootstrap's global
+   .row { display:flex } collapses <tr>s into a flex box (cells stack), so the
+   table stops rendering as a table. Keep custom classes off Bootstrap names.
    ═══════════════════════════════════════════════════════════════════════════ *@
 
-<div class="ingress-dash">
-    <div class="d-flex justify-content-between align-items-start mb-3 flex-wrap gap-2">
-        <div>
-            <h4 class="mb-1"><i class="bi bi-signpost-split me-2"></i>Routes &amp; Ingress</h4>
-            <div class="text-muted small">Live north-south routing across every cluster in this tenant.</div>
+<div class="tk">
+    @* ── Dark top navbar (Traefik chrome) ── *@
+    <div class="tk-nav">
+        <div class="tk-brand">
+            <span class="tk-logo"><i class="bi bi-signpost-2-fill"></i></span>
+            <span class="tk-brand-name">Routes &amp; Ingress</span>
+            <span class="tk-brand-sub">@StackLabel</span>
         </div>
-        <div class="d-flex align-items-center gap-2">
-            <select class="form-select form-select-sm" style="width:auto" @bind="metricWindow" @bind:after="OnWindowChanged">
-                <option value="15">15m</option>
-                <option value="60">1h</option>
-                <option value="360">6h</option>
-                <option value="1440">24h</option>
-            </select>
-            <button class="btn btn-sm btn-outline-secondary" @onclick="Reload" disabled="@loading">
-                <i class="bi bi-arrow-clockwise @(loading ? "spin" : "")"></i> Refresh
+        <div class="tk-nav-actions">
+            @if (data is not null && data.Clusters.Count > 0)
+            {
+                <div class="tk-select">
+                    <i class="bi bi-hexagon-fill"></i>
+                    <select @bind="selectedCluster" @bind:after="OnClusterChanged">
+                        <option value="">All clusters</option>
+                        @foreach (ClusterProbe c in data.Clusters)
+                        {
+                            <option value="@c.ClusterId" disabled="@(!c.Reachable)">
+                                @c.ClusterName@(c.Reachable ? "" : " (unreachable)")
+                            </option>
+                        }
+                    </select>
+                </div>
+                <div class="tk-select">
+                    <i class="bi bi-clock-history"></i>
+                    <select @bind="metricWindow" @bind:after="OnWindowChanged">
+                        <option value="15">15m</option>
+                        <option value="60">1h</option>
+                        <option value="360">6h</option>
+                        <option value="1440">24h</option>
+                    </select>
+                </div>
+            }
+            <button class="tk-refresh" @onclick="Reload" disabled="@loading" title="Refresh">
+                <i class="bi bi-arrow-clockwise @(loading ? "spin" : "")"></i>
             </button>
         </div>
     </div>
 
     @if (loading && data is null)
     {
-        <div class="text-center py-5">
-            <div class="spinner-border text-primary" role="status"></div>
-            <p class="text-muted mt-2 mb-0">Querying clusters…</p>
-        </div>
+        <div class="tk-empty"><div class="tk-spinner"></div><p>Querying clusters…</p></div>
     }
     else if (data is null)
     {
-        <div class="alert alert-danger">Failed to load ingress data.</div>
-    }
-    else if (data.Total == 0)
-    {
-        <div class="text-center text-muted py-5">
-            <i class="bi bi-hexagon fs-1 d-block mb-2"></i>
-            <div class="fw-semibold">No routes found</div>
-            @if (data.Clusters.Count == 0)
-            {
-                <div class="small">Register a cluster with a stored kubeconfig to see its routes here.</div>
-            }
-            else if (UnreachableClusters.Count == data.Clusters.Count)
-            {
-                <div class="small">All @data.Clusters.Count cluster(s) were unreachable: @string.Join(", ", UnreachableClusters.Select(c => c.ClusterName)).</div>
-            }
-            else
-            {
-                <div class="small">Scanned @data.Clusters.Count cluster(s) — no Ingress, HTTPRoute or Traefik routes are defined yet.</div>
-            }
-        </div>
+        <div class="tk-canvas"><div class="tk-alert">Failed to load ingress data.</div></div>
     }
     else
     {
-        @* ── Summary bar: segmented status filter (= the KPIs) + TLS meter + clusters ── *@
-        <div class="summary-bar mb-3">
-            <div class="seg" role="tablist" aria-label="Filter by status">
-                <button class="seg-btn @(statusFilter == "all" ? "active" : "")" @onclick='() => statusFilter = "all"'>
-                    All <span class="n">@data.Total</span>
-                </button>
-                <button class="seg-btn crit @(statusFilter == "critical" ? "active" : "")" @onclick='() => statusFilter = "critical"'
-                        disabled="@(CriticalCount == 0)">
-                    <i class="bi bi-x-octagon-fill"></i> Critical <span class="n">@CriticalCount</span>
-                </button>
-                <button class="seg-btn warn @(statusFilter == "warning" ? "active" : "")" @onclick='() => statusFilter = "warning"'
-                        disabled="@(WarningCount == 0)">
-                    <i class="bi bi-exclamation-triangle-fill"></i> Warnings <span class="n">@WarningCount</span>
-                </button>
-                <button class="seg-btn ok @(statusFilter == "healthy" ? "active" : "")" @onclick='() => statusFilter = "healthy"'
-                        disabled="@(HealthyCount == 0)">
-                    <i class="bi bi-check-circle-fill"></i> Healthy <span class="n">@HealthyCount</span>
-                </button>
-            </div>
-
-            <div class="summary-facts">
-                <div class="tls-meter" title="@data.Secured of @data.Total routes served over TLS">
-                    <div class="bar"><span class="@TlsMeterClass" style="width:@data.TlsCoverage.ToString("F0")%"></span></div>
-                    <span class="lbl">@data.TlsCoverage.ToString("F0")% TLS</span>
+        <div class="tk-canvas">
+            @if (UnreachableClusters.Count > 0)
+            {
+                <div class="tk-banner warn">
+                    <i class="bi bi-exclamation-triangle-fill"></i>
+                    @UnreachableClusters.Count of @data.Clusters.Count cluster(s) unreachable:
+                    @string.Join(", ", UnreachableClusters.Select(c => c.ClusterName))
                 </div>
-                <span class="clusters-fact" title="@ClustersTooltip">
-                    <i class="bi bi-hexagon-fill"></i> @ReachableClusters/@data.Clusters.Count clusters
-                </span>
-            </div>
+            }
+            @if (Orphans().Count > 0)
+            {
+                <div class="tk-banner muted">
+                    <i class="bi bi-diagram-2"></i>
+                    <strong>@Orphans().Count</strong> stored route(s) no longer resolve to a live object (drift):
+                    <span class="mono">@string.Join(", ", Orphans().Take(6).Select(o => o.Hostname))</span>@(Orphans().Count > 6 ? " …" : "")
+                </div>
+            }
 
-            <div class="summary-search ms-auto">
-                <i class="bi bi-search"></i>
-                <input placeholder="Filter host, service, namespace…" @bind="search" @bind:event="oninput" />
-            </div>
-        </div>
-
-        @* ── Only-when-wrong banners (kept out of the way otherwise) ── *@
-        @if (UnreachableClusters.Count > 0)
-        {
-            <div class="notice warn mb-2">
-                <i class="bi bi-exclamation-triangle me-1"></i>
-                @UnreachableClusters.Count of @data.Clusters.Count clusters unreachable:
-                @string.Join(", ", UnreachableClusters.Select(c => c.ClusterName))
-            </div>
-        }
-        @if (data.Orphans.Count > 0)
-        {
-            <div class="notice muted mb-2">
-                <i class="bi bi-diagram-2 me-1"></i>
-                <strong>@data.Orphans.Count</strong> stored route(s) no longer resolve to a live object (drift):
-                <span class="mono">@string.Join(", ", data.Orphans.Take(6).Select(o => o.Hostname))</span>@(data.Orphans.Count > 6 ? " …" : "")
-            </div>
-        }
-
-        @if (Groups().Count == 0)
-        {
-            <div class="text-center text-muted py-4">
-                <i class="bi bi-inbox fs-3 d-block mb-1"></i>
-                No routes match this filter.
-            </div>
-        }
-        else
-        {
-            <div class="route-list">
-                @foreach (RouteGroup g in Groups())
-                {
-                    bool collapsed = collapsedClusters.Contains(g.ClusterId);
-                    <div class="cluster-block">
-                        <button type="button" class="cluster-head" @onclick="() => ToggleCluster(g.ClusterId)" aria-expanded="@(!collapsed)">
-                            <i class="bi @(collapsed ? "bi-chevron-right" : "bi-chevron-down") caret"></i>
-                            <i class="bi bi-hexagon-fill hx"></i>
-                            <span class="name">@g.ClusterName</span>
-                            <span class="env">@g.EnvironmentName</span>
-                            <span class="gw">@g.GatewayClass</span>
-                            <span class="count">@g.Routes.Count route@(g.Routes.Count == 1 ? "" : "s")</span>
-                            @if (g.Issues > 0)
+            @* ── Overview strip ── *@
+            <div class="tk-overview">
+                @* Entrypoints / Gateways — collapsed to distinct ports, never per-listener ── *@
+                <div class="tk-card ov-entrypoints">
+                    <div class="tk-card-h">
+                        @EntryHeader
+                        @if (GatewayCount > 0) { <span class="hcount">@GatewayCount</span> }
+                    </div>
+                    @{ List<EntryPointAgg> eps = EntryPoints(); }
+                    @if (eps.Count == 0)
+                    {
+                        <div class="tk-none">None</div>
+                    }
+                    else
+                    {
+                        <div class="ep-list">
+                            @foreach (EntryPointAgg ep in eps.Take(6))
                             {
-                                <span class="issues"><i class="bi bi-exclamation-triangle-fill"></i> @g.Issues</span>
+                                <div class="ep" title="@ep.Count listener@(ep.Count == 1 ? "" : "s")">
+                                    @if (ep.Tls) { <i class="bi bi-lock-fill ep-lock" title="TLS"></i> }
+                                    <span class="ep-name">@ep.Name</span>
+                                    <span class="ep-addr">@(ep.Port is int p ? $":{p}" : "")</span>
+                                    @if (ep.Count > 1) { <span class="ep-n">@ep.Count</span> }
+                                </div>
                             }
-                        </button>
+                            @if (eps.Count > 6) { <div class="ep more">+@(eps.Count - 6) more</div> }
+                        </div>
+                    }
+                </div>
 
-                        @if (!collapsed)
+                @* Routes / Routers *@
+                <button class="tk-card ov-donut @(httpSection == "routers" ? "sel" : "")"
+                        @onclick='() => Go("http", "routers")'>
+                    <div class="tk-card-h">HTTP @RouteHeader</div>
+                    <div class="donut-wrap">
+                        <div class="donut" style="@DonutStyle(RouterCounts)">
+                            <div class="donut-hole"><span class="donut-total">@RouterCounts.Total</span></div>
+                        </div>
+                        <div class="donut-legend">
+                            <div class="lg ok"><span class="d"></span>@RouterCounts.Success <em>success</em></div>
+                            <div class="lg warn"><span class="d"></span>@RouterCounts.Warning <em>warnings</em></div>
+                            <div class="lg err"><span class="d"></span>@RouterCounts.Error <em>errors</em></div>
+                        </div>
+                    </div>
+                </button>
+
+                @* Services *@
+                <button class="tk-card ov-donut @(httpSection == "services" ? "sel" : "")"
+                        @onclick='() => Go("http", "services")'>
+                    <div class="tk-card-h">HTTP Services</div>
+                    <div class="donut-wrap">
+                        <div class="donut" style="@DonutStyle(ServiceCounts)">
+                            <div class="donut-hole"><span class="donut-total">@ServiceCounts.Total</span></div>
+                        </div>
+                        <div class="donut-legend">
+                            <div class="lg ok"><span class="d"></span>@ServiceCounts.Success <em>success</em></div>
+                            <div class="lg warn"><span class="d"></span>@ServiceCounts.Warning <em>warnings</em></div>
+                            <div class="lg err"><span class="d"></span>@ServiceCounts.Error <em>errors</em></div>
+                        </div>
+                    </div>
+                </button>
+
+                @* Middlewares / Filters *@
+                <button class="tk-card ov-donut @(httpSection == "middlewares" ? "sel" : "")"
+                        @onclick='() => Go("http", "middlewares")'>
+                    <div class="tk-card-h">HTTP @MwHeader</div>
+                    <div class="donut-wrap">
+                        <div class="donut" style="@DonutStyle(MiddlewareCounts)">
+                            <div class="donut-hole"><span class="donut-total">@MiddlewareCounts.Total</span></div>
+                        </div>
+                        <div class="donut-legend">
+                            <div class="lg ok"><span class="d"></span>@MiddlewareCounts.Success <em>success</em></div>
+                            <div class="lg warn"><span class="d"></span>@MiddlewareCounts.Warning <em>warnings</em></div>
+                            <div class="lg err"><span class="d"></span>@MiddlewareCounts.Error <em>errors</em></div>
+                        </div>
+                    </div>
+                </button>
+            </div>
+
+            @* ── Protocol tabs ── *@
+            <div class="tk-tabs">
+                <button class="tk-tab @(protocolTab == "http" ? "active" : "")" @onclick='() => protocolTab = "http"'>HTTP</button>
+                <button class="tk-tab @(protocolTab == "tcp" ? "active" : "")" @onclick='() => protocolTab = "tcp"'>TCP</button>
+                <button class="tk-tab @(protocolTab == "udp" ? "active" : "")" @onclick='() => protocolTab = "udp"'>UDP</button>
+            </div>
+
+            @if (protocolTab != "http")
+            {
+                <div class="tk-card">
+                    <div class="tk-none-big">
+                        <i class="bi bi-diagram-3"></i>
+                        <div>No @protocolTab.ToUpper() routers are defined</div>
+                        <span>EntKube surfaces HTTP routing (Ingress, HTTPRoute, Traefik IngressRoute).</span>
+                    </div>
+                </div>
+            }
+            else
+            {
+                @* Section sub-tabs + search *@
+                <div class="tk-subhead">
+                    <div class="tk-subtabs">
+                        <button class="tk-subtab @(httpSection == "routers" ? "active" : "")" @onclick='() => httpSection = "routers"'>
+                            @RouteHeader <span class="cnt">@FilteredRouters().Count</span>
+                        </button>
+                        <button class="tk-subtab @(httpSection == "services" ? "active" : "")" @onclick='() => httpSection = "services"'>
+                            Services <span class="cnt">@FilteredServices().Count</span>
+                        </button>
+                        <button class="tk-subtab @(httpSection == "middlewares" ? "active" : "")" @onclick='() => httpSection = "middlewares"'>
+                            @MwHeader <span class="cnt">@FilteredMiddlewares().Count</span>
+                        </button>
+                    </div>
+                    <div class="tk-search">
+                        <i class="bi bi-search"></i>
+                        <input placeholder="Search…" @bind="search" @bind:event="oninput" />
+                    </div>
+                </div>
+
+                <div class="tk-card tk-table-card">
+                    @if (httpSection == "routers")
+                    {
+                        @if (FilteredRouters().Count == 0)
                         {
-                            <table class="route-table">
+                            <div class="tk-none-big"><i class="bi bi-inbox"></i><div>No routers match</div></div>
+                        }
+                        else
+                        {
+                            <table class="tk-table routers">
+                                <thead>
+                                    <tr>
+                                        <th class="c-st"></th><th>Rule</th><th>Entrypoints</th>
+                                        <th>Name</th><th>Service</th><th class="c-prov">Provider</th><th class="c-tls">TLS</th>
+                                    </tr>
+                                </thead>
                                 <tbody>
-                                    @foreach (IngressRouteView r in g.Routes)
+                                    @foreach (IngressRouteView r in FilteredRouters())
                                     {
                                         string rid = RowId(r);
                                         bool open = expanded.Contains(rid);
-                                        List<(string Cls, string Label)> issues = Issues(r);
-                                        <tr class="route-row tier-@Tier(issues) @(open ? "open" : "")" @onclick="() => Toggle(r)">
-                                            <td class="c-caret"><i class="bi @(open ? "bi-chevron-down" : "bi-chevron-right")"></i></td>
-                                            <td class="c-host">
-                                                <div class="host-line">
-                                                    <span class="host">@r.PrimaryHost</span>
-                                                    @if (r.Hostnames.Count > 1) { <span class="dim">+@(r.Hostnames.Count - 1)</span> }
-                                                    @if (ShowPath(r)) { <span class="path">@r.Paths[0]</span> }
-                                                    @if (!r.IsManaged) { <span class="tag-ext" title="Not created by EntKube">external</span> }
-                                                </div>
-                                                @if (issues.Count > 0)
-                                                {
-                                                    <div class="issue-line @issues[0].Cls">
-                                                        <i class="bi @IssueIcon(issues[0].Label)"></i> @issues[0].Label
-                                                        @if (issues.Count > 1) { <span class="more">· +@(issues.Count - 1)</span> }
-                                                    </div>
-                                                }
+                                        Sev sv = RouterSev(r);
+                                        <tr class="tk-row @(open ? "open" : "")" @onclick="() => Toggle(r)">
+                                            <td class="c-st"><span class="dot @SevClass(sv)" title="@sv"></span></td>
+                                            <td class="c-rule" title="@r.Rule">
+                                                <code class="rule">@RuleFragments(r.Rule)</code>
+                                                @if (IsAcmeChallenge(r)) { <span class="chip acme" title="cert-manager HTTP-01 challenge — plain HTTP by design">ACME</span> }
                                             </td>
-                                            <td class="c-backend">
+                                            <td class="c-ep">
+                                                @foreach (string ep in r.EntryPointNames.Take(3)) { <span class="chip">@ep</span> }
+                                                @if (r.EntryPointNames.Count > 3) { <span class="chip more">+@(r.EntryPointNames.Count - 3)</span> }
+                                            </td>
+                                            <td class="c-name" title="@r.QualifiedName"><span class="qn">@r.QualifiedName</span></td>
+                                            <td class="c-svc">
                                                 @if (r.Backends.Count > 0)
                                                 {
-                                                    <span class="health-dot @BackendClass(r.WorstBackend)"></span>
-                                                    <span class="mono">@r.Backends[0].Display</span>
-                                                    @if (r.Backends.Count > 1) { <span class="dim">+@(r.Backends.Count - 1)</span> }
-                                                    @if (r.Backends[0].TotalEndpoints >= 0)
-                                                    {
-                                                        <span class="ready">@r.Backends[0].ReadyEndpoints/@r.Backends[0].TotalEndpoints</span>
-                                                    }
+                                                    <span class="qn muted" title="@r.Backends[0].ServiceName">@r.Backends[0].ServiceName</span>
                                                 }
-                                                else { <span class="dim">—</span> }
+                                                else { <span class="muted">—</span> }
                                             </td>
-                                            <td class="c-tls text-center">
-                                                @if (r.TlsEnabled) { <i class="bi bi-lock-fill text-success" title="TLS terminated"></i> }
-                                                else { <i class="bi bi-unlock text-danger" title="Served over plain HTTP"></i> }
+                                            <td class="c-prov"><i class="bi bi-hexagon-fill prov-dot" title="@ProviderLabel(r.Provider)"></i></td>
+                                            <td class="c-tls">
+                                                @if (r.TlsEnabled) { <i class="bi bi-lock-fill tls-on" title="TLS"></i> }
+                                                else { <span class="tls-off">—</span> }
                                             </td>
                                         </tr>
                                         @if (open)
                                         {
-                                            <tr class="detail-row">
-                                                <td></td>
-                                                <td colspan="3">
-                                                    <div class="detail-grid">
-                                                        <div>
-                                                            <div class="detail-h">Object</div>
-                                                            <div class="mono small">@KindLabel(r.Kind) · @r.Namespace/@r.Name</div>
-                                                            @if (r.Hostnames.Count > 1)
-                                                            {
-                                                                <div class="detail-h mt-2">Hostnames</div>
-                                                                @foreach (string h in r.Hostnames) { <div class="mono small">@h</div> }
-                                                            }
-                                                            @if (r.Paths.Count > 0)
-                                                            {
-                                                                <div class="detail-h mt-2">Paths</div>
-                                                                <div class="mono small">@string.Join("  ", r.Paths)</div>
-                                                            }
-                                                        </div>
-                                                        <div>
-                                                            <div class="detail-h">Backends</div>
-                                                            @foreach (IngressBackend b in r.Backends)
-                                                            {
-                                                                <div class="small">
-                                                                    <span class="health-dot @BackendClass(b.State)"></span>
-                                                                    <span class="mono">@b.Display</span>
-                                                                    <span class="text-muted">
-                                                                        @(b.TotalEndpoints < 0 ? "no endpoints" : $"{b.ReadyEndpoints}/{b.TotalEndpoints} ready")
-                                                                    </span>
-                                                                </div>
-                                                            }
-                                                            @if (r.Backends.Count == 0) { <div class="text-muted small">No backend resolved.</div> }
-
-                                                            <div class="detail-h mt-2">TLS</div>
-                                                            @if (r.Cert is { } c)
-                                                            {
-                                                                <div class="small">
-                                                                    <span class="mono">@c.Namespace/@c.Name</span>
-                                                                    @if (c.Expired) { <span class="pill bad">expired</span> }
-                                                                    else if (c.DaysToExpiry is int d) { <span class="@(c.ExpiringSoon ? "text-warning" : "text-muted")">@d days left</span> }
-                                                                    @if (!c.Ready) { <span class="pill warn">not ready</span> }
-                                                                </div>
-                                                            }
-                                                            else if (r.TlsEnabled) { <div class="text-muted small">Terminated (no cert-manager Certificate tracked).</div> }
-                                                            else { <div class="text-danger small">Served over plain HTTP.</div> }
-                                                        </div>
-                                                        <div>
-                                                            <div class="detail-h d-flex justify-content-between">
-                                                                <span>Traffic (req/s)</span>
-                                                                <span class="text-muted">@WindowLabel()</span>
-                                                            </div>
-                                                            @if (metrics.TryGetValue(rid, out List<TimeSeriesDataPoint>? series))
-                                                            {
-                                                                @if (series.Count >= 2)
-                                                                {
-                                                                    <MetricChart DataPoints="series" Color="#0d6efd" Unit="/s" HeightPx="70" ShowAxes="true" />
-                                                                }
-                                                                else
-                                                                {
-                                                                    <div class="text-muted small py-3">No traffic data
-                                                                        (@(r.GatewayClass) metrics unavailable or no requests).</div>
-                                                                }
-                                                            }
-                                                            else
-                                                            {
-                                                                <div class="text-muted small py-3"><span class="spinner-border spinner-border-sm me-1"></span>Loading…</div>
-                                                            }
-                                                        </div>
-                                                    </div>
-                                                </td>
+                                            <tr class="detail">
+                                                <td colspan="7">@RouterDetail(r, rid)</td>
                                             </tr>
                                         }
                                     }
                                 </tbody>
                             </table>
                         }
-                    </div>
-                }
-            </div>
-        }
+                    }
+                    else if (httpSection == "services")
+                    {
+                        @if (FilteredServices().Count == 0)
+                        {
+                            <div class="tk-none-big"><i class="bi bi-inbox"></i><div>No services match</div></div>
+                        }
+                        else
+                        {
+                            <table class="tk-table services">
+                                <thead>
+                                    <tr><th class="c-st"></th><th>Type</th><th>Name</th><th>Servers</th><th class="c-prov">Provider</th></tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (ServiceAgg s in FilteredServices())
+                                    {
+                                        <tr class="tk-row static">
+                                            <td class="c-st"><span class="dot @SevClass(s.Sev)" title="@s.Sev"></span></td>
+                                            <td><span class="chip type">loadbalancer</span></td>
+                                            <td class="c-name" title="@s.Namespace/@s.ServiceName"><span class="qn">@s.Namespace/@s.ServiceName</span></td>
+                                            <td class="c-servers">
+                                                <span class="dot @(s.Ready > 0 ? "ok" : "err")"></span>
+                                                @s.Ready/@(s.Total < 0 ? 0 : s.Total) <span class="muted">servers</span>
+                                            </td>
+                                            <td class="c-prov"><i class="bi bi-hexagon-fill prov-dot" title="@ProviderLabel(s.Provider)"></i></td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        }
+                    }
+                    else
+                    {
+                        @if (FilteredMiddlewares().Count == 0)
+                        {
+                            <div class="tk-none-big"><i class="bi bi-inbox"></i><div>No @MwHeader.ToLower() defined</div>
+                                <span>Traefik Middleware CRDs and Gateway API route filters appear here when present.</span></div>
+                        }
+                        else
+                        {
+                            <table class="tk-table middlewares">
+                                <thead>
+                                    <tr><th class="c-st"></th><th>Type</th><th>Name</th><th class="c-prov">Provider</th></tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (MiddlewareInfo m in FilteredMiddlewares())
+                                    {
+                                        <tr class="tk-row static">
+                                            <td class="c-st"><span class="dot ok"></span></td>
+                                            <td><span class="chip type">@m.Type</span></td>
+                                            <td class="c-name" title="@m.QualifiedName"><span class="qn">@m.QualifiedName</span></td>
+                                            <td class="c-prov"><i class="bi bi-hexagon-fill prov-dot" title="@ProviderLabel(m.Provider)"></i></td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        }
+                    }
+                </div>
+            }
+        </div>
     }
 </div>
 
@@ -277,15 +326,22 @@
     private IngressDashboard? data;
     private bool loading;
     private string search = "";
-    private string statusFilter = "all";   // all | critical | warning | healthy
-    private int metricWindow = 60;          // minutes
+    private string selectedCluster = "";       // "" = all clusters
+    private string protocolTab = "http";        // http | tcp | udp
+    private string httpSection = "routers";      // routers | services | middlewares
+    private int metricWindow = 60;               // minutes
 
     private readonly HashSet<string> expanded = [];
-    private readonly HashSet<Guid> collapsedClusters = [];
     private readonly Dictionary<string, List<TimeSeriesDataPoint>> metrics = [];
 
-    private sealed record RouteGroup(Guid ClusterId, string ClusterName, string EnvironmentName,
-        string GatewayClass, int Issues, List<IngressRouteView> Routes);
+    private enum Sev { Success, Warning, Error }
+    private readonly record struct Counts(int Success, int Warning, int Error)
+    {
+        public int Total => Success + Warning + Error;
+    }
+    private sealed record ServiceAgg(Guid ClusterId, string Namespace, string ServiceName,
+        string Provider, int Ready, int Total, Sev Sev);
+    private sealed record EntryPointAgg(string Name, int? Port, bool Tls, int Count);
 
     protected override async Task OnInitializedAsync() => await Reload();
 
@@ -293,97 +349,239 @@
     {
         loading = true;
         expanded.Clear();
-        collapsedClusters.Clear();
         metrics.Clear();
         StateHasChanged();
         try { data = await IngressService.LoadAsync(TenantId); }
         catch (Exception) { data = null; }
         finally { loading = false; }
-    }
 
-    // ── Severity: a route is Critical (2), Warning (1) or Healthy (0). ──
-    private static List<(string Cls, string Label)> Issues(IngressRouteView r)
-    {
-        List<(string, string)> list = [];
-        if (r.Cert?.Expired == true) list.Add(("crit", "Cert expired"));
-        if (r.WorstBackend == BackendState.NoBackend) list.Add(("crit", "No backend"));
-        else if (r.WorstBackend == BackendState.Down) list.Add(("crit", "Backend down"));
-        else if (r.WorstBackend == BackendState.Degraded) list.Add(("warn", "Backend degraded"));
-        if (r.Cert?.ExpiringSoon == true && r.Cert?.Expired != true)
-            list.Add(("warn", $"Cert expires in {r.Cert!.DaysToExpiry}d"));
-        if (!r.TlsEnabled) list.Add(("warn", "No TLS"));
-        return list;
-    }
-
-    private static int Tier(List<(string Cls, string Label)> issues) =>
-        issues.Any(i => i.Cls == "crit") ? 2 : issues.Count > 0 ? 1 : 0;
-
-    private static int TierOf(IngressRouteView r) => Tier(Issues(r));
-
-    private int CriticalCount => data?.Routes.Count(r => TierOf(r) == 2) ?? 0;
-    private int WarningCount => data?.Routes.Count(r => TierOf(r) == 1) ?? 0;
-    private int HealthyCount => data?.Routes.Count(r => TierOf(r) == 0) ?? 0;
-
-    private int ReachableClusters => data?.Clusters.Count(c => c.Reachable) ?? 0;
-    private List<ClusterProbe> UnreachableClusters => data?.Clusters.Where(c => !c.Reachable).ToList() ?? [];
-    private string ClustersTooltip => data is null ? "" :
-        string.Join(", ", data.Clusters.Select(c => $"{c.ClusterName} ({(c.Reachable ? c.GatewayClass : "unreachable")})"));
-
-    private string TlsMeterClass => (data?.TlsCoverage ?? 0) >= 100 ? "full" : (data?.TlsCoverage ?? 0) >= 80 ? "ok" : "low";
-
-    private IEnumerable<IngressRouteView> FilteredRoutes()
-    {
-        if (data is null) return [];
-        IEnumerable<IngressRouteView> q = data.Routes;
-
-        q = statusFilter switch
+        // Default to a single reachable cluster (faithful single-instance view); else "All".
+        if (data is not null && string.IsNullOrEmpty(selectedCluster))
         {
-            "critical" => q.Where(r => TierOf(r) == 2),
-            "warning" => q.Where(r => TierOf(r) == 1),
-            "healthy" => q.Where(r => TierOf(r) == 0),
-            _ => q
-        };
-
-        if (!string.IsNullOrWhiteSpace(search))
-        {
-            string s = search.Trim();
-            q = q.Where(r =>
-                r.Hostnames.Any(h => h.Contains(s, StringComparison.OrdinalIgnoreCase))
-                || r.Backends.Any(b => b.ServiceName.Contains(s, StringComparison.OrdinalIgnoreCase))
-                || r.Namespace.Contains(s, StringComparison.OrdinalIgnoreCase)
-                || r.Name.Contains(s, StringComparison.OrdinalIgnoreCase));
+            ClusterProbe? first = data.Clusters
+                .Where(c => c.Reachable && c.RouteCount > 0)
+                .OrderBy(c => c.ClusterName)
+                .FirstOrDefault();
+            if (first is not null && data.Clusters.Count(c => c.Reachable) == 1)
+                selectedCluster = first.ClusterId.ToString();
         }
-        return q;
     }
 
-    // Group the filtered routes by cluster, worst-first within each group.
-    private List<RouteGroup> Groups()
-    {
-        if (data is null) return [];
-        Dictionary<Guid, string> gwByCluster = data.Clusters.ToDictionary(c => c.ClusterId, c => c.GatewayClass);
+    // ── Cluster scoping ──
+    private Guid? SelectedClusterId =>
+        Guid.TryParse(selectedCluster, out Guid id) ? id : null;
 
-        return FilteredRoutes()
-            .GroupBy(r => r.ClusterId)
-            .Select(grp =>
+    private IEnumerable<IngressRouteView> ScopedRoutes =>
+        data is null ? [] :
+        SelectedClusterId is Guid id ? data.Routes.Where(r => r.ClusterId == id) : data.Routes;
+
+    private IEnumerable<MiddlewareInfo> ScopedMiddlewares =>
+        data is null ? [] :
+        SelectedClusterId is Guid id ? data.Middlewares.Where(m => m.ClusterId == id) : data.Middlewares;
+
+    private IEnumerable<GatewayListenerInfo> ScopedListeners =>
+        data is null ? [] :
+        SelectedClusterId is Guid id ? data.Listeners.Where(l => l.ClusterId == id) : data.Listeners;
+
+    // ── Provider context (config-derived): which routing stack the current scope runs on. ──
+    private IEnumerable<string> ScopedGatewayClasses =>
+        data is null ? [] :
+        (SelectedClusterId is Guid id
+            ? data.Clusters.Where(c => c.ClusterId == id)
+            : data.Clusters.Where(c => c.Reachable))
+          .Select(c => c.GatewayClass)
+          .Where(g => !string.IsNullOrWhiteSpace(g) && g != "?")
+          .Distinct();
+
+    // "traefik" (Traefik entrypoints/middlewares), "gateway" (Gateway API), or "mixed".
+    private string ProviderContext
+    {
+        get
+        {
+            List<string> gcs = ScopedGatewayClasses.ToList();
+            if (gcs.Count == 0) return "gateway";
+            bool anyTraefik = gcs.Contains("traefik");
+            bool anyOther = gcs.Any(g => g != "traefik");
+            return anyTraefik && anyOther ? "mixed" : anyTraefik ? "traefik" : "gateway";
+        }
+    }
+
+    // Provider-native vocabulary for the current scope.
+    private string EntryHeader => ProviderContext == "traefik" ? "Entrypoints" : "Gateways";
+    private string RouteHeader => ProviderContext == "traefik" ? "Routers" : "Routes";
+    private string MwHeader => ProviderContext == "traefik" ? "Middlewares" : "Filters";
+
+    private string StackLabel => ProviderContext switch
+    {
+        "traefik" => "Traefik",
+        "mixed" => "Multiple providers",
+        _ => ScopedGatewayClasses.Contains("istio") ? "Istio · Gateway API" : "Gateway API"
+    };
+
+    private List<OrphanedRoute> Orphans() => data?.Orphans.ToList() ?? [];
+
+    private List<ClusterProbe> UnreachableClusters => data?.Clusters.Where(c => !c.Reachable).ToList() ?? [];
+
+    // ── Severity ──
+    // cert-manager's HTTP-01 solver routes are intentionally plain HTTP with a transient solver
+    // backend; they'd otherwise trip "No TLS"/"Backend down". Presume the ACME flow completes.
+    private const string AcmeChallengePath = "/.well-known/acme-challenge";
+    private static bool IsAcmeChallenge(IngressRouteView r) =>
+        r.Paths.Any(p => p.StartsWith(AcmeChallengePath, StringComparison.OrdinalIgnoreCase));
+
+    private static Sev RouterSev(IngressRouteView r) =>
+        IsAcmeChallenge(r) ? Sev.Success
+        : r.Cert?.Expired == true || r.WorstBackend is BackendState.Down or BackendState.NoBackend ? Sev.Error
+        : r.WorstBackend == BackendState.Degraded || r.Cert?.ExpiringSoon == true || !r.TlsEnabled ? Sev.Warning
+        : Sev.Success;
+
+    private static Sev BackendSev(BackendState s) => s switch
+    {
+        BackendState.Healthy => Sev.Success,
+        BackendState.Degraded => Sev.Warning,
+        _ => Sev.Error
+    };
+
+    private static string SevClass(Sev s) => s switch { Sev.Success => "ok", Sev.Warning => "warn", _ => "err" };
+
+    // ── Overview aggregates (cluster-scoped) ──
+    private Counts RouterCounts
+    {
+        get
+        {
+            List<IngressRouteView> rs = ScopedRoutes.ToList();
+            return new(rs.Count(r => RouterSev(r) == Sev.Success),
+                       rs.Count(r => RouterSev(r) == Sev.Warning),
+                       rs.Count(r => RouterSev(r) == Sev.Error));
+        }
+    }
+
+    private Counts ServiceCounts
+    {
+        get
+        {
+            List<ServiceAgg> ss = AllServices();
+            return new(ss.Count(s => s.Sev == Sev.Success),
+                       ss.Count(s => s.Sev == Sev.Warning),
+                       ss.Count(s => s.Sev == Sev.Error));
+        }
+    }
+
+    // Middlewares carry no health signal in Traefik — all count as success.
+    private Counts MiddlewareCounts => new(ScopedMiddlewares.Count(), 0, 0);
+
+    private List<ServiceAgg> AllServices()
+    {
+        return ScopedRoutes
+            .SelectMany(r => r.Backends.Select(b => (r, b)))
+            .GroupBy(x => (x.r.ClusterId, x.b.Namespace, x.b.ServiceName, x.r.Provider))
+            .Select(g =>
             {
-                List<IngressRouteView> routes = grp
-                    .OrderByDescending(TierOf).ThenBy(r => r.PrimaryHost)
-                    .ToList();
-                IngressRouteView first = routes[0];
-                return new RouteGroup(
-                    grp.Key, first.ClusterName, first.EnvironmentName,
-                    gwByCluster.GetValueOrDefault(grp.Key, first.GatewayClass),
-                    routes.Count(r => TierOf(r) > 0), routes);
+                IngressBackend b = g.Select(x => x.b).First();
+                return new ServiceAgg(g.Key.ClusterId, g.Key.Namespace, g.Key.ServiceName,
+                    g.Key.Provider, b.ReadyEndpoints, b.TotalEndpoints, BackendSev(b.State));
             })
-            .OrderBy(g => g.ClusterName)
+            .OrderByDescending(s => s.Sev).ThenBy(s => s.ServiceName)
             .ToList();
     }
 
-    private void ToggleCluster(Guid id) { if (!collapsedClusters.Remove(id)) collapsedClusters.Add(id); }
+    // Number of distinct Gateway API Gateways in scope — an Istio setup can have many, each with
+    // several listeners, so the overview never lists listeners; it lists the ports they bind.
+    private int GatewayCount =>
+        ScopedListeners.Select(l => $"{l.Namespace}/{l.GatewayName}").Distinct().Count();
 
-    private static bool ShowPath(IngressRouteView r) =>
-        r.Paths.Count > 0 && !(r.Paths.Count == 1 && r.Paths[0] == "/");
+    private List<EntryPointAgg> EntryPoints()
+    {
+        // Real Gateway API listeners collapse to the distinct ports they expose (the true
+        // "entrypoints"), NOT one row per listener — a per-hostname-listener mesh would flood.
+        List<GatewayListenerInfo> ls = ScopedListeners.ToList();
+        if (ls.Count > 0)
+            return ls
+                .GroupBy(l => (l.Port, l.Tls))
+                .Select(g => new EntryPointAgg(PortName(g), g.Key.Port > 0 ? g.Key.Port : null, g.Key.Tls, g.Count()))
+                .OrderBy(e => e.Port ?? int.MaxValue)
+                .ToList();
 
+        // Traefik (or unreadable Gateways): fall back to the entrypoint names routes declare.
+        return ScopedRoutes.SelectMany(r => r.EntryPointNames)
+            .GroupBy(n => n)
+            .Select(g => new EntryPointAgg(g.Key, EntryPointPort(g.Key), g.Key == "websecure", g.Count()))
+            .OrderBy(e => e.Port ?? int.MaxValue).ThenBy(e => e.Name)
+            .ToList();
+    }
+
+    // Label a port group: a shared listener name if unambiguous, else its protocol.
+    private static string PortName(IEnumerable<GatewayListenerInfo> group)
+    {
+        List<GatewayListenerInfo> g = group.ToList();
+        List<string> names = g.Select(l => l.ListenerName).Where(n => n.Length > 0).Distinct().ToList();
+        if (names.Count == 1) return names[0];
+        List<string> protos = g.Select(l => l.Protocol).Where(p => p.Length > 0).Distinct().ToList();
+        if (protos.Count == 1) return protos[0];
+        return g[0].Tls ? "HTTPS" : "HTTP";
+    }
+
+    private static int? EntryPointPort(string name) => name switch
+    {
+        "websecure" => 443, "web" => 80, _ => null
+    };
+
+    private static string ProviderLabel(string p) => p switch
+    {
+        "traefik" => "Traefik",
+        "istio" => "Istio",
+        "kubernetes" => "Kubernetes Ingress",
+        "" => "Kubernetes",
+        _ => char.ToUpperInvariant(p[0]) + p[1..]
+    };
+
+    // ── Filtered lists (section + search) ──
+    private bool Match(string s) => string.IsNullOrWhiteSpace(search)
+        || s.Contains(search.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private List<IngressRouteView> FilteredRouters() =>
+        ScopedRoutes.Where(r =>
+            string.IsNullOrWhiteSpace(search)
+            || r.Rule.Contains(search, StringComparison.OrdinalIgnoreCase)
+            || r.QualifiedName.Contains(search, StringComparison.OrdinalIgnoreCase)
+            || r.Hostnames.Any(h => Match(h))
+            || r.Backends.Any(b => Match(b.ServiceName)))
+        .OrderByDescending(RouterSev).ThenBy(r => r.PrimaryHost)
+        .ToList();
+
+    private List<ServiceAgg> FilteredServices() =>
+        AllServices().Where(s => Match(s.ServiceName) || Match(s.Namespace)).ToList();
+
+    private List<MiddlewareInfo> FilteredMiddlewares() =>
+        ScopedMiddlewares.Where(m => Match(m.Name) || Match(m.Type) || Match(m.Namespace))
+            .OrderBy(m => m.Name)
+            .ToList();
+
+    // ── Donut: conic-gradient ring from the three counts ──
+    private static string DonutStyle(Counts c)
+    {
+        if (c.Total == 0)
+            return "background: conic-gradient(#e6e8f0 0 100%);";
+        double ok = c.Success * 100.0 / c.Total;
+        double warn = c.Warning * 100.0 / c.Total;
+        double a = ok, b = ok + warn;
+        return $"background: conic-gradient(" +
+            $"#00b884 0 {a:F2}%, " +
+            $"#f5a623 {a:F2}% {b:F2}%, " +
+            $"#ff5b6a {b:F2}% 100%);";
+    }
+
+    // ── Rule rendering: colour the Host(`…`) backtick contents ──
+    private static MarkupString RuleFragments(string rule)
+    {
+        string enc = System.Net.WebUtility.HtmlEncode(rule ?? "");
+        // Highlight backtick-quoted values.
+        enc = System.Text.RegularExpressions.Regex.Replace(enc,
+            "`([^`]*)`", "<span class=\"rv\">`$1`</span>");
+        return new MarkupString(enc);
+    }
+
+    // ── Row expand + metrics ──
     private async Task Toggle(IngressRouteView r)
     {
         string id = RowId(r);
@@ -403,14 +601,23 @@
     private async Task OnWindowChanged()
     {
         metrics.Clear();
-        if (data is null) return;
-        foreach (IngressRouteView r in data.Routes.Where(r => expanded.Contains(RowId(r))))
+        foreach (IngressRouteView r in ScopedRoutes.Where(r => expanded.Contains(RowId(r))))
             await LoadMetrics(r, RowId(r));
     }
 
-    private static string RowId(IngressRouteView r) => $"{r.ClusterId}:{r.Namespace}:{r.Name}:{(int)r.Kind}";
+    private void OnClusterChanged()
+    {
+        expanded.Clear();
+        metrics.Clear();
+    }
 
-    private string WindowLabel() => metricWindow switch { 15 => "15m", 60 => "1h", 360 => "6h", _ => "24h" };
+    private void Go(string protocol, string section)
+    {
+        protocolTab = protocol;
+        httpSection = section;
+    }
+
+    private static string RowId(IngressRouteView r) => $"{r.ClusterId}:{r.Namespace}:{r.Name}:{(int)r.Kind}";
 
     private static string KindLabel(IngressRouteKind k) => k switch
     {
@@ -419,18 +626,106 @@
         _ => "Ingress"
     };
 
-    private static string BackendClass(BackendState s) => s switch
+    // ── Router detail: the Traefik flow (Entrypoints → Router → Middlewares → Service) ──
+    private RenderFragment RouterDetail(IngressRouteView r, string rid) => __builder =>
     {
-        BackendState.Healthy => "ok",
-        BackendState.Degraded => "warn",
-        BackendState.Down => "bad",
-        _ => "none"
+        <div class="tk-detail">
+            <div class="flow">
+                <div class="flow-col">
+                    <div class="flow-h">@EntryHeader</div>
+                    @foreach (string ep in r.EntryPointNames)
+                    {
+                        <div class="flow-box ep"><i class="bi bi-box-arrow-in-right"></i> @ep</div>
+                    }
+                </div>
+                <div class="flow-arrow"><i class="bi bi-arrow-right"></i></div>
+                <div class="flow-col">
+                    <div class="flow-h">Router</div>
+                    <div class="flow-box router">
+                        <div class="fb-title">@r.QualifiedName</div>
+                        <code class="rule sm">@RuleFragments(r.Rule)</code>
+                        <div class="fb-meta">
+                            @KindLabel(r.Kind) · priority @(r.Priority == 0 ? "default" : r.Priority.ToString())
+                            @if (r.TlsEnabled) { <span class="chip tls"><i class="bi bi-lock-fill"></i> TLS</span> }
+                        </div>
+                    </div>
+                </div>
+                <div class="flow-arrow"><i class="bi bi-arrow-right"></i></div>
+                <div class="flow-col">
+                    <div class="flow-h">@MwHeader</div>
+                    @if (r.MiddlewareRefs.Count == 0)
+                    {
+                        <div class="flow-box none">none</div>
+                    }
+                    else
+                    {
+                        @foreach (MiddlewareRef m in r.MiddlewareRefs)
+                        {
+                            <div class="flow-box mw"><i class="bi bi-funnel"></i> @m.Name</div>
+                        }
+                    }
+                </div>
+                <div class="flow-arrow"><i class="bi bi-arrow-right"></i></div>
+                <div class="flow-col grow">
+                    <div class="flow-h">Service</div>
+                    @if (r.Backends.Count == 0)
+                    {
+                        <div class="flow-box none">No backend resolved</div>
+                    }
+                    else
+                    {
+                        @foreach (IngressBackend b in r.Backends)
+                        {
+                            <div class="flow-box svc">
+                                <div class="fb-title">@b.Display</div>
+                                <div class="servers">
+                                    <span class="dot @(BackendSev(b.State) == Sev.Success ? "ok" : BackendSev(b.State) == Sev.Warning ? "warn" : "err")"></span>
+                                    @(b.TotalEndpoints < 0 ? "no endpoints" : $"{b.ReadyEndpoints}/{b.TotalEndpoints} servers ready")
+                                </div>
+                            </div>
+                        }
+                    }
+                </div>
+            </div>
+
+            <div class="detail-foot">
+                <div class="df-block">
+                    <div class="df-h">TLS</div>
+                    @if (r.Cert is { } c)
+                    {
+                        <div class="df-line">
+                            <span class="mono">@c.Namespace/@c.Name</span>
+                            @if (c.Expired) { <span class="pill bad">expired</span> }
+                            else if (c.DaysToExpiry is int d) { <span class="@(c.ExpiringSoon ? "warn-t" : "muted")">@d days left</span> }
+                            @if (!c.Ready) { <span class="pill warn">not ready</span> }
+                        </div>
+                    }
+                    else if (r.TlsEnabled) { <div class="muted">Terminated (no cert-manager Certificate tracked).</div> }
+                    else { <div class="err-t">Served over plain HTTP.</div> }
+                </div>
+                <div class="df-block grow">
+                    <div class="df-h d-flex justify-content-between">
+                        <span>Traffic (req/s)</span><span class="muted">@WindowLabel()</span>
+                    </div>
+                    @if (metrics.TryGetValue(rid, out List<TimeSeriesDataPoint>? series))
+                    {
+                        @if (series.Count >= 2)
+                        {
+                            <MetricChart DataPoints="series" Color="#00b884" Unit="/s" HeightPx="64" ShowAxes="true" />
+                        }
+                        else
+                        {
+                            <div class="muted sm py-2">No traffic data (@r.GatewayClass metrics unavailable or no requests).</div>
+                        }
+                    }
+                    else
+                    {
+                        <div class="muted sm py-2"><span class="tk-spinner sm"></span> Loading…</div>
+                    }
+                </div>
+            </div>
+        </div>
     };
 
-    private static string IssueIcon(string label) =>
-        label.StartsWith("Cert") ? "bi-shield-exclamation"
-        : label == "No backend" ? "bi-plug"
-        : label.StartsWith("Backend") ? "bi-x-octagon"
-        : label == "No TLS" ? "bi-unlock"
-        : "bi-exclamation-triangle";
+    private string WindowLabel() => metricWindow switch { 15 => "15m", 60 => "1h", 360 => "6h", _ => "24h" };
 }

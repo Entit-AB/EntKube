@@ -314,6 +314,7 @@ else
         new("kafka", "Kafka", "bi-diagram-3"),
         new("registry", "Registry", "bi-box-seam"),
         new("identity", "Identity", "bi-person-badge"),
+        new("ldap", "Directory (LDAP)", "bi-person-vcard"),
     ];
     // Tenant-scoped (shared) services.
     private static readonly SectionItem[] PlatformItems =
@@ -678,6 +679,7 @@ else
             case "storage": OpenEnvScoped<StorageTab>(builder, tid); break;
             case "identity": OpenEnvScoped<IdentityTab>(builder, tid); break;
             case "registry": OpenEnvScoped<RegistryTab>(builder, tid); break;
+            case "ldap": OpenEnvScoped<LdapTab>(builder, tid); break;
             case "vault": builder.OpenComponent<VaultTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "certificates": builder.OpenComponent<CertificatesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "overview":

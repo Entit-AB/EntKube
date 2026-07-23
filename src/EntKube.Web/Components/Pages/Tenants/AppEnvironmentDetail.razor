@@ -142,6 +142,11 @@
         </button>
     </li>
     }
+    @* In the customer portal, Databases/Messaging/Cache are reached from the app's
+       Services menu (per-app leaf → pick environment), so they are not shown as tabs
+       here — keeping the portal app page uncluttered. The internal view keeps them. *@
+    @if (!IsPortalView)
+    {
     <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "databases" ? "active" : "")"
                 role="tab"
@@ -181,6 +186,7 @@
             }
         </button>
     </li>
+    }
     <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "storage" ? "active" : "")"
                 role="tab"
@@ -2356,6 +2362,13 @@
     /// portal log viewer's "Go to deployment" action) instead of the deployment list.
     [Parameter] public Guid? InitialDeploymentId { get; set; }
 
+    /// <summary>
+    /// Opens the view directly on a given section tab (e.g. "databases", "cache", "messaging").
+    /// Used by the customer portal's per-app Services menu, where these env-scoped views are
+    /// reached as leaves rather than tabs. Null keeps the default section.
+    /// </summary>
+    [Parameter] public string? InitialSection { get; set; }
+
     private string section = "deployments";
 
     // Governance
@@ -2560,6 +2573,16 @@
         {
             AppDeployment? preselect = deployments.FirstOrDefault(d => d.Id == depId);
             if (preselect is not null) await SelectDeployment(preselect);
+        }
+
+        // Deep-link: open directly on a section (portal Services menu → Databases/Cache/Messaging).
+        switch (InitialSection)
+        {
+            case "databases": await OpenDatabasesSection(); break;
+            case "messaging": await OpenMessagingSection(); break;
+            case "cache": await OpenCacheSection(); break;
+            case "storage": await OpenStorageSection(); break;
+            case { Length: > 0 } s: section = s; break;
         }
 
         envClusters = (await TenantService.GetClustersAsync(TenantId))

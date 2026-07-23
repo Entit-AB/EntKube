@@ -59,6 +59,8 @@ public partial class IngressDashboardService(
             .ToHashSet();
 
         List<IngressRouteView> routes = [];
+        List<MiddlewareInfo> middlewares = [];
+        List<GatewayListenerInfo> listeners = [];
         List<ClusterProbe> probes = [];
 
         foreach (KubernetesCluster cluster in clusters)
@@ -74,9 +76,12 @@ public partial class IngressDashboardService(
 
             try
             {
-                List<IngressRouteView> clusterRoutes = await LoadClusterAsync(
-                    cluster, envName, gatewayClass, managedHosts, ct);
+                (List<IngressRouteView> clusterRoutes, List<MiddlewareInfo> clusterMiddlewares,
+                    List<GatewayListenerInfo> clusterListeners) =
+                    await LoadClusterAsync(cluster, envName, gatewayClass, managedHosts, ct);
                 routes.AddRange(clusterRoutes);
+                middlewares.AddRange(clusterMiddlewares);
+                listeners.AddRange(clusterListeners);
                 probes.Add(new ClusterProbe(cluster.Id, cluster.Name, true, gatewayClass, null, clusterRoutes.Count));
             }
             catch (Exception ex)
@@ -100,7 +105,7 @@ public partial class IngressDashboardService(
             .ToList();
 
         routes = [.. routes.OrderByDescending(r => r.Severity).ThenBy(r => r.PrimaryHost)];
-        return new IngressDashboard(routes, probes, orphans);
+        return new IngressDashboard(routes, probes, orphans, middlewares, listeners);
     }
 
     /// <summary>
@@ -108,7 +113,7 @@ public partial class IngressDashboardService(
     /// route list. Each source-object query is independently guarded: a missing CRD (e.g.
     /// no Gateway API, no Traefik) just yields nothing for that kind.
     /// </summary>
-    private async Task<List<IngressRouteView>> LoadClusterAsync(
+    private async Task<(List<IngressRouteView> Routes, List<MiddlewareInfo> Middlewares, List<GatewayListenerInfo> Listeners)> LoadClusterAsync(
         KubernetesCluster cluster, string envName, string gatewayClass,
         HashSet<string> managedHosts, CancellationToken ct)
     {
@@ -120,9 +125,27 @@ public partial class IngressDashboardService(
         // cert-manager Certificates → TLS state per dnsName.
         Dictionary<string, CertInfo> certs = await LoadCertificatesAsync(kc, ct);
 
-        // Gateway API Gateways → hostnames served over a TLS listener (exact + wildcard suffix),
-        // so HTTPRoutes attached to those gateways read as TLS-terminated even without a tracked cert.
-        (HashSet<string> tlsHostsExact, List<string> tlsWildcards) = await LoadGatewayTlsHostsAsync(kc, ct);
+        // Provider-native "middleware/filter" catalog: Traefik Middleware CRDs on a Traefik
+        // cluster, Gateway API HTTPRoute filters (added below) on a Gateway API cluster.
+        List<MiddlewareInfo> middlewareCatalog = string.Equals(gatewayClass, "traefik", StringComparison.OrdinalIgnoreCase)
+            ? await LoadMiddlewaresAsync(cluster.Id, kc, ct)
+            : [];
+
+        // Gateway API Gateways → the real listeners (name/port/protocol/TLS/hostname). These are
+        // the provider-agnostic analogue of Traefik "entrypoints", and let HTTPRoutes resolve
+        // which listener (and port) they attach to via parentRefs, plus whether TLS terminates there.
+        List<GatewayListenerInfo> listeners = await LoadGatewayListenersAsync(cluster.Id, kc, ct);
+
+        // TLS host sets derived from the listeners (exact hostnames + wildcard suffixes).
+        HashSet<string> tlsHostsExact = [];
+        List<string> tlsWildcards = [];
+        foreach (GatewayListenerInfo l in listeners.Where(l => l.Tls && l.Hostname.Length > 0))
+        {
+            if (l.Hostname.StartsWith("*."))
+                tlsWildcards.Add(l.Hostname[1..].ToLowerInvariant());
+            else
+                tlsHostsExact.Add(l.Hostname.ToLowerInvariant());
+        }
         bool GatewayTerminatesTls(string host)
         {
             string h = host.ToLowerInvariant();
@@ -130,10 +153,17 @@ public partial class IngressDashboardService(
                 || tlsWildcards.Any(suffix => h.EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
         }
 
+        // Gateway (ns/name) → its listeners, for HTTPRoute parentRef → entrypoint/TLS resolution.
+        Dictionary<string, List<GatewayListenerInfo>> listenersByGateway = listeners
+            .GroupBy(l => $"{l.Namespace}/{l.GatewayName}")
+            .ToDictionary(g => g.Key, g => g.ToList());
+
         List<IngressRouteView> views = [];
 
         void Add(IngressRouteKind kind, string ns, string name, List<string> hosts,
-            List<string> paths, List<(string Svc, int? Port)> backends, bool tls)
+            List<string> paths, List<(string Svc, int? Port)> backends, bool tls,
+            string? rawRule = null, List<string>? entryPoints = null,
+            List<MiddlewareRef>? middlewares = null, int priority = 0)
         {
             List<IngressBackend> resolved = backends.Select(b =>
             {
@@ -147,11 +177,21 @@ public partial class IngressDashboardService(
 
             bool managed = hosts.Any(h => managedHosts.Contains(h.ToLowerInvariant()));
 
+            // Traefik-style rule: preserve the CRD's own match, else synthesize from host+path.
+            string rule = !string.IsNullOrWhiteSpace(rawRule) ? rawRule! : BuildRule(hosts, paths);
+
+            // Entrypoint names: Traefik carries them explicitly; for Ingress/HTTPRoute derive
+            // web/websecure from whether the route is TLS-terminated (Traefik's default names).
+            List<string> eps = entryPoints is { Count: > 0 }
+                ? entryPoints.Distinct().ToList()
+                : [tls ? "websecure" : "web"];
+
             views.Add(new IngressRouteView(
                 cluster.Id, cluster.Name, cluster.EnvironmentId, envName,
                 kind, ns, name,
                 hosts.Distinct().ToList(), paths.Distinct().ToList(),
-                resolved, tls, gatewayClass, cert, managed));
+                resolved, tls, gatewayClass, cert, managed,
+                rule, eps, middlewares ?? [], priority));
         }
 
         // ── Core Ingress (networking.k8s.io) ──
@@ -207,6 +247,7 @@ public partial class IngressDashboardService(
                 : [];
             List<string> paths = [];
             List<(string, int?)> backends = [];
+            List<MiddlewareRef> filters = [];
             if (spec.TryGetProperty("rules", out JsonElement rules) && rules.ValueKind == JsonValueKind.Array)
                 foreach (JsonElement rule in rules.EnumerateArray())
                 {
@@ -215,19 +256,40 @@ public partial class IngressDashboardService(
                             if (m.TryGetProperty("path", out JsonElement pth) && pth.TryGetProperty("value", out JsonElement pv)
                                 && pv.GetString() is { } path)
                                 paths.Add(path);
+                    // Gateway API filters are the provider-agnostic analogue of Traefik middlewares.
+                    CollectHttpRouteFilters(rule, ns, filters);
                     if (rule.TryGetProperty("backendRefs", out JsonElement brefs) && brefs.ValueKind == JsonValueKind.Array)
                         foreach (JsonElement b in brefs.EnumerateArray())
                         {
                             string svcName = b.TryGetProperty("name", out JsonElement bn) ? bn.GetString() ?? "" : "";
                             int? port = b.TryGetProperty("port", out JsonElement bp) && bp.TryGetInt32(out int bpn) ? bpn : null;
                             if (svcName.Length > 0) backends.Add((svcName, port));
+                            CollectHttpRouteFilters(b, ns, filters);
                         }
                 }
+            filters = filters.DistinctBy(f => f.Name).ToList();
 
-            // An HTTPRoute is TLS-terminated at its parent Gateway listener — so it's HTTPS if its
-            // host matches a Gateway TLS listener, or (fallback) a cert-manager Certificate exists.
-            bool tls = hosts.Any(h => GatewayTerminatesTls(h) || certs.ContainsKey(h.ToLowerInvariant()));
-            Add(IngressRouteKind.HttpRoute, ns, name, hosts, paths, backends, tls);
+            // Resolve parentRefs → the actual Gateway listeners this route attaches to. Those give
+            // the real entrypoint names/ports, and whether TLS terminates at that listener.
+            List<GatewayListenerInfo> attached = ResolveParents(spec, ns, listenersByGateway);
+            // Chip per attached Gateway (not per listener) — a route with no sectionName binds every
+            // listener of a gateway, which on a per-hostname mesh could be dozens.
+            List<string> entryPoints = attached
+                .Select(l => l.GatewayName)
+                .Where(n => n.Length > 0)
+                .Distinct()
+                .ToList();
+
+            // TLS if the attached listener terminates TLS, else host matches a TLS listener / has a cert.
+            bool tls = attached.Any(l => l.Tls)
+                || hosts.Any(h => GatewayTerminatesTls(h) || certs.ContainsKey(h.ToLowerInvariant()));
+
+            // Surface each distinct filter as a catalog row (provider-native "middleware/filter").
+            foreach (MiddlewareRef f in filters)
+                middlewareCatalog.Add(new MiddlewareInfo(cluster.Id, $"{name}", ns, f.Name, gatewayClass));
+
+            Add(IngressRouteKind.HttpRoute, ns, name, hosts, paths, backends, tls,
+                entryPoints: entryPoints, middlewares: filters);
         }
 
         // ── Traefik IngressRoute CRD (traefik.io, with legacy containo.us fallback) ──
@@ -243,16 +305,35 @@ public partial class IngressDashboardService(
             List<string> hosts = [];
             List<string> paths = [];
             List<(string, int?)> backends = [];
+            List<string> matches = [];
+            List<MiddlewareRef> mws = [];
+            int priority = 0;
+
+            // Entrypoints are declared once at the CRD's spec level.
+            List<string> entryPoints = [];
+            if (spec.TryGetProperty("entryPoints", out JsonElement epArr) && epArr.ValueKind == JsonValueKind.Array)
+                entryPoints.AddRange(epArr.EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s.Length > 0));
+
             if (spec.TryGetProperty("routes", out JsonElement rArr) && rArr.ValueKind == JsonValueKind.Array)
                 foreach (JsonElement r in rArr.EnumerateArray())
                 {
-                    if (r.TryGetProperty("match", out JsonElement mEl) && mEl.GetString() is { } match)
+                    if (r.TryGetProperty("match", out JsonElement mEl) && mEl.GetString() is { Length: > 0 } match)
                     {
+                        matches.Add(match);
                         foreach (Match hm in HostRuleRegex().Matches(match))
                             hosts.Add(hm.Groups[1].Value);
                         foreach (Match pm in PathRuleRegex().Matches(match))
                             paths.Add(pm.Groups[1].Value);
                     }
+                    if (r.TryGetProperty("priority", out JsonElement pr) && pr.TryGetInt32(out int prio))
+                        priority = Math.Max(priority, prio);
+                    if (r.TryGetProperty("middlewares", out JsonElement mwArr) && mwArr.ValueKind == JsonValueKind.Array)
+                        foreach (JsonElement m in mwArr.EnumerateArray())
+                        {
+                            string mwName = m.TryGetProperty("name", out JsonElement mn) ? mn.GetString() ?? "" : "";
+                            string mwNs = m.TryGetProperty("namespace", out JsonElement mns) ? mns.GetString() ?? ns : ns;
+                            if (mwName.Length > 0) mws.Add(new MiddlewareRef(mwName, mwNs));
+                        }
                     if (r.TryGetProperty("services", out JsonElement sArr) && sArr.ValueKind == JsonValueKind.Array)
                         foreach (JsonElement s in sArr.EnumerateArray())
                         {
@@ -261,10 +342,16 @@ public partial class IngressDashboardService(
                             if (svcName.Length > 0) backends.Add((svcName, port));
                         }
                 }
-            Add(IngressRouteKind.TraefikIngressRoute, ns, name, hosts, paths, backends, tls);
+
+            // Multiple route entries under one CRD → OR them into a single rule string.
+            string? rawRule = matches.Count > 0
+                ? string.Join(" || ", matches.Select(m => matches.Count > 1 ? $"({m})" : m))
+                : null;
+            Add(IngressRouteKind.TraefikIngressRoute, ns, name, hosts, paths, backends, tls,
+                rawRule, entryPoints, mws.DistinctBy(m => $"{m.Namespace}/{m.Name}").ToList(), priority);
         }
 
-        return views;
+        return (views, middlewareCatalog.DistinctBy(m => $"{m.Namespace}/{m.Name}/{m.Type}").ToList(), listeners);
     }
 
     /// <summary>
@@ -290,6 +377,113 @@ public partial class IngressDashboardService(
             map[$"{ns}/{name}"] = (ready, ready + notReady);
         }
         return map;
+    }
+
+    /// <summary>
+    /// Loads Traefik Middleware CRDs (traefik.io, legacy containo.us fallback) into a flat
+    /// catalog, deriving each middleware's <em>type</em> from the first key under its spec
+    /// (e.g. <c>stripPrefix</c>, <c>headers</c>, <c>basicAuth</c>) — exactly what Traefik's own
+    /// dashboard shows. Absent Traefik just yields an empty list.
+    /// </summary>
+    private async Task<List<MiddlewareInfo>> LoadMiddlewaresAsync(Guid clusterId, string kc, CancellationToken ct)
+    {
+        List<MiddlewareInfo> list = [];
+        string json = await SafeGetAsync("middlewares.traefik.io", kc, ct);
+        if (Items(json).Count == 0)
+            json = await SafeGetAsync("middlewares.traefik.containo.us", kc, ct);
+
+        foreach (JsonElement item in Items(json))
+        {
+            (string ns, string name) = Meta(item);
+            string type = "middleware";
+            if (item.TryGetProperty("spec", out JsonElement spec) && spec.ValueKind == JsonValueKind.Object)
+                foreach (JsonProperty prop in spec.EnumerateObject()) { type = prop.Name; break; }
+            list.Add(new MiddlewareInfo(clusterId, name, ns, type, "traefik"));
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// Loads Gateway API Gateways → a flat list of their listeners (name/port/protocol/TLS/hostname).
+    /// These are the provider-agnostic analogue of Traefik entrypoints and drive the "Gateways"
+    /// overview card plus HTTPRoute parentRef resolution. Absent Gateway API yields an empty list.
+    /// </summary>
+    private async Task<List<GatewayListenerInfo>> LoadGatewayListenersAsync(Guid clusterId, string kc, CancellationToken ct)
+    {
+        List<GatewayListenerInfo> list = [];
+        foreach (JsonElement item in Items(await SafeGetAsync("gateways.gateway.networking.k8s.io", kc, ct)))
+        {
+            (string ns, string name) = Meta(item);
+            if (!item.TryGetProperty("spec", out JsonElement spec)
+                || !spec.TryGetProperty("listeners", out JsonElement listeners)
+                || listeners.ValueKind != JsonValueKind.Array) continue;
+
+            foreach (JsonElement l in listeners.EnumerateArray())
+            {
+                string lname = l.TryGetProperty("name", out JsonElement ln) ? ln.GetString() ?? "" : "";
+                string protocol = l.TryGetProperty("protocol", out JsonElement pr) ? pr.GetString() ?? "" : "";
+                int port = l.TryGetProperty("port", out JsonElement po) && po.TryGetInt32(out int pn) ? pn : 0;
+                string hostname = l.TryGetProperty("hostname", out JsonElement hn) ? hn.GetString() ?? "" : "";
+                bool tls = protocol is "HTTPS" or "TLS" || l.TryGetProperty("tls", out _);
+                list.Add(new GatewayListenerInfo(clusterId, ns, name, lname, port, protocol, tls, hostname));
+            }
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// Resolves an HTTPRoute's <c>spec.parentRefs</c> to the concrete Gateway listeners it binds to,
+    /// using the cluster's loaded Gateways. A ref with no <c>sectionName</c> matches all of the
+    /// gateway's listeners; a <c>sectionName</c> pins one. Refs to gateways we couldn't load
+    /// (e.g. another namespace) resolve to nothing and the caller falls back to derived entrypoints.
+    /// </summary>
+    private static List<GatewayListenerInfo> ResolveParents(
+        JsonElement spec, string routeNs, Dictionary<string, List<GatewayListenerInfo>> byGateway)
+    {
+        List<GatewayListenerInfo> matched = [];
+        if (!spec.TryGetProperty("parentRefs", out JsonElement prefs) || prefs.ValueKind != JsonValueKind.Array)
+            return matched;
+
+        foreach (JsonElement p in prefs.EnumerateArray())
+        {
+            string gwName = p.TryGetProperty("name", out JsonElement gn) ? gn.GetString() ?? "" : "";
+            if (gwName.Length == 0) continue;
+            string gwNs = p.TryGetProperty("namespace", out JsonElement gns) ? gns.GetString() ?? routeNs : routeNs;
+            string section = p.TryGetProperty("sectionName", out JsonElement sn) ? sn.GetString() ?? "" : "";
+
+            if (!byGateway.TryGetValue($"{gwNs}/{gwName}", out List<GatewayListenerInfo>? ls)) continue;
+            matched.AddRange(section.Length > 0 ? ls.Where(l => l.ListenerName == section) : ls);
+        }
+        return matched;
+    }
+
+    /// <summary>
+    /// Collects Gateway API filter <em>types</em> (RequestHeaderModifier, RequestRedirect, URLRewrite,
+    /// RequestMirror, ExtensionRef…) from an HTTPRoute rule or backendRef into a middleware-ref list.
+    /// </summary>
+    private static void CollectHttpRouteFilters(JsonElement node, string ns, List<MiddlewareRef> into)
+    {
+        if (!node.TryGetProperty("filters", out JsonElement filters) || filters.ValueKind != JsonValueKind.Array)
+            return;
+        foreach (JsonElement f in filters.EnumerateArray())
+            if (f.TryGetProperty("type", out JsonElement t) && t.GetString() is { Length: > 0 } type)
+                into.Add(new MiddlewareRef(type, ns));
+    }
+
+    /// <summary>
+    /// Synthesizes a Traefik-style routing rule from a route's hosts and paths — used for core
+    /// Ingress and Gateway API HTTPRoutes, which don't carry a Traefik match expression natively.
+    /// </summary>
+    private static string BuildRule(List<string> hosts, List<string> paths)
+    {
+        List<string> parts = [];
+        List<string> h = hosts.Distinct().Where(x => x.Length > 0).ToList();
+        if (h.Count > 0)
+            parts.Add($"Host({string.Join(", ", h.Select(x => $"`{x}`"))})");
+        List<string> p = paths.Distinct().Where(x => x.Length > 0 && x != "/").ToList();
+        if (p.Count > 0)
+            parts.Add($"PathPrefix({string.Join(", ", p.Select(x => $"`{x}`"))})");
+        return parts.Count > 0 ? string.Join(" && ", parts) : "PathPrefix(`/`)";
     }
 
     /// <summary>
@@ -322,39 +516,6 @@ public partial class IngressDashboardService(
                         map[host.ToLowerInvariant()] = info;
         }
         return map;
-    }
-
-    /// <summary>
-    /// Loads Gateway API Gateways → the set of hostnames served over a TLS/HTTPS listener.
-    /// Exact hostnames go in the returned set; wildcard listeners (<c>*.example.com</c>) become
-    /// suffix strings (<c>.example.com</c>) matched by EndsWith. Used to decide whether an
-    /// HTTPRoute is TLS-terminated at its parent Gateway.
-    /// </summary>
-    private async Task<(HashSet<string> Exact, List<string> Wildcards)> LoadGatewayTlsHostsAsync(string kc, CancellationToken ct)
-    {
-        HashSet<string> exact = [];
-        List<string> wildcards = [];
-        foreach (JsonElement item in Items(await SafeGetAsync("gateways.gateway.networking.k8s.io", kc, ct)))
-        {
-            if (!item.TryGetProperty("spec", out JsonElement spec)
-                || !spec.TryGetProperty("listeners", out JsonElement listeners)
-                || listeners.ValueKind != JsonValueKind.Array) continue;
-
-            foreach (JsonElement l in listeners.EnumerateArray())
-            {
-                string protocol = l.TryGetProperty("protocol", out JsonElement pr) ? pr.GetString() ?? "" : "";
-                bool tlsListener = protocol is "HTTPS" or "TLS" || l.TryGetProperty("tls", out _);
-                if (!tlsListener) continue;
-
-                string host = l.TryGetProperty("hostname", out JsonElement hn) ? hn.GetString() ?? "" : "";
-                if (host.Length == 0) continue; // no hostname = matches all; skip (can't attribute)
-                if (host.StartsWith("*."))
-                    wildcards.Add(host[1..].ToLowerInvariant()); // "*.ex.com" → ".ex.com"
-                else
-                    exact.Add(host.ToLowerInvariant());
-            }
-        }
-        return (exact, wildcards);
     }
 
     /// <summary>
@@ -471,15 +632,60 @@ public record CertInfo(string Name, string Namespace, DateTime? NotAfter, bool R
     public bool ExpiringSoon => DaysToExpiry is int d && d >= 0 && d <= 14;
 }
 
+/// <summary>
+/// A request-processing step attached to a route — a Traefik Middleware or a Gateway API filter.
+/// <see cref="Name"/> is the middleware/filter type shown in the router flow.
+/// </summary>
+public record MiddlewareRef(string Name, string Namespace);
+
+/// <summary>
+/// A provider-native request-processing element in a cluster: a Traefik Middleware CRD
+/// (type = stripPrefix / headers…) or a Gateway API HTTPRoute filter
+/// (type = RequestHeaderModifier / RequestRedirect / URLRewrite…). <see cref="Provider"/> is the
+/// cluster's gateway class (traefik / istio / …).
+/// </summary>
+public record MiddlewareInfo(Guid ClusterId, string Name, string Namespace, string Type, string Provider)
+{
+    public string QualifiedName => $"{Namespace}-{Name}@{Provider}";
+}
+
+/// <summary>
+/// A single Gateway API Gateway listener — the provider-agnostic analogue of a Traefik entrypoint.
+/// </summary>
+public record GatewayListenerInfo(
+    Guid ClusterId, string Namespace, string GatewayName, string ListenerName,
+    int Port, string Protocol, bool Tls, string Hostname)
+{
+    /// <summary>Concise entrypoint label for a route chip: the listener name, else the port.</summary>
+    public string EntryPointLabel => ListenerName.Length > 0 ? ListenerName : Port > 0 ? Port.ToString() : GatewayName;
+}
+
 /// <summary>A single unified ingress route, spanning Ingress / HTTPRoute / Traefik CRD.</summary>
 public record IngressRouteView(
     Guid ClusterId, string ClusterName, Guid EnvironmentId, string EnvironmentName,
     IngressRouteKind Kind, string Namespace, string Name,
     IReadOnlyList<string> Hostnames, IReadOnlyList<string> Paths,
     IReadOnlyList<IngressBackend> Backends,
-    bool TlsEnabled, string GatewayClass, CertInfo? Cert, bool IsManaged)
+    bool TlsEnabled, string GatewayClass, CertInfo? Cert, bool IsManaged,
+    string Rule = "", IReadOnlyList<string>? EntryPoints = null,
+    IReadOnlyList<MiddlewareRef>? Middlewares = null, int Priority = 0)
 {
     public string PrimaryHost => Hostnames.Count > 0 ? Hostnames[0] : "(no host)";
+
+    /// <summary>
+    /// The controller/provider serving this route, derived from EntKube's config for the cluster
+    /// (its gateway class — istio / traefik / …). Traefik CRDs are always Traefik regardless.
+    /// Drives the provider column and the qualified name.
+    /// </summary>
+    public string Provider => Kind == IngressRouteKind.TraefikIngressRoute
+        ? "traefik"
+        : string.IsNullOrWhiteSpace(GatewayClass) ? "kubernetes" : GatewayClass;
+
+    /// <summary>Qualified route name: <c>{namespace}-{name}@{provider}</c>.</summary>
+    public string QualifiedName => $"{Namespace}-{Name}@{Provider}";
+
+    public IReadOnlyList<string> EntryPointNames => EntryPoints ?? [];
+    public IReadOnlyList<MiddlewareRef> MiddlewareRefs => Middlewares ?? [];
 
     public BackendState WorstBackend => Backends.Count == 0
         ? BackendState.NoBackend
@@ -525,7 +731,9 @@ public record OrphanedRoute(string Hostname, string ServiceName, string ClusterN
 public record IngressDashboard(
     IReadOnlyList<IngressRouteView> Routes,
     IReadOnlyList<ClusterProbe> Clusters,
-    IReadOnlyList<OrphanedRoute> Orphans)
+    IReadOnlyList<OrphanedRoute> Orphans,
+    IReadOnlyList<MiddlewareInfo> Middlewares,
+    IReadOnlyList<GatewayListenerInfo> Listeners)
 {
     public int Total => Routes.Count;
     public int Secured => Routes.Count(r => r.TlsEnabled);

@@ -357,6 +357,7 @@ public class Program
         builder.Services.AddScoped<RedisService>();
         builder.Services.AddScoped<KafkaService>();
         builder.Services.AddScoped<HarborService>();
+        builder.Services.AddScoped<OpenLdapService>();
         builder.Services.AddScoped<TailscaleService>();
         builder.Services.AddScoped<HeadscaleService>();
         builder.Services.AddScoped<AuditService>();

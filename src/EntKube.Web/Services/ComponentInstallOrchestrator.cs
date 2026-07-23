@@ -21,6 +21,7 @@ public class ComponentInstallOrchestrator(
     ComponentLifecycleService lifecycleService,
     KeycloakService keycloakService,
     HarborService harborService,
+    OpenLdapService openLdapService,
     HeadscaleService headscaleService)
 {
     /// <summary>
@@ -43,6 +44,11 @@ public class ComponentInstallOrchestrator(
         await keycloakService.FixRealmUrlsIfConfiguredAsync(tenantId, componentId);
         // Refresh Harbor CNPG + S3 credentials in Helm values before install/upgrade.
         await harborService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId);
+        // Regenerate OpenLDAP Helm values + seed LDIF from the authored directory.
+        await openLdapService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId);
+        // For ClusterIssuer TLS, provision the cert-manager Certificate → tls Secret BEFORE the
+        // install so the StatefulSet's init container can mount it (chart does not self-sign).
+        await openLdapService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId);
 
         HelmCommand command = await lifecycleService.GetInstallCommandAsync(componentId, ct);
 

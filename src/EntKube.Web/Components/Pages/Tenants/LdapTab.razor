@@ -1,0 +1,530 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject OpenLdapService OpenLdap
+@inject ComponentInstallOrchestrator InstallOrchestrator
+@inject ToastService Toasts
+
+@* ===========================================================================
+   Directory (LDAP) Tab — manages EntKube-authored OpenLDAP directories.
+   The directory (base DN, TLS, replication, overlays, password policy, and the
+   seed OUs/users/groups) is edited here and applied to the running symas/openldap
+   deployment by regenerating its Helm values + bootstrap LDIF and re-installing.
+   =========================================================================== *@
+
+<LoadingPanel Loading="@loading" LoadingText="Loading LDAP directories…">
+@if (!loading)
+{
+    <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                   Message="@(pendingConfirm?.Message ?? "")"
+                   ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+                   IsBusy="confirmBusy"
+                   OnConfirm="RunPendingConfirmAsync"
+                   OnCancel="() => pendingConfirm = null" />
+
+    @if (instances.Count == 0)
+    {
+        <div class="alert alert-info d-flex align-items-start gap-2">
+            <i class="bi bi-info-circle-fill mt-1"></i>
+            <div>
+                <strong>No OpenLDAP instances found for this environment.</strong>
+                <div class="small mt-1">
+                    Install <em>OpenLDAP</em> from a cluster's <strong>Components</strong> tab (Identity category),
+                    then return here to author the directory.
+                </div>
+            </div>
+        </div>
+    }
+    else
+    {
+        <div class="mb-4">
+            <label class="form-label small text-muted mb-1">Directory instance</label>
+            <div class="d-flex gap-2 flex-wrap">
+                @foreach (var inst in instances)
+                {
+                    bool active = selected?.Component.Id == inst.Component.Id;
+                    <button class="btn btn-sm @(active ? "btn-primary" : "btn-outline-secondary")"
+                            @onclick="() => SelectInstanceAsync(inst)">
+                        <i class="bi bi-person-vcard me-1"></i>@inst.Component.Cluster.Name
+                        @if (inst.Config is null)
+                        {
+                            <span class="badge bg-warning text-dark ms-1">unconfigured</span>
+                        }
+                    </button>
+                }
+            </div>
+        </div>
+
+        @if (selected is not null && cfg is not null)
+        {
+            <div class="d-flex align-items-center justify-content-between mb-3">
+                <h5 class="mb-0"><i class="bi bi-diagram-3 text-primary me-2"></i>@cfg.BaseDn</h5>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-sm btn-outline-primary" @onclick="SaveConfigAsync" disabled="@busy">
+                        <i class="bi bi-save me-1"></i>Save
+                    </button>
+                    <button class="btn btn-sm btn-success" @onclick="ApplyToClusterAsync" disabled="@busy">
+                        <i class="bi bi-cloud-upload me-1"></i>Save &amp; Apply to cluster
+                    </button>
+                </div>
+            </div>
+
+            <ul class="nav nav-tabs mb-3">
+                <li class="nav-item"><a class="nav-link @(view == "config" ? "active" : "")" role="button" @onclick="@(() => view = "config")">Configuration</a></li>
+                <li class="nav-item"><a class="nav-link @(view == "ous" ? "active" : "")" role="button" @onclick="@(() => view = "ous")">Org Units <span class="badge bg-secondary rounded-pill">@cfg.OrganizationalUnits.Count</span></a></li>
+                <li class="nav-item"><a class="nav-link @(view == "users" ? "active" : "")" role="button" @onclick="@(() => view = "users")">Users <span class="badge bg-secondary rounded-pill">@cfg.Users.Count</span></a></li>
+                <li class="nav-item"><a class="nav-link @(view == "groups" ? "active" : "")" role="button" @onclick="@(() => view = "groups")">Groups <span class="badge bg-secondary rounded-pill">@cfg.Groups.Count</span></a></li>
+            </ul>
+
+            @if (view == "config")
+            {
+                <div class="row g-4">
+                    <div class="col-lg-6">
+                        <div class="card shadow-sm h-100"><div class="card-body">
+                            <h6 class="card-title"><i class="bi bi-diagram-2 me-2"></i>Directory identity</h6>
+                            <div class="mb-2">
+                                <label class="form-label small">Base DN</label>
+                                <input class="form-control form-control-sm" @bind="cfg.BaseDn" />
+                                <div class="form-text">LDAP domain: <code>@OpenLdapService.DomainFromBaseDn(cfg.BaseDn)</code></div>
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label small">Organization</label>
+                                <input class="form-control form-control-sm" @bind="cfg.Organization" />
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label small">Admin username (cn)</label>
+                                <input class="form-control form-control-sm" @bind="cfg.AdminUsername" />
+                            </div>
+                            <div class="row g-2">
+                                <div class="col">
+                                    <label class="form-label small">Admin password</label>
+                                    <input type="password" class="form-control form-control-sm" placeholder="unchanged" @bind="adminPassword" />
+                                </div>
+                                <div class="col">
+                                    <label class="form-label small">Config password</label>
+                                    <input type="password" class="form-control form-control-sm" placeholder="unchanged" @bind="configPassword" />
+                                </div>
+                            </div>
+                        </div></div>
+                    </div>
+
+                    <div class="col-lg-6">
+                        <div class="card shadow-sm h-100"><div class="card-body">
+                            <h6 class="card-title"><i class="bi bi-shield-lock me-2"></i>TLS &amp; replication</h6>
+                            <div class="mb-2">
+                                <label class="form-label small">TLS mode</label>
+                                <select class="form-select form-select-sm" @bind="cfg.TlsMode">
+                                    <option value="@OpenLdapTlsMode.ClusterIssuer">cert-manager ClusterIssuer</option>
+                                    <option value="@OpenLdapTlsMode.Manual">Manual certificate</option>
+                                    <option value="@OpenLdapTlsMode.Off">Off (LDAP only)</option>
+                                </select>
+                            </div>
+                            @if (cfg.TlsMode == OpenLdapTlsMode.ClusterIssuer)
+                            {
+                                <div class="mb-2">
+                                    <label class="form-label small">Cluster issuer</label>
+                                    <input class="form-control form-control-sm" @bind="cfg.ClusterIssuer" placeholder="ca-issuer" />
+                                    <div class="form-text">
+                                        cert-manager issues <code>@OpenLdapService.TlsSecretName</code> on apply. Use a CA / self-signed
+                                        issuer — public ACME (Let's Encrypt) can't issue cluster-internal service certs.
+                                    </div>
+                                </div>
+                            }
+                            <div class="form-check form-switch mb-3">
+                                <input class="form-check-input" type="checkbox" id="starttls" @bind="cfg.StartTlsEnabled" />
+                                <label class="form-check-label small" for="starttls">Advertise StartTLS on the plaintext port</label>
+                            </div>
+                            <div class="row g-2 align-items-end">
+                                <div class="col">
+                                    <label class="form-label small">Replicas</label>
+                                    <input type="number" min="1" class="form-control form-control-sm" @bind="cfg.ReplicaCount" />
+                                </div>
+                                <div class="col-auto">
+                                    <div class="form-check form-switch mb-2">
+                                        <input class="form-check-input" type="checkbox" id="repl" @bind="cfg.ReplicationEnabled" />
+                                        <label class="form-check-label small" for="repl">Multi-master replication</label>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label small">Storage size</label>
+                                <input class="form-control form-control-sm" @bind="cfg.StorageSize" />
+                            </div>
+                        </div></div>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="card shadow-sm"><div class="card-body">
+                            <h6 class="card-title"><i class="bi bi-key me-2"></i>Overlays &amp; password policy</h6>
+                            <div class="d-flex gap-4 flex-wrap mb-3">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="memberof" @bind="cfg.MemberOfEnabled" />
+                                    <label class="form-check-label small" for="memberof">memberOf overlay</label>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="refint" @bind="cfg.RefIntEnabled" />
+                                    <label class="form-check-label small" for="refint">refint overlay</label>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="ppolicy" @bind="cfg.PasswordPolicyEnabled" />
+                                    <label class="form-check-label small" for="ppolicy">ppolicy (password policy)</label>
+                                </div>
+                            </div>
+                            @if (cfg.PasswordPolicyEnabled)
+                            {
+                                <div class="row g-2">
+                                    <div class="col-md">
+                                        <label class="form-label small">Min length</label>
+                                        <input type="number" class="form-control form-control-sm" @bind="cfg.PpolicyMinLength" />
+                                    </div>
+                                    <div class="col-md">
+                                        <label class="form-label small">Max failures</label>
+                                        <input type="number" class="form-control form-control-sm" @bind="cfg.PpolicyMaxFailure" />
+                                    </div>
+                                    <div class="col-md">
+                                        <label class="form-label small">Lockout (s)</label>
+                                        <input type="number" class="form-control form-control-sm" @bind="cfg.PpolicyLockoutDurationSeconds" />
+                                    </div>
+                                    <div class="col-md">
+                                        <label class="form-label small">Max age (days)</label>
+                                        <input type="number" class="form-control form-control-sm" @bind="cfg.PpolicyMaxAgeDays" />
+                                    </div>
+                                    <div class="col-md">
+                                        <label class="form-label small">History</label>
+                                        <input type="number" class="form-control form-control-sm" @bind="cfg.PpolicyInHistory" />
+                                    </div>
+                                </div>
+                            }
+                        </div></div>
+                    </div>
+                </div>
+            }
+            else if (view == "ous")
+            {
+                <div class="card shadow-sm mb-3"><div class="card-body">
+                    <h6 class="card-title">Add organizational unit</h6>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-4"><label class="form-label small">Name (ou)</label><input class="form-control form-control-sm" @bind="newOuName" placeholder="people" /></div>
+                        <div class="col-md-6"><label class="form-label small">Description</label><input class="form-control form-control-sm" @bind="newOuDesc" /></div>
+                        <div class="col-md-2"><button class="btn btn-sm btn-secondary w-100" @onclick="AddOuAsync" disabled="@(busy || string.IsNullOrWhiteSpace(newOuName))"><i class="bi bi-plus-lg"></i> Add</button></div>
+                    </div>
+                </div></div>
+                <table class="table table-sm align-middle">
+                    <thead><tr><th>DN</th><th>Description</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var ou in cfg.OrganizationalUnits.OrderBy(o => o.Name))
+                        {
+                            <tr>
+                                <td><code>ou=@ou.Name,@cfg.BaseDn</code></td>
+                                <td class="small text-muted">@ou.Description</td>
+                                <td class="text-end"><button class="btn btn-sm btn-outline-danger" @onclick="() => ConfirmDeleteOu(ou)"><i class="bi bi-trash"></i></button></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+            else if (view == "users")
+            {
+                <div class="card shadow-sm mb-3"><div class="card-body">
+                    <h6 class="card-title">Add user</h6>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-2"><label class="form-label small">uid</label><input class="form-control form-control-sm" @bind="nu.Uid" /></div>
+                        <div class="col-md-3"><label class="form-label small">Full name (cn)</label><input class="form-control form-control-sm" @bind="nu.Cn" /></div>
+                        <div class="col-md-2"><label class="form-label small">Email</label><input class="form-control form-control-sm" @bind="nu.Email" /></div>
+                        <div class="col-md-2">
+                            <label class="form-label small">OU</label>
+                            <select class="form-select form-select-sm" @bind="nu.OrganizationalUnitId">
+                                <option value="">(base)</option>
+                                @foreach (var ou in cfg.OrganizationalUnits.OrderBy(o => o.Name))
+                                { <option value="@ou.Id">@ou.Name</option> }
+                            </select>
+                        </div>
+                        <div class="col-md-2"><label class="form-label small">Password</label><input type="password" class="form-control form-control-sm" @bind="newUserPassword" /></div>
+                        <div class="col-md-1"><button class="btn btn-sm btn-secondary w-100" @onclick="AddUserAsync" disabled="@(busy || string.IsNullOrWhiteSpace(nu.Uid) || string.IsNullOrWhiteSpace(nu.Cn))"><i class="bi bi-plus-lg"></i></button></div>
+                    </div>
+                    <div class="form-check form-switch mt-2">
+                        <input class="form-check-input" type="checkbox" id="svc" @bind="nu.IsServiceAccount" />
+                        <label class="form-check-label small" for="svc">Service / bind account</label>
+                    </div>
+                </div></div>
+                <table class="table table-sm align-middle">
+                    <thead><tr><th>uid</th><th>Name</th><th>Email</th><th>OU</th><th>Type</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var u in cfg.Users.OrderBy(u => u.Uid))
+                        {
+                            <tr>
+                                <td><code>@u.Uid</code>@if (!u.Enabled) { <span class="badge bg-secondary ms-1">disabled</span> }</td>
+                                <td>@u.Cn</td>
+                                <td class="small text-muted">@u.Email</td>
+                                <td class="small">@(OuName(u.OrganizationalUnitId))</td>
+                                <td>@if (u.IsServiceAccount) { <span class="badge bg-info-subtle text-info">service</span> } else { <span class="badge bg-light text-dark">person</span> }</td>
+                                <td class="text-end"><button class="btn btn-sm btn-outline-danger" @onclick="() => ConfirmDeleteUser(u)"><i class="bi bi-trash"></i></button></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+            else if (view == "groups")
+            {
+                <div class="card shadow-sm mb-3"><div class="card-body">
+                    <h6 class="card-title">Add group</h6>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-3"><label class="form-label small">Name (cn)</label><input class="form-control form-control-sm" @bind="ng.Cn" /></div>
+                        <div class="col-md-3"><label class="form-label small">Description</label><input class="form-control form-control-sm" @bind="ng.Description" /></div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Type</label>
+                            <select class="form-select form-select-sm" @bind="ng.GroupType">
+                                <option value="@OpenLdapGroupType.GroupOfNames">groupOfNames</option>
+                                <option value="@OpenLdapGroupType.PosixGroup">posixGroup</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">OU</label>
+                            <select class="form-select form-select-sm" @bind="ng.OrganizationalUnitId">
+                                <option value="">(base)</option>
+                                @foreach (var ou in cfg.OrganizationalUnits.OrderBy(o => o.Name))
+                                { <option value="@ou.Id">@ou.Name</option> }
+                            </select>
+                        </div>
+                        <div class="col-md-2"><button class="btn btn-sm btn-secondary w-100" @onclick="AddGroupAsync" disabled="@(busy || string.IsNullOrWhiteSpace(ng.Cn))"><i class="bi bi-plus-lg"></i> Add</button></div>
+                    </div>
+                </div></div>
+                @foreach (var g in cfg.Groups.OrderBy(g => g.Cn))
+                {
+                    <div class="card shadow-sm mb-2"><div class="card-body py-2">
+                        <div class="d-flex align-items-center justify-content-between">
+                            <div>
+                                <code>cn=@g.Cn</code>
+                                <span class="badge bg-light text-dark ms-1">@g.GroupType</span>
+                                <span class="text-muted small ms-2">@g.Members.Count member(s)</span>
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => ToggleMembers(g)"><i class="bi bi-people"></i> Members</button>
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => ConfirmDeleteGroup(g)"><i class="bi bi-trash"></i></button>
+                            </div>
+                        </div>
+                        @if (editingMembersGroupId == g.Id)
+                        {
+                            <div class="mt-2 border-top pt-2">
+                                <div class="row">
+                                    @foreach (var u in cfg.Users.OrderBy(u => u.Uid))
+                                    {
+                                        <div class="col-md-3">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox"
+                                                       checked="@memberSelection.Contains(u.Id)"
+                                                       @onchange="e => ToggleMember(u.Id, (bool)(e.Value ?? false))" />
+                                                <label class="form-check-label small">@u.Uid</label>
+                                            </div>
+                                        </div>
+                                    }
+                                </div>
+                                <button class="btn btn-sm btn-primary mt-2" @onclick="() => SaveMembersAsync(g)" disabled="@busy"><i class="bi bi-check-lg me-1"></i>Save members</button>
+                            </div>
+                        }
+                    </div></div>
+                }
+            }
+        }
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
+    private bool loading = true;
+    private bool busy;
+    private string view = "config";
+
+    private List<OpenLdapService.OpenLdapInstance> instances = [];
+    private OpenLdapService.OpenLdapInstance? selected;
+    private OpenLdapComponentConfig? cfg;
+
+    private string? adminPassword;
+    private string? configPassword;
+
+    private string newOuName = "";
+    private string? newOuDesc;
+    private OpenLdapUser nu = NewUser();
+    private string? newUserPassword;
+    private OpenLdapGroup ng = NewGroup();
+
+    private Guid? editingMembersGroupId;
+    private HashSet<Guid> memberSelection = [];
+
+    private (string Message, string ConfirmText, Func<Task> Action)? pendingConfirm;
+    private bool confirmBusy;
+
+    private Guid? EnvFilter => EnvironmentId == Guid.Empty ? null : EnvironmentId;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        instances = await OpenLdap.GetInstancesAsync(TenantId, EnvFilter);
+        if (selected is not null)
+        {
+            selected = instances.FirstOrDefault(i => i.Component.Id == selected.Component.Id);
+        }
+        selected ??= instances.FirstOrDefault(i => i.Config is not null) ?? instances.FirstOrDefault();
+        await LoadSelectedConfigAsync();
+        loading = false;
+    }
+
+    private async Task SelectInstanceAsync(OpenLdapService.OpenLdapInstance inst)
+    {
+        selected = inst;
+        view = "config";
+        await LoadSelectedConfigAsync();
+    }
+
+    private async Task LoadSelectedConfigAsync()
+    {
+        cfg = selected?.Config is not null ? await OpenLdap.GetConfigAsync(selected.Config.Id) : null;
+        adminPassword = configPassword = null;
+    }
+
+    private async Task ReloadConfigAsync()
+    {
+        if (cfg is not null) cfg = await OpenLdap.GetConfigAsync(cfg.Id);
+    }
+
+    private async Task<bool> PersistConfigAsync()
+    {
+        if (selected?.Component is null || cfg is null) return false;
+        OpenLdapComponentConfig edited = cfg;
+        await OpenLdap.ConfigureAsync(TenantId, selected.Component.Id, target =>
+        {
+            target.BaseDn = edited.BaseDn.Trim();
+            target.Organization = edited.Organization;
+            target.AdminUsername = edited.AdminUsername;
+            target.TlsMode = edited.TlsMode;
+            target.ClusterIssuer = edited.TlsMode == OpenLdapTlsMode.ClusterIssuer ? edited.ClusterIssuer : null;
+            target.StartTlsEnabled = edited.StartTlsEnabled;
+            target.ReplicaCount = Math.Max(1, edited.ReplicaCount);
+            target.ReplicationEnabled = edited.ReplicationEnabled;
+            target.StorageSize = edited.StorageSize;
+            target.MemberOfEnabled = edited.MemberOfEnabled;
+            target.RefIntEnabled = edited.RefIntEnabled;
+            target.PasswordPolicyEnabled = edited.PasswordPolicyEnabled;
+            target.PpolicyMinLength = edited.PpolicyMinLength;
+            target.PpolicyMaxFailure = edited.PpolicyMaxFailure;
+            target.PpolicyLockoutDurationSeconds = edited.PpolicyLockoutDurationSeconds;
+            target.PpolicyMaxAgeDays = edited.PpolicyMaxAgeDays;
+            target.PpolicyInHistory = edited.PpolicyInHistory;
+        }, adminPassword, configPassword);
+        adminPassword = configPassword = null;
+        return true;
+    }
+
+    private async Task SaveConfigAsync()
+    {
+        busy = true;
+        try { if (await PersistConfigAsync()) Toasts.Success("Directory configuration saved."); }
+        catch (Exception ex) { Toasts.Error($"Save failed: {ex.Message}"); }
+        finally { busy = false; }
+    }
+
+    private async Task ApplyToClusterAsync()
+    {
+        if (selected?.Component is null) return;
+        busy = true;
+        try
+        {
+            await PersistConfigAsync();
+            HelmExecutionResult result = await InstallOrchestrator.InstallAsync(TenantId, selected.Component.Id);
+            if (result.Success) Toasts.Success("Applied to cluster — OpenLDAP upgraded with the current directory.");
+            else Toasts.Error($"Apply failed: {result.Output}");
+        }
+        catch (Exception ex) { Toasts.Error($"Apply failed: {ex.Message}"); }
+        finally { busy = false; }
+    }
+
+    // ── OU ──
+    private async Task AddOuAsync()
+    {
+        if (cfg is null) return;
+        busy = true;
+        try { await OpenLdap.AddOuAsync(cfg.Id, newOuName, newOuDesc); newOuName = ""; newOuDesc = null; await ReloadConfigAsync(); }
+        catch (Exception ex) { Toasts.Error($"Add OU failed: {ex.Message}"); }
+        finally { busy = false; }
+    }
+    private void ConfirmDeleteOu(OpenLdapOrganizationalUnit ou) =>
+        pendingConfirm = ($"Delete organizational unit \"ou={ou.Name}\"? Users/groups in it fall back to the base DN.", "Delete", async () =>
+        { await OpenLdap.DeleteOuAsync(ou.Id); await ReloadConfigAsync(); });
+
+    // ── Users ──
+    private async Task AddUserAsync()
+    {
+        if (cfg is null) return;
+        busy = true;
+        try
+        {
+            nu.ConfigId = cfg.Id;
+            if (nu.OrganizationalUnitId == Guid.Empty) nu.OrganizationalUnitId = null;
+            await OpenLdap.AddUserAsync(nu, newUserPassword);
+            nu = NewUser(); newUserPassword = null;
+            await ReloadConfigAsync();
+        }
+        catch (Exception ex) { Toasts.Error($"Add user failed: {ex.Message}"); }
+        finally { busy = false; }
+    }
+    private void ConfirmDeleteUser(OpenLdapUser u) =>
+        pendingConfirm = ($"Delete user \"uid={u.Uid}\"?", "Delete", async () =>
+        { await OpenLdap.DeleteUserAsync(u.Id); await ReloadConfigAsync(); });
+
+    // ── Groups ──
+    private async Task AddGroupAsync()
+    {
+        if (cfg is null) return;
+        busy = true;
+        try
+        {
+            ng.ConfigId = cfg.Id;
+            if (ng.OrganizationalUnitId == Guid.Empty) ng.OrganizationalUnitId = null;
+            await OpenLdap.AddGroupAsync(ng);
+            ng = NewGroup();
+            await ReloadConfigAsync();
+        }
+        catch (Exception ex) { Toasts.Error($"Add group failed: {ex.Message}"); }
+        finally { busy = false; }
+    }
+    private void ConfirmDeleteGroup(OpenLdapGroup g) =>
+        pendingConfirm = ($"Delete group \"cn={g.Cn}\"?", "Delete", async () =>
+        { await OpenLdap.DeleteGroupAsync(g.Id); await ReloadConfigAsync(); });
+
+    private void ToggleMembers(OpenLdapGroup g)
+    {
+        if (editingMembersGroupId == g.Id) { editingMembersGroupId = null; return; }
+        editingMembersGroupId = g.Id;
+        memberSelection = g.Members.Select(m => m.UserId).ToHashSet();
+    }
+    private void ToggleMember(Guid userId, bool on)
+    {
+        if (on) memberSelection.Add(userId); else memberSelection.Remove(userId);
+    }
+    private async Task SaveMembersAsync(OpenLdapGroup g)
+    {
+        busy = true;
+        try { await OpenLdap.SetGroupMembersAsync(g.Id, memberSelection); editingMembersGroupId = null; await ReloadConfigAsync(); }
+        catch (Exception ex) { Toasts.Error($"Save members failed: {ex.Message}"); }
+        finally { busy = false; }
+    }
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Value.Action(); }
+        catch (Exception ex) { Toasts.Error($"Operation failed: {ex.Message}"); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
+
+    private string OuName(Guid? ouId) =>
+        ouId is Guid id ? cfg?.OrganizationalUnits.FirstOrDefault(o => o.Id == id)?.Name ?? "—" : "(base)";
+
+    private static OpenLdapUser NewUser() => new() { Uid = "", Cn = "", Enabled = true };
+    private static OpenLdapGroup NewGroup() => new() { Cn = "", GroupType = OpenLdapGroupType.GroupOfNames };
+}

@@ -22,6 +22,7 @@ public class CatalogComponentRegistrar(
     VaultService vaultService,
     KeycloakService keycloakService,
     HarborService harborService,
+    OpenLdapService openLdapService,
     LokiService lokiService,
     MimirService mimirService,
     TempoService tempoService,
@@ -89,6 +90,7 @@ public class CatalogComponentRegistrar(
         await SaveSecretFieldsToVaultAsync(tenantId, component.Id, entry, formValues, component.Namespace);
         await SaveKeycloakConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveHarborConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
+        await SaveOpenLdapConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveLokiConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveMimirConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveTempoConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
@@ -128,7 +130,8 @@ public class CatalogComponentRegistrar(
 
             if (field.YamlPath.StartsWith("cnpg:", StringComparison.Ordinal)
                 || field.YamlPath.StartsWith("harbor:", StringComparison.Ordinal)
-                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal))
+                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal)
+                || field.YamlPath.StartsWith("ldap:", StringComparison.Ordinal))
             {
                 continue;
             }
@@ -289,6 +292,46 @@ public class CatalogComponentRegistrar(
 
             await EnsureRouteAsync(componentId, fieldValues, hostname, "harbor", isKeycloak: false);
         }
+    }
+
+    private async Task SaveOpenLdapConfigIfNeededAsync(
+        Guid tenantId, Guid componentId, IReadOnlyDictionary<string, string> fieldValues, CatalogEntry catalogEntry)
+    {
+        if (catalogEntry.Key != OpenLdapService.CatalogKey)
+        {
+            return;
+        }
+
+        string baseDn = fieldValues.TryGetValue("base-dn", out string? b) && !string.IsNullOrWhiteSpace(b) ? b.Trim() : "dc=example,dc=com";
+        string org = fieldValues.TryGetValue("organization", out string? o) && !string.IsNullOrWhiteSpace(o) ? o.Trim() : "EntKube";
+        string tlsMode = fieldValues.TryGetValue("tls-mode", out string? t) && !string.IsNullOrWhiteSpace(t) ? t : "ClusterIssuer";
+        string? issuer = fieldValues.TryGetValue("cluster-issuer", out string? i) && !string.IsNullOrWhiteSpace(i) ? i : null;
+        int replicas = fieldValues.TryGetValue("replica-count", out string? r) && int.TryParse(r, out int rp) && rp > 0 ? rp : 1;
+        string storage = fieldValues.TryGetValue("storage-size", out string? s) && !string.IsNullOrWhiteSpace(s) ? s.Trim() : "8Gi";
+        fieldValues.TryGetValue("admin-password", out string? adminPassword);
+        fieldValues.TryGetValue("config-password", out string? configPassword);
+
+        OpenLdapTlsMode mode = tlsMode switch
+        {
+            "Off" => OpenLdapTlsMode.Off,
+            "Manual" => OpenLdapTlsMode.Manual,
+            _ => OpenLdapTlsMode.ClusterIssuer,
+        };
+
+        await openLdapService.ConfigureAsync(
+            tenantId, componentId,
+            cfg =>
+            {
+                cfg.BaseDn = baseDn;
+                cfg.Organization = org;
+                cfg.TlsMode = mode;
+                cfg.ClusterIssuer = mode == OpenLdapTlsMode.ClusterIssuer ? issuer : null;
+                cfg.ReplicaCount = replicas;
+                cfg.ReplicationEnabled = replicas > 1;
+                cfg.StorageSize = storage;
+            },
+            string.IsNullOrWhiteSpace(adminPassword) ? null : adminPassword,
+            string.IsNullOrWhiteSpace(configPassword) ? null : configPassword);
     }
 
     private async Task SaveLokiConfigIfNeededAsync(

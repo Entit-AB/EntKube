@@ -2003,6 +2003,94 @@ public static class ComponentCatalog
                 """
         },
 
+        new CatalogEntry
+        {
+            Key = "openldap",
+            DisplayName = "OpenLDAP",
+            Description = "Managed LDAP directory (openldap-stack-ha). Provides a central directory of users, groups and service accounts over LDAP/LDAPS with optional multi-master replication. The directory (OUs, users, groups) is authored in EntKube's Directory (LDAP) tab and seeded declaratively via the chart's customLdifFiles.",
+            Icon = "bi-person-vcard",
+            Category = "Identity",
+            HelmRepoUrl = "https://jp-gouin.github.io/helm-openldap/",
+            HelmChartName = "openldap-stack-ha",
+            HelmChartVersion = "4.3.3",
+            DefaultNamespace = "openldap",
+            DefaultReleaseName = "openldap",
+            // slapd + optional replication rollout node-by-node can exceed the default 10m.
+            InstallTimeout = "20m0s",
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "base-dn", Label = "Base DN",
+                    YamlPath = "ldap:base-dn", Type = FormFieldType.Text,
+                    DefaultValue = "dc=example,dc=com",
+                    HelpText = "Root distinguished name of the directory (derives the LDAP domain)."
+                },
+                new ComponentFormField
+                {
+                    Key = "organization", Label = "Organization",
+                    YamlPath = "ldap:organization", Type = FormFieldType.Text,
+                    DefaultValue = "EntKube"
+                },
+                new ComponentFormField
+                {
+                    Key = "admin-password", Label = "Admin Password",
+                    YamlPath = "ldap:admin-password", Type = FormFieldType.Password,
+                    Placeholder = "Password for cn=admin,<base dn>",
+                    HelpText = "Stored in vault and synced to a Kubernetes Secret the chart consumes."
+                },
+                new ComponentFormField
+                {
+                    Key = "config-password", Label = "Config Admin Password",
+                    YamlPath = "ldap:config-password", Type = FormFieldType.Password,
+                    Placeholder = "Password for the cn=config backend",
+                    HelpText = "Protects the runtime configuration (cn=config) backend."
+                },
+                new ComponentFormField
+                {
+                    Key = "tls-mode", Label = "TLS Mode",
+                    YamlPath = "ldap:tls-mode", Type = FormFieldType.Select,
+                    DefaultValue = "ClusterIssuer",
+                    Options = ["ClusterIssuer", "Off", "Manual"],
+                    HelpText = "ClusterIssuer issues a real cert via cert-manager (needs cert-manager on the cluster)."
+                },
+                new ComponentFormField
+                {
+                    Key = "cluster-issuer", Label = "Cluster Issuer",
+                    YamlPath = "ldap:cluster-issuer", Type = FormFieldType.ClusterIssuer,
+                    DependsOnKey = "tls-mode", DependsOnValue = "ClusterIssuer",
+                    HelpText = "Use a CA / self-signed ClusterIssuer — public ACME (Let's Encrypt) cannot issue certs for cluster-internal LDAP service names."
+                },
+                new ComponentFormField
+                {
+                    Key = "replica-count", Label = "Replicas",
+                    YamlPath = "ldap:replica-count", Type = FormFieldType.Number,
+                    DefaultValue = "1",
+                    HelpText = "≥2 enables multi-master replication for high availability."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-size", Label = "Storage Size",
+                    YamlPath = "ldap:storage-size", Type = FormFieldType.Text,
+                    DefaultValue = "8Gi", Placeholder = "e.g. 8Gi, 20Gi"
+                }
+            ],
+            DefaultValues = """
+                # Initial values — replaced by EntKube once the directory is configured
+                # in the Directory (LDAP) tab (base DN, TLS, replication, seed entries).
+                replicaCount: 1
+                global:
+                  ldapDomain: "dc=example,dc=com"
+                phpldapadmin:
+                  enabled: false
+                ltb-passwd:
+                  enabled: false
+                persistence:
+                  enabled: true
+                  size: 8Gi
+                """
+        },
+
         // ── Registry ──
 
         new CatalogEntry
