@@ -6,11 +6,31 @@ public enum OpenLdapTlsMode
     /// <summary>No TLS listener — LDAP on 389 only (rely on NetworkPolicy/mesh for isolation).</summary>
     Off = 0,
 
-    /// <summary>cert-manager issues the server certificate from a ClusterIssuer.</summary>
+    /// <summary>cert-manager issues the server certificate from a ClusterIssuer (requires cert-manager + a ready CA ClusterIssuer).</summary>
     ClusterIssuer = 1,
 
-    /// <summary>Operator supplies a certificate + key manually (stored as component vault secrets).</summary>
+    /// <summary>Operator supplies a certificate + key manually (a pre-created <c>openldap-tls</c> Secret).</summary>
     Manual = 2,
+
+    /// <summary>
+    /// The chart generates a self-signed certificate at startup — zero external dependencies, works
+    /// immediately. Replication verification is relaxed (tls_reqcert=never) so multi-master still works.
+    /// The safe default.
+    /// </summary>
+    SelfSigned = 3,
+}
+
+/// <summary>How a bundled web UI (phpLDAPadmin / LTB) is published externally.</summary>
+public enum OpenLdapExposeMode
+{
+    /// <summary>Not exposed — the UI Service stays ClusterIP-only (reach it via port-forward).</summary>
+    None = 0,
+
+    /// <summary>EntKube ExternalRoute — Gateway API HTTPRoute on the cluster's gateway (traefik/istio) + cert-manager TLS.</summary>
+    Gateway = 1,
+
+    /// <summary>The chart's own classic Ingress with a chosen ingressClassName (nginx, traefik, …) — no API gateway.</summary>
+    Ingress = 2,
 }
 
 /// <summary>The LDAP object class used to model a group entry.</summary>
@@ -65,7 +85,7 @@ public class OpenLdapComponentConfig
 
     // ── TLS ───────────────────────────────────────────────────────────────────
 
-    public OpenLdapTlsMode TlsMode { get; set; } = OpenLdapTlsMode.ClusterIssuer;
+    public OpenLdapTlsMode TlsMode { get; set; } = OpenLdapTlsMode.SelfSigned;
 
     /// <summary>cert-manager ClusterIssuer name when <see cref="TlsMode"/> is ClusterIssuer.</summary>
     public string? ClusterIssuer { get; set; }
@@ -113,6 +133,50 @@ public class OpenLdapComponentConfig
     public string StorageSize { get; set; } = "8Gi";
 
     public string? StorageClass { get; set; }
+
+    // ── Bundled web UIs (chart subcharts) ─────────────────────────────────────
+
+    /// <summary>Deploy phpLDAPadmin (directory admin web UI). Requires <see cref="PhpLdapAdminHostname"/> + an ingress controller/gateway.</summary>
+    public bool PhpLdapAdminEnabled { get; set; }
+
+    /// <summary>External hostname for phpLDAPadmin (required when exposed).</summary>
+    public string? PhpLdapAdminHostname { get; set; }
+
+    /// <summary>How phpLDAPadmin is published (Gateway API route vs classic Ingress).</summary>
+    public OpenLdapExposeMode PhpLdapAdminExposeMode { get; set; } = OpenLdapExposeMode.Gateway;
+
+    /// <summary>ingressClassName (e.g. "nginx") when <see cref="PhpLdapAdminExposeMode"/> is Ingress.</summary>
+    public string? PhpLdapAdminIngressClass { get; set; }
+
+    /// <summary>Optional container image override ("repository:tag") for phpLDAPadmin. Null uses the chart default (osixia/phpldapadmin).</summary>
+    public string? PhpLdapAdminImage { get; set; }
+
+    /// <summary>Deploy LTB Self-Service-Password (user password self-service web UI). Requires <see cref="LtbPasswdHostname"/> + an ingress controller/gateway.</summary>
+    public bool LtbPasswdEnabled { get; set; }
+
+    /// <summary>External hostname for the self-service password portal (required when exposed).</summary>
+    public string? LtbPasswdHostname { get; set; }
+
+    /// <summary>How the self-service password portal is published (Gateway API route vs classic Ingress).</summary>
+    public OpenLdapExposeMode LtbPasswdExposeMode { get; set; } = OpenLdapExposeMode.Gateway;
+
+    /// <summary>ingressClassName (e.g. "nginx") when <see cref="LtbPasswdExposeMode"/> is Ingress.</summary>
+    public string? LtbPasswdIngressClass { get; set; }
+
+    /// <summary>
+    /// Container image override ("repository:tag") for the self-service password portal. REQUIRED to
+    /// deploy it: the chart's default image (tiredofit/self-service-password) has been removed from all
+    /// public registries, so an image implementing that env interface (LDAP_SERVER/LDAP_BINDDN/…) must be
+    /// supplied. When null, the LTB subchart is not deployed even if <see cref="LtbPasswdEnabled"/> is set.
+    /// </summary>
+    public string? LtbPasswdImage { get; set; }
+
+    /// <summary>
+    /// cert-manager ClusterIssuer for the PUBLIC web-UI certificates (Gateway route TLS and the classic
+    /// Ingress cert-manager annotation). Public hostnames, so a public ACME issuer (e.g. letsencrypt-prod)
+    /// is appropriate here — distinct from <see cref="ClusterIssuer"/> which secures the internal LDAP service.
+    /// </summary>
+    public string? WebUiClusterIssuer { get; set; } = "letsencrypt-prod";
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;

@@ -3824,6 +3824,26 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<int>("LdapsPort")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool>("LtbPasswdEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LtbPasswdExposeMode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LtbPasswdHostname")
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LtbPasswdImage")
+                        .HasMaxLength(300)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LtbPasswdIngressClass")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
                     b.Property<bool>("MemberOfEnabled")
                         .HasColumnType("INTEGER");
 
@@ -3834,6 +3854,26 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<bool>("PasswordPolicyEnabled")
                         .HasColumnType("INTEGER");
+
+                    b.Property<bool>("PhpLdapAdminEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PhpLdapAdminExposeMode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PhpLdapAdminHostname")
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PhpLdapAdminImage")
+                        .HasMaxLength(300)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PhpLdapAdminIngressClass")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
 
                     b.Property<int>("PpolicyInHistory")
                         .HasColumnType("INTEGER");
@@ -3880,6 +3920,10 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WebUiClusterIssuer")
+                        .HasMaxLength(200)
                         .HasColumnType("TEXT");
 
                     b.HasKey("Id");

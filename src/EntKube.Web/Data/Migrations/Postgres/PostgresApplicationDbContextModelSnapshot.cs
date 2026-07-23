@@ -3829,6 +3829,26 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<int>("LdapsPort")
                         .HasColumnType("integer");
 
+                    b.Property<bool>("LtbPasswdEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("LtbPasswdExposeMode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("LtbPasswdHostname")
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<string>("LtbPasswdImage")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
+
+                    b.Property<string>("LtbPasswdIngressClass")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
                     b.Property<bool>("MemberOfEnabled")
                         .HasColumnType("boolean");
 
@@ -3839,6 +3859,26 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<bool>("PasswordPolicyEnabled")
                         .HasColumnType("boolean");
+
+                    b.Property<bool>("PhpLdapAdminEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("PhpLdapAdminExposeMode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("PhpLdapAdminHostname")
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<string>("PhpLdapAdminImage")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
+
+                    b.Property<string>("PhpLdapAdminIngressClass")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
 
                     b.Property<int>("PpolicyInHistory")
                         .HasColumnType("integer");
@@ -3886,6 +3926,10 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("WebUiClusterIssuer")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
 
                     b.HasKey("Id");
 

@@ -864,6 +864,15 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(c => c.StorageSize).HasMaxLength(20).IsRequired();
             entity.Property(c => c.StorageClass).HasMaxLength(100);
             entity.Property(c => c.TlsMode).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.PhpLdapAdminHostname).HasMaxLength(253);
+            entity.Property(c => c.LtbPasswdHostname).HasMaxLength(253);
+            entity.Property(c => c.PhpLdapAdminExposeMode).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.LtbPasswdExposeMode).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.PhpLdapAdminIngressClass).HasMaxLength(100);
+            entity.Property(c => c.LtbPasswdIngressClass).HasMaxLength(100);
+            entity.Property(c => c.WebUiClusterIssuer).HasMaxLength(200);
+            entity.Property(c => c.PhpLdapAdminImage).HasMaxLength(300);
+            entity.Property(c => c.LtbPasswdImage).HasMaxLength(300);
 
             entity.HasOne(c => c.Tenant)
                 .WithMany()

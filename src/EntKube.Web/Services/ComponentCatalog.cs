@@ -2069,9 +2069,9 @@ public static class ComponentCatalog
                 {
                     Key = "tls-mode", Label = "TLS Mode",
                     YamlPath = "ldap:tls-mode", Type = FormFieldType.Select,
-                    DefaultValue = "ClusterIssuer",
-                    Options = ["ClusterIssuer", "Off", "Manual"],
-                    HelpText = "ClusterIssuer issues a real cert via cert-manager (needs cert-manager on the cluster)."
+                    DefaultValue = "SelfSigned",
+                    Options = ["SelfSigned", "ClusterIssuer", "Manual", "Off"],
+                    HelpText = "Self-signed works with no dependencies (default). ClusterIssuer issues a real cert via cert-manager (needs cert-manager + a ready CA issuer)."
                 },
                 new ComponentFormField
                 {
@@ -2092,7 +2092,25 @@ public static class ComponentCatalog
                     Key = "storage-size", Label = "Storage Size",
                     YamlPath = "ldap:storage-size", Type = FormFieldType.Text,
                     DefaultValue = "8Gi", Placeholder = "e.g. 8Gi, 20Gi"
+                },
+                new ComponentFormField
+                {
+                    Key = "phpldapadmin-enabled", Label = "phpLDAPadmin (admin web UI)",
+                    YamlPath = "ldap:phpldapadmin", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Deploy the phpLDAPadmin directory admin UI (needs an ingress controller)."
+                },
+                new ComponentFormField
+                {
+                    Key = "phpldapadmin-hostname", Label = "phpLDAPadmin Hostname",
+                    YamlPath = "ldap:phpldapadmin-host", Type = FormFieldType.Text,
+                    Placeholder = "ldapadmin.example.com",
+                    HelpText = "Required when phpLDAPadmin is enabled.",
+                    DependsOnKey = "phpldapadmin-enabled", DependsOnValue = "true"
                 }
+                // The LTB self-service password portal is configured from the Directory (LDAP) tab only:
+                // its upstream chart image was removed from public registries, so it requires an explicit
+                // image override (settable in that tab) to deploy.
             ],
             DefaultValues = """
                 # Initial values — replaced by EntKube once the directory is configured

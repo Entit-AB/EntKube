@@ -4,6 +4,7 @@ using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.SqlServer
 {
     [DbContext(typeof(SqlServerApplicationDbContext))]
-    partial class SqlServerApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260723193146_AddOpenLdapWebUiExpose")]
+    partial class AddOpenLdapWebUiExpose
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3843,10 +3846,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(253)
                         .HasColumnType("nvarchar(253)");
 
-                    b.Property<string>("LtbPasswdImage")
-                        .HasMaxLength(300)
-                        .HasColumnType("nvarchar(300)");
-
                     b.Property<string>("LtbPasswdIngressClass")
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
@@ -3873,10 +3872,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<string>("PhpLdapAdminHostname")
                         .HasMaxLength(253)
                         .HasColumnType("nvarchar(253)");
-
-                    b.Property<string>("PhpLdapAdminImage")
-                        .HasMaxLength(300)
-                        .HasColumnType("nvarchar(300)");
 
                     b.Property<string>("PhpLdapAdminIngressClass")
                         .HasMaxLength(100)

@@ -228,6 +228,109 @@ public class OpenLdapServiceTests
     }
 
     [Fact]
+    public void BuildHelmValues_WebUi_GatewayMode_DeploysButChartIngressOff()
+    {
+        // Gateway mode: the subchart is deployed but its own Ingress is off — EntKube ExternalRoutes
+        // publish it, so the hostname is NOT in the Helm values.
+        OpenLdapComponentConfig cfg = new()
+        {
+            Id = Guid.NewGuid(), TenantId = Guid.NewGuid(), BaseDn = "dc=example,dc=com", AdminUsername = "admin",
+            PhpLdapAdminEnabled = true, PhpLdapAdminHostname = "ldapadmin.example.com",
+            PhpLdapAdminExposeMode = OpenLdapExposeMode.Gateway,
+        };
+
+        string values = OpenLdapService.BuildHelmValues(cfg, "", "creds");
+
+        values.Should().Contain("phpldapadmin:\n  enabled: true\n  ingress:\n    enabled: false");
+        values.Should().NotContain("ldapadmin.example.com"); // host goes into an ExternalRoute, not values
+    }
+
+    [Fact]
+    public void BuildHelmValues_WebUi_IngressMode_EmitsClassicIngress()
+    {
+        OpenLdapComponentConfig cfg = new()
+        {
+            Id = Guid.NewGuid(), TenantId = Guid.NewGuid(), BaseDn = "dc=example,dc=com", AdminUsername = "admin",
+            PhpLdapAdminEnabled = true, PhpLdapAdminHostname = "ldapadmin.example.com",
+            PhpLdapAdminExposeMode = OpenLdapExposeMode.Ingress, PhpLdapAdminIngressClass = "nginx",
+            WebUiClusterIssuer = "letsencrypt-prod",
+        };
+
+        string values = OpenLdapService.BuildHelmValues(cfg, "", "creds");
+
+        values.Should().Contain("phpldapadmin:\n  enabled: true\n  ingress:\n    enabled: true");
+        values.Should().Contain("ingressClassName: nginx");
+        values.Should().Contain("cert-manager.io/cluster-issuer: letsencrypt-prod");
+        values.Should().Contain("- ldapadmin.example.com");
+        values.Should().Contain("secretName: phpldapadmin-tls");
+    }
+
+    [Fact]
+    public void BuildHelmValues_Ltb_NotDeployedWithoutImage_DeployedWithImage()
+    {
+        OpenLdapComponentConfig noImage = new()
+        {
+            Id = Guid.NewGuid(), TenantId = Guid.NewGuid(), BaseDn = "dc=example,dc=com", AdminUsername = "admin",
+            LtbPasswdEnabled = true, LtbPasswdHostname = "ssp.example.com", LtbPasswdImage = null,
+        };
+        // Enabled but no image → left disabled (chart default image is gone → would ImagePullBackOff).
+        OpenLdapService.BuildHelmValues(noImage, "", "creds").Should().Contain("ltb-passwd:\n  enabled: false");
+
+        OpenLdapComponentConfig withImage = new()
+        {
+            Id = Guid.NewGuid(), TenantId = Guid.NewGuid(), BaseDn = "dc=example,dc=com", AdminUsername = "admin",
+            LtbPasswdEnabled = true, LtbPasswdImage = "myrepo/self-service-password:1.0",
+            LtbPasswdExposeMode = OpenLdapExposeMode.None,
+        };
+        string v = OpenLdapService.BuildHelmValues(withImage, "", "creds");
+        v.Should().Contain("ltb-passwd:\n  enabled: true");
+        v.Should().Contain("repository: myrepo/self-service-password");
+        v.Should().Contain("tag: \"1.0\"");
+    }
+
+    [Theory]
+    [InlineData("myrepo/self-service-password:1.0", "myrepo/self-service-password", "1.0")]
+    [InlineData("osixia/phpldapadmin", "osixia/phpldapadmin", null)]
+    [InlineData("registry.example.com:5000/team/app:2.3", "registry.example.com:5000/team/app", "2.3")]
+    public void ParseImage_SplitsRepoAndTag(string image, string repo, string? tag)
+    {
+        (string r, string? t) = OpenLdapService.ParseImage(image);
+        r.Should().Be(repo);
+        t.Should().Be(tag);
+    }
+
+    [Fact]
+    public void BuildHelmValues_WebUis_DefaultDisabled()
+    {
+        OpenLdapComponentConfig cfg = new()
+        {
+            Id = Guid.NewGuid(), TenantId = Guid.NewGuid(), BaseDn = "dc=example,dc=com", AdminUsername = "admin",
+        };
+
+        string values = OpenLdapService.BuildHelmValues(cfg, "", "creds");
+
+        values.Should().Contain("phpldapadmin:\n  enabled: false");
+        values.Should().Contain("ltb-passwd:\n  enabled: false");
+    }
+
+    [Fact]
+    public void BuildHelmValues_SelfSigned_ChartGeneratesCert_NoExternalSecret()
+    {
+        OpenLdapComponentConfig cfg = new()
+        {
+            Id = Guid.NewGuid(), TenantId = Guid.NewGuid(), BaseDn = "dc=example,dc=com",
+            AdminUsername = "admin", TlsMode = OpenLdapTlsMode.SelfSigned,
+        };
+
+        string values = OpenLdapService.BuildHelmValues(cfg, "", "creds");
+
+        // tls_enabled:false → chart self-signs into an emptyDir (no openldap-tls Secret to wait for → no hang)
+        values.Should().Contain("initTLSSecret:\n  tls_enabled: false");
+        values.Should().Contain("LDAP_ENABLE_TLS: \"yes\"");
+        values.Should().NotContain($"secret: \"{OpenLdapService.TlsSecretName}\"");
+    }
+
+    [Fact]
     public void BuildHelmValues_TlsOff_DisablesTls()
     {
         OpenLdapComponentConfig cfg = new()
@@ -298,12 +401,12 @@ public class OpenLdapServiceTests
     }
 
     [Fact]
-    public void CertManager_UsesFieldDefault_WhenNoFormValues()
+    public void CertManager_NotRequiredByDefault_SinceSelfSignedIsDefault()
     {
-        // Default tls-mode is ClusterIssuer, so the dependency shows without any form input.
+        // Default tls-mode is now SelfSigned (no cert infra), so cert-manager is NOT required by default.
         var check = ComponentCatalog.CheckDependencies(OpenLdapEntry(), installedComponentNames: []);
 
-        check.MissingDependencies.Should().Contain("cert-manager");
+        check.MissingDependencies.Should().NotContain("cert-manager");
     }
 
     [Fact]

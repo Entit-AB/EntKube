@@ -10,6 +10,7 @@
 @inject BlueprintFromClusterService BlueprintFromClusterService
 @inject KeycloakService KeycloakService
 @inject HarborService HarborService
+@inject OpenLdapService OpenLdapService
 @inject LokiService LokiService
 @inject MimirService MimirService
 @inject TempoService TempoService
@@ -1964,6 +1965,10 @@ else if (section == "components")
 
             await SaveHarborConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
 
+            // Configure OpenLDAP (base DN, storage, TLS, replication, bundled UIs) if this is OpenLDAP.
+
+            await SaveOpenLdapConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
+
             // Configure Loki S3 chunk storage if a storage link was selected.
 
             await SaveLokiConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
@@ -2205,6 +2210,10 @@ else if (section == "components")
             // Configure Harbor if this is a Harbor component.
 
             await SaveHarborConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
+
+            // Configure OpenLDAP if this is an OpenLDAP component.
+
+            await SaveOpenLdapConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
 
             // Configure Loki S3 chunk storage if a storage link was selected.
 
@@ -3208,6 +3217,20 @@ else if (section == "components")
         }
 
         await TempoService.WriteStorageHelmValuesAsync(TenantId, componentId, storageLinkId);
+    }
+
+    private async Task SaveOpenLdapConfigIfNeeded(
+        Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
+    {
+        if (catalogEntry?.Key != OpenLdapService.CatalogKey)
+        {
+            return;
+        }
+
+        // Single source of truth shared with the blueprint bootstrap path — captures base DN,
+        // storage, TLS, replication and bundled-UI settings into the config so BuildHelmValues
+        // renders global.ldapDomain / persistence.size / phpldapadmin / ltb-passwd from them.
+        await OpenLdapService.ConfigureFromFormAsync(TenantId, componentId, fieldValues);
     }
 
     private async Task SaveHarborConfigIfNeeded(

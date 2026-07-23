@@ -27,8 +27,12 @@ public class OpenLdapService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
     IKubernetesClientFactory k8sFactory,
+    ExternalRouteService routeService,
     ILogger<OpenLdapService> logger)
 {
+    /// <summary>Subchart Service name suffixes (openldap-stack-ha convention: {release}-{suffix}).</summary>
+    private const string PhpLdapAdminServiceSuffix = "phpldapadmin";
+    private const string LtbPasswdServiceSuffix = "ltb-passwd";
     public const string CatalogKey = "openldap";
     // Key names the openldap-stack-ha chart expects inside global.existingSecret.
     private const string AdminPasswordSecretName = "LDAP_ADMIN_PASSWORD";
@@ -139,7 +143,131 @@ public class OpenLdapService(
         }
 
         await RefreshHelmValuesIfConfiguredAsync(tenantId, clusterComponentId, ct);
+        await EnsureWebUiRoutesAsync(tenantId, clusterComponentId, ct);
         return config;
+    }
+
+    /// <summary>
+    /// Reconciles EntKube ExternalRoutes for the two bundled web UIs. For a UI in
+    /// <see cref="OpenLdapExposeMode.Gateway"/> mode with a hostname, ensures a route exists targeting
+    /// the subchart's Service (published via the cluster's gateway — traefik/istio — with cert-manager TLS
+    /// from <see cref="OpenLdapComponentConfig.WebUiClusterIssuer"/>). Routes for UIs that are disabled or
+    /// switched to Ingress/None mode are removed. The routes are applied to the cluster by the normal
+    /// install/apply flow (ComponentInstallOrchestrator → ApplyExternalRoutesAsync).
+    /// </summary>
+    public async Task EnsureWebUiRoutesAsync(Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
+    {
+        OpenLdapComponentConfig? config;
+        string release;
+        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        {
+            config = await db.OpenLdapComponentConfigs
+                .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId && c.TenantId == tenantId, ct);
+            if (config is null) return;
+
+            ClusterComponent? component = await db.ClusterComponents.FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+            if (component is null) return;
+            release = component.ReleaseName ?? component.Name;
+        }
+
+        string phpSvc = $"{release}-{PhpLdapAdminServiceSuffix}";
+        string ltbSvc = $"{release}-{LtbPasswdServiceSuffix}";
+
+        // Remove any existing web-UI routes (by their backing Service) so mode/host/disable changes reconcile.
+        List<ExternalRoute> existing = await routeService.GetRoutesAsync(clusterComponentId, ct);
+        foreach (ExternalRoute r in existing.Where(r => r.ServiceName == phpSvc || r.ServiceName == ltbSvc))
+        {
+            await routeService.DeleteRouteAsync(r.Id, ct);
+        }
+
+        await AddGatewayRouteIfNeeded(clusterComponentId, config.PhpLdapAdminEnabled, config.PhpLdapAdminExposeMode,
+            config.PhpLdapAdminHostname, phpSvc, config.WebUiClusterIssuer, ct);
+        // LTB is only actually deployed when an image is supplied — don't route to a Service that won't exist.
+        bool ltbDeployed = config.LtbPasswdEnabled && !string.IsNullOrWhiteSpace(config.LtbPasswdImage);
+        await AddGatewayRouteIfNeeded(clusterComponentId, ltbDeployed, config.LtbPasswdExposeMode,
+            config.LtbPasswdHostname, ltbSvc, config.WebUiClusterIssuer, ct);
+    }
+
+    private async Task AddGatewayRouteIfNeeded(
+        Guid componentId, bool enabled, OpenLdapExposeMode mode, string? hostname,
+        string serviceName, string? issuer, CancellationToken ct)
+    {
+        if (!enabled || mode != OpenLdapExposeMode.Gateway || string.IsNullOrWhiteSpace(hostname))
+        {
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(issuer))
+        {
+            logger.LogWarning("Skipping Gateway route for {Service} — no web-UI ClusterIssuer set for TLS.", serviceName);
+            return;
+        }
+
+        await routeService.AddRouteAsync(componentId, new ExternalRouteRequest
+        {
+            Hostname = hostname.Trim(),
+            ServiceName = serviceName,
+            ServicePort = 80,
+            PathPrefix = "/",
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = issuer.Trim(),
+            // GatewayName/Namespace left null → auto-resolved from the installed gateway (traefik/istio).
+        }, ct);
+    }
+
+    /// <summary>
+    /// Parses catalog form-field values (keyed by <see cref="ComponentFormField.Key"/>) and
+    /// applies them to the component's config. Single source of truth shared by the interactive
+    /// install/edit path (ClusterDetail) and the blueprint bootstrap path (CatalogComponentRegistrar),
+    /// so both capture the base DN, storage size, TLS, replication, and bundled-UI settings identically.
+    /// </summary>
+    public async Task ConfigureFromFormAsync(
+        Guid tenantId, Guid clusterComponentId, IReadOnlyDictionary<string, string> form, CancellationToken ct = default)
+    {
+        string baseDn = Get(form, "base-dn", "dc=example,dc=com");
+        string org = Get(form, "organization", "EntKube");
+        string tlsMode = Get(form, "tls-mode", "SelfSigned");
+        string? issuer = form.TryGetValue("cluster-issuer", out string? i) && !string.IsNullOrWhiteSpace(i) ? i : null;
+        int replicas = form.TryGetValue("replica-count", out string? r) && int.TryParse(r, out int rp) && rp > 0 ? rp : 1;
+        string storage = Get(form, "storage-size", "8Gi");
+        form.TryGetValue("admin-password", out string? adminPassword);
+        form.TryGetValue("config-password", out string? configPassword);
+        bool phpEnabled = IsOn(form, "phpldapadmin-enabled");
+        string? phpHost = form.TryGetValue("phpldapadmin-hostname", out string? ph) && !string.IsNullOrWhiteSpace(ph) ? ph.Trim() : null;
+        bool ltbEnabled = IsOn(form, "ltb-passwd-enabled");
+        string? ltbHost = form.TryGetValue("ltb-passwd-hostname", out string? lh) && !string.IsNullOrWhiteSpace(lh) ? lh.Trim() : null;
+
+        OpenLdapTlsMode mode = tlsMode switch
+        {
+            "Off" => OpenLdapTlsMode.Off,
+            "Manual" => OpenLdapTlsMode.Manual,
+            "ClusterIssuer" => OpenLdapTlsMode.ClusterIssuer,
+            _ => OpenLdapTlsMode.SelfSigned,
+        };
+
+        await ConfigureAsync(
+            tenantId, clusterComponentId,
+            cfg =>
+            {
+                cfg.BaseDn = baseDn;
+                cfg.Organization = org;
+                cfg.TlsMode = mode;
+                cfg.ClusterIssuer = mode == OpenLdapTlsMode.ClusterIssuer ? issuer : null;
+                cfg.ReplicaCount = replicas;
+                cfg.ReplicationEnabled = replicas > 1;
+                cfg.StorageSize = storage;
+                cfg.PhpLdapAdminEnabled = phpEnabled;
+                cfg.PhpLdapAdminHostname = phpEnabled ? phpHost : null;
+                cfg.LtbPasswdEnabled = ltbEnabled;
+                cfg.LtbPasswdHostname = ltbEnabled ? ltbHost : null;
+            },
+            string.IsNullOrWhiteSpace(adminPassword) ? null : adminPassword,
+            string.IsNullOrWhiteSpace(configPassword) ? null : configPassword,
+            ct);
+
+        static string Get(IReadOnlyDictionary<string, string> f, string k, string dflt) =>
+            f.TryGetValue(k, out string? v) && !string.IsNullOrWhiteSpace(v) ? v.Trim() : dflt;
+        static bool IsOn(IReadOnlyDictionary<string, string> f, string k) =>
+            f.TryGetValue(k, out string? v) && (v == "true" || v == "on" || v == "1");
     }
 
     /// <summary>
@@ -220,6 +348,42 @@ public class OpenLdapService(
         logger.LogInformation(
             "Applied cert-manager Certificate '{Secret}' for OpenLDAP component {ComponentId} via ClusterIssuer '{Issuer}'.",
             TlsSecretName, clusterComponentId, config.ClusterIssuer);
+
+        // Wait for cert-manager to actually issue the Secret BEFORE the install proceeds — the chart
+        // mounts it as a volume, so a missing Secret would hang every pod in ContainerCreating. Fail
+        // fast with an actionable message instead of letting `helm --wait` block for the full timeout.
+        if (!await WaitForSecretAsync(ns, TlsSecretName, kubeconfig, TimeSpan.FromMinutes(2), ct))
+        {
+            throw new InvalidOperationException(
+                $"cert-manager did not issue the '{TlsSecretName}' TLS Secret in namespace '{ns}' within 2 minutes " +
+                $"(ClusterIssuer '{config.ClusterIssuer}'). Ensure cert-manager is installed and the ClusterIssuer is a " +
+                $"ready CA/self-signed issuer that can sign cluster-internal names — a public ACME issuer (Let's Encrypt) " +
+                $"cannot. Or switch TLS mode to 'Self-signed' to avoid the dependency.");
+        }
+    }
+
+    private async Task<bool> WaitForSecretAsync(
+        string ns, string secretName, string kubeconfig, TimeSpan timeout, CancellationToken ct)
+    {
+        DateTime deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                string json = await k8sFactory.GetJsonAsync($"secret/{secretName}", ns, kubeconfig, ct: ct);
+                if (json.Contains("\"kind\"", StringComparison.Ordinal) && json.Contains("tls.crt", StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                // kubectl returns non-zero until the Secret exists — keep polling.
+                logger.LogDebug(ex, "Waiting for TLS Secret {Secret} in {Namespace}…", secretName, ns);
+            }
+            await Task.Delay(TimeSpan.FromSeconds(3), ct);
+        }
+        return false;
     }
 
     /// <summary>Builds a cert-manager Certificate CR that issues the LDAP server cert into <see cref="TlsSecretName"/>.</summary>
@@ -462,9 +626,19 @@ public class OpenLdapService(
         // keys LDAP_ADMIN_PASSWORD + LDAP_CONFIG_ADMIN_PASSWORD.
         sb.Append($"  existingSecret: \"{credSecretName}\"\n\n");
 
-        // Bundled admin UIs off by default — this is a headless directory service.
-        sb.Append("ltb-passwd:\n  enabled: false\n\n");
-        sb.Append("phpldapadmin:\n  enabled: false\n\n");
+        // Bundled admin UIs. The subchart is deployed when enabled; how it's published depends on
+        // the expose mode: Ingress → the chart's own classic Ingress (ingressClassName, cert-manager
+        // annotation); Gateway/None → the chart Ingress is OFF (EntKube ExternalRoutes handle Gateway
+        // exposure — see EnsureWebUiRoutesAsync). Default off: this is a headless directory service.
+        // phpLDAPadmin has a working default image (image override optional).
+        AppendWebUi(sb, "phpldapadmin", config.PhpLdapAdminEnabled, config.PhpLdapAdminHostname,
+            config.PhpLdapAdminExposeMode, config.PhpLdapAdminIngressClass, config.WebUiClusterIssuer,
+            config.PhpLdapAdminImage, imageRequired: false);
+        // LTB self-service: the chart's default image is gone upstream, so an override image is REQUIRED
+        // to deploy it — otherwise it's left disabled to avoid a guaranteed ImagePullBackOff.
+        AppendWebUi(sb, "ltb-passwd", config.LtbPasswdEnabled, config.LtbPasswdHostname,
+            config.LtbPasswdExposeMode, config.LtbPasswdIngressClass, config.WebUiClusterIssuer,
+            config.LtbPasswdImage, imageRequired: true);
 
         // Replication (multi-master) only when enabled AND more than one replica.
         sb.Append("replication:\n");
@@ -480,23 +654,33 @@ public class OpenLdapService(
         }
         sb.Append('\n');
 
-        // TLS via initTLSSecret. The chart mounts initTLSSecret.secret and copies its
-        // tls.crt/tls.key/ca.crt into the server — it does NOT self-sign when a secret is named,
-        // so the Secret must already exist. For ClusterIssuer mode a cert-manager Certificate
-        // (see BuildTlsCertificateManifest / ApplyTlsCertificateIfNeededAsync) populates it; for
-        // Manual the operator provides it. Off disables the TLS listener entirely.
-        if (config.TlsMode == OpenLdapTlsMode.Off)
-        {
-            sb.Append("initTLSSecret:\n  tls_enabled: false\n\n");
-            sb.Append("env:\n  LDAP_ENABLE_TLS: \"no\"\n\n");
-        }
-        else
+        // TLS. IMPORTANT: when initTLSSecret.tls_enabled is true AND a secret is named, the chart
+        // MOUNTS that Secret as a volume and copies its tls.crt/tls.key — it does NOT self-sign, so the
+        // Secret must already exist or the pod hangs in ContainerCreating forever. We therefore only set
+        // tls_enabled:true for ClusterIssuer (a cert-manager Certificate populates it — waited on in
+        // ApplyTlsCertificateIfNeededAsync) and Manual (operator pre-creates it). SelfSigned/Off leave
+        // tls_enabled:false so the chart generates its own cert with zero external dependencies (and the
+        // chart relaxes replication to tls_reqcert=never, so multi-master still works).
+        bool externalCert = config.TlsMode is OpenLdapTlsMode.ClusterIssuer or OpenLdapTlsMode.Manual;
+        if (externalCert)
         {
             sb.Append("initTLSSecret:\n  tls_enabled: true\n");
             sb.Append($"  secret: \"{TlsSecretName}\"\n\n");
             sb.Append("env:\n");
             sb.Append("  LDAP_ENABLE_TLS: \"yes\"\n");
             sb.Append($"  LDAP_REQUIRE_TLS: \"{Bool(!config.StartTlsEnabled)}\"\n\n");
+        }
+        else
+        {
+            // SelfSigned or Off — chart self-signs into an emptyDir (no external Secret to wait for).
+            sb.Append("initTLSSecret:\n  tls_enabled: false\n\n");
+            sb.Append("env:\n");
+            sb.Append($"  LDAP_ENABLE_TLS: \"{(config.TlsMode == OpenLdapTlsMode.Off ? "no" : "yes")}\"\n");
+            if (config.TlsMode != OpenLdapTlsMode.Off)
+            {
+                sb.Append($"  LDAP_REQUIRE_TLS: \"{Bool(!config.StartTlsEnabled)}\"\n");
+            }
+            sb.Append('\n');
         }
 
         // Custom overlay notes + seed entries. The root org entry MUST be present because the
@@ -540,6 +724,74 @@ public class OpenLdapService(
     }
 
     private static string Bool(bool b) => b ? "true" : "false";
+
+    /// <summary>Splits "repository:tag" into parts, tolerating a registry:port in the repository.</summary>
+    public static (string Repository, string? Tag) ParseImage(string image)
+    {
+        int lastSlash = image.LastIndexOf('/');
+        int lastColon = image.LastIndexOf(':');
+        // A colon after the last slash is the tag separator; a colon before it is a registry port.
+        return lastColon > lastSlash ? (image[..lastColon], image[(lastColon + 1)..]) : (image, null);
+    }
+
+    /// <summary>
+    /// Emits a chart subchart (phpldapadmin / ltb-passwd) block. The subchart is deployed when enabled;
+    /// its built-in classic Ingress is emitted only for <see cref="OpenLdapExposeMode.Ingress"/> (with the
+    /// chosen ingressClassName + cert-manager TLS). For Gateway/None the chart Ingress stays off — Gateway
+    /// exposure is done via EntKube ExternalRoutes instead (<see cref="EnsureWebUiRoutesAsync"/>).
+    /// </summary>
+    private static void AppendWebUi(
+        StringBuilder sb, string key, bool enabled, string? hostname,
+        OpenLdapExposeMode mode, string? ingressClass, string? webUiIssuer,
+        string? imageOverride, bool imageRequired)
+    {
+        // Refuse to deploy a UI whose only usable image must be supplied but wasn't (avoids ImagePullBackOff).
+        bool effectiveEnabled = enabled && (!imageRequired || !string.IsNullOrWhiteSpace(imageOverride));
+        sb.Append($"{key}:\n  enabled: {Bool(effectiveEnabled)}\n");
+
+        if (effectiveEnabled && !string.IsNullOrWhiteSpace(imageOverride))
+        {
+            (string repo, string? tag) = ParseImage(imageOverride.Trim());
+            sb.Append("  image:\n");
+            sb.Append($"    repository: {repo}\n");
+            if (tag is not null)
+            {
+                sb.Append($"    tag: \"{tag}\"\n");
+            }
+        }
+
+        bool classicIngress = effectiveEnabled && mode == OpenLdapExposeMode.Ingress && !string.IsNullOrWhiteSpace(hostname);
+        if (classicIngress)
+        {
+            string host = hostname!.Trim();
+            sb.Append("  ingress:\n");
+            sb.Append("    enabled: true\n");
+            if (!string.IsNullOrWhiteSpace(ingressClass))
+            {
+                sb.Append($"    ingressClassName: {ingressClass.Trim()}\n");
+            }
+            if (!string.IsNullOrWhiteSpace(webUiIssuer))
+            {
+                sb.Append("    annotations:\n");
+                sb.Append($"      cert-manager.io/cluster-issuer: {webUiIssuer.Trim()}\n");
+            }
+            sb.Append("    hosts:\n");
+            sb.Append($"      - {host}\n");
+            if (!string.IsNullOrWhiteSpace(webUiIssuer))
+            {
+                sb.Append("    tls:\n");
+                sb.Append($"      - secretName: {key}-tls\n");
+                sb.Append("        hosts:\n");
+                sb.Append($"          - {host}\n");
+            }
+        }
+        else
+        {
+            // Gateway or None → the chart must not create its own Ingress.
+            sb.Append("  ingress:\n    enabled: false\n");
+        }
+        sb.Append('\n');
+    }
 
     /// <summary>cn=config overlay/ppolicy directives derived from the config toggles.</summary>
     private static string BuildOverlayLdif(OpenLdapComponentConfig config)

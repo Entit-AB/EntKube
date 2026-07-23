@@ -68,11 +68,32 @@
                 </div>
             </div>
 
+            @if (!IsPersisted)
+            {
+                <div class="alert alert-warning d-flex align-items-start gap-2 py-2">
+                    <i class="bi bi-exclamation-triangle-fill mt-1"></i>
+                    <div class="small">
+                        This directory isn't configured yet. Set the base DN and (if not already set at install)
+                        an admin password below, then <strong>Save</strong> to initialize it — after that you can
+                        add organizational units, users, and groups, and apply everything to the cluster.
+                    </div>
+                </div>
+            }
+
             <ul class="nav nav-tabs mb-3">
                 <li class="nav-item"><a class="nav-link @(view == "config" ? "active" : "")" role="button" @onclick="@(() => view = "config")">Configuration</a></li>
-                <li class="nav-item"><a class="nav-link @(view == "ous" ? "active" : "")" role="button" @onclick="@(() => view = "ous")">Org Units <span class="badge bg-secondary rounded-pill">@cfg.OrganizationalUnits.Count</span></a></li>
-                <li class="nav-item"><a class="nav-link @(view == "users" ? "active" : "")" role="button" @onclick="@(() => view = "users")">Users <span class="badge bg-secondary rounded-pill">@cfg.Users.Count</span></a></li>
-                <li class="nav-item"><a class="nav-link @(view == "groups" ? "active" : "")" role="button" @onclick="@(() => view = "groups")">Groups <span class="badge bg-secondary rounded-pill">@cfg.Groups.Count</span></a></li>
+                @if (IsPersisted)
+                {
+                    <li class="nav-item"><a class="nav-link @(view == "ous" ? "active" : "")" role="button" @onclick="@(() => view = "ous")">Org Units <span class="badge bg-secondary rounded-pill">@cfg.OrganizationalUnits.Count</span></a></li>
+                    <li class="nav-item"><a class="nav-link @(view == "users" ? "active" : "")" role="button" @onclick="@(() => view = "users")">Users <span class="badge bg-secondary rounded-pill">@cfg.Users.Count</span></a></li>
+                    <li class="nav-item"><a class="nav-link @(view == "groups" ? "active" : "")" role="button" @onclick="@(() => view = "groups")">Groups <span class="badge bg-secondary rounded-pill">@cfg.Groups.Count</span></a></li>
+                }
+                else
+                {
+                    <li class="nav-item"><span class="nav-link disabled" title="Save the configuration first">Org Units</span></li>
+                    <li class="nav-item"><span class="nav-link disabled" title="Save the configuration first">Users</span></li>
+                    <li class="nav-item"><span class="nav-link disabled" title="Save the configuration first">Groups</span></li>
+                }
             </ul>
 
             @if (view == "config")
@@ -113,10 +134,18 @@
                             <div class="mb-2">
                                 <label class="form-label small">TLS mode</label>
                                 <select class="form-select form-select-sm" @bind="cfg.TlsMode">
-                                    <option value="@OpenLdapTlsMode.ClusterIssuer">cert-manager ClusterIssuer</option>
-                                    <option value="@OpenLdapTlsMode.Manual">Manual certificate</option>
+                                    <option value="@OpenLdapTlsMode.SelfSigned">Self-signed (chart, no dependencies)</option>
+                                    <option value="@OpenLdapTlsMode.ClusterIssuer">cert-manager ClusterIssuer (real cert)</option>
+                                    <option value="@OpenLdapTlsMode.Manual">Manual certificate (openldap-tls Secret)</option>
                                     <option value="@OpenLdapTlsMode.Off">Off (LDAP only)</option>
                                 </select>
+                                @if (cfg.TlsMode == OpenLdapTlsMode.ClusterIssuer)
+                                {
+                                    <div class="form-text text-warning">
+                                        Requires cert-manager and a ready CA/self-signed ClusterIssuer. Install hangs if the
+                                        cert can't be issued — use Self-signed if unsure.
+                                    </div>
+                                }
                             </div>
                             @if (cfg.TlsMode == OpenLdapTlsMode.ClusterIssuer)
                             {
@@ -148,6 +177,81 @@
                             <div class="mb-2">
                                 <label class="form-label small">Storage size</label>
                                 <input class="form-control form-control-sm" @bind="cfg.StorageSize" />
+                            </div>
+                        </div></div>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="card shadow-sm"><div class="card-body">
+                            <h6 class="card-title"><i class="bi bi-window-sidebar me-2"></i>Bundled web UIs</h6>
+                            <div class="row g-3">
+                                <div class="col-md-6">
+                                    <div class="form-check form-switch mb-2">
+                                        <input class="form-check-input" type="checkbox" id="phpui" @bind="cfg.PhpLdapAdminEnabled" />
+                                        <label class="form-check-label small" for="phpui">phpLDAPadmin (directory admin UI)</label>
+                                    </div>
+                                    @if (cfg.PhpLdapAdminEnabled)
+                                    {
+                                        <input class="form-control form-control-sm mb-2" @bind="cfg.PhpLdapAdminHostname"
+                                               placeholder="ldapadmin.example.com" />
+                                        <label class="form-label small">Expose via</label>
+                                        <select class="form-select form-select-sm mb-2" @bind="cfg.PhpLdapAdminExposeMode">
+                                            <option value="@OpenLdapExposeMode.Gateway">Gateway API route (traefik / istio)</option>
+                                            <option value="@OpenLdapExposeMode.Ingress">Classic Ingress (nginx / traefik)</option>
+                                            <option value="@OpenLdapExposeMode.None">Not exposed (ClusterIP only)</option>
+                                        </select>
+                                        @if (cfg.PhpLdapAdminExposeMode == OpenLdapExposeMode.Ingress)
+                                        {
+                                            <input class="form-control form-control-sm mb-2" @bind="cfg.PhpLdapAdminIngressClass"
+                                                   placeholder="ingressClassName (e.g. nginx)" />
+                                        }
+                                        <input class="form-control form-control-sm" @bind="cfg.PhpLdapAdminImage"
+                                               placeholder="image override (optional) — default osixia/phpldapadmin:0.9.0" />
+                                    }
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="form-check form-switch mb-2">
+                                        <input class="form-check-input" type="checkbox" id="ltbui" @bind="cfg.LtbPasswdEnabled" />
+                                        <label class="form-check-label small" for="ltbui">Self-service password (LTB)</label>
+                                    </div>
+                                    @if (cfg.LtbPasswdEnabled)
+                                    {
+                                        <input class="form-control form-control-sm mb-2" @bind="cfg.LtbPasswdHostname"
+                                               placeholder="password.example.com" />
+                                        <label class="form-label small">Expose via</label>
+                                        <select class="form-select form-select-sm mb-2" @bind="cfg.LtbPasswdExposeMode">
+                                            <option value="@OpenLdapExposeMode.Gateway">Gateway API route (traefik / istio)</option>
+                                            <option value="@OpenLdapExposeMode.Ingress">Classic Ingress (nginx / traefik)</option>
+                                            <option value="@OpenLdapExposeMode.None">Not exposed (ClusterIP only)</option>
+                                        </select>
+                                        @if (cfg.LtbPasswdExposeMode == OpenLdapExposeMode.Ingress)
+                                        {
+                                            <input class="form-control form-control-sm mb-2" @bind="cfg.LtbPasswdIngressClass"
+                                                   placeholder="ingressClassName (e.g. nginx)" />
+                                        }
+                                        <div class="alert alert-warning py-1 px-2 small mb-1">
+                                            <i class="bi bi-exclamation-triangle me-1"></i>The chart's default self-service image
+                                            (<code>tiredofit/self-service-password</code>) was removed from public registries.
+                                            Supply a compatible image (same <code>LDAP_SERVER</code>/<code>LDAP_BINDDN</code> env interface)
+                                            to deploy it — otherwise it stays undeployed.
+                                        </div>
+                                        <input class="form-control form-control-sm @(string.IsNullOrWhiteSpace(cfg.LtbPasswdImage) ? "border-warning" : "")"
+                                               @bind="cfg.LtbPasswdImage" placeholder="required image, e.g. myrepo/self-service-password:1.0" />
+                                    }
+                                </div>
+                                @if ((cfg.PhpLdapAdminEnabled && cfg.PhpLdapAdminExposeMode != OpenLdapExposeMode.None)
+                                     || (cfg.LtbPasswdEnabled && cfg.LtbPasswdExposeMode != OpenLdapExposeMode.None))
+                                {
+                                    <div class="col-md-6">
+                                        <label class="form-label small">Web UI TLS ClusterIssuer</label>
+                                        <input class="form-control form-control-sm" @bind="cfg.WebUiClusterIssuer"
+                                               placeholder="letsencrypt-prod" />
+                                        <div class="form-text">
+                                            Public cert for the web UIs (Gateway route TLS / Ingress cert-manager annotation).
+                                            Public hostnames, so a public ACME issuer fits here.
+                                        </div>
+                                    </div>
+                                }
                             </div>
                         </div></div>
                     </div>
@@ -380,9 +484,26 @@
         await LoadSelectedConfigAsync();
     }
 
+    // True once the selected instance has a saved config row (directory CRUD needs its Id).
+    private bool IsPersisted => selected?.Config is not null;
+
     private async Task LoadSelectedConfigAsync()
     {
-        cfg = selected?.Config is not null ? await OpenLdap.GetConfigAsync(selected.Config.Id) : null;
+        if (selected?.Config is not null)
+        {
+            cfg = await OpenLdap.GetConfigAsync(selected.Config.Id);
+        }
+        else if (selected is not null)
+        {
+            // Unconfigured instance — seed an in-memory default so the operator can configure it.
+            // The first Save creates the config row (ConfigureAsync upserts).
+            cfg = new OpenLdapComponentConfig { BaseDn = "dc=example,dc=com" };
+            view = "config";
+        }
+        else
+        {
+            cfg = null;
+        }
         adminPassword = configPassword = null;
     }
 
@@ -394,6 +515,17 @@
     private async Task<bool> PersistConfigAsync()
     {
         if (selected?.Component is null || cfg is null) return false;
+
+        // Required-when-exposed validation for the bundled web UIs.
+        if (!ValidateWebUi("phpLDAPadmin", cfg.PhpLdapAdminEnabled, cfg.PhpLdapAdminExposeMode, cfg.PhpLdapAdminHostname)) return false;
+        if (!ValidateWebUi("the self-service password portal", cfg.LtbPasswdEnabled, cfg.LtbPasswdExposeMode, cfg.LtbPasswdHostname)) return false;
+
+        // LTB has no working default image — warn (non-blocking) that it won't deploy without one.
+        if (cfg.LtbPasswdEnabled && string.IsNullOrWhiteSpace(cfg.LtbPasswdImage))
+        {
+            Toasts.Warning("Self-service password portal has no image set — it will not be deployed. Provide a compatible image to enable it.");
+        }
+
         OpenLdapComponentConfig edited = cfg;
         await OpenLdap.ConfigureAsync(TenantId, selected.Component.Id, target =>
         {
@@ -414,6 +546,17 @@
             target.PpolicyLockoutDurationSeconds = edited.PpolicyLockoutDurationSeconds;
             target.PpolicyMaxAgeDays = edited.PpolicyMaxAgeDays;
             target.PpolicyInHistory = edited.PpolicyInHistory;
+            target.PhpLdapAdminEnabled = edited.PhpLdapAdminEnabled;
+            target.PhpLdapAdminHostname = edited.PhpLdapAdminEnabled ? edited.PhpLdapAdminHostname?.Trim() : null;
+            target.PhpLdapAdminExposeMode = edited.PhpLdapAdminExposeMode;
+            target.PhpLdapAdminIngressClass = edited.PhpLdapAdminExposeMode == OpenLdapExposeMode.Ingress ? edited.PhpLdapAdminIngressClass?.Trim() : null;
+            target.PhpLdapAdminImage = string.IsNullOrWhiteSpace(edited.PhpLdapAdminImage) ? null : edited.PhpLdapAdminImage.Trim();
+            target.LtbPasswdEnabled = edited.LtbPasswdEnabled;
+            target.LtbPasswdHostname = edited.LtbPasswdEnabled ? edited.LtbPasswdHostname?.Trim() : null;
+            target.LtbPasswdExposeMode = edited.LtbPasswdExposeMode;
+            target.LtbPasswdIngressClass = edited.LtbPasswdExposeMode == OpenLdapExposeMode.Ingress ? edited.LtbPasswdIngressClass?.Trim() : null;
+            target.LtbPasswdImage = string.IsNullOrWhiteSpace(edited.LtbPasswdImage) ? null : edited.LtbPasswdImage.Trim();
+            target.WebUiClusterIssuer = string.IsNullOrWhiteSpace(edited.WebUiClusterIssuer) ? null : edited.WebUiClusterIssuer.Trim();
         }, adminPassword, configPassword);
         adminPassword = configPassword = null;
         return true;
@@ -422,7 +565,14 @@
     private async Task SaveConfigAsync()
     {
         busy = true;
-        try { if (await PersistConfigAsync()) Toasts.Success("Directory configuration saved."); }
+        try
+        {
+            if (await PersistConfigAsync())
+            {
+                Toasts.Success("Directory configuration saved.");
+                await LoadAsync(); // refresh so an initialized instance is no longer "unconfigured"
+            }
+        }
         catch (Exception ex) { Toasts.Error($"Save failed: {ex.Message}"); }
         finally { busy = false; }
     }
@@ -433,10 +583,11 @@
         busy = true;
         try
         {
-            await PersistConfigAsync();
+            if (!await PersistConfigAsync()) return;
             HelmExecutionResult result = await InstallOrchestrator.InstallAsync(TenantId, selected.Component.Id);
             if (result.Success) Toasts.Success("Applied to cluster — OpenLDAP upgraded with the current directory.");
             else Toasts.Error($"Apply failed: {result.Output}");
+            await LoadAsync();
         }
         catch (Exception ex) { Toasts.Error($"Apply failed: {ex.Message}"); }
         finally { busy = false; }
@@ -520,6 +671,22 @@
         try { await pendingConfirm.Value.Action(); }
         catch (Exception ex) { Toasts.Error($"Operation failed: {ex.Message}"); }
         finally { confirmBusy = false; pendingConfirm = null; }
+    }
+
+    private bool ValidateWebUi(string label, bool enabled, OpenLdapExposeMode mode, string? hostname)
+    {
+        if (!enabled || mode == OpenLdapExposeMode.None) return true;
+        if (string.IsNullOrWhiteSpace(hostname))
+        {
+            Toasts.Warning($"Enter a hostname to expose {label}, or set it to \"Not exposed\".");
+            return false;
+        }
+        if (mode == OpenLdapExposeMode.Gateway && string.IsNullOrWhiteSpace(cfg?.WebUiClusterIssuer))
+        {
+            Toasts.Warning($"A Web UI TLS ClusterIssuer is required to expose {label} via a Gateway route.");
+            return false;
+        }
+        return true;
     }
 
     private string OuName(Guid? ouId) =>

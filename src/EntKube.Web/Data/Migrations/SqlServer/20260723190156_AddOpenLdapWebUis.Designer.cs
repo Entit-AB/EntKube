@@ -4,6 +4,7 @@ using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.SqlServer
 {
     [DbContext(typeof(SqlServerApplicationDbContext))]
-    partial class SqlServerApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260723190156_AddOpenLdapWebUis")]
+    partial class AddOpenLdapWebUis
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3834,22 +3837,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<bool>("LtbPasswdEnabled")
                         .HasColumnType("bit");
 
-                    b.Property<string>("LtbPasswdExposeMode")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("nvarchar(20)");
-
                     b.Property<string>("LtbPasswdHostname")
                         .HasMaxLength(253)
                         .HasColumnType("nvarchar(253)");
-
-                    b.Property<string>("LtbPasswdImage")
-                        .HasMaxLength(300)
-                        .HasColumnType("nvarchar(300)");
-
-                    b.Property<string>("LtbPasswdIngressClass")
-                        .HasMaxLength(100)
-                        .HasColumnType("nvarchar(100)");
 
                     b.Property<bool>("MemberOfEnabled")
                         .HasColumnType("bit");
@@ -3865,22 +3855,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<bool>("PhpLdapAdminEnabled")
                         .HasColumnType("bit");
 
-                    b.Property<string>("PhpLdapAdminExposeMode")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("nvarchar(20)");
-
                     b.Property<string>("PhpLdapAdminHostname")
                         .HasMaxLength(253)
                         .HasColumnType("nvarchar(253)");
-
-                    b.Property<string>("PhpLdapAdminImage")
-                        .HasMaxLength(300)
-                        .HasColumnType("nvarchar(300)");
-
-                    b.Property<string>("PhpLdapAdminIngressClass")
-                        .HasMaxLength(100)
-                        .HasColumnType("nvarchar(100)");
 
                     b.Property<int>("PpolicyInHistory")
                         .HasColumnType("int");
@@ -3928,10 +3905,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("datetime2");
-
-                    b.Property<string>("WebUiClusterIssuer")
-                        .HasMaxLength(200)
-                        .HasColumnType("nvarchar(200)");
 
                     b.HasKey("Id");
 

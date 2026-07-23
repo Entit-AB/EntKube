@@ -302,36 +302,7 @@ public class CatalogComponentRegistrar(
             return;
         }
 
-        string baseDn = fieldValues.TryGetValue("base-dn", out string? b) && !string.IsNullOrWhiteSpace(b) ? b.Trim() : "dc=example,dc=com";
-        string org = fieldValues.TryGetValue("organization", out string? o) && !string.IsNullOrWhiteSpace(o) ? o.Trim() : "EntKube";
-        string tlsMode = fieldValues.TryGetValue("tls-mode", out string? t) && !string.IsNullOrWhiteSpace(t) ? t : "ClusterIssuer";
-        string? issuer = fieldValues.TryGetValue("cluster-issuer", out string? i) && !string.IsNullOrWhiteSpace(i) ? i : null;
-        int replicas = fieldValues.TryGetValue("replica-count", out string? r) && int.TryParse(r, out int rp) && rp > 0 ? rp : 1;
-        string storage = fieldValues.TryGetValue("storage-size", out string? s) && !string.IsNullOrWhiteSpace(s) ? s.Trim() : "8Gi";
-        fieldValues.TryGetValue("admin-password", out string? adminPassword);
-        fieldValues.TryGetValue("config-password", out string? configPassword);
-
-        OpenLdapTlsMode mode = tlsMode switch
-        {
-            "Off" => OpenLdapTlsMode.Off,
-            "Manual" => OpenLdapTlsMode.Manual,
-            _ => OpenLdapTlsMode.ClusterIssuer,
-        };
-
-        await openLdapService.ConfigureAsync(
-            tenantId, componentId,
-            cfg =>
-            {
-                cfg.BaseDn = baseDn;
-                cfg.Organization = org;
-                cfg.TlsMode = mode;
-                cfg.ClusterIssuer = mode == OpenLdapTlsMode.ClusterIssuer ? issuer : null;
-                cfg.ReplicaCount = replicas;
-                cfg.ReplicationEnabled = replicas > 1;
-                cfg.StorageSize = storage;
-            },
-            string.IsNullOrWhiteSpace(adminPassword) ? null : adminPassword,
-            string.IsNullOrWhiteSpace(configPassword) ? null : configPassword);
+        await openLdapService.ConfigureFromFormAsync(tenantId, componentId, fieldValues);
     }
 
     private async Task SaveLokiConfigIfNeededAsync(
