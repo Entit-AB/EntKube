@@ -259,6 +259,53 @@ public class OpenLdapServiceTests
         manifest.Should().Contain("kind: ClusterIssuer");
     }
 
+    // ── Conditional cert-manager dependency ───────────────────────────────────
+
+    private static CatalogEntry OpenLdapEntry() =>
+        ComponentCatalog.Entries.Single(e => e.Key == OpenLdapService.CatalogKey);
+
+    [Fact]
+    public void CertManager_IsRequired_WhenTlsModeIsClusterIssuer()
+    {
+        var check = ComponentCatalog.CheckDependencies(
+            OpenLdapEntry(), installedComponentNames: [],
+            formValues: new Dictionary<string, string> { ["tls-mode"] = "ClusterIssuer" });
+
+        check.MissingDependencies.Should().Contain("cert-manager");
+        check.IsSatisfied.Should().BeFalse();
+    }
+
+    [Fact]
+    public void CertManager_NotRequired_WhenTlsModeIsOff()
+    {
+        var check = ComponentCatalog.CheckDependencies(
+            OpenLdapEntry(), installedComponentNames: [],
+            formValues: new Dictionary<string, string> { ["tls-mode"] = "Off" });
+
+        check.MissingDependencies.Should().NotContain("cert-manager");
+        check.IsSatisfied.Should().BeTrue();
+    }
+
+    [Fact]
+    public void CertManager_Satisfied_WhenInstalled()
+    {
+        var check = ComponentCatalog.CheckDependencies(
+            OpenLdapEntry(), installedComponentNames: ["cert-manager"],
+            formValues: new Dictionary<string, string> { ["tls-mode"] = "ClusterIssuer" });
+
+        check.MissingDependencies.Should().NotContain("cert-manager");
+        check.IsSatisfied.Should().BeTrue();
+    }
+
+    [Fact]
+    public void CertManager_UsesFieldDefault_WhenNoFormValues()
+    {
+        // Default tls-mode is ClusterIssuer, so the dependency shows without any form input.
+        var check = ComponentCatalog.CheckDependencies(OpenLdapEntry(), installedComponentNames: []);
+
+        check.MissingDependencies.Should().Contain("cert-manager");
+    }
+
     [Fact]
     public void BuildRootLdif_EmitsDcObjectOrganization()
     {

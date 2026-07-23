@@ -1886,7 +1886,9 @@ else if (section == "components")
     {
         List<string> installedKeys = ComponentCatalog.ResolveInstalledKeys(
             components?.Select(c => (c.Name, c.HelmChartName, c.ReleaseName)) ?? []);
-        return ComponentCatalog.CheckDependencies(entry, installedKeys);
+        // Pass the live form selections so conditional dependencies (e.g. cert-manager only
+        // when TLS mode is ClusterIssuer) are evaluated against what the operator picked.
+        return ComponentCatalog.CheckDependencies(entry, installedKeys, regFormFieldValues);
     }
 
     private async Task SelectCatalogEntry(CatalogEntry entry)

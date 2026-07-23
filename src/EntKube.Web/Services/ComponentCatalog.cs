@@ -88,6 +88,14 @@ public class CatalogEntry
     public IReadOnlyList<DependencyRequirement> RequiresOneOf { get; init; } = [];
 
     /// <summary>
+    /// Dependencies that only apply when a form field has a particular value — e.g.
+    /// OpenLDAP requires cert-manager only when TLS mode is "ClusterIssuer". These are
+    /// evaluated against the operator's current form selections (falling back to the
+    /// field's default) so the dependency appears exactly when it's actually needed.
+    /// </summary>
+    public IReadOnlyList<ConditionalDependency> ConditionalDependencies { get; init; } = [];
+
+    /// <summary>
     /// Form fields that provide a user-friendly way to configure the most common
     /// Helm values. These render as simple form controls (text boxes, selects,
     /// toggles) so operators don't need to understand YAML for routine settings.
@@ -121,6 +129,14 @@ public class DependencyRequirement
     /// <summary>Catalog entry keys that can satisfy this requirement.</summary>
     public required IReadOnlyList<string> Options { get; init; }
 }
+
+/// <summary>
+/// A dependency that only applies when a form field equals a specific value.
+/// </summary>
+/// <param name="DependencyKey">Catalog entry key that must be installed when the condition holds.</param>
+/// <param name="WhenFieldKey">The <see cref="ComponentFormField.Key"/> whose value gates the dependency.</param>
+/// <param name="EqualsValue">The value that activates the dependency (case-insensitive).</param>
+public sealed record ConditionalDependency(string DependencyKey, string WhenFieldKey, string EqualsValue);
 
 /// <summary>
 /// The component catalog is a static, in-memory registry of all the infrastructure
@@ -2017,6 +2033,9 @@ public static class ComponentCatalog
             DefaultReleaseName = "openldap",
             // slapd + optional replication rollout node-by-node can exceed the default 10m.
             InstallTimeout = "20m0s",
+            // cert-manager is required only when TLS mode is ClusterIssuer (a real cert is
+            // issued into the openldap-tls Secret before install).
+            ConditionalDependencies = [new ConditionalDependency("cert-manager", "tls-mode", "ClusterIssuer")],
             FormFields =
             [
                 new ComponentFormField
@@ -3706,7 +3725,10 @@ public static class ComponentCatalog
     /// catalog entry, based on the components already present on the cluster.
     /// Returns a result describing the status of each dependency.
     /// </summary>
-    public static DependencyCheckResult CheckDependencies(CatalogEntry entry, IEnumerable<string> installedComponentNames)
+    public static DependencyCheckResult CheckDependencies(
+        CatalogEntry entry,
+        IEnumerable<string> installedComponentNames,
+        IReadOnlyDictionary<string, string>? formValues = null)
     {
         HashSet<string> installed = new(installedComponentNames, StringComparer.OrdinalIgnoreCase);
         List<string> missingDirect = [];
@@ -3719,6 +3741,22 @@ public static class ComponentCatalog
             if (!installed.Contains(dep))
             {
                 missingDirect.Add(dep);
+            }
+        }
+
+        // Conditional dependencies — active only when their gating field has the trigger value.
+        // Use the operator's current form selection, falling back to the field's default so the
+        // dependency shows on the catalog card before the form is touched.
+        foreach (ConditionalDependency cond in entry.ConditionalDependencies)
+        {
+            string? activeValue = formValues != null && formValues.TryGetValue(cond.WhenFieldKey, out string? v)
+                ? v
+                : entry.FormFields.FirstOrDefault(f => f.Key == cond.WhenFieldKey)?.DefaultValue;
+
+            bool active = string.Equals(activeValue, cond.EqualsValue, StringComparison.OrdinalIgnoreCase);
+            if (active && !installed.Contains(cond.DependencyKey) && !missingDirect.Contains(cond.DependencyKey))
+            {
+                missingDirect.Add(cond.DependencyKey);
             }
         }
 
