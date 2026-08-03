@@ -826,7 +826,13 @@ else if (section == "components")
                                             }
                                             @if (!string.IsNullOrEmpty(comp.HelmChartVersion))
                                             {
-                                                <small class="text-muted"><i class="bi bi-tag me-1"></i>v@(comp.HelmChartVersion)</small>
+                                                <small class="text-muted"><i class="bi bi-tag me-1"></i>@FormatChartVersion(comp.HelmChartVersion)</small>
+                                            }
+                                            else if (comp.Status == ComponentStatus.Installed && comp.ComponentType == "HelmChart")
+                                            {
+                                                <small class="text-muted" title="This component was adopted from the cluster, so its installed chart version is unknown. Upgrading pins it to the catalog version.">
+                                                    <i class="bi bi-tag me-1"></i>version unknown
+                                                </small>
                                             }
                                             @if (headerCatalog is not null
                                                 && !string.IsNullOrEmpty(headerCatalog.HelmChartVersion)
@@ -834,7 +840,7 @@ else if (section == "components")
                                                 && comp.HelmChartVersion != headerCatalog.HelmChartVersion)
                                             {
                                                 <span class="badge bg-info text-dark"
-                                                      title="Catalog version: @headerCatalog.HelmChartVersion — click Apply to upgrade">
+                                                      title="Catalog version: @FormatChartVersion(headerCatalog.HelmChartVersion) — click Upgrade to move to it">
                                                     <i class="bi bi-arrow-up-circle me-1"></i>Update available
                                                 </span>
                                             }
@@ -891,7 +897,7 @@ else if (section == "components")
                                         }
                                         <button class="btn btn-sm @(HasCatalogUpdate(comp, headerCatalog) ? "btn-primary" : "btn-outline-primary")"
                                                 @onclick="() => UpgradeComponent(comp.Id)"
-                                                title="@(HasCatalogUpdate(comp, headerCatalog) ? $"Upgrade to v{headerCatalog!.HelmChartVersion}" : "Apply configuration changes")">
+                                                title="@(HasCatalogUpdate(comp, headerCatalog) ? $"Upgrade to {FormatChartVersion(headerCatalog!.HelmChartVersion)}" : "Apply configuration changes")">
                                             <i class="bi @(HasCatalogUpdate(comp, headerCatalog) ? "bi-arrow-up-circle-fill" : "bi-arrow-clockwise") me-1"></i>@(HasCatalogUpdate(comp, headerCatalog) ? "Upgrade" : "Apply")
                                         </button>
                                         <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmDeleteComponentId = comp.Id" title="Uninstall">
@@ -2271,6 +2277,20 @@ else if (section == "components")
             // But first reset status to allow the operation.
 
             ClusterComponent comp = components!.First(c => c.Id == componentId);
+
+            // The helm command is built from the component's *stored* chart version, so an
+            // "Upgrade" click would otherwise re-run `helm upgrade --version <current>` — a
+            // no-op that leaves the Upgrade badge in place. Pin the component to the catalog
+            // version first so helm actually pulls the newer chart.
+
+            CatalogEntry? upgradeCatalog = ResolveCatalog(comp);
+            if (HasCatalogUpdate(comp, upgradeCatalog))
+            {
+                await LifecycleService.UpdateConfigurationAsync(
+                    componentId, helmValues: null, chartVersion: upgradeCatalog!.HelmChartVersion);
+                comp.HelmChartVersion = upgradeCatalog.HelmChartVersion;
+            }
+
             comp.Status = ComponentStatus.Installing;
             await LifecycleService.MarkInstallResultAsync(componentId, false, "Upgrading...");
 
@@ -3147,7 +3167,22 @@ else if (section == "components")
         entry is not null
         && !string.IsNullOrEmpty(entry.HelmChartVersion)
         && comp.Status == ComponentStatus.Installed
-        && comp.HelmChartVersion != entry.HelmChartVersion;
+        && !string.Equals(
+            NormalizeChartVersion(comp.HelmChartVersion),
+            NormalizeChartVersion(entry.HelmChartVersion),
+            StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Strips a leading "v" so versions compare on their semver alone. Charts are
+    /// inconsistent about the prefix (jetstack publishes "v0.24.0", most publish
+    /// "0.24.0"), and a prefix-only difference is not an available upgrade.
+    /// </summary>
+    private static string NormalizeChartVersion(string? version) =>
+        version?.Trim().TrimStart('v', 'V') ?? "";
+
+    /// <summary>Renders a chart version with exactly one "v" prefix.</summary>
+    private static string FormatChartVersion(string? version) =>
+        string.IsNullOrWhiteSpace(version) ? "" : "v" + NormalizeChartVersion(version);
 
     private static bool IsKeycloakComponent(ClusterComponent comp) =>
         comp.Name == "keycloak"
