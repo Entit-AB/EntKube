@@ -391,6 +391,15 @@ public class KubernetesOperationsService(
     }
 
     /// <summary>
+    /// Whether a Service port conventionally speaks TLS, so the gateway must originate TLS
+    /// rather than connect in plaintext. Port-number based on purpose: the Service's port NAME
+    /// would be more precise but is not carried on <see cref="AppDeploymentRoute"/>, and reading
+    /// it back would mean a cluster round-trip per route on every apply. A backend that serves
+    /// plaintext on 443 is the rarer mistake, and it fails loudly rather than silently.
+    /// </summary>
+    private static bool IsTlsPort(int port) => port is 443 or 8443;
+
+    /// <summary>
     /// Restarts a Kubernetes Deployment by patching its pod template annotation
     /// with the current timestamp. This triggers a rolling restart — Kubernetes
     /// creates new pods and terminates old ones gradually.
@@ -1174,21 +1183,58 @@ public class KubernetesOperationsService(
             // non-root namespace is only guaranteed to affect traffic originating from that
             // namespace, not from gateway pods in istio-system. The FQDN host uniquely
             // identifies the target service regardless of where the rule is stored.
-            foreach (AppDeploymentRoute enabledRoute in enabledRoutes)
+            // One DestinationRule per backend Service, covering every port routed to it. Grouping
+            // matters: the rule name is service-derived, so emitting one per route would make the
+            // last route silently overwrite the settings of its siblings on other ports.
+            var routesByService = enabledRoutes
+                .GroupBy(r => (
+                    Svc: r.ServiceName,
+                    Ns: r.AppDeployment?.Namespace ?? dr.AppDeployment.Namespace));
+
+            foreach (var svcGroup in routesByService)
             {
-                string svc = enabledRoute.ServiceName;
-                string svcNs = enabledRoute.AppDeployment?.Namespace ?? dr.AppDeployment.Namespace;
+                IEnumerable<int> ports = svcGroup.Select(r => r.ServicePort).Distinct().OrderBy(p => p);
+
+                string portSettings = string.Concat(ports.Select(port =>
+                    $"      - port:\n" +
+                    $"          number: {port}\n" +
+                    $"        tls:\n" +
+                    // A backend that terminates TLS itself (Kestrel on 8443, say) rejects the
+                    // plaintext Envoy would otherwise send, and the gateway reports a 503
+                    // "connection termination" that looks like an unhealthy upstream rather than a
+                    // protocol mismatch. Originate TLS for the conventional TLS ports and stay
+                    // plaintext elsewhere. Verification is skipped because these are in-cluster
+                    // certs issued for the Service name, not the FQDN Envoy connects to.
+                    (IsTlsPort(port)
+                        ? $"          mode: SIMPLE\n" +
+                          $"          insecureSkipVerify: true\n"
+                        : $"          mode: DISABLE\n") +
+                    // Session affinity, hashed on a cookie Envoy issues itself. Blazor Server and
+                    // SignalR negotiate on one request and open the WebSocket on the next; without
+                    // affinity the second request round-robins to a pod that has never heard of
+                    // that connection id and answers 404, so a multi-replica app fails to connect
+                    // (1 - 1/replicas) of the time while every pod stays Ready. A backplane does not
+                    // help — Blazor circuits are per-server state and cannot move between pods.
+                    // NB: portLevelSettings REPLACES the destination-level trafficPolicy for that
+                    // port, so the load balancer has to be declared here, not alongside it.
+                    $"        loadBalancer:\n" +
+                    $"          consistentHash:\n" +
+                    $"            httpCookie:\n" +
+                    $"              name: entkube-affinity\n" +
+                    $"              path: /\n" +
+                    $"              ttl: 0s\n"));
+
                 string destinationRuleYaml =
                     $"apiVersion: networking.istio.io/v1beta1\n" +
                     $"kind: DestinationRule\n" +
                     $"metadata:\n" +
-                    $"  name: entkube-disable-mtls-{svc}\n" +
+                    $"  name: entkube-disable-mtls-{svcGroup.Key.Svc}\n" +
                     $"  namespace: {gwNamespace}\n" +
                     $"spec:\n" +
-                    $"  host: {svc}.{svcNs}.svc.cluster.local\n" +
+                    $"  host: {svcGroup.Key.Svc}.{svcGroup.Key.Ns}.svc.cluster.local\n" +
                     $"  trafficPolicy:\n" +
-                    $"    tls:\n" +
-                    $"      mode: DISABLE\n";
+                    $"    portLevelSettings:\n" +
+                    portSettings;
                 await ApplyRawYamlAsync(kubeconfig, destinationRuleYaml, ct);
             }
         }
