@@ -443,3 +443,5 @@ src/EntKube.Web/keys/
 /src/EntKube.Web/appsettings.Development.json
 /src/EntKube.Web/appsettings.Production.json
 !/src/EntKube.Web/appsettings*.json.example
+
+*/kubecontext.yaml

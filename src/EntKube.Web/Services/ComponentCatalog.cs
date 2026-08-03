@@ -684,6 +684,7 @@ public static class ComponentCatalog
             Category = "Certificate Management",
             HelmRepoUrl = "https://charts.jetstack.io",
             HelmChartName = "trust-manager",
+            HelmChartVersion = "v0.24.0",
             DefaultNamespace = "cert-manager",
             DefaultReleaseName = "trust-manager",
             Dependencies = ["cert-manager"],
@@ -704,7 +705,7 @@ public static class ComponentCatalog
                     Key = "enable-secret-targets", Label = "Allow Secret targets",
                     YamlPath = "secretTargets.enabled", Type = FormFieldType.Toggle,
                     DefaultValue = "false",
-                    HelpText = "Permit Bundles to write their trust store to a Secret (not just a ConfigMap). Required if you distribute a bundle as a Secret."
+                    HelpText = "Permit Bundles to write their trust store to a Secret (not just a ConfigMap). Required if you distribute a bundle as a Secret. Note this grants trust-manager read access to every Secret in the cluster — Kubernetes RBAC cannot scope list/watch to named Secrets."
                 },
                 new ComponentFormField
                 {
@@ -726,8 +727,14 @@ public static class ComponentCatalog
                     namespace: cert-manager
 
                 # Only enable if you distribute trust bundles as Secrets rather than ConfigMaps.
+                # authorizedSecretsAll MUST accompany enabled:true — the chart gates the
+                # cluster-scoped Secret RBAC on it, while `enabled` alone still passes
+                # --secret-targets-enabled to the binary. Without it trust-manager starts a
+                # cluster-wide Secret informer it has no permission to list, the bundles cache
+                # never syncs, and the pod crash-loops. It is inert while enabled is false.
                 secretTargets:
                   enabled: false
+                  authorizedSecretsAll: true
 
                 resources:
                   requests:
