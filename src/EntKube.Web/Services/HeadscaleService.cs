@@ -413,6 +413,13 @@ public class HeadscaleService(
         //
         // Fix: patch the TLS filter chain for the headscale SNI to only advertise http/1.1,
         // forcing Tailscale to connect over HTTP/1.1 where the Upgrade mechanism works.
+        //
+        // BLAST-RADIUS WARNING: the sni match only isolates headscale when the Gateway gives it
+        // its own server block/certificate. Under a single wildcard-cert listener Istio builds
+        // ONE filter chain for every host on :443, so this patch strips h2 from ALL of them —
+        // gRPC clients on the shared gateway then fail to negotiate HTTP/2. If headscale shares
+        // a wildcard listener, prefer SwitchToTlsPassthroughAsync below, which keeps Envoy's
+        // HTTP layer (and everyone else's ALPN) out of the picture entirely.
         string alpnFilter = $"""
             apiVersion: networking.istio.io/v1alpha3
             kind: EnvoyFilter
@@ -441,8 +448,19 @@ public class HeadscaleService(
         await k8sFactory.ApplyManifestAsync(alpnFilter, kubeconfig, ct);
 
         // Secondary fix: with HTTP/1.1 in place, Envoy must recognise the ts2021 upgrade type
-        // or it will strip the Upgrade header before forwarding. No portNumber filter so it
-        // applies regardless of whether the gateway pod listens on 443 or 8443 internally.
+        // or it will strip the Upgrade header before forwarding.
+        //
+        // TWO THINGS HERE ARE LOAD-BEARING, both learned the hard way:
+        //
+        //  1. The filterChain match MUST carry the headscale SNI. Without it this patches the
+        //     HttpConnectionManager of EVERY HTTP filter chain on the gateway — every host, not
+        //     just headscale — because `context: GATEWAY` alone matches them all.
+        //  2. `websocket` MUST be listed alongside ts2021. Envoy treats a configured
+        //     upgrade_configs as the allow-list of upgrade types; if the merge lands as a
+        //     replace rather than an append, an entry of only [ts2021] silently revokes
+        //     websocket for everything behind the gateway. Any app relying on WebSockets
+        //     (Blazor Server circuits, SignalR, live-reload) then fails to connect. Listing it
+        //     explicitly is correct under either merge semantics.
         string upgradeFilter = $"""
             apiVersion: networking.istio.io/v1alpha3
             kind: EnvoyFilter
@@ -456,6 +474,7 @@ public class HeadscaleService(
                   context: GATEWAY
                   listener:
                     filterChain:
+                      sni: {hostname}
                       filter:
                         name: envoy.filters.network.http_connection_manager
                 patch:
@@ -464,6 +483,7 @@ public class HeadscaleService(
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                       upgrade_configs:
+                      - upgrade_type: websocket
                       - upgrade_type: ts2021
             """;
         await k8sFactory.ApplyManifestAsync(upgradeFilter, kubeconfig, ct);
