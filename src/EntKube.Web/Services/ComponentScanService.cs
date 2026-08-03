@@ -1173,6 +1173,13 @@ public class ComponentScanService(
             existing.Status = ComponentStatus.Installed;
             existing.Namespace = discovered.Namespace;
             existing.InstalledAt ??= DateTime.UtcNow;
+
+            // Backfill chart identity for components adopted before this was recorded.
+            // The version is deliberately left alone — an out-of-band install's real chart
+            // version is unknown, and claiming the catalog's would be a guess.
+            existing.HelmChartName ??= catalog?.HelmChartName;
+            existing.HelmRepoUrl ??= catalog?.HelmRepoUrl;
+
             await db.SaveChangesAsync(ct);
             return existing;
         }
@@ -1186,6 +1193,7 @@ public class ComponentScanService(
             Status = ComponentStatus.Installed,
             Namespace = discovered.Namespace,
             HelmRepoUrl = catalog?.HelmRepoUrl,
+            HelmChartName = catalog?.HelmChartName,
             ReleaseName = catalog?.DefaultReleaseName,
             InstalledAt = DateTime.UtcNow,
             CreatedAt = DateTime.UtcNow
