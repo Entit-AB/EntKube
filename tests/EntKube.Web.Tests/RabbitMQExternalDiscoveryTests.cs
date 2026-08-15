@@ -4,6 +4,7 @@ using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Moq;
+using Moq.Language.Flow;
 
 namespace EntKube.Web.Tests;
 
@@ -593,6 +594,119 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         command.Should().Equal(
             ["rabbitmqctl", "set_permissions", "--vhost", "orders", "app", ".*", ".*", ".*"]);
 
+        k8s.Verify(f => f.ApplyManifestAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    // ──────── Operator-managed broker WITHOUT the Topology Operator ────────
+
+    /// <summary>
+    /// Seeds an operator-managed cluster directly (as if created by EntKube via the Cluster
+    /// Operator) and controls whether the Topology Operator CRDs are registered.
+    /// </summary>
+    private async Task<(Guid TenantId, Guid ClusterId)> SeedOperatorManagedAsync(bool topologyCrdsPresent)
+    {
+        (Tenant tenant, KubernetesCluster k8sCluster) = await SeedTenantWithClusterAsync();
+
+        RabbitMQCluster cluster = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = k8sCluster.Id,
+            Name = "managed",
+            Namespace = "messaging",
+            RabbitMQVersion = "3.13",
+            StorageSize = "10Gi",
+            Status = RabbitMQClusterStatus.Running,
+            IsOperatorManaged = true
+        };
+        db.RabbitMQClusters.Add(cluster);
+        await db.SaveChangesAsync();
+
+        ISetup<IKubernetesClientFactory, Task<string>> probe = k8s.Setup(f => f.GetJsonAsync(
+            "crd/vhosts.rabbitmq.com", It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<string>(), It.IsAny<CancellationToken>()));
+
+        if (topologyCrdsPresent)
+        {
+            probe.ReturnsAsync("""{"kind":"CustomResourceDefinition"}""");
+        }
+        else
+        {
+            // Exactly what kubectl reports when the Topology Operator was never installed.
+            probe.ThrowsAsync(new InvalidOperationException(
+                "kubectl failed (exit 1): error: the server doesn't have a resource type \"vhosts\""));
+        }
+
+        return (tenant.Id, cluster.Id);
+    }
+
+    [Fact]
+    public async Task GetVhostsAsync_OperatorManagedWithoutTopologyOperator_FallsBackToRabbitmqctl()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedOperatorManagedAsync(topologyCrdsPresent: false);
+
+        k8s.Setup(f => f.RunCommandOnPodAsync(
+                "managed-server-0", "messaging",
+                It.Is<IReadOnlyList<string>>(c => c.Contains("list_vhosts")),
+                It.IsAny<string>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
+                It.IsAny<CancellationToken>(), It.IsAny<int>(), It.IsAny<bool>()))
+            .ReturnsAsync("""[{"name":"/"},{"name":"orders"}]""");
+
+        List<RabbitMQVhostInfo> vhosts = await sut.GetVhostsAsync(tenantId, clusterId);
+
+        vhosts.Select(v => v.VhostName).Should().BeEquivalentTo(["/", "orders"]);
+
+        // The CRD query that produced "the server doesn't have a resource type" must not happen.
+        k8s.Verify(f => f.GetJsonAsync(
+            "vhosts.rabbitmq.com", It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task GetVhostsAsync_OperatorManagedWithTopologyOperator_StillUsesCrds()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedOperatorManagedAsync(topologyCrdsPresent: true);
+
+        k8s.Setup(f => f.GetJsonAsync(
+                "vhosts.rabbitmq.com", It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""
+                {"items":[{"metadata":{"name":"managed-vh-orders"},"spec":{"name":"orders"}}]}
+                """);
+
+        List<RabbitMQVhostInfo> vhosts = await sut.GetVhostsAsync(tenantId, clusterId);
+
+        vhosts.Should().ContainSingle().Which.VhostName.Should().Be("orders");
+        // CR-backed clusters keep the K8s object name — the operator owns these entries.
+        vhosts[0].K8sName.Should().Be("managed-vh-orders");
+
+        k8s.Verify(f => f.RunCommandOnPodAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+            It.IsAny<string>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
+            It.IsAny<CancellationToken>(), It.IsAny<int>(), It.IsAny<bool>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task CreateVhostAsync_OperatorManagedWithoutTopologyOperator_UsesCtlNotAManifest()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedOperatorManagedAsync(topologyCrdsPresent: false);
+
+        List<string>? command = null;
+        k8s.Setup(f => f.RunCommandOnPodAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<string>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
+                It.IsAny<CancellationToken>(), It.IsAny<int>(), It.IsAny<bool>()))
+            .Callback((string _, string _, IReadOnlyList<string> cmd, string _,
+                       IReadOnlyDictionary<string, string>? _, CancellationToken _, int _, bool _) =>
+                command = [.. cmd])
+            .ReturnsAsync("");
+
+        await sut.CreateVhostAsync(tenantId, clusterId, "orders");
+
+        command.Should().Equal(["rabbitmqctl", "add_vhost", "orders"]);
+
+        // Applying a Vhost CR would fail on a cluster with no Topology Operator.
         k8s.Verify(f => f.ApplyManifestAsync(
             It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }

@@ -252,6 +252,21 @@
                                     binding, so those must be removed from its management UI.
                                 </div>
                             }
+                            else if (!topologyIsCrdBacked && !loadingTopology)
+                            {
+                                @* Cluster Operator present, Topology Operator absent — the CRDs this
+                                   page would otherwise query simply aren't registered. *@
+                                <div class="alert alert-secondary py-2 small mb-3">
+                                    <i class="bi bi-diagram-3 me-1"></i>
+                                    <strong>Topology Operator not installed.</strong>
+                                    EntKube is managing this broker's topology through <code>rabbitmqctl</code>
+                                    instead of Topology Operator CRs. Vhosts, queues, users, permissions and app
+                                    links all work, but they exist only in the broker — not as Kubernetes objects —
+                                    and RabbitMQ has no CLI command to delete an exchange or a binding.
+                                    Install the Topology Operator from the cluster's Components tab for
+                                    declarative, CR-backed topology.
+                                </div>
+                            }
 
                             <ul class="nav nav-pills mb-3 gap-1 flex-wrap" role="tablist" aria-label="RabbitMQ cluster sections">
                                 @foreach (string tab in new[] { "vhosts", "queues", "exchanges", "routing", "users", "app-links", "backup", "credentials", "metrics" })
@@ -329,7 +344,7 @@
                                                     @* External brokers have no K8s object behind a vhost — the
                                                        handle in K8sName is an internal address, not something to show. *@
                                                     <td class="align-middle text-muted font-monospace">
-                                                        @(cluster.IsOperatorManaged ? v.K8sName : "—")
+                                                        @(topologyIsCrdBacked ? v.K8sName : "—")
                                                     </td>
                                                     <td class="align-middle text-end">
                                                         <button class="btn btn-sm btn-outline-danger" title="Delete" aria-label="@($"Delete vhost {v.VhostName}")"
@@ -504,8 +519,8 @@
                                                         @* rabbitmqctl has no delete_exchange, so this is unreachable
                                                            on an external broker. *@
                                                         <button class="btn btn-sm btn-outline-danger" aria-label="@($"Delete exchange {ex.ExchangeName}")"
-                                                                disabled="@(!cluster.IsOperatorManaged)"
-                                                                title="@(cluster.IsOperatorManaged ? "Delete" : "RabbitMQ has no CLI command to delete an exchange — use its management UI")"
+                                                                disabled="@(!topologyIsCrdBacked)"
+                                                                title="@(topologyIsCrdBacked ? "Delete" : "RabbitMQ has no CLI command to delete an exchange — use its management UI")"
                                                                 @onclick='() => PrepareCascadeDelete(cluster, "exchange", ex.K8sName, ex.ExchangeName, ex.Vhost)'>
                                                             <i class="bi bi-trash"></i>
                                                         </button>
@@ -591,8 +606,8 @@
                                                     <td class="align-middle text-end">
                                                         @* Same as exchanges: no rabbitmqctl unbind verb exists. *@
                                                         <button class="btn btn-sm btn-outline-danger" aria-label="Delete binding"
-                                                                disabled="@(!cluster.IsOperatorManaged)"
-                                                                title="@(cluster.IsOperatorManaged ? "Delete" : "RabbitMQ has no CLI command to remove a binding — use its management UI")"
+                                                                disabled="@(!topologyIsCrdBacked)"
+                                                                title="@(topologyIsCrdBacked ? "Delete" : "RabbitMQ has no CLI command to remove a binding — use its management UI")"
                                                                 @onclick='() => PrepareCascadeDelete(cluster, "binding", rb.K8sName, $"{rb.Source} → {rb.Destination}", rb.Vhost)'>
                                                             <i class="bi bi-trash"></i>
                                                         </button>
@@ -666,7 +681,7 @@
                                                         }
                                                     </td>
                                                     <td class="align-middle text-muted font-monospace">
-                                                        @(cluster.IsOperatorManaged ? u.K8sName : "—")
+                                                        @(topologyIsCrdBacked ? u.K8sName : "—")
                                                     </td>
                                                     <td class="align-middle text-end">
                                                         <button class="btn btn-sm btn-outline-warning me-1"
@@ -1243,6 +1258,11 @@
 
     private bool clusterOperatorAvailable;
     private bool topologyOperatorAvailable;
+
+    // Whether the expanded cluster's topology is backed by Topology Operator CRs, or driven
+    // through rabbitmqctl. Resolved against the live cluster per expansion — an operator-managed
+    // broker without the Topology Operator installed falls back to rabbitmqctl like an external one.
+    private bool topologyIsCrdBacked = true;
     private RabbitMQOperatorStatus? operatorStatus;
 
     // Discover existing clusters
@@ -1616,6 +1636,8 @@
 
         try
         {
+            topologyIsCrdBacked = await RabbitMQService.UsesTopologyCrdsAsync(TenantId, clusterId);
+
             switch (clusterTab)
             {
                 case "vhosts":

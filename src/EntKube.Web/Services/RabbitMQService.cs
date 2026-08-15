@@ -128,6 +128,70 @@ public class RabbitMQService(
     IKubernetesClientFactory k8s,
     VaultService vaultService)
 {
+    // ── Topology capability ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Per-Kubernetes-cluster cache of "are the Messaging Topology Operator CRDs registered",
+    /// so the probe costs one kubectl per cluster rather than one per topology read. Entries
+    /// expire so that installing or removing the operator is picked up without a restart.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (bool Present, DateTime CheckedAt)>
+        TopologyCrdCache = new();
+
+    private static readonly TimeSpan TopologyCrdCacheTtl = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Decides how a cluster's topology is managed.
+    ///
+    /// The CRD path is used only when the Messaging Topology Operator is actually installed —
+    /// checked against the live cluster, not against EntKube's component records, which can
+    /// disagree with reality. Everything else falls back to rabbitmqctl on the broker pod,
+    /// which works for any reachable broker.
+    ///
+    /// This matters for a cluster created by the Cluster Operator without the Topology Operator
+    /// alongside it: querying vhosts.rabbitmq.com there fails with "the server doesn't have a
+    /// resource type", and before this check that made every topology tab unusable even though
+    /// the broker itself was perfectly reachable.
+    /// </summary>
+    private async Task<bool> UseTopologyCrdsAsync(RabbitMQCluster cluster, CancellationToken ct)
+    {
+        // An external broker has no CRs by definition — don't even probe.
+        if (!cluster.IsOperatorManaged) return false;
+
+        if (TopologyCrdCache.TryGetValue(cluster.KubernetesClusterId, out (bool Present, DateTime CheckedAt) cached)
+            && DateTime.UtcNow - cached.CheckedAt < TopologyCrdCacheTtl)
+        {
+            return cached.Present;
+        }
+
+        bool present;
+        try
+        {
+            // CRDs are cluster-scoped; the namespace argument is ignored by kubectl here.
+            await k8s.GetJsonAsync(
+                "crd/vhosts.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!, ct: ct);
+            present = true;
+        }
+        catch
+        {
+            present = false;
+        }
+
+        TopologyCrdCache[cluster.KubernetesClusterId] = (present, DateTime.UtcNow);
+        return present;
+    }
+
+    /// <summary>
+    /// Whether this cluster's topology is backed by Messaging Topology Operator CRs (true) or
+    /// driven directly through rabbitmqctl (false). The UI uses this to decide whether to show
+    /// K8s object names and whether exchange/binding deletes are possible.
+    /// </summary>
+    public async Task<bool> UsesTopologyCrdsAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+        return await UseTopologyCrdsAsync(cluster, ct);
+    }
+
     // ── Cluster queries ───────────────────────────────────────────────────────
 
     public async Task<List<RabbitMQCluster>> GetClustersAsync(Guid tenantId, CancellationToken ct = default)
@@ -1190,7 +1254,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             return [.. (await ListExternalVhostsAsync(cluster, ct))
                 .Select(v => new RabbitMQVhostInfo
@@ -1216,7 +1280,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             await RunCtlAsync(cluster, ["add_vhost", vhostName], ct);
             return;
@@ -1245,7 +1309,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             (_, string vhost) = ParseExternalHandle(k8sName);
             await RunCtlAsync(cluster, ["delete_vhost", vhost], ct);
@@ -1263,7 +1327,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             // list_queues is scoped to one vhost at a time, so walk them.
             List<RabbitMQQueueInfo> queues = [];
@@ -1307,7 +1371,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             string definitions = JsonSerializer.Serialize(new
             {
@@ -1355,7 +1419,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             (string vhost, string queue) = ParseExternalHandle(k8sName);
             await RunCtlAsync(cluster, ["delete_queue", "--vhost", vhost, queue], ct);
@@ -1373,7 +1437,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             List<RabbitMQExchangeInfo> exchanges = [];
 
@@ -1420,7 +1484,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             string definitions = JsonSerializer.Serialize(new
             {
@@ -1469,7 +1533,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged) throw NoCliVerb("delete an exchange");
+        if (!await UseTopologyCrdsAsync(cluster, ct)) throw NoCliVerb("delete an exchange");
 
         await k8s.DeleteManifestAsync("exchange", k8sName, cluster.Namespace,
             cluster.KubernetesCluster.Kubeconfig!, ct);
@@ -1482,7 +1546,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             List<RabbitMQRoutingBindingInfo> bindings = [];
 
@@ -1532,7 +1596,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             string definitions = JsonSerializer.Serialize(new
             {
@@ -1581,7 +1645,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged) throw NoCliVerb("unbind a queue or exchange");
+        if (!await UseTopologyCrdsAsync(cluster, ct)) throw NoCliVerb("unbind a queue or exchange");
 
         await k8s.DeleteManifestAsync("binding", k8sName, cluster.Namespace,
             cluster.KubernetesCluster.Kubeconfig!, ct);
@@ -1652,7 +1716,7 @@ public class RabbitMQService(
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
         string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             (string vhost, string name) = ParseExternalHandle(targetK8sName);
 
@@ -1688,7 +1752,7 @@ public class RabbitMQService(
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
         string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             List<JsonElement> rows = await RunCtlListAsync(cluster, ["list_users"], ct);
 
@@ -1749,7 +1813,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             // The password is passed as an argv entry, not through a shell, so it is never
             // word-split or expanded — but it is briefly visible in the pod's process list.
@@ -1807,7 +1871,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             (_, string username) = ParseExternalHandle(k8sName);
             await RunCtlAsync(cluster, ["delete_user", username], ct);
@@ -1836,7 +1900,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             List<RabbitMQPermissionInfo> permissions = [];
 
@@ -1891,7 +1955,7 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
 
-        if (!cluster.IsOperatorManaged)
+        if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             await RunCtlAsync(cluster,
                 ["set_permissions", "--vhost", vhost, username, configure, write, read], ct);
