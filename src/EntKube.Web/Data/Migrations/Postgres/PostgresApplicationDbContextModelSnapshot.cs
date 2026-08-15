@@ -4208,12 +4208,27 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("AdminUsername")
+                        .HasColumnType("text");
+
                     b.Property<string>("BackupSchedule")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CredentialsPasswordKey")
+                        .HasColumnType("text");
+
+                    b.Property<string>("CredentialsSecretName")
+                        .HasColumnType("text");
+
+                    b.Property<string>("CredentialsUsernameKey")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsOperatorManaged")
+                        .HasColumnType("boolean");
 
                     b.Property<Guid>("KubernetesClusterId")
                         .HasColumnType("uuid");
@@ -4243,6 +4258,12 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<int>("Replicas")
                         .HasColumnType("integer");
+
+                    b.Property<string>("ServiceName")
+                        .HasColumnType("text");
+
+                    b.Property<string>("StatefulSetName")
+                        .HasColumnType("text");
 
                     b.Property<int>("Status")
                         .HasColumnType("integer");
