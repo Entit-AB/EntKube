@@ -710,4 +710,91 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         k8s.Verify(f => f.ApplyManifestAsync(
             It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
+
+    // ──────── Status reconciliation ────────
+
+    private void SetupCrStatus(string clusterName, bool available, bool allReady)
+    {
+        string avail = available ? "True" : "False";
+        string ready = allReady ? "True" : "False";
+        string json =
+            "{\"status\":{\"conditions\":["
+            + "{\"type\":\"ClusterAvailable\",\"status\":\"" + avail + "\"},"
+            + "{\"type\":\"AllReplicasReady\",\"status\":\"" + ready + "\"}"
+            + "]}}";
+
+        k8s.Setup(f => f.GetJsonAsync(
+                $"rabbitmqcluster/{clusterName}", It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(json);
+    }
+
+    [Fact]
+    public async Task ReconcileStatusAsync_ServingButMidRestart_StaysRunningRatherThanFailed()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedOperatorManagedAsync(topologyCrdsPresent: true);
+
+        // A rolling restart: the cluster serves traffic, but not every replica is ready yet.
+        SetupCrStatus("managed", available: true, allReady: false);
+
+        await sut.ReconcileStatusAsync(tenantId, clusterId);
+
+        RabbitMQCluster after = await db.RabbitMQClusters.AsNoTracking().SingleAsync(c => c.Id == clusterId);
+        after.Status.Should().Be(RabbitMQClusterStatus.Running);
+        after.LastError.Should().Contain("not every replica is ready");
+    }
+
+    [Fact]
+    public async Task ReconcileStatusAsync_RecoversAClusterPreviouslyMarkedFailed()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedOperatorManagedAsync(topologyCrdsPresent: true);
+
+        RabbitMQCluster stuck = await db.RabbitMQClusters.SingleAsync(c => c.Id == clusterId);
+        stuck.Status = RabbitMQClusterStatus.Failed;
+        stuck.LastError = "something transient happened";
+        await db.SaveChangesAsync();
+
+        SetupCrStatus("managed", available: true, allReady: true);
+
+        await sut.ReconcileStatusAsync(tenantId, clusterId);
+
+        RabbitMQCluster after = await db.RabbitMQClusters.AsNoTracking().SingleAsync(c => c.Id == clusterId);
+        after.Status.Should().Be(RabbitMQClusterStatus.Running);
+        after.LastError.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ReconcileAllAsync_RevisitsFailedClustersSoTheyCanRecover()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedOperatorManagedAsync(topologyCrdsPresent: true);
+
+        RabbitMQCluster stuck = await db.RabbitMQClusters.SingleAsync(c => c.Id == clusterId);
+        stuck.Status = RabbitMQClusterStatus.Failed;
+        await db.SaveChangesAsync();
+
+        SetupCrStatus("managed", available: true, allReady: true);
+
+        // The poller, not a hand-triggered refresh — this is what used to skip Failed entirely.
+        await sut.ReconcileAllAsync();
+
+        RabbitMQCluster after = await db.RabbitMQClusters.AsNoTracking().SingleAsync(c => c.Id == clusterId);
+        after.Status.Should().Be(RabbitMQClusterStatus.Running);
+    }
+
+    [Fact]
+    public async Task ReconcileStatusAsync_GenuinelyUnavailable_IsStillReportedFailed()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedOperatorManagedAsync(topologyCrdsPresent: true);
+
+        RabbitMQCluster running = await db.RabbitMQClusters.SingleAsync(c => c.Id == clusterId);
+        running.Status = RabbitMQClusterStatus.Running;
+        await db.SaveChangesAsync();
+
+        SetupCrStatus("managed", available: false, allReady: false);
+
+        await sut.ReconcileStatusAsync(tenantId, clusterId);
+
+        RabbitMQCluster after = await db.RabbitMQClusters.AsNoTracking().SingleAsync(c => c.Id == clusterId);
+        after.Status.Should().Be(RabbitMQClusterStatus.Failed);
+    }
 }

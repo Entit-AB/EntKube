@@ -888,10 +888,16 @@ public class RabbitMQService(
             .FirstOrDefaultAsync(c => c.Id == clusterId, ct)
             ?? throw new InvalidOperationException("RabbitMQ cluster not found.");
 
-        if (info.ClusterAvailable && info.AllReplicasReady)
+        // Availability is the health signal: it means the broker is serving. Replicas not all
+        // being ready is a rolling restart, a pod reschedule or a scale-up in progress — normal
+        // operation, not a failure. Treating it as one marked healthy, usable clusters Failed,
+        // and they stayed that way because the poller used to skip Failed clusters entirely.
+        if (info.ClusterAvailable)
         {
             cluster.Status = RabbitMQClusterStatus.Running;
-            cluster.LastError = null;
+            cluster.LastError = info.AllReplicasReady
+                ? null
+                : "Serving, but not every replica is ready — a restart or scale-up may be in progress.";
         }
         else if (cluster.Status != RabbitMQClusterStatus.Creating)
         {
@@ -910,9 +916,12 @@ public class RabbitMQService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // Failed must be included: it is a verdict from a previous poll, not a terminal state.
+        // Excluding it meant a cluster marked Failed by a transient blip could never be observed
+        // recovering, so the badge stayed wrong until someone hit "Refresh Status" by hand.
+        // Only Deleting is skipped — that one is mid-teardown and owned by DeleteClusterAsync.
         List<RabbitMQCluster> clusters = await db.RabbitMQClusters
-            .Where(c => c.Status == RabbitMQClusterStatus.Creating
-                     || c.Status == RabbitMQClusterStatus.Running)
+            .Where(c => c.Status != RabbitMQClusterStatus.Deleting)
             .ToListAsync(ct);
 
         foreach (RabbitMQCluster cluster in clusters)

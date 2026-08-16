@@ -228,10 +228,13 @@
                         <i class="bi @(expanded ? "bi-chevron-up" : "bi-chevron-down") @(cluster.IsOperatorManaged ? "ms-2" : "ms-auto") text-muted"></i>
                     </div>
 
-                    @if (!string.IsNullOrEmpty(cluster.LastError) && cluster.Status == RabbitMQClusterStatus.Failed)
+                    @* A message on a Running cluster is a degraded-but-serving note (e.g. a replica
+                       still coming up), not an error — show it, but don't dress it as a failure. *@
+                    @if (!string.IsNullOrEmpty(cluster.LastError))
                     {
-                        <div class="px-3 py-2 bg-danger-subtle text-danger small border-bottom">
-                            <i class="bi bi-exclamation-triangle me-1"></i>@cluster.LastError
+                        bool fatal = cluster.Status == RabbitMQClusterStatus.Failed;
+                        <div class="px-3 py-2 small border-bottom @(fatal ? "bg-danger-subtle text-danger" : "bg-warning-subtle text-warning-emphasis")">
+                            <i class="bi @(fatal ? "bi-exclamation-triangle" : "bi-exclamation-circle") me-1"></i>@cluster.LastError
                         </div>
                     }
 
