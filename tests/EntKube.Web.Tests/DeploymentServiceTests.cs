@@ -416,4 +416,56 @@ public class DeploymentServiceTests : IDisposable
         deployments[0].StatusMessage.Should().Be("All resources healthy");
         deployments[0].LastSyncedAt.Should().NotBeNull();
     }
+
+    // ════════════════════════════════════════════════════════════════
+    //  Namespace guard
+    // ════════════════════════════════════════════════════════════════
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task CreateDeploymentAsync_RejectsABlankNamespace(string ns)
+    {
+        // A deployment stored without a namespace cannot be installed, and the edit form's own
+        // required-namespace rule then refuses every later change to it — chart version included.
+        (App app, Data.Environment env, KubernetesCluster cluster) = CreateTestApp();
+
+        Func<Task> act = () => sut.CreateDeploymentAsync(
+            app.Id, "no-ns", DeploymentType.HelmChart, env.Id, cluster.Id, ns);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*namespace is required*");
+        (await sut.GetDeploymentsAsync(app.Id)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task UpdateDeploymentAsync_RejectsBlankingAnExistingNamespace()
+    {
+        (App app, Data.Environment env, KubernetesCluster cluster) = CreateTestApp();
+        AppDeployment deployment = await sut.CreateDeploymentAsync(
+            app.Id, "billing", DeploymentType.HelmChart, env.Id, cluster.Id, "billing-ns");
+
+        Func<Task> act = () => sut.UpdateDeploymentAsync(deployment.Id, "billing", "");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*namespace is required*");
+        (await sut.GetDeploymentsAsync(app.Id))[0].Namespace.Should().Be("billing-ns");
+    }
+
+    [Fact]
+    public async Task UpdateDeploymentAsync_ChangesTheChartVersionOfAnUninstalledHelmDeployment()
+    {
+        // The chart coordinates are plain stored fields — nothing about them depends on a
+        // release existing on the cluster.
+        (App app, Data.Environment env, KubernetesCluster cluster) = CreateTestApp();
+        AppDeployment deployment = await sut.CreateDeploymentAsync(
+            app.Id, "billing", DeploymentType.GitHelm, env.Id, cluster.Id, "billing-ns",
+            helmRepoUrl: "https://charts.example.com", helmChartName: "billing", helmChartVersion: "1.0.0");
+
+        await sut.UpdateDeploymentAsync(
+            deployment.Id, "billing", "billing-ns",
+            "https://charts.example.com", "billing", "2.3.4");
+
+        AppDeployment updated = (await sut.GetDeploymentsAsync(app.Id))[0];
+        updated.HelmChartVersion.Should().Be("2.3.4");
+        updated.SyncStatus.Should().Be(SyncStatus.Unknown);   // still never deployed
+    }
 }

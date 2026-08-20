@@ -547,6 +547,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
 
+                    b.Property<int?>("RequestTimeoutSeconds")
+                        .HasColumnType("int");
+
                     b.Property<string>("RewritePath")
                         .HasColumnType("nvarchar(max)");
 
@@ -2455,6 +2458,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
 
+                    b.Property<int?>("RequestTimeoutSeconds")
+                        .HasColumnType("int");
+
                     b.Property<string>("ServiceName")
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
@@ -2999,6 +3005,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<Guid>("AppId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("BehaviorYaml")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<int?>("CooldownPeriod")
                         .HasColumnType("int");
 
@@ -3037,6 +3046,12 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<string>("ScaleTargetName")
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("TargetCpuUtilization")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("TargetMemoryUtilization")
+                        .HasColumnType("int");
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uniqueidentifier");
@@ -4134,6 +4149,12 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("ProjectName")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ProxyUrl")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ProxyUsername")
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("Region")

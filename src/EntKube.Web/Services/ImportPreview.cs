@@ -179,6 +179,13 @@ public class DetectedRouteRule
     public string? ServiceName { get; set; }
     public int ServicePort { get; set; } = 80;
     public string? RewritePath { get; set; }
+
+    /// <summary>
+    /// Request timeout observed on the live rule (spec.rules[].timeouts.request), in seconds.
+    /// Null when the rule carries none — the imported route then takes the platform default.
+    /// Preserved so adopting a streaming route doesn't impose a timeout it never had.
+    /// </summary>
+    public int? RequestTimeoutSeconds { get; set; }
 }
 
 /// <summary>

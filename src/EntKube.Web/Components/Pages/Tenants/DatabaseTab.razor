@@ -3155,6 +3155,57 @@
                                                 {
                                                     <div class="alert alert-success small py-1 mt-2 mb-0">@mongoScheduleSuccess</div>
                                                 }
+
+                                                @* What the cluster actually has — a stored schedule only records the intent. *@
+                                                <div class="border-top mt-2 pt-2">
+                                                    @if (mongoScheduleStatus is null)
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-secondary"
+                                                                disabled="@mongoCheckingSchedule"
+                                                                @onclick="() => CheckMongoScheduleStatus(mc.Id)">
+                                                            @if (mongoCheckingSchedule)
+                                                            {
+                                                                <span class="spinner-border spinner-border-sm me-1"></span>
+                                                            }
+                                                            else
+                                                            {
+                                                                <i class="bi bi-binoculars me-1"></i>
+                                                            }
+                                                            Check the CronJob on the cluster
+                                                        </button>
+                                                    }
+                                                    else
+                                                    {
+                                                        <div class="small">
+                                                            @if (mongoScheduleStatus.Problem is not null)
+                                                            {
+                                                                <div class="text-warning-emphasis">
+                                                                    <i class="bi bi-exclamation-triangle me-1"></i>@mongoScheduleStatus.Problem
+                                                                </div>
+                                                            }
+                                                            @if (mongoScheduleStatus.Exists)
+                                                            {
+                                                                <div class="text-muted mt-1">
+                                                                    CronJob schedule <code>@mongoScheduleStatus.AppliedSchedule</code>
+                                                                    @if (mongoScheduleStatus.LastScheduleTime is { } fired)
+                                                                    {
+                                                                        <text> · last fired @fired.ToLocalTime().ToString("MMM d HH:mm")</text>
+                                                                    }
+                                                                    @if (mongoScheduleStatus.LastSuccessfulTime is { } ok)
+                                                                    {
+                                                                        <text> · last success @ok.ToLocalTime().ToString("MMM d HH:mm")</text>
+                                                                    }
+                                                                    @if (mongoScheduleStatus.ActiveJobs > 0)
+                                                                    {
+                                                                        <text> · @mongoScheduleStatus.ActiveJobs running now</text>
+                                                                    }
+                                                                </div>
+                                                            }
+                                                            <button class="btn btn-sm btn-link p-0 mt-1"
+                                                                    @onclick="() => CheckMongoScheduleStatus(mc.Id)">Re-check</button>
+                                                        </div>
+                                                    }
+                                                </div>
                                             </div>
                                         </div>
                                     }
@@ -3736,6 +3787,8 @@
 
     // Mongo backup settings
     private Guid? mongoConfiguringScheduleId;
+    private MongoScheduledBackupStatus? mongoScheduleStatus;
+    private bool mongoCheckingSchedule;
     private Guid? mongoApplyingScheduleId;
     private string mongoScheduleInput = "";
     private int mongoScheduleRetentionDays = 30;
@@ -4938,6 +4991,7 @@
         mongoScheduleMaxBackups = cluster.MaxBackups;
         mongoScheduleError = null;
         mongoScheduleSuccess = null;
+        mongoScheduleStatus = null;
     }
 
     private void CancelMongoScheduleForm()
@@ -4945,6 +4999,25 @@
         mongoConfiguringScheduleId = null;
         mongoScheduleError = null;
         mongoScheduleSuccess = null;
+        mongoScheduleStatus = null;
+    }
+
+    /// <summary>Reads the CronJob from the cluster so a schedule can be checked, not assumed.</summary>
+    private async Task CheckMongoScheduleStatus(Guid mongoClusterId)
+    {
+        mongoCheckingSchedule = true;
+        try
+        {
+            mongoScheduleStatus = await MongoService.GetScheduledBackupStatusAsync(TenantId, mongoClusterId);
+        }
+        catch (Exception ex)
+        {
+            mongoScheduleStatus = new MongoScheduledBackupStatus { Problem = ex.Message };
+        }
+        finally
+        {
+            mongoCheckingSchedule = false;
+        }
     }
 
     private async Task SaveMongoBackupSettings(Guid mongoClusterId)
@@ -4960,6 +5033,8 @@
         {
             mongoApplyingScheduleId = null;
             managedMongoClusters = await MongoService.GetClustersAsync(TenantId);
+            // Report what the cluster ended up with rather than just claiming success.
+            await CheckMongoScheduleStatus(mongoClusterId);
         }
     }
 

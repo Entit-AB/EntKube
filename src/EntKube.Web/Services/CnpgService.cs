@@ -469,6 +469,39 @@ public class CnpgService(
     /// (replicas first, then a switchover before recreating the old primary), which also lets
     /// the scheduler re-place pods according to the cluster's anti-affinity.
     /// </summary>
+    /// <summary>
+    /// Re-applies the Cluster manifest exactly as EntKube would build it today, so a database
+    /// created by an older version picks up spec changes made since — most visibly
+    /// <c>spec.monitoring.enablePodMonitor</c>, without which nothing scrapes its metrics.
+    ///
+    /// Nothing else about the database changes: the manifest is rebuilt from the same stored
+    /// settings, so the change gate's dry-run shows only what the current code adds. Until this
+    /// existed the only ways to re-apply were incidental — running a backup, or an upgrade — and
+    /// neither is an obvious thing to reach for when metrics are missing.
+    /// </summary>
+    public async Task ReapplyClusterSpecAsync(
+        Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        CnpgCluster cnpg = await db.CnpgClusters
+            .Include(c => c.KubernetesCluster)
+            .Include(c => c.StorageLink)
+            .FirstOrDefaultAsync(c => c.Id == cnpgClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("CNPG cluster not found.");
+
+        if (string.IsNullOrWhiteSpace(cnpg.KubernetesCluster.Kubeconfig))
+            throw new InvalidOperationException("Cluster has no kubeconfig configured.");
+
+        // Same secret-name convention as every other apply path, so the rebuilt manifest matches
+        // the live spec everywhere except the parts this version of EntKube changed.
+        string? s3SecretName = cnpg.StorageLinkId.HasValue ? $"{cnpg.Name}-s3-credentials" : null;
+
+        await k8sFactory.ApplyManifestAsync(
+            BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName),
+            cnpg.KubernetesCluster.Kubeconfig, ct);
+    }
+
     public async Task RestartClusterAsync(
         Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
@@ -2042,6 +2075,12 @@ public class CnpgService(
         sb.AppendLine("  primaryUpdateMethod: switchover");
         sb.AppendLine("  switchoverDelay: 600");
 
+        // Every CNPG instance already serves metrics on :9187, but nothing scrapes them until
+        // the operator is told to create a PodMonitor for the cluster. Without this the database
+        // monitoring panel has no cnpg_* series to query and simply shows nothing.
+        sb.AppendLine("  monitoring:");
+        sb.AppendLine("    enablePodMonitor: true");
+
         // Synchronous replication requires at least 2 instances. For HA clusters,
         // we guarantee one synchronous replica so no committed transactions are lost.
 
@@ -2199,6 +2238,10 @@ public class CnpgService(
         sb.AppendLine("spec:");
         sb.AppendLine($"  instances: {restored.Instances}");
         sb.AppendLine($"  imageName: ghcr.io/cloudnative-pg/postgresql:{restored.PostgresVersion}");
+        // Same PodMonitor opt-in as a freshly created cluster — a restored cluster should not
+        // come back monitoring-blind.
+        sb.AppendLine("  monitoring:");
+        sb.AppendLine("    enablePodMonitor: true");
         sb.AppendLine("  postgresql:");
         sb.AppendLine("    parameters:");
         sb.AppendLine("      archive_timeout: \"5min\"");

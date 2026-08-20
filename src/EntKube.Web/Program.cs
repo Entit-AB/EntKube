@@ -237,6 +237,7 @@ public class Program
         builder.Services.AddScoped<CustomerAccessService>();
         builder.Services.AddScoped<KubernetesOperationsService>();
         builder.Services.AddScoped<NodeManagementService>();
+        builder.Services.AddScoped<WorkloadService>();
         builder.Services.AddScoped<PrometheusService>();
         // Telemetry engine: the self-built Lucene/S3 segment engine is the sole backend for logs, traces,
         // and RUM. OTLP/RUM writes go through SegmentTelemetryStore (no per-request DB connection — the
@@ -343,6 +344,8 @@ public class Program
         builder.Services.AddScoped<RegisteredPostgresService>();
         builder.Services.AddScoped<EntKube.Web.Services.ClusterChanges.IClusterChangeGate, EntKube.Web.Services.ClusterChanges.ClusterChangeGate>();
         builder.Services.AddScoped<IKubernetesClientFactory, KubernetesClientFactory>();
+        // Singleton: pools one HTTP handler per distinct OpenStack proxy setting.
+        builder.Services.AddSingleton<OpenStackHttpFactory>();
         builder.Services.AddScoped<OpenStackKeystoneClient>();
         builder.Services.AddScoped<OpenStackS3Service>();
         builder.Services.AddScoped<OpenStackComputeService>();

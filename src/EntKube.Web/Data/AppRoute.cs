@@ -78,6 +78,18 @@ public class AppDeploymentRoute
     /// </summary>
     public string? RewritePath { get; set; }
 
+    /// <summary>
+    /// Request timeout for this rule in the generated HTTPRoute (spec.rules[].timeouts). Null uses
+    /// the platform default (<see cref="Services.ExternalRouteService.DefaultRequestTimeoutSeconds"/>);
+    /// 0 emits no timeouts block, leaving the gateway to wait indefinitely.
+    ///
+    /// Only set 0 for paths carrying long-lived streams (websockets, SSE, chunked downloads):
+    /// Gateway API's request timeout bounds the whole exchange, so a finite value cuts a live
+    /// stream off mid-flight. Everything else wants a finite value so a wedged backend fails
+    /// fast instead of hanging the browser.
+    /// </summary>
+    public int? RequestTimeoutSeconds { get; set; }
+
     /// <summary>Gateway resource name resolved from the cluster's installed ingress controller.</summary>
     public string? GatewayName { get; set; }
 

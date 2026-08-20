@@ -492,4 +492,94 @@ public class ComponentLifecycleServiceTests : IDisposable
         command.ValuesYaml.Should().Be("grafana:\n  enabled: true\n");
         command.HasValues.Should().BeTrue();
     }
+
+    // ──────── UpdateConfigurationAsync — Helm identity fields ────────
+
+    private async Task<ClusterComponent> RegisterAsync(string name = "prom", string ns = "monitoring") =>
+        await sut.RegisterComponentAsync(clusterId, new ComponentRegistration
+        {
+            Name = name,
+            ComponentType = "HelmChart",
+            Namespace = ns,
+            HelmRepoUrl = "https://prometheus-community.github.io/helm-charts",
+            HelmChartName = "kube-prometheus-stack",
+            HelmChartVersion = "65.1.0",
+            ReleaseName = name,
+        });
+
+    [Fact]
+    public async Task UpdateConfigurationAsync_PersistsChartNameNamespaceAndReleaseName()
+    {
+        // These were editable in the UI but had no parameter here, so the edits were dropped
+        // on the floor and reappeared as the old values on the next load.
+        ClusterComponent component = await RegisterAsync();
+
+        await sut.UpdateConfigurationAsync(
+            component.Id, helmValues: null,
+            componentNamespace: "observability", releaseName: "prom-stack", chartName: "prometheus");
+
+        ClusterComponent reloaded = await db.ClusterComponents.AsNoTracking()
+            .FirstAsync(c => c.Id == component.Id);
+        reloaded.Namespace.Should().Be("observability");
+        reloaded.ReleaseName.Should().Be("prom-stack");
+        reloaded.HelmChartName.Should().Be("prometheus");
+    }
+
+    [Fact]
+    public async Task UpdateConfigurationAsync_RefusesToMoveAnInstalledRelease()
+    {
+        // Helm keys a release on (namespace, name). Repointing them would strand the running
+        // release rather than move it, so the change is refused while the component is installed.
+        ClusterComponent component = await RegisterAsync();
+        await sut.PrepareInstallAsync(component.Id);
+        await sut.MarkInstallResultAsync(component.Id, true);
+
+        Func<Task> moveNamespace = () => sut.UpdateConfigurationAsync(
+            component.Id, helmValues: null, componentNamespace: "elsewhere");
+        Func<Task> renameRelease = () => sut.UpdateConfigurationAsync(
+            component.Id, helmValues: null, releaseName: "renamed");
+
+        await moveNamespace.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Uninstall it first*");
+        await renameRelease.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Uninstall it first*");
+
+        ClusterComponent reloaded = await db.ClusterComponents.AsNoTracking()
+            .FirstAsync(c => c.Id == component.Id);
+        reloaded.Namespace.Should().Be("monitoring");
+        reloaded.ReleaseName.Should().Be("prom");
+    }
+
+    [Fact]
+    public async Task UpdateConfigurationAsync_AllowsEditingAnInstalledComponentThatKeepsItsIdentity()
+    {
+        // The config form posts every field on every save, so resending the unchanged namespace
+        // and release name must not trip the guard — only an actual move does.
+        ClusterComponent component = await RegisterAsync();
+        await sut.PrepareInstallAsync(component.Id);
+        await sut.MarkInstallResultAsync(component.Id, true);
+
+        await sut.UpdateConfigurationAsync(
+            component.Id, helmValues: "grafana:\n  enabled: false\n",
+            chartVersion: "66.0.0",
+            componentNamespace: "monitoring", releaseName: "prom", chartName: "kube-prometheus-stack");
+
+        ClusterComponent reloaded = await db.ClusterComponents.AsNoTracking()
+            .FirstAsync(c => c.Id == component.Id);
+        reloaded.HelmChartVersion.Should().Be("66.0.0");
+        reloaded.HelmValues.Should().Contain("enabled: false");
+    }
+
+    [Fact]
+    public async Task UpdateConfigurationAsync_TreatsOmittedFieldsAsNoChange()
+    {
+        ClusterComponent component = await RegisterAsync();
+
+        await sut.UpdateConfigurationAsync(component.Id, helmValues: "replicas: 2\n");
+
+        ClusterComponent reloaded = await db.ClusterComponents.AsNoTracking()
+            .FirstAsync(c => c.Id == component.Id);
+        reloaded.HelmValues.Should().Be("replicas: 2\n");
+        reloaded.Namespace.Should().Be("monitoring");
+        reloaded.ReleaseName.Should().Be("prom");
+        reloaded.HelmChartName.Should().Be("kube-prometheus-stack");
+    }
 }

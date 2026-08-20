@@ -124,7 +124,10 @@ public class ComponentLifecycleService(
     /// </summary>
     public async Task<ClusterComponent> UpdateConfigurationAsync(
         Guid componentId, string? helmValues, string? chartVersion = null,
-        string? helmRepoUrl = null, string? configuration = null, CancellationToken ct = default)
+        string? helmRepoUrl = null, string? configuration = null,
+        string? componentNamespace = null, string? releaseName = null,
+        string? chartName = null,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -149,13 +152,47 @@ public class ComponentLifecycleService(
             component.HelmRepoUrl = helmRepoUrl;
         }
 
+        // Swapping the chart of an installed release is a normal helm upgrade — unlike the
+        // namespace/name below, it does not change which release is being managed.
+        if (chartName is not null)
+        {
+            component.HelmChartName = chartName;
+        }
+
         if (configuration is not null)
         {
             component.Configuration = configuration;
         }
 
+        // Namespace + release name are the release's identity to Helm. Repointing them on an
+        // installed component would not move anything: the next apply would install a *second*
+        // release under the new identity and leave the original running, unreferenced and no
+        // longer manageable from here. Uninstalling first is the only safe order.
+        if (componentNamespace is not null && !string.Equals(componentNamespace, component.Namespace, StringComparison.Ordinal))
+        {
+            RequireNotInstalled(component, "namespace");
+            component.Namespace = componentNamespace;
+        }
+
+        if (releaseName is not null && !string.Equals(releaseName, component.ReleaseName, StringComparison.Ordinal))
+        {
+            RequireNotInstalled(component, "release name");
+            component.ReleaseName = releaseName;
+        }
+
         await db.SaveChangesAsync(ct);
         return component;
+    }
+
+    private static void RequireNotInstalled(ClusterComponent component, string field)
+    {
+        if (component.Status == ComponentStatus.Installed)
+        {
+            throw new InvalidOperationException(
+                $"The {field} cannot be changed while '{component.Name}' is installed — Helm identifies a release " +
+                $"by its namespace and name, so this would orphan the running release instead of moving it. " +
+                $"Uninstall it first, then change the {field} and install again.");
+        }
     }
 
     /// <summary>
@@ -1863,7 +1900,7 @@ public class ComponentLifecycleService(
             return new HelmExecutionResult
             {
                 Success = false,
-                Output = $"Failed to run {program}: {ex.Message}"
+                Output = HelmExecutionResult.DescribeLaunchFailure(program, ex)
             };
         }
     }
@@ -1898,4 +1935,23 @@ public class HelmExecutionResult
     public bool Success { get; set; }
     public int ExitCode { get; set; }
     public string Output { get; set; } = "";
+
+    /// <summary>
+    /// Explains why an external CLI could not be launched.
+    ///
+    /// A missing binary surfaces as a bare ENOENT whose message names the working directory and
+    /// not the executable ("...with working directory '/app'. No such file or directory"), which
+    /// reads as a path problem inside the app rather than a tool absent from the image. Saying so
+    /// outright turns it into something an operator can act on.
+    /// </summary>
+    public static string DescribeLaunchFailure(string program, Exception ex)
+    {
+        bool notFound = ex is System.ComponentModel.Win32Exception { NativeErrorCode: 2 };
+
+        return notFound
+            ? $"'{program}' is not installed in the EntKube container image, so this operation "
+              + $"cannot run. Rebuild or update the image, then verify with: "
+              + $"docker run --rm --entrypoint {program} <image> version"
+            : $"Failed to run {program}: {ex.Message}";
+    }
 }

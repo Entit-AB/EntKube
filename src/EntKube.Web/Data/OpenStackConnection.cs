@@ -55,6 +55,23 @@ public class OpenStackConnection
     /// </summary>
     public string? Username { get; set; }
 
+    /// <summary>
+    /// Optional outbound proxy for every call to this cloud's APIs, e.g.
+    /// "socks5://10.0.0.5:1080" or "http://proxy.corp:3128".
+    ///
+    /// Set this when the cloud restricts its API to an IP allowlist that the
+    /// EntKube server is not on: the proxy runs on a permitted network, so
+    /// OpenStack sees the request arrive from an allowed address. Credentials
+    /// must not be embedded here — use <see cref="ProxyUsername"/>.
+    /// </summary>
+    public string? ProxyUrl { get; set; }
+
+    /// <summary>
+    /// Username for an authenticating proxy. The password is stored in the vault
+    /// under this connection's ID as OS_PROXY_PASSWORD.
+    /// </summary>
+    public string? ProxyUsername { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation

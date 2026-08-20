@@ -36,7 +36,7 @@ public class MinioBucketInfo
 /// External providers are registered manually — the service stores metadata
 /// in StorageLink entities and credentials in the VaultSecret table.
 /// </summary>
-public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, IKubernetesClientFactory k8sFactory, StorageLinkClientFactory storageClientFactory)
+public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, OpenStackKeystoneClient keystone, IKubernetesClientFactory k8sFactory, StorageLinkClientFactory storageClientFactory)
 {
     // ──────── Operator Status ────────
 
@@ -624,7 +624,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         (string accessKey, string secretKey) = await GetStoredCredentialsAsync(tenantId, linkId, ct);
 
         return await openStackS3.ListBucketsAsync(
-            link.Endpoint ?? "", accessKey, secretKey, link.Region ?? "", ct);
+            link.Endpoint ?? "", accessKey, secretKey, link.Region ?? "",
+            await ResolveOpenStackProxyAsync(link, ct), ct);
     }
 
     /// <summary>
@@ -651,7 +652,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
             if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
             {
                 await openStackS3.DeleteBucketAsync(
-                    link.Endpoint, accessKey, secretKey, link.BucketName, link.Region, ct);
+                    link.Endpoint, accessKey, secretKey, link.BucketName, link.Region,
+                    await ResolveOpenStackProxyAsync(link, ct), ct);
             }
             // If credentials are missing the bucket cannot be deleted via the S3 API,
             // but we still remove the StorageLink record so the link can be cleaned up.
@@ -695,7 +697,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         }
 
         return await openStackS3.ListBucketsAsync(
-            link.Endpoint ?? "", accessKey, secretKey, link.Region ?? "us-east-1", ct);
+            link.Endpoint ?? "", accessKey, secretKey, link.Region ?? "us-east-1",
+            await ResolveOpenStackProxyAsync(link, ct), ct);
     }
 
     /// <summary>
@@ -720,7 +723,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         }
 
         return await openStackS3.GetBucketCorsAsync(
-            link.Endpoint!, accessKey, secretKey, link.BucketName!, link.Region!, ct);
+            link.Endpoint!, accessKey, secretKey, link.BucketName!, link.Region!,
+            await ResolveOpenStackProxyAsync(link, ct), ct);
     }
 
     /// <summary>
@@ -746,7 +750,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         }
 
         await openStackS3.SetBucketCorsAsync(
-            link.Endpoint!, accessKey, secretKey, link.BucketName!, link.Region!, rules, ct);
+            link.Endpoint!, accessKey, secretKey, link.BucketName!, link.Region!, rules,
+            await ResolveOpenStackProxyAsync(link, ct), ct);
     }
 
     /// <summary>
@@ -771,7 +776,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         }
 
         return await openStackS3.GetBucketPolicyAsync(
-            link.Endpoint!, accessKey, secretKey, link.BucketName!, link.Region!, ct);
+            link.Endpoint!, accessKey, secretKey, link.BucketName!, link.Region!,
+            await ResolveOpenStackProxyAsync(link, ct), ct);
     }
 
     /// <summary>
@@ -797,7 +803,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         }
 
         await openStackS3.SetBucketPolicyAsync(
-            link.Endpoint!, accessKey, secretKey, link.BucketName!, link.Region!, policyJson, ct);
+            link.Endpoint!, accessKey, secretKey, link.BucketName!, link.Region!, policyJson,
+            await ResolveOpenStackProxyAsync(link, ct), ct);
     }
 
     /// <summary>
@@ -830,6 +837,31 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     }
 
     // ──────── Private Helpers ────────
+
+    /// <summary>
+    /// Returns the outbound proxy configured on the link's OpenStack connection,
+    /// or null when the link has no connection (MinIO, AWS, Azure, CubeFS) or the
+    /// connection talks to OpenStack directly.
+    ///
+    /// Needed because the bucket-management calls authenticate with stored EC2
+    /// credentials rather than a Keystone session, so there is no session to
+    /// inherit the proxy from.
+    /// </summary>
+    private async Task<OpenStackProxy?> ResolveOpenStackProxyAsync(
+        StorageLink link, CancellationToken ct)
+    {
+        if (!link.OpenStackConnectionId.HasValue)
+        {
+            return null;
+        }
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        OpenStackConnection? connection = await db.OpenStackConnections
+            .FirstOrDefaultAsync(c => c.Id == link.OpenStackConnectionId.Value, ct);
+
+        return connection is null ? null : await keystone.ResolveProxyAsync(connection, ct);
+    }
 
     /// <summary>
     /// Loads a Cleura S3 StorageLink or throws if not found.
@@ -983,8 +1015,15 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         string? projectDomainName,
         string? username,
         string? password,
+        string? proxyUrl,
+        string? proxyUsername,
+        string? proxyPassword,
         CancellationToken ct = default)
     {
+        // Fail fast on a malformed proxy rather than storing a value that only
+        // breaks later, at the first call to the cloud.
+        proxyUrl = NormalizeProxyUrl(proxyUrl);
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         OpenStackConnection connection = new()
@@ -998,7 +1037,9 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
             ProjectId = projectId,
             UserDomainName = userDomainName,
             ProjectDomainName = projectDomainName,
-            Username = username
+            Username = username,
+            ProxyUrl = proxyUrl,
+            ProxyUsername = proxyUsername
         };
 
         db.OpenStackConnections.Add(connection);
@@ -1006,10 +1047,20 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         // Store the password in the vault, keyed by the connection ID.
 
-        if (!string.IsNullOrWhiteSpace(password))
+        if (!string.IsNullOrWhiteSpace(password) || !string.IsNullOrWhiteSpace(proxyPassword))
         {
             await vaultService.InitializeVaultAsync(tenantId, ct);
+        }
+
+        if (!string.IsNullOrWhiteSpace(password))
+        {
             await vaultService.SetOpenStackSecretAsync(tenantId, connection.Id, "OS_PASSWORD", password, ct);
+        }
+
+        if (!string.IsNullOrWhiteSpace(proxyPassword))
+        {
+            await vaultService.SetOpenStackSecretAsync(
+                tenantId, connection.Id, OpenStackKeystoneClient.ProxyPasswordSecretName, proxyPassword, ct);
         }
 
         return connection;
@@ -1030,9 +1081,14 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         string? projectDomainName,
         string? username,
         string? password,
+        string? proxyUrl,
+        string? proxyUsername,
+        string? proxyPassword,
         Guid tenantId,
         CancellationToken ct = default)
     {
+        proxyUrl = NormalizeProxyUrl(proxyUrl);
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         OpenStackConnection? connection = await db.OpenStackConnections.FindAsync([connectionId], ct);
@@ -1050,14 +1106,85 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         connection.UserDomainName = userDomainName;
         connection.ProjectDomainName = projectDomainName;
         connection.Username = username;
+        connection.ProxyUrl = proxyUrl;
+        connection.ProxyUsername = proxyUsername;
         await db.SaveChangesAsync(ct);
 
-        // Update password if a new one was provided.
+        // Update passwords only when a new one was supplied — an empty field means
+        // "leave the stored secret alone", not "clear it".
+
+        if (!string.IsNullOrWhiteSpace(password) || !string.IsNullOrWhiteSpace(proxyPassword))
+        {
+            await vaultService.InitializeVaultAsync(tenantId, ct);
+        }
 
         if (!string.IsNullOrWhiteSpace(password))
         {
-            await vaultService.InitializeVaultAsync(tenantId, ct);
             await vaultService.SetOpenStackSecretAsync(tenantId, connectionId, "OS_PASSWORD", password, ct);
+        }
+
+        if (!string.IsNullOrWhiteSpace(proxyPassword))
+        {
+            await vaultService.SetOpenStackSecretAsync(
+                tenantId, connectionId, OpenStackKeystoneClient.ProxyPasswordSecretName, proxyPassword, ct);
+        }
+    }
+
+    /// <summary>
+    /// Validates a user-entered proxy URL and normalizes it (filling in the
+    /// default SOCKS port). Returns null for a blank value.
+    /// </summary>
+    private static string? NormalizeProxyUrl(string? proxyUrl)
+        => string.IsNullOrWhiteSpace(proxyUrl)
+            ? null
+            : OpenStackHttpFactory.ParseProxyUri(proxyUrl).ToString().TrimEnd('/');
+
+    /// <summary>
+    /// Authenticates against Keystone to prove the connection works end to end —
+    /// including the proxy, when one is configured. Returns a human-readable
+    /// result rather than throwing, so the form can show it inline.
+    ///
+    /// Worth running after setting a proxy: it distinguishes "the allowlist still
+    /// rejects us" from "the credentials are wrong" without provisioning anything.
+    /// </summary>
+    public async Task<(bool Ok, string Message)> TestOpenStackConnectionAsync(
+        Guid tenantId, Guid connectionId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        OpenStackConnection? connection = await db.OpenStackConnections
+            .FirstOrDefaultAsync(c => c.Id == connectionId && c.TenantId == tenantId, ct);
+
+        if (connection is null)
+        {
+            return (false, "OpenStack connection not found.");
+        }
+
+        string? password = await vaultService.GetOpenStackSecretValueAsync(
+            tenantId, connectionId, "OS_PASSWORD", ct);
+
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            return (false, "No password stored in the vault for this connection.");
+        }
+
+        try
+        {
+            KeystoneSession session = await keystone.AuthenticateAsync(connection, password, ct);
+
+            string route = connection.ProxyUrl is { Length: > 0 } proxy
+                ? $" via {proxy}"
+                : "";
+
+            string objectStore = session.GetEndpoint("object-store") is not null
+                ? "object-store available"
+                : "no object-store endpoint in the catalog";
+
+            return (true, $"Authenticated{route} — project {session.ProjectId}, {objectStore}.");
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
         }
     }
 

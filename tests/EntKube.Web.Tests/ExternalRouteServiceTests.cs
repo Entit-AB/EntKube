@@ -372,6 +372,125 @@ public class ExternalRouteServiceTests : IDisposable
         yaml.Should().BeEmpty();
     }
 
+    // ──────── Request timeouts ────────
+
+    private ExternalRoute TimeoutRoute(string pathPrefix, int? timeoutSeconds) => new()
+    {
+        Id = Guid.NewGuid(),
+        ComponentId = componentId,
+        Hostname = "timeout.example.com",
+        ServiceName = "svc",
+        ServicePort = 80,
+        PathPrefix = pathPrefix,
+        GatewayName = "traefik-gateway",
+        GatewayNamespace = "traefik",
+        RequestTimeoutSeconds = timeoutSeconds,
+        Component = new ClusterComponent
+        {
+            Id = componentId,
+            ClusterId = clusterId,
+            Name = "test",
+            ComponentType = "HelmChart",
+            Namespace = "apps"
+        }
+    };
+
+    [Fact]
+    public void GenerateHttpRouteYaml_NoTimeoutSet_AppliesPlatformDefault()
+    {
+        // Without a timeouts block the gateway waits forever, so a wedged upstream hangs the
+        // browser instead of failing fast. Routes that set nothing get the platform default.
+
+        string yaml = ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/", null));
+
+        yaml.Should().Contain("      timeouts:");
+        yaml.Should().Contain($"        request: {ExternalRouteService.DefaultRequestTimeoutSeconds}s");
+        yaml.Should().Contain($"        backendRequest: {ExternalRouteService.DefaultRequestTimeoutSeconds}s");
+    }
+
+    [Fact]
+    public void GenerateHttpRouteYaml_ExplicitTimeout_UsesIt()
+    {
+        string yaml = ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/", 15));
+
+        yaml.Should().Contain("        request: 15s");
+        yaml.Should().Contain("        backendRequest: 15s");
+        yaml.Should().NotContain($"{ExternalRouteService.DefaultRequestTimeoutSeconds}s");
+    }
+
+    [Fact]
+    public void GenerateHttpRouteYaml_ZeroTimeout_EmitsNoTimeoutsBlock()
+    {
+        // 0 is the escape hatch for long-lived streams (websockets, ts2021): the rule carries
+        // no timeouts at all, so the gateway keeps its own no-timeout behaviour.
+
+        string yaml = ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/", 0));
+
+        yaml.Should().NotContain("timeouts:");
+        yaml.Should().NotContain("backendRequest:");
+    }
+
+    [Fact]
+    public void GenerateHttpRouteYaml_PathPrefixedRoute_NestsTimeoutsInsideTheRule()
+    {
+        // The timeouts block is a sibling of matches/backendRefs, not of the list item —
+        // one indent level deeper than the rule's "- " marker.
+
+        string yaml = ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/api", 30));
+
+        yaml.Should().Contain("    - matches:");
+        yaml.Should().Contain("      backendRefs:");
+        yaml.Should().Contain("      timeouts:");
+        yaml.Should().Contain("        request: 30s");
+    }
+
+    [Fact]
+    public async Task AddRoute_PersistsRequestTimeout()
+    {
+        ExternalRouteRequest request = new()
+        {
+            Hostname = "stream.example.com",
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt-prod",
+            RequestTimeoutSeconds = 0
+        };
+
+        ExternalRoute route = await sut.AddRouteAsync(componentId, request);
+
+        route.RequestTimeoutSeconds.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task UpdateRouteTimeout_ChangesStoredValue()
+    {
+        ExternalRoute route = await sut.AddRouteAsync(componentId, new ExternalRouteRequest
+        {
+            Hostname = "adjust.example.com",
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt-prod"
+        });
+
+        await sut.UpdateRouteTimeoutAsync(route.Id, 120);
+
+        List<ExternalRoute> routes = await sut.GetRoutesAsync(componentId);
+        routes.Single(r => r.Id == route.Id).RequestTimeoutSeconds.Should().Be(120);
+    }
+
+    [Fact]
+    public async Task UpdateRouteTimeout_NegativeValue_Throws()
+    {
+        ExternalRoute route = await sut.AddRouteAsync(componentId, new ExternalRouteRequest
+        {
+            Hostname = "negative.example.com",
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt-prod"
+        });
+
+        Func<Task> act = () => sut.UpdateRouteTimeoutAsync(route.Id, -1);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
     // ──────── Gateway resolution ────────
 
     [Fact]

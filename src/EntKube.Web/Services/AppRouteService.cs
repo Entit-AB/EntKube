@@ -27,6 +27,13 @@ public class AppDeploymentRouteRequest
     public string PathPrefix { get; set; } = "/";
     public string? RewritePath { get; set; }
     public bool IsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Request timeout for this rule in the generated HTTPRoute. Null takes the platform
+    /// default (<see cref="ExternalRouteService.DefaultRequestTimeoutSeconds"/>); 0 disables
+    /// the timeout for long-lived streams.
+    /// </summary>
+    public int? RequestTimeoutSeconds { get; set; }
 }
 
 /// <summary>
@@ -186,7 +193,8 @@ public class AppRouteService(
             ServicePort = request.ServicePort,
             GatewayName = gatewayName,
             GatewayNamespace = gatewayNamespace,
-            IsEnabled = request.IsEnabled
+            IsEnabled = request.IsEnabled,
+            RequestTimeoutSeconds = ValidateTimeout(request.RequestTimeoutSeconds)
         };
 
         db.AppDeploymentRoutes.Add(dr);
@@ -219,10 +227,36 @@ public class AppRouteService(
         dr.ServiceName = request.ServiceName.Trim();
         dr.ServicePort = request.ServicePort;
         dr.IsEnabled = request.IsEnabled;
+        dr.RequestTimeoutSeconds = ValidateTimeout(request.RequestTimeoutSeconds);
         dr.ClusterAppliedAt = null; // route changed — must be re-applied
 
         await db.SaveChangesAsync(ct);
     }
+
+    /// <summary>
+    /// Changes only the request timeout on a deployment route. Clears ClusterAppliedAt so the
+    /// row shows as needing a re-apply — the new value reaches the cluster with the regenerated
+    /// HTTPRoute, not before. Null restores the platform default; 0 disables the timeout.
+    /// </summary>
+    public async Task UpdateDeploymentRouteTimeoutAsync(
+        Guid deploymentRouteId, int? requestTimeoutSeconds, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        AppDeploymentRoute dr = await db.AppDeploymentRoutes
+            .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct)
+            ?? throw new InvalidOperationException("Deployment route not found.");
+
+        dr.RequestTimeoutSeconds = ValidateTimeout(requestTimeoutSeconds);
+        dr.ClusterAppliedAt = null;
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    private static int? ValidateTimeout(int? requestTimeoutSeconds)
+        => requestTimeoutSeconds is < 0
+            ? throw new InvalidOperationException("Request timeout cannot be negative. Use 0 for no timeout.")
+            : requestTimeoutSeconds;
 
     public async Task DeleteDeploymentRouteAsync(Guid deploymentRouteId, CancellationToken ct = default)
     {
@@ -359,6 +393,10 @@ public class AppRouteService(
                 rules.AppendLine($"          namespace: {drNs}");
                 rules.AppendLine($"          port: {dr.ServicePort}");
             }
+
+            // Each deployment route carries its own timeout, so a streaming path can opt out
+            // (0) while the rest of the hostname still fails fast.
+            rules.Append(ExternalRouteService.RenderTimeouts(dr.RequestTimeoutSeconds, "      "));
         }
 
         return

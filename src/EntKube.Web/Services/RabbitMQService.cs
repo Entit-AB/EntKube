@@ -35,6 +35,37 @@ public class RabbitMQQueueInfo
     public bool AutoDelete { get; set; }
 }
 
+/// <summary>
+/// Live per-queue counters read from <c>rabbitmqctl list_queues</c>.
+///
+/// These deliberately do not come from Prometheus: the RabbitMQ Prometheus plugin aggregates
+/// per-object metrics on its default endpoint, so queue-level depth is simply not there. Reading
+/// them over rabbitmqctl also works on brokers EntKube adopted rather than installed, which have
+/// no Prometheus wiring of their own.
+/// </summary>
+public class RabbitMQQueueStats
+{
+    public required string QueueName { get; set; }
+    public required string Vhost { get; set; }
+    public string QueueType { get; set; } = "classic";
+
+    public long Messages { get; set; }
+    public long MessagesReady { get; set; }
+    public long MessagesUnacknowledged { get; set; }
+    public long MessageBytes { get; set; }
+    public int Consumers { get; set; }
+    public long MemoryBytes { get; set; }
+
+    /// <summary>"running", "idle", "flow" (the broker is throttling publishers), "down", …</summary>
+    public string State { get; set; } = "";
+
+    /// <summary>Messages are queued with nothing attached to consume them.</summary>
+    public bool Stalled => MessagesReady > 0 && Consumers == 0;
+
+    /// <summary>The queue is applying back-pressure to its publishers.</summary>
+    public bool InFlowControl => State.Equals("flow", StringComparison.OrdinalIgnoreCase);
+}
+
 public class RabbitMQExchangeInfo
 {
     public required string K8sName { get; set; }
@@ -113,7 +144,8 @@ public class RabbitMQOperatorStatus
 public class RabbitMQService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     IKubernetesClientFactory k8s,
-    VaultService vaultService)
+    VaultService vaultService,
+    ILogger<RabbitMQService>? logger = null)
 {
     // ── Cluster queries ───────────────────────────────────────────────────────
 
@@ -792,6 +824,176 @@ public class RabbitMQService(
         await db.SaveChangesAsync(ct);
     }
 
+    // ── Metrics scraping ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Creates the ServiceMonitor that makes Prometheus scrape this broker.
+    ///
+    /// Nothing does this on its own: the RabbitMQ operator exposes the Prometheus plugin on a
+    /// port named <c>prometheus</c> but never creates a monitor for it, so a broker installed
+    /// through EntKube serves metrics that nothing collects. The shape follows the operator's
+    /// own published ServiceMonitor, narrowed to a single cluster.
+    ///
+    /// Only the aggregated <c>/metrics</c> endpoint is scraped. RabbitMQ's published monitor also
+    /// scrapes <c>/metrics/detailed</c> for per-queue series, but EntKube reads per-queue depth
+    /// straight off the broker with rabbitmqctl, so that endpoint would buy nothing while costing
+    /// cardinality proportional to the queue count — and it emits a second
+    /// <c>rabbitmq_identity_info</c> series per node, which doubles the node count and makes the
+    /// cluster-name join ambiguous.
+    ///
+    /// External brokers are refused rather than guessed at: their Service names, labels and
+    /// metrics ports come from whatever chart installed them, and a ServiceMonitor pointed at
+    /// the wrong port would look installed while collecting nothing.
+    /// </summary>
+    public async Task EnableMetricsScrapeAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!cluster.IsOperatorManaged)
+            throw new InvalidOperationException(
+                $"'{cluster.Name}' was not installed by EntKube, so its metrics port and Service "
+                + "labels are not known. Create a ServiceMonitor for it by hand — RabbitMQ publishes "
+                + "one at rabbitmq/cluster-operator under observability/prometheus/monitors.");
+
+        string manifest = $"""
+            apiVersion: monitoring.coreos.com/v1
+            kind: ServiceMonitor
+            metadata:
+              name: {cluster.Name}-metrics
+              namespace: {cluster.Namespace}
+              labels:
+                app.kubernetes.io/name: {cluster.Name}
+                app.kubernetes.io/component: rabbitmq
+            spec:
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: {cluster.Name}
+                  app.kubernetes.io/component: rabbitmq
+              endpoints:
+                - port: prometheus
+                  scheme: http
+                  interval: 15s
+                  scrapeTimeout: 14s
+            """;
+
+        await k8s.ApplyManifestAsync(manifest, cluster.KubernetesCluster.Kubeconfig!, ct);
+    }
+
+    // ── External brokers: rabbitmqctl control channel ─────────────────────────
+    //
+    // An external broker has no topology CRs to apply and its management API is not reachable
+    // from the EntKube process, so every topology read and write goes through rabbitmqctl on
+    // the broker pod. That covers vhosts, users and permissions outright. Queues, exchanges and
+    // bindings have no rabbitmqctl create verb, so those are created by importing a partial
+    // definitions document — the same mechanism restore already uses.
+
+    /// <summary>
+    /// Runs rabbitmqctl on the broker pod and returns stdout.
+    ///
+    /// Bounded rather than left to run indefinitely: every one of these is a listing or a small
+    /// topology change that finishes in well under a second, and they are issued while a page is
+    /// waiting. An exec against an unreachable API server never completes on its own, which would
+    /// leave the caller — and the panel that awaited it — hanging with no way out but a reload.
+    /// </summary>
+    private async Task<string> RunCtlAsync(
+        RabbitMQCluster cluster, IReadOnlyList<string> args, CancellationToken ct,
+        int timeoutSeconds = 60)
+    {
+        List<string> command = ["rabbitmqctl", .. args];
+        return await k8s.RunCommandOnPodAsync(
+            cluster.PrimaryPodName, cluster.Namespace, command,
+            cluster.KubernetesCluster.Kubeconfig!, ct: ct, timeoutSeconds: timeoutSeconds);
+    }
+
+    /// <summary>
+    /// Runs a rabbitmqctl listing with JSON output and returns the rows. rabbitmqctl may print
+    /// human-readable status lines ahead of the payload, so the array is located in the output
+    /// rather than assumed to start at the first byte.
+    /// </summary>
+    private async Task<List<JsonElement>> RunCtlListAsync(
+        RabbitMQCluster cluster, IReadOnlyList<string> args, CancellationToken ct)
+    {
+        string raw = await RunCtlAsync(cluster, [.. args, "--formatter", "json"], ct);
+
+        int start = raw.IndexOf('[');
+        int end = raw.LastIndexOf(']');
+        if (start < 0 || end <= start) return [];
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(raw[start..(end + 1)]);
+            // Clone so the elements outlive the document.
+            return [.. doc.RootElement.EnumerateArray().Select(e => e.Clone())];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// Imports a partial definitions document. RabbitMQ treats absent top-level keys as
+    /// "nothing to do", so a document containing only queues (or only exchanges, or only
+    /// bindings) creates just those objects and leaves the rest of the broker untouched.
+    /// </summary>
+    private async Task ImportPartialDefinitionsAsync(
+        RabbitMQCluster cluster, string definitionsJson, CancellationToken ct)
+    {
+        await k8s.RunCommandOnPodWithStdinAsync(
+            cluster.PrimaryPodName, cluster.Namespace,
+            ["rabbitmqctl", "import_definitions", "-"],
+            definitionsJson, cluster.KubernetesCluster.Kubeconfig!, ct);
+    }
+
+    private async Task<List<string>> ListExternalVhostsAsync(RabbitMQCluster cluster, CancellationToken ct)
+    {
+        List<JsonElement> rows = await RunCtlListAsync(cluster, ["list_vhosts", "name"], ct);
+        return [.. rows.Select(r => CtlString(r, "name")).Where(v => v.Length > 0)];
+    }
+
+    private static string CtlString(JsonElement row, string field) =>
+        row.TryGetProperty(field, out JsonElement v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString() ?? "" : "";
+
+    private static bool CtlBool(JsonElement row, string field) =>
+        row.TryGetProperty(field, out JsonElement v) && v.ValueKind == JsonValueKind.True;
+
+    /// <summary>
+    /// Reads a numeric rabbitmqctl column. Counters are absent on a queue that has never seen
+    /// traffic and null on one whose stats the broker has not collected yet, both of which mean
+    /// zero here rather than an error.
+    /// </summary>
+    private static long CtlLong(JsonElement row, string field) =>
+        row.TryGetProperty(field, out JsonElement v) && v.ValueKind == JsonValueKind.Number
+        && v.TryGetInt64(out long n) ? n : 0;
+
+    /// <summary>
+    /// Builds the delete handle for a topology object on an external broker. Operator-managed
+    /// objects are addressed by their K8s object name; external ones have none, so the
+    /// (vhost, object) pair travels in that same slot. Both halves are base64 so the ':'
+    /// separator stays unambiguous — vhost and object names may contain almost any character,
+    /// and the default vhost is literally "/".
+    /// </summary>
+    private static string ExternalHandle(string vhost, string name) =>
+        $"ext:{B64(vhost)}:{B64(name)}";
+
+    private static (string Vhost, string Name) ParseExternalHandle(string handle)
+    {
+        string[] parts = handle.Split(':');
+
+        if (parts.Length != 3 || parts[0] != "ext")
+            throw new InvalidOperationException($"'{handle}' is not an external topology handle.");
+
+        return (Encoding.UTF8.GetString(Convert.FromBase64String(parts[1])),
+                Encoding.UTF8.GetString(Convert.FromBase64String(parts[2])));
+    }
+
+    /// <summary>Thrown for operations that RabbitMQ exposes no CLI verb for on an external broker.</summary>
+    private static InvalidOperationException NoCliVerb(string what) =>
+        new($"RabbitMQ offers no rabbitmqctl command to {what}, and this broker is not "
+            + "operator-managed, so EntKube cannot do it. Use the RabbitMQ management UI.");
+
     // ── Topology — Vhosts ─────────────────────────────────────────────────────
 
     public async Task<List<RabbitMQVhostInfo>> GetVhostsAsync(
@@ -857,6 +1059,76 @@ public class RabbitMQService(
             Durable = GetSpecBool(item, "spec", "durable") ?? true,
             AutoDelete = GetSpecBool(item, "spec", "autoDelete") ?? false
         });
+    }
+
+    /// <summary>
+    /// Reads live per-queue counters for every vhost on the broker.
+    ///
+    /// Always goes through rabbitmqctl, for both operator-managed and adopted brokers: the
+    /// topology CRDs describe what a queue should be, not how much is sitting in it, and the
+    /// Prometheus plugin aggregates the per-queue series away by default.
+    /// </summary>
+    public async Task<List<RabbitMQQueueStats>> GetQueueStatsAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        List<RabbitMQQueueStats> stats = [];
+
+        foreach (string vhost in await ListExternalVhostsAsync(cluster, ct))
+        {
+            List<JsonElement> rows = await ListQueueStatRowsAsync(cluster, vhost, ct);
+
+            stats.AddRange(rows.Select(r => new RabbitMQQueueStats
+            {
+                QueueName              = CtlString(r, "name"),
+                Vhost                  = vhost,
+                QueueType              = CtlString(r, "type") is { Length: > 0 } t ? t : "classic",
+                Messages               = CtlLong(r, "messages"),
+                MessagesReady          = CtlLong(r, "messages_ready"),
+                MessagesUnacknowledged = CtlLong(r, "messages_unacknowledged"),
+                MessageBytes           = CtlLong(r, "message_bytes"),
+                Consumers              = (int)CtlLong(r, "consumers"),
+                MemoryBytes            = CtlLong(r, "memory"),
+                State                  = CtlString(r, "state"),
+            }));
+        }
+
+        return [.. stats.OrderByDescending(s => s.Messages).ThenBy(s => s.QueueName)];
+    }
+
+    /// <summary>
+    /// Lists one vhost's queues with their counters, retrying on a reduced column set.
+    ///
+    /// rabbitmqctl rejects the whole command if any single column is unknown to the broker, and
+    /// the optional columns here have moved between RabbitMQ versions. Falling back to the
+    /// columns that have always existed keeps depth visible on a broker that refuses the rest,
+    /// rather than failing the panel outright.
+    /// </summary>
+    private async Task<List<JsonElement>> ListQueueStatRowsAsync(
+        RabbitMQCluster cluster, string vhost, CancellationToken ct)
+    {
+        string[] full =
+        [
+            "list_queues", "--vhost", vhost,
+            "name", "type", "messages", "messages_ready", "messages_unacknowledged",
+            "message_bytes", "consumers", "memory", "state"
+        ];
+
+        try
+        {
+            return await RunCtlListAsync(cluster, full, ct);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogDebug(ex,
+                "list_queues with full column set failed on {Cluster} vhost {Vhost}; retrying reduced",
+                cluster.Name, vhost);
+
+            return await RunCtlListAsync(cluster,
+                ["list_queues", "--vhost", vhost,
+                 "name", "messages", "messages_ready", "messages_unacknowledged", "consumers"], ct);
+        }
     }
 
     public async Task CreateQueueAsync(

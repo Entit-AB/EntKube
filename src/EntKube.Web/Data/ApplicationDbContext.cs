@@ -2039,8 +2039,9 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
-        // KedaScaler — KEDA autoscaler (ScaledObject / Custom) scoped per (App, Environment).
-        // Name is unique within that scope and used as the Kubernetes resource name.
+        // KedaScaler — autoscaler (KEDA ScaledObject / Custom YAML / native HPA) scoped per
+        // (App, Environment). Name is unique within that scope and used as the Kubernetes
+        // resource name.
 
         builder.Entity<KedaScaler>(entity =>
         {

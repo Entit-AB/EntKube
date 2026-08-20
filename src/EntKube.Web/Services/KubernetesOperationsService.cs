@@ -2923,7 +2923,7 @@ public class KubernetesOperationsService(
             return new HelmExecutionResult
             {
                 Success = false,
-                Output = $"Failed to run {program}: {ex.Message}"
+                Output = HelmExecutionResult.DescribeLaunchFailure(program, ex)
             };
         }
     }

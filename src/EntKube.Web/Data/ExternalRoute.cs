@@ -57,6 +57,18 @@ public class ExternalRoute
     /// </summary>
     public string PathPrefix { get; set; } = "/";
 
+    /// <summary>
+    /// Request timeout for the generated HTTPRoute rule (spec.rules[].timeouts). Null uses
+    /// the platform default (<see cref="Services.ExternalRouteService.DefaultRequestTimeoutSeconds"/>);
+    /// 0 emits no timeouts block at all, leaving the gateway to wait indefinitely.
+    ///
+    /// Only set 0 for routes carrying long-lived streams (websockets, SSE, HTTP upgrade such as
+    /// Tailscale's ts2021): Gateway API's request timeout bounds the entire exchange, not the time
+    /// to first byte, so a finite value cuts a live stream off mid-flight. Everything else wants a
+    /// finite value — without one a wedged upstream hangs the browser instead of failing fast.
+    /// </summary>
+    public int? RequestTimeoutSeconds { get; set; }
+
     /// <summary>How TLS is handled — automatic via ClusterIssuer or manual cert upload.</summary>
     public TlsMode TlsMode { get; set; } = TlsMode.ClusterIssuer;
 

@@ -1922,6 +1922,15 @@ else if (selectedKeycloak is not null)
                 </button>
             </li>
             <li class="nav-item" role="presentation">
+                <button class="nav-link @(instanceTab == "monitoring" ? "active" : "")"
+                        role="tab"
+                        aria-selected="@(instanceTab == "monitoring")"
+                        tabindex="@(instanceTab == "monitoring" ? 0 : -1)"
+                        @onclick='() => SwitchInstanceTab("monitoring")'>
+                    <i class="bi bi-speedometer2 me-1"></i>Monitoring
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
                 <button class="nav-link @(instanceTab == "migrate" ? "active" : "")"
                         role="tab"
                         aria-selected="@(instanceTab == "migrate")"
@@ -1931,6 +1940,28 @@ else if (selectedKeycloak is not null)
                 </button>
             </li>
         </ul>
+
+        @if (instanceTab == "monitoring")
+        {
+            @* ── Monitoring tab ── *@
+            @if (selectedKeycloak?.Component is { } monitored && monitored.ClusterId != Guid.Empty)
+            {
+                @* Namespace is nullable on the component; installs made through the catalog use
+                   the entry's default, which is what the metrics selector needs. *@
+                <KeycloakMonitoringPanel ClusterId="monitored.ClusterId"
+                                         Namespace="@(string.IsNullOrWhiteSpace(monitored.Namespace) ? "keycloak" : monitored.Namespace)"
+                                         InstanceName="@selectedKeycloak.DisplayName" />
+            }
+            else
+            {
+                <div class="alert alert-secondary py-2 small">
+                    <span class="bi bi-info-circle me-1"></span>
+                    This Keycloak was registered by URL rather than installed by EntKube, so there is
+                    no cluster or namespace to read metrics from. Metrics are available for instances
+                    deployed as a cluster component.
+                </div>
+            }
+        }
 
         @if (instanceTab == "themes")
         {

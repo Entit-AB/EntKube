@@ -542,6 +542,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
 
+                    b.Property<int?>("RequestTimeoutSeconds")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("RewritePath")
                         .HasColumnType("TEXT");
 
@@ -2449,6 +2452,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
 
+                    b.Property<int?>("RequestTimeoutSeconds")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("ServiceName")
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
@@ -2993,6 +2999,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<Guid>("AppId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("BehaviorYaml")
+                        .HasColumnType("TEXT");
+
                     b.Property<int?>("CooldownPeriod")
                         .HasColumnType("INTEGER");
 
@@ -3031,6 +3040,12 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<string>("ScaleTargetName")
                         .HasColumnType("TEXT");
+
+                    b.Property<int?>("TargetCpuUtilization")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("TargetMemoryUtilization")
+                        .HasColumnType("INTEGER");
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("TEXT");
@@ -4127,6 +4142,12 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ProjectName")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProxyUrl")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProxyUsername")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Region")

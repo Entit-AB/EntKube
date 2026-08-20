@@ -4,17 +4,18 @@
 @inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
-   KedaTab — KEDA autoscaler management at app+environment scope.
-   ScaledObjects (structured) and Custom YAML (ScaledObject/ScaledJob)
-   are applied to the app's namespace on every cluster it runs on.
+   KedaTab — autoscaler management at app+environment scope.
+   KEDA ScaledObjects (structured), native autoscaling/v2 HPAs, and
+   Custom YAML (ScaledObject/ScaledJob) are applied to the app's
+   namespace on every cluster it runs on.
    ═══════════════════════════════════════════════════════════════════ *@
 
 <div class="card shadow-sm mb-3 mt-4">
     <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
         <div>
             <i class="bi bi-arrows-angle-expand me-2 text-primary"></i>
-            <strong>Autoscaling (KEDA)</strong>
-            <span class="text-muted small ms-2">Event-driven autoscalers applied to this app's namespace in this environment.</span>
+            <strong>Autoscaling</strong>
+            <span class="text-muted small ms-2">Horizontal Pod Autoscalers and event-driven KEDA scalers applied to this app's namespace in this environment.</span>
         </div>
         <div class="d-flex align-items-center gap-2">
             @if (scalers.Count > 0)
@@ -80,8 +81,9 @@
                     <i class="bi bi-exclamation-triangle-fill text-warning flex-shrink-0"></i>
                     <div>
                         <strong>KEDA is not installed</strong> on any cluster in this environment.
-                        Install it from the <strong>Cluster → Components</strong> page (Autoscaling category).
-                        Saved autoscalers will take effect once KEDA is running.
+                        Install it from the <strong>Cluster → Components</strong> page (Autoscaling category);
+                        saved ScaledObjects and ScaledJobs take effect once KEDA is running.
+                        <strong>Horizontal Pod Autoscalers don't need KEDA</strong> — they work wherever metrics-server runs.
                     </div>
                 </div>
             }
@@ -96,7 +98,10 @@
             @* ── Existing scalers ── *@
             @if (scalers.Count == 0)
             {
-                <p class="text-muted small fst-italic mb-3">No autoscalers yet. Add a ScaledObject to autoscale a workload, or use Custom YAML for a ScaledJob.</p>
+                <p class="text-muted small fst-italic mb-3">
+                    No autoscalers yet. Add an HPA to scale on CPU/memory, a ScaledObject to scale on events (queue depth, Prometheus, cron),
+                    or Custom YAML for a ScaledJob.
+                </p>
             }
             else
             {
@@ -115,6 +120,15 @@
                                         {
                                             <text> (@(s.MinReplicaCount?.ToString() ?? "0")–@(s.MaxReplicaCount?.ToString() ?? "100") replicas)</text>
                                         }
+                                    </span>
+                                }
+                                else if (s.Kind == KedaScalerKind.Hpa)
+                                {
+                                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle ms-2">HPA</span>
+                                    <span class="text-muted small ms-2">
+                                        → @s.ScaleTargetKind/@s.ScaleTargetName
+                                        (@(s.MinReplicaCount ?? 1)–@(s.MaxReplicaCount?.ToString() ?? "?") replicas,
+                                        @HpaMetricSummary(s))
                                     </span>
                                 }
                                 else
@@ -161,7 +175,8 @@
                         <div class="col-md-6">
                             <label class="form-label small mb-1">Type</label>
                             <select class="form-select form-select-sm" @bind="editKind">
-                                <option value="@KedaScalerKind.ScaledObject">ScaledObject (autoscale a workload)</option>
+                                <option value="@KedaScalerKind.Hpa">HorizontalPodAutoscaler (CPU / memory)</option>
+                                <option value="@KedaScalerKind.ScaledObject">ScaledObject (KEDA — event-driven)</option>
                                 <option value="@KedaScalerKind.Custom">Custom YAML (ScaledObject / ScaledJob)</option>
                             </select>
                         </div>
@@ -206,6 +221,59 @@
                         </label>
                         <YamlEditor @bind-Value="fTriggers" />
                     }
+                    else if (editKind == KedaScalerKind.Hpa)
+                    {
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-4">
+                                <label class="form-label small mb-1">Target kind</label>
+                                <select class="form-select form-select-sm" @bind="fTargetKind">
+                                    <option>Deployment</option>
+                                    <option>StatefulSet</option>
+                                    <option>ReplicaSet</option>
+                                </select>
+                            </div>
+                            <div class="col-md-8">
+                                <label class="form-label small mb-1">Target name</label>
+                                <input class="form-control form-control-sm font-monospace" @bind="fTargetName"
+                                       placeholder="workload name to scale" />
+                            </div>
+                        </div>
+                        <div class="row g-2 mb-2">
+                            <div class="col">
+                                <label class="form-label small mb-1">Min replicas</label>
+                                <input type="number" min="1" class="form-control form-control-sm" @bind="fMin" placeholder="1" />
+                            </div>
+                            <div class="col">
+                                <label class="form-label small mb-1">Max replicas</label>
+                                <input type="number" min="1" class="form-control form-control-sm" @bind="fMax" placeholder="10" />
+                            </div>
+                            <div class="col">
+                                <label class="form-label small mb-1">Target CPU %</label>
+                                <input type="number" min="1" class="form-control form-control-sm" @bind="fCpuTarget" placeholder="off" />
+                            </div>
+                            <div class="col">
+                                <label class="form-label small mb-1">Target memory %</label>
+                                <input type="number" min="1" class="form-control form-control-sm" @bind="fMemTarget" placeholder="off" />
+                            </div>
+                        </div>
+                        <div class="form-text mb-2">
+                            Targets are a percentage of each pod's <strong>resource request</strong>, so the workload must set
+                            CPU/memory requests or the HPA has nothing to measure. Leave a field empty to drop that metric.
+                            Scaling to zero needs a KEDA ScaledObject — an HPA's minimum is 1.
+                        </div>
+
+                        <div class="form-check form-switch mb-2">
+                            <input class="form-check-input" type="checkbox" id="hpa-behavior-toggle" @bind="showBehavior" />
+                            <label class="form-check-label small" for="hpa-behavior-toggle">
+                                Scaling behavior <span class="text-muted">(stabilization windows and policies)</span>
+                            </label>
+                        </div>
+                        @if (showBehavior)
+                        {
+                            <YamlEditor @bind-Value="fBehavior" />
+                            <div class="form-text mb-2">Spliced under <code>spec.behavior</code>. Leave empty for the Kubernetes defaults.</div>
+                        }
+                    }
                     else
                     {
                         <label class="form-label small mb-1">
@@ -226,6 +294,9 @@
             else
             {
                 <div class="d-flex gap-2">
+                    <button class="btn btn-sm btn-outline-primary" @onclick="NewHpa">
+                        <i class="bi bi-plus-lg me-1"></i>Add HPA
+                    </button>
                     <button class="btn btn-sm btn-outline-primary" @onclick="NewScaledObject">
                         <i class="bi bi-plus-lg me-1"></i>Add ScaledObject
                     </button>
@@ -234,6 +305,177 @@
                     </button>
                 </div>
             }
+
+            @* ── What is actually on the cluster ── *@
+            <div class="border-top mt-3 pt-3">
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                    <div>
+                        <strong class="small"><i class="bi bi-binoculars me-1 text-primary"></i>On the cluster</strong>
+                        <span class="text-muted small ms-2">
+                            Autoscalers found in this app's namespaces — including ones EntKube didn't create.
+                        </span>
+                    </div>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="Scan" disabled="@scanning">
+                        @if (scanning) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        else { <i class="bi bi-arrow-repeat me-1"></i> }
+                        Rescan
+                    </button>
+                </div>
+
+                @if (scanning && scan is null)
+                {
+                    <p class="text-muted small mb-0"><span class="spinner-border spinner-border-sm me-1"></span>Scanning clusters…</p>
+                }
+                else if (scan is null)
+                {
+                    <p class="text-muted small fst-italic mb-0">Not scanned yet.</p>
+                }
+                else
+                {
+                    @if (scan.Errors.Count > 0)
+                    {
+                        <div class="alert alert-danger py-2 small mb-2">
+                            <i class="bi bi-exclamation-triangle me-1"></i>
+                            <strong>Some namespaces could not be read</strong> — what runs there is unknown, not necessarily nothing.
+                            <ul class="mb-0 mt-1 ps-3">
+                                @foreach (string err in scan.Errors)
+                                {
+                                    <li>@err</li>
+                                }
+                            </ul>
+                        </div>
+                    }
+
+                    @if (scan.ScannedTargets.Count == 0)
+                    {
+                        <p class="text-muted small fst-italic mb-0">
+                            No deployments in this environment yet, so there is no namespace to scan.
+                        </p>
+                    }
+                    else if (scan.Live.Count == 0)
+                    {
+                        <p class="text-muted small fst-italic mb-0">
+                            No autoscalers running in @string.Join(", ", scan.ScannedTargets).
+                        </p>
+                    }
+                    else
+                    {
+                        @if (scan.Conflicting.Count > 0)
+                        {
+                            <div class="alert alert-danger py-2 small mb-2">
+                                <i class="bi bi-exclamation-octagon-fill me-1"></i>
+                                <strong>@scan.Conflicting.Count autoscaler(s) share a workload.</strong>
+                                Each one keeps recomputing the replica count from its own metrics and overwriting the other,
+                                so the workload flaps. Keep one and delete the rest.
+                            </div>
+                        }
+                        else if (scan.Unmanaged.Count > 0)
+                        {
+                            <div class="alert alert-warning py-2 small mb-2">
+                                <i class="bi bi-exclamation-triangle me-1"></i>
+                                @scan.Unmanaged.Count autoscaler(s) here were not created by EntKube. Applying from this tab
+                                will not change or remove them.
+                            </div>
+                        }
+
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-2">
+                                <thead>
+                                    <tr class="small text-muted">
+                                        <th>Autoscaler</th>
+                                        <th>Target</th>
+                                        <th>Replicas</th>
+                                        <th>Metrics / triggers</th>
+                                        <th>Source</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (IGrouping<string, LiveAutoscaler> group in scan.Live.GroupBy(l => $"{l.ClusterName}/{l.Namespace}"))
+                                    {
+                                        <tr class="table-light">
+                                            <td colspan="5" class="small text-muted fw-medium">
+                                                <i class="bi bi-hdd-network me-1"></i>@group.Key
+                                            </td>
+                                        </tr>
+                                        @foreach (LiveAutoscaler l in group)
+                                        {
+                                            <tr class="@(l.Conflict is not null ? "table-danger" : null)">
+                                                <td>
+                                                    <code class="small">@l.Name</code>
+                                                    <span class="badge @LiveKindBadge(l.Kind) ms-1">@LiveKindLabel(l.Kind)</span>
+                                                </td>
+                                                <td class="small">
+                                                    @if (string.IsNullOrWhiteSpace(l.TargetName))
+                                                    {
+                                                        <span class="text-muted">—</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <text>@l.TargetKind/@l.TargetName</text>
+                                                    }
+                                                </td>
+                                                <td class="small">
+                                                    @(l.MinReplicas?.ToString() ?? "–")–@(l.MaxReplicas?.ToString() ?? "–")
+                                                    @if (l.CurrentReplicas is not null)
+                                                    {
+                                                        <span class="text-muted"> (now @l.CurrentReplicas)</span>
+                                                    }
+                                                </td>
+                                                <td class="small text-muted">@l.Summary</td>
+                                                <td>
+                                                    @switch (l.Owner)
+                                                    {
+                                                        case AutoscalerOwner.EntKube:
+                                                            <span class="badge bg-success-subtle text-success-emphasis">Managed here</span>
+                                                            break;
+                                                        case AutoscalerOwner.Keda:
+                                                            <span class="badge bg-secondary-subtle text-secondary-emphasis"
+                                                                  title="@($"Created by the KEDA operator for {l.OwnerName}")">
+                                                                KEDA-owned
+                                                            </span>
+                                                            break;
+                                                        default:
+                                                            <span class="badge bg-warning-subtle text-warning-emphasis">Outside EntKube</span>
+                                                            break;
+                                                    }
+                                                </td>
+                                            </tr>
+                                            @if (l.Conflict is not null || l.StatusNote is not null)
+                                            {
+                                                <tr class="@(l.Conflict is not null ? "table-danger" : null)">
+                                                    <td colspan="5" class="small pt-0">
+                                                        @if (l.Conflict is not null)
+                                                        {
+                                                            <div class="text-danger">
+                                                                <i class="bi bi-exclamation-octagon me-1"></i>@l.Conflict
+                                                            </div>
+                                                        }
+                                                        @if (l.StatusNote is not null)
+                                                        {
+                                                            <div class="text-warning-emphasis">
+                                                                <i class="bi bi-info-circle me-1"></i>@l.StatusNote
+                                                            </div>
+                                                        }
+                                                    </td>
+                                                </tr>
+                                            }
+                                        }
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+
+                    @if (scan.NotApplied.Count > 0)
+                    {
+                        <div class="alert alert-info py-2 small mb-0">
+                            <i class="bi bi-cloud-upload me-1"></i>
+                            Configured here but not on the cluster: @string.Join(", ", scan.NotApplied).
+                            Use <strong>Apply to clusters</strong> to push them.
+                        </div>
+                    }
+                }
+            </div>
         }
     </div>
 </div>
@@ -261,6 +503,10 @@
         finally { confirmBusy = false; pendingConfirm = null; }
     }
 
+    // Cluster scan
+    private AutoscalerScanResult? scan;
+    private bool scanning;
+
     // Apply
     private bool applying;
     private List<(string Target, bool Success, string Output)>? applyResults;
@@ -281,6 +527,10 @@
     private int? fCooldown;
     private string fTriggers = "";
     private string fCustom = "";
+    private int? fCpuTarget;
+    private int? fMemTarget;
+    private string fBehavior = "";
+    private bool showBehavior;
 
     private const string DefaultTriggers =
         "- type: cpu\n" +
@@ -332,10 +582,21 @@
         }
     }
 
-    private void NewScaledObject()
+    private void NewScaledObject() => NewScaler(KedaScalerKind.ScaledObject);
+
+    private void NewHpa() => NewScaler(KedaScalerKind.Hpa);
+
+    private void NewCustom() => NewScaler(KedaScalerKind.Custom);
+
+    /// <summary>
+    /// Opens the editor on a new scaler. Every kind's fields are seeded, not just the chosen
+    /// one's, so switching the Type dropdown mid-edit lands on a usable form rather than a
+    /// blank one.
+    /// </summary>
+    private void NewScaler(KedaScalerKind kind)
     {
         editId = null;
-        editKind = KedaScalerKind.ScaledObject;
+        editKind = kind;
         fName = "";
         fTargetKind = "Deployment";
         fTargetName = "";
@@ -344,16 +605,11 @@
         fPolling = null;
         fCooldown = null;
         fTriggers = DefaultTriggers;
-        saveError = null;
-        editorOpen = true;
-    }
-
-    private void NewCustom()
-    {
-        editId = null;
-        editKind = KedaScalerKind.Custom;
-        fName = "";
         fCustom = DefaultCustomYaml;
+        fCpuTarget = 70;
+        fMemTarget = null;
+        fBehavior = "";
+        showBehavior = false;
         saveError = null;
         editorOpen = true;
     }
@@ -371,8 +627,23 @@
         fCooldown = s.CooldownPeriod;
         fTriggers = s.TriggersYaml ?? DefaultTriggers;
         fCustom = s.CustomYaml ?? "";
+        // Converting a KEDA scaler to an HPA via the Type dropdown should land on a working
+        // CPU target rather than "no metrics", so only an actual HPA restores its own values.
+        fCpuTarget = s.Kind == KedaScalerKind.Hpa ? s.TargetCpuUtilization : 70;
+        fMemTarget = s.Kind == KedaScalerKind.Hpa ? s.TargetMemoryUtilization : null;
+        fBehavior = s.BehaviorYaml ?? "";
+        showBehavior = !string.IsNullOrWhiteSpace(s.BehaviorYaml);
         saveError = null;
         editorOpen = true;
+    }
+
+    /// <summary>One-line summary of an HPA's metrics for the list row.</summary>
+    private static string HpaMetricSummary(KedaScaler s)
+    {
+        List<string> parts = [];
+        if (s.TargetCpuUtilization is { } cpu) parts.Add($"CPU {cpu}%");
+        if (s.TargetMemoryUtilization is { } mem) parts.Add($"memory {mem}%");
+        return parts.Count == 0 ? "no metrics" : string.Join(" + ", parts);
     }
 
     private void CancelEdit() => editorOpen = false;
@@ -394,6 +665,14 @@
                     TenantId, AppId, EnvironmentId, editId,
                     fName, fTargetKind, fTargetName,
                     fMin, fMax, fPolling, fCooldown, fTriggers);
+            }
+            else if (editKind == KedaScalerKind.Hpa)
+            {
+                await KedaService.SaveHpaAsync(
+                    TenantId, AppId, EnvironmentId, editId,
+                    fName, fTargetKind, fTargetName,
+                    fMin, fMax, fCpuTarget, fMemTarget,
+                    showBehavior ? fBehavior : null);
             }
             else
             {
@@ -449,5 +728,55 @@
         {
             applying = false;
         }
+
+        // The cluster just changed, so the previous scan is stale.
+        await Scan();
     }
+
+    // ── Cluster scan ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Runs after the first render (and on demand) rather than during load, so a slow or
+    /// unreachable cluster delays only this section instead of the whole tab.
+    /// </summary>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !loading && loadError is null && scan is null && !scanning)
+        {
+            await Scan();
+            StateHasChanged();
+        }
+    }
+
+    private async Task Scan()
+    {
+        scanning = true;
+        StateHasChanged();
+        try
+        {
+            scan = await KedaService.ScanEnvironmentAsync(AppId, EnvironmentId);
+        }
+        catch (Exception ex)
+        {
+            scan = new AutoscalerScanResult { Errors = { ex.Message } };
+        }
+        finally
+        {
+            scanning = false;
+        }
+    }
+
+    private static string LiveKindLabel(LiveAutoscalerKind kind) => kind switch
+    {
+        LiveAutoscalerKind.Hpa          => "HPA",
+        LiveAutoscalerKind.ScaledObject => "ScaledObject",
+        LiveAutoscalerKind.ScaledJob    => "ScaledJob",
+        _                                => kind.ToString()
+    };
+
+    private static string LiveKindBadge(LiveAutoscalerKind kind) => kind switch
+    {
+        LiveAutoscalerKind.Hpa => "bg-primary-subtle text-primary border border-primary-subtle",
+        _                       => "bg-info-subtle text-info border border-info-subtle"
+    };
 }

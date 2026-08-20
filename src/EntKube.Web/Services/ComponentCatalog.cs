@@ -837,7 +837,16 @@ public static class ComponentCatalog
                       requests:
                         memory: 512Mi
                         cpu: 250m
-                
+                    # Scrape the PodMonitors/ServiceMonitors that other operators create —
+                    # CNPG databases, Strimzi, RabbitMQ and friends. At the chart default
+                    # (true) Prometheus selects only monitors labelled with its own Helm
+                    # release, so those operator-created ones are silently never scraped.
+                    podMonitorSelectorNilUsesHelmValues: false
+                    serviceMonitorSelectorNilUsesHelmValues: false
+                    probeSelectorNilUsesHelmValues: false
+                    scrapeConfigSelectorNilUsesHelmValues: false
+                    ruleSelectorNilUsesHelmValues: false
+
                 # ── External access via Gateway API HTTPRoutes ──
                 # Uncomment and adjust the hostnames to expose services externally.
                 # Requires an ingress controller (Traefik or Istio) and cert-manager.
@@ -2013,6 +2022,17 @@ public static class ComponentCatalog
                 # --hostname-strict=false (removed in Keycloak 26, causes help-text crash).
                 args:
                   - start
+
+                # Keycloak serves Prometheus metrics and health probes on its management
+                # interface (port 9000, named http-internal by the chart). The chart turns both
+                # on by default, but leaves serviceMonitor off — so without this block the
+                # metrics exist on the pod and nothing ever scrapes them.
+                metrics:
+                  enabled: true
+                health:
+                  enabled: true
+                serviceMonitor:
+                  enabled: true
 
                 # HTTP configuration
                 http:

@@ -47,9 +47,11 @@ public class CleuraS3ManagementTests : IDisposable
         VaultEncryptionService encryption = new(TestRootKey);
         vaultService = new VaultService(dbFactory, encryption);
         httpFactory = new Mock<IHttpClientFactory>();
-        OpenStackS3Service openStackS3 = new(vaultService, httpFactory.Object, new OpenStackKeystoneClient(httpFactory.Object));
-        StorageLinkClientFactory storageClientFactory = new(vaultService, dbFactory);
-        sut = new StorageService(dbFactory, vaultService, openStackS3, new Mock<IKubernetesClientFactory>().Object, storageClientFactory);
+        OpenStackHttpFactory osHttpFactory = new(httpFactory.Object);
+        OpenStackKeystoneClient keystone = new(osHttpFactory, vaultService);
+        OpenStackS3Service openStackS3 = new(vaultService, osHttpFactory, keystone);
+        StorageLinkClientFactory storageClientFactory = new(vaultService, dbFactory, osHttpFactory, keystone);
+        sut = new StorageService(dbFactory, vaultService, openStackS3, keystone, new Mock<IKubernetesClientFactory>().Object, storageClientFactory);
     }
 
     public void Dispose()

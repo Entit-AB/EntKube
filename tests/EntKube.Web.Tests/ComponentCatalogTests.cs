@@ -423,4 +423,39 @@ public class ComponentCatalogTests : IDisposable
         ComponentCatalog.ResolveForComponent("istio-gw-external", "gateway")?.Key.Should().Be("istio");
         ComponentCatalog.ResolveForComponent("istio-gw-internal", "gateway")?.Key.Should().Be("istio-internal");
     }
+
+    [Fact]
+    public void KubePrometheusStack_ScrapesMonitorsCreatedByOtherOperators()
+    {
+        // The chart defaults these to true, which restricts Prometheus to the PodMonitors and
+        // ServiceMonitors carrying its own Helm release label. Operator-created ones — a CNPG
+        // database's PodMonitor, for instance — are then never scraped, and the database
+        // monitoring panel has nothing to show.
+        CatalogEntry? entry = ComponentCatalog.GetByKey("kube-prometheus-stack");
+
+        entry.Should().NotBeNull();
+        entry!.DefaultValues.Should().Contain("podMonitorSelectorNilUsesHelmValues: false");
+        entry.DefaultValues.Should().Contain("serviceMonitorSelectorNilUsesHelmValues: false");
+    }
+
+    [Fact]
+    public void AllCatalogDefaultValuesAreParseableYaml()
+    {
+        // A stray indent in one of these raw string literals only surfaces as a failed helm
+        // install against a real cluster, so parse them all here instead. Entries carrying
+        // %%PLACEHOLDER%% tokens are templates that are substituted at apply time — a bare '%'
+        // opens a YAML directive, so stand in a value first and check the structure around it.
+        foreach (CatalogEntry entry in ComponentCatalog.Entries.Where(e => !string.IsNullOrWhiteSpace(e.DefaultValues)))
+        {
+            string yamlText = System.Text.RegularExpressions.Regex.Replace(
+                entry.DefaultValues!, "%%[A-Z0-9_]+%%", "placeholder");
+
+            Action parse = () =>
+            {
+                YamlDotNet.RepresentationModel.YamlStream yaml = [];
+                yaml.Load(new StringReader(yamlText));
+            };
+            parse.Should().NotThrow($"'{entry.Key}' default values must be valid YAML");
+        }
+    }
 }

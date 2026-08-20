@@ -29,9 +29,20 @@ public class DeploymentService(
     /// sync/health status until resources are actually applied to the cluster.
     /// For Helm deployments, pass the chart details; for Manual/Yaml, leave them null.
     /// </summary>
+    /// <summary>
+    /// Checks a namespace before it is written to a deployment: it must be present, and it must
+    /// match the environment's governance lock when one is set.
+    ///
+    /// The emptiness check matters beyond the failed install it prevents — a stored blank
+    /// namespace also trips the edit form's own required-field rule, so the deployment becomes
+    /// uneditable and every later change (chart version included) is refused.
+    /// </summary>
     private async Task EnforceNamespaceAsync(
         Guid appId, Guid environmentId, string ns, CancellationToken ct)
     {
+        if (string.IsNullOrWhiteSpace(ns))
+            throw new InvalidOperationException("A namespace is required.");
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         AppEnvironment? ae = await db.AppEnvironments
             .FirstOrDefaultAsync(e => e.AppId == appId && e.EnvironmentId == environmentId, ct);

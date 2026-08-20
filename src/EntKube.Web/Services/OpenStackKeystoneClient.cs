@@ -17,6 +17,13 @@ public sealed class KeystoneSession
     public required string UserId { get; init; }
     public required string ProjectId { get; init; }
 
+    /// <summary>
+    /// Outbound proxy the session was established through, or null for a direct
+    /// connection. Carried here so Nova/Neutron/Glance/Swift calls made with this
+    /// session automatically leave from the same address Keystone accepted.
+    /// </summary>
+    public OpenStackProxy? Proxy { get; init; }
+
     /// <summary>Public endpoint URL per service type ("compute", "network", "image", "load-balancer", "object-store", "identity").</summary>
     public required IReadOnlyDictionary<string, string> Endpoints { get; init; }
 
@@ -51,8 +58,32 @@ public sealed class ApplicationCredential
 /// <see cref="OpenStackS3Service"/> and the compute/provisioning services build
 /// on top of the <see cref="KeystoneSession"/> it returns.
 /// </summary>
-public class OpenStackKeystoneClient(IHttpClientFactory httpClientFactory)
+public class OpenStackKeystoneClient(OpenStackHttpFactory httpFactory, VaultService vaultService)
 {
+    /// <summary>Vault key holding the proxy password for an OpenStack connection.</summary>
+    public const string ProxyPasswordSecretName = "OS_PROXY_PASSWORD";
+
+    /// <summary>
+    /// Builds the proxy settings for a connection, pulling the proxy password out
+    /// of the vault when the proxy authenticates. Returns null when the connection
+    /// talks to OpenStack directly.
+    /// </summary>
+    public async Task<OpenStackProxy?> ResolveProxyAsync(
+        OpenStackConnection connection, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(connection.ProxyUrl))
+        {
+            return null;
+        }
+
+        string? proxyPassword = string.IsNullOrWhiteSpace(connection.ProxyUsername)
+            ? null
+            : await vaultService.GetOpenStackSecretValueAsync(
+                connection.TenantId, connection.Id, ProxyPasswordSecretName, ct);
+
+        return new OpenStackProxy(connection.ProxyUrl, connection.ProxyUsername, proxyPassword);
+    }
+
     /// <summary>
     /// Authenticates against Keystone v3 with password auth and returns a
     /// project-scoped session including the discovered service catalog.
@@ -89,7 +120,9 @@ public class OpenStackKeystoneClient(IHttpClientFactory httpClientFactory)
 
         string json = JsonSerializer.Serialize(authBody);
 
-        using HttpClient client = httpClientFactory.CreateClient();
+        OpenStackProxy? proxy = await ResolveProxyAsync(connection, ct);
+
+        using HttpClient client = httpFactory.CreateClient(proxy);
         string authUrl = NormalizeV3(connection.AuthUrl);
 
         using HttpRequestMessage request = new(HttpMethod.Post, $"{authUrl}/auth/tokens")
@@ -121,6 +154,7 @@ public class OpenStackKeystoneClient(IHttpClientFactory httpClientFactory)
             Token = token,
             UserId = userId,
             ProjectId = projectId,
+            Proxy = proxy,
             Endpoints = ParsePublicEndpoints(tokenElement)
         };
     }
@@ -138,7 +172,7 @@ public class OpenStackKeystoneClient(IHttpClientFactory httpClientFactory)
         object requestBody = new { tenant_id = session.ProjectId };
         string json = JsonSerializer.Serialize(requestBody);
 
-        using HttpClient client = httpClientFactory.CreateClient();
+        using HttpClient client = httpFactory.CreateClient(session.Proxy);
         using HttpRequestMessage request = new(HttpMethod.Post, url)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
@@ -182,7 +216,7 @@ public class OpenStackKeystoneClient(IHttpClientFactory httpClientFactory)
         };
         string json = JsonSerializer.Serialize(requestBody);
 
-        using HttpClient client = httpClientFactory.CreateClient();
+        using HttpClient client = httpFactory.CreateClient(session.Proxy);
         using HttpRequestMessage request = new(HttpMethod.Post, url)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")

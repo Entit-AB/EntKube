@@ -19,6 +19,13 @@ public class ExternalRouteRequest
     public string? TlsPrivateKey { get; set; }
     public string? GatewayName { get; set; }
     public string? GatewayNamespace { get; set; }
+
+    /// <summary>
+    /// Request timeout for the generated HTTPRoute rule. Null takes the platform default
+    /// (<see cref="ExternalRouteService.DefaultRequestTimeoutSeconds"/>); 0 disables the
+    /// timeout for long-lived streams.
+    /// </summary>
+    public int? RequestTimeoutSeconds { get; set; }
 }
 
 /// <summary>
@@ -110,7 +117,8 @@ public class ExternalRouteService(
             TlsCertificate = request.TlsCertificate,
             TlsPrivateKey = request.TlsPrivateKey,
             GatewayName = gatewayName,
-            GatewayNamespace = gatewayNamespace
+            GatewayNamespace = gatewayNamespace,
+            RequestTimeoutSeconds = request.RequestTimeoutSeconds
         };
 
         db.ExternalRoutes.Add(route);
@@ -133,6 +141,33 @@ public class ExternalRouteService(
             .Where(r => r.ComponentId == componentId)
             .OrderBy(r => r.Hostname)
             .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Changes the request timeout on an existing route. The caller re-applies the route
+    /// afterwards — the value only reaches the cluster with the regenerated HTTPRoute.
+    /// Null restores the platform default; 0 disables the timeout.
+    /// </summary>
+    public async Task UpdateRouteTimeoutAsync(
+        Guid routeId, int? requestTimeoutSeconds, CancellationToken ct = default)
+    {
+        if (requestTimeoutSeconds is < 0)
+        {
+            throw new InvalidOperationException("Request timeout cannot be negative. Use 0 for no timeout.");
+        }
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ExternalRoute route = await db.ExternalRoutes
+            .FirstOrDefaultAsync(r => r.Id == routeId, ct)
+            ?? throw new InvalidOperationException("Route not found.");
+
+        route.RequestTimeoutSeconds = requestTimeoutSeconds;
+        await db.SaveChangesAsync(ct);
+
+        logger.LogInformation(
+            "External route {Hostname} request timeout set to {Timeout}",
+            route.Hostname, requestTimeoutSeconds?.ToString() ?? "default");
     }
 
     /// <summary>
@@ -200,37 +235,74 @@ public class ExternalRouteService(
         // TLS is terminated at the Gateway listener — HTTPRoute only routes by hostname/path.
         // No TLS section belongs in HTTPRoute.spec.
 
-        string pathMatch = route.PathPrefix != "/"
-            ? $"""
-                      - matches:
-                          - path:
-                              type: PathPrefix
-                              value: {route.PathPrefix}
-                        backendRefs:
-                          - name: {route.ServiceName}
-                            port: {route.ServicePort}
-               """
-            : $"""
-                      - backendRefs:
-                          - name: {route.ServiceName}
-                            port: {route.ServicePort}
-               """;
+        var rule = new System.Text.StringBuilder();
+        if (route.PathPrefix != "/")
+        {
+            rule.AppendLine("    - matches:");
+            rule.AppendLine("        - path:");
+            rule.AppendLine("            type: PathPrefix");
+            rule.AppendLine($"            value: {route.PathPrefix}");
+            rule.AppendLine("      backendRefs:");
+            rule.AppendLine($"        - name: {route.ServiceName}");
+            rule.AppendLine($"          port: {route.ServicePort}");
+        }
+        else
+        {
+            rule.AppendLine("    - backendRefs:");
+            rule.AppendLine($"        - name: {route.ServiceName}");
+            rule.AppendLine($"          port: {route.ServicePort}");
+        }
 
-        return $"""
-            apiVersion: gateway.networking.k8s.io/v1
-            kind: HTTPRoute
-            metadata:
-              name: {routeName}
-              namespace: {ns}
-            spec:
-              parentRefs:
-                - name: {route.GatewayName}
-                  namespace: {route.GatewayNamespace}
-              hostnames:
-                - {route.Hostname}
-              rules:
-            {pathMatch}
-            """;
+        rule.Append(RenderTimeouts(route.RequestTimeoutSeconds, "      "));
+
+        return
+            $"apiVersion: gateway.networking.k8s.io/v1\n" +
+            $"kind: HTTPRoute\n" +
+            $"metadata:\n" +
+            $"  name: {routeName}\n" +
+            $"  namespace: {ns}\n" +
+            $"spec:\n" +
+            $"  parentRefs:\n" +
+            $"    - name: {route.GatewayName}\n" +
+            $"      namespace: {route.GatewayNamespace}\n" +
+            $"  hostnames:\n" +
+            $"    - {route.Hostname}\n" +
+            $"  rules:\n" +
+            rule.ToString().TrimEnd() + "\n";
+    }
+
+    /// <summary>The request timeout applied to generated HTTPRoute rules when a route sets none.</summary>
+    public const int DefaultRequestTimeoutSeconds = 60;
+
+    /// <summary>
+    /// Timeout for routes that legitimately carry multi-minute requests — container image pushes
+    /// and pulls through Harbor, where a single layer upload can run far past the default. Long,
+    /// but still finite, so a wedged registry eventually fails instead of hanging the client.
+    /// </summary>
+    public const int RegistryRequestTimeoutSeconds = 3600;
+
+    /// <summary>
+    /// Renders the Gateway API <c>timeouts</c> block for one HTTPRoute rule, each line prefixed
+    /// with <paramref name="indent"/> (the indentation of the rule's other keys).
+    ///
+    /// Without this block the gateway applies no timeout at all, so a wedged upstream holds the
+    /// browser's connection open indefinitely instead of failing fast. Returns an empty string
+    /// when the route opts out with 0 — the escape hatch for long-lived streams, since
+    /// <c>timeouts.request</c> bounds the whole exchange rather than the time to first byte.
+    /// </summary>
+    public static string RenderTimeouts(int? requestTimeoutSeconds, string indent)
+    {
+        int seconds = requestTimeoutSeconds ?? DefaultRequestTimeoutSeconds;
+        if (seconds <= 0)
+        {
+            return "";
+        }
+
+        // backendRequest must not exceed request; equal values give the single retry-less
+        // attempt the same budget as the overall request.
+        return $"{indent}timeouts:\n" +
+               $"{indent}  request: {seconds}s\n" +
+               $"{indent}  backendRequest: {seconds}s\n";
     }
 
     /// <summary>

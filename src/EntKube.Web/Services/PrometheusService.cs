@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using EntKube.Web.Data;
 using k8s;
 using k8s.Models;
@@ -176,19 +177,226 @@ public class AlertRule
 
 /// <summary>
 /// RabbitMQ cluster metrics scraped from Prometheus via the RabbitMQ Prometheus plugin.
+///
+/// The plugin's default <c>/metrics</c> endpoint aggregates per-object metrics, so everything
+/// here is cluster- or node-wide. Per-queue depth is not available this way and comes from
+/// <c>rabbitmqctl list_queues</c> instead (see <c>RabbitMQService.GetQueuesAsync</c>).
 /// </summary>
 public class RabbitMQMetricsSummary
 {
     public string ClusterName { get; set; } = "";
+
+    /// <summary>
+    /// False when Prometheus holds no rabbitmq_* series for this cluster at all — a broker that
+    /// is not being scraped, which the all-zeros card would otherwise render identically to a
+    /// perfectly healthy idle one.
+    /// </summary>
+    public bool HasData { get; set; }
+
     public int Nodes { get; set; }
+
+    // ── Depth ──
     public long TotalMessages { get; set; }
     public long ReadyMessages { get; set; }
     public long UnackedMessages { get; set; }
+    public long MessageBytes { get; set; }
+
+    // ── Topology / clients ──
     public int Connections { get; set; }
     public int Channels { get; set; }
+    public int Consumers { get; set; }
+    public int Queues { get; set; }
+
+    // ── Throughput (per second, averaged over the query window) ──
     public double PublishRatePerSec { get; set; }
+
+    /// <summary>Deliveries in every acknowledgement mode, plus basic.get.</summary>
     public double DeliverRatePerSec { get; set; }
+
+    /// <summary>
+    /// The manual-acknowledgement share of <see cref="DeliverRatePerSec"/>. Auto-ack deliveries
+    /// are never acknowledged, so only this half is comparable with the ack rate.
+    /// </summary>
+    public double ManualAckDeliverPerSec { get; set; }
+
+    public double AckRatePerSec { get; set; }
+    public double RedeliverRatePerSec { get; set; }
+
+    /// <summary>
+    /// Messages published into an exchange that matched no queue — dropped or returned to the
+    /// publisher. Sustained non-zero means a routing key or binding is wrong and messages are
+    /// being lost, which no queue-depth metric reveals.
+    /// </summary>
+    public double UnroutableRatePerSec { get; set; }
+
+    /// <summary>Published but not yet confirmed. A rising value means publishers are outrunning
+    /// the broker's ability to confirm, and will eventually block.</summary>
+    public long UnconfirmedMessages { get; set; }
+
+    public double ConnectionsClosedPerSec { get; set; }
+    public double ChannelsClosedPerSec { get; set; }
+
+    /// <summary>Per-node resource usage, where alarms and single-node problems show up.</summary>
+    public List<RabbitMQNodeMetrics> NodeMetrics { get; set; } = [];
+
     public DateTime QueriedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// Messages sitting unconsumed with nothing attached to drain them.
+    ///
+    /// The idle delivery rate is part of the test on purpose: a broker whose plugin does not
+    /// export <c>rabbitmq_consumers</c> reports zero consumers, and without the second condition
+    /// every healthy broker with a queue would be flagged. The per-queue table, which reads
+    /// consumer counts straight from the broker, is the authoritative view.
+    /// </summary>
+    public bool StalledBacklog => ReadyMessages > 0 && Consumers == 0 && DeliverRatePerSec == 0;
+
+    /// <summary>
+    /// Consumers are being handed messages faster than they acknowledge them.
+    ///
+    /// Measured against manual-ack deliveries only. Comparing against all deliveries would read
+    /// as permanent lag on auto-ack consumers, which never acknowledge anything by design.
+    /// </summary>
+    public bool AckLag => ManualAckDeliverPerSec > 0 && AckRatePerSec < ManualAckDeliverPerSec * 0.9;
+
+    public bool AnyNodeAlarm => NodeMetrics.Any(n => n.MemoryAlarm || n.DiskAlarm);
+}
+
+/// <summary>
+/// One RabbitMQ node's resource usage against the limits that trigger its alarms.
+///
+/// RabbitMQ blocks publishers when a node crosses its memory high watermark or drops below the
+/// free-disk limit, so proximity to these limits is the earliest warning of a broker that is
+/// about to stop accepting traffic.
+/// </summary>
+public class RabbitMQNodeMetrics
+{
+    public string Node { get; set; } = "";
+
+    public double MemoryUsedBytes { get; set; }
+    public double MemoryLimitBytes { get; set; }
+    public double DiskFreeBytes { get; set; }
+    public double DiskFreeLimitBytes { get; set; }
+    public double OpenFds { get; set; }
+    public double MaxFds { get; set; }
+    public double OpenSockets { get; set; }
+    public double MaxSockets { get; set; }
+
+    public double MemoryUsedPercent => MemoryLimitBytes > 0 ? MemoryUsedBytes / MemoryLimitBytes * 100 : 0;
+    public double FdUsedPercent     => MaxFds > 0 ? OpenFds / MaxFds * 100 : 0;
+    public double SocketUsedPercent => MaxSockets > 0 ? OpenSockets / MaxSockets * 100 : 0;
+
+    /// <summary>Memory alarm: usage has reached the high watermark and publishers are blocked.</summary>
+    public bool MemoryAlarm => MemoryLimitBytes > 0 && MemoryUsedBytes >= MemoryLimitBytes;
+
+    /// <summary>Disk alarm: free space has fallen to the configured floor.</summary>
+    public bool DiskAlarm => DiskFreeLimitBytes > 0 && DiskFreeBytes <= DiskFreeLimitBytes;
+
+    /// <summary>Approaching a limit without having crossed it yet.</summary>
+    public bool NearLimit => (!MemoryAlarm && MemoryUsedPercent >= 80)
+                             || (!DiskAlarm && DiskFreeLimitBytes > 0 && DiskFreeBytes <= DiskFreeLimitBytes * 2)
+                             || FdUsedPercent >= 80
+                             || SocketUsedPercent >= 80;
+}
+
+/// <summary>
+/// Keycloak instance metrics scraped from Prometheus via Keycloak's management interface
+/// (port 9000, <c>/metrics</c>), which serves Quarkus/Micrometer metrics.
+/// </summary>
+public class KeycloakMetricsSummary
+{
+    public string InstanceName { get; set; } = "";
+    public string Namespace { get; set; } = "";
+
+    /// <summary>False when no http_server_* series exist for this namespace — Keycloak is not
+    /// being scraped, as opposed to serving no traffic.</summary>
+    public bool HasData { get; set; }
+
+    // ── HTTP ──
+    public double RequestsPerSec { get; set; }
+    public double ServerErrorsPerSec { get; set; }
+    public double ClientErrorsPerSec { get; set; }
+    public double AvgLatencyMs { get; set; }
+    public double ActiveRequests { get; set; }
+
+    /// <summary>Share of requests answered 5xx. The clearest single "something is broken" signal.</summary>
+    public double ServerErrorPercent => RequestsPerSec > 0 ? ServerErrorsPerSec / RequestsPerSec * 100 : 0;
+
+    // ── JVM ──
+    public double HeapUsedBytes { get; set; }
+    public double HeapCommittedBytes { get; set; }
+    public double HeapUsedPercent => HeapCommittedBytes > 0 ? HeapUsedBytes / HeapCommittedBytes * 100 : 0;
+
+    /// <summary>Seconds of GC pause per second of wall clock, for the worst pod. Above ~0.1 that
+    /// JVM is spending more than a tenth of its time stopped, and latency will show it.</summary>
+    public double GcPauseSecondsPerSec { get; set; }
+    public double GcOverheadPercent { get; set; }
+
+    // ── Database connection pool (Agroal) ──
+    //
+    // Every figure below describes the busiest single pod rather than the deployment as a whole:
+    // each replica has its own pool, and a pool is exhausted or not on a per-pod basis.
+
+    public double DbActiveConnections { get; set; }
+
+    /// <summary>Spare connections in the most constrained pod's pool.</summary>
+    public double DbAvailableConnections { get; set; }
+
+    /// <summary>Threads blocked waiting for a connection. Anything above zero means the pool is
+    /// too small for the load and requests are queueing on the database.</summary>
+    public double DbAwaitingThreads { get; set; }
+    public double DbBlockingTimeAvgMs { get; set; }
+    public double DbMaxUsedConnections { get; set; }
+
+    // ── Keycloak user events ──
+    /// <summary>False when keycloak_user_events_total is absent — event metrics are off by
+    /// default and need <c>--event-metrics-user-enabled=true</c>.</summary>
+    public bool HasUserEventMetrics { get; set; }
+    public double LoginsPerSec { get; set; }
+    public double LoginErrorsPerSec { get; set; }
+    public double TokenRefreshPerSec { get; set; }
+    public double RegistrationsPerSec { get; set; }
+
+    /// <summary>Share of login attempts that failed — a spike is either an outage or an attack.</summary>
+    public double LoginErrorPercent =>
+        LoginsPerSec + LoginErrorsPerSec > 0 ? LoginErrorsPerSec / (LoginsPerSec + LoginErrorsPerSec) * 100 : 0;
+
+    /// <summary>Top failing user events, broken down by realm and error.</summary>
+    public List<KeycloakEventBreakdown> TopErrors { get; set; } = [];
+
+    public DateTime QueriedAt { get; set; } = DateTime.UtcNow;
+
+    public bool DbPoolSaturated => DbAwaitingThreads > 0;
+    public bool HeapPressure    => HeapUsedPercent >= 90 || GcPauseSecondsPerSec >= 0.1;
+}
+
+/// <summary>
+/// Why a workload's metrics are missing, told from what is actually in the cluster: whether a
+/// ServiceMonitor exists, and whether Prometheus's selector accepts it.
+/// </summary>
+public class ScrapeDiagnosis
+{
+    public bool MonitorExists { get; init; }
+
+    /// <summary>Labels on the ServiceMonitor — what Prometheus's selector is matched against.</summary>
+    public Dictionary<string, string> MonitorLabels { get; init; } = [];
+
+    /// <summary>matchLabels of the Prometheus resource's serviceMonitorSelector.</summary>
+    public Dictionary<string, string> PrometheusSelector { get; init; } = [];
+
+    public bool SelectorAcceptsMonitor { get; init; }
+
+    public List<string> Findings { get; init; } = [];
+    public string? Remedy { get; init; }
+}
+
+/// <summary>One row of the Keycloak failing-event breakdown.</summary>
+public class KeycloakEventBreakdown
+{
+    public string Realm { get; set; } = "";
+    public string Event { get; set; } = "";
+    public string Error { get; set; } = "";
+    public double RatePerSec { get; set; }
 }
 
 /// <summary>
@@ -197,6 +405,12 @@ public class RabbitMQMetricsSummary
 public class CnpgMetricsSummary
 {
     public string ClusterName { get; set; } = "";
+
+    /// <summary>
+    /// False when Prometheus returned no series at all for this cluster — it is not being
+    /// scraped (no PodMonitor, or Prometheus does not select it) rather than merely idle.
+    /// </summary>
+    public bool HasData { get; set; }
     public double ReplicationLagSeconds { get; set; }
     public int TotalBackends { get; set; }
     public int ActiveQueries { get; set; }
@@ -644,19 +858,17 @@ public class PrometheusService(
             info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             async (http, baseUrl, token) =>
             {
-                string clusterLabel = $"{{cluster_name=\"{cnpgClusterName}\"}}";
-
                 string lagJson = await http.GetStringAsync(
-                    $"{baseUrl}/api/v1/query?query={Q($"max(cnpg_pg_replication_lag{clusterLabel})")}",
+                    $"{baseUrl}/api/v1/query?query={Q($"max({CnpgSelector("cnpg_pg_replication_lag", cnpgClusterName)})")}",
                     token);
                 string backendsJson = await http.GetStringAsync(
-                    $"{baseUrl}/api/v1/query?query={Q($"sum(cnpg_backends_total{clusterLabel})")}",
+                    $"{baseUrl}/api/v1/query?query={Q($"sum({CnpgSelector("cnpg_backends_total", cnpgClusterName)})")}",
                     token);
                 string queriesJson = await http.GetStringAsync(
-                    $"{baseUrl}/api/v1/query?query={Q($"sum(cnpg_pg_stat_activity_count{clusterLabel}{{state=\"active\"}})")}",
+                    $"{baseUrl}/api/v1/query?query={Q($"sum({CnpgSelector("cnpg_pg_stat_activity_count", cnpgClusterName, "state=\"active\"")})")}",
                     token);
                 string sizesJson = await http.GetStringAsync(
-                    $"{baseUrl}/api/v1/query?query={Q($"cnpg_pg_database_size_bytes{clusterLabel}{{datname!=\"\"}}")}",
+                    $"{baseUrl}/api/v1/query?query={Q(CnpgSelector("cnpg_pg_database_size_bytes", cnpgClusterName, "datname!=\"\""))}",
                     token);
 
                 List<PrometheusMetricResult> lagResults = ParseInstantQueryResult(lagJson);
@@ -667,6 +879,11 @@ public class PrometheusService(
                 return new CnpgMetricsSummary
                 {
                     ClusterName = cnpgClusterName,
+                    // Every query answering with zero series means Prometheus holds no cnpg_*
+                    // data for this cluster at all — a different situation from a healthy idle
+                    // database, which the all-zeros card would otherwise look identical to.
+                    HasData = lagResults.Count > 0 || backendResults.Count > 0
+                              || queryResults.Count > 0 || sizeResults.Count > 0,
                     ReplicationLagSeconds = lagResults.Count > 0 ? lagResults[0].Value : 0,
                     TotalBackends = backendResults.Count > 0 ? (int)backendResults[0].Value : 0,
                     ActiveQueries = queryResults.Count > 0 ? (int)queryResults[0].Value : 0,
@@ -682,6 +899,186 @@ public class PrometheusService(
             },
             $"CNPG metrics for cluster {cnpgClusterName}", ct);
     }
+
+    /// <summary>
+    /// Builds the PromQL selector for one CNPG metric, scoped to a single database cluster.
+    ///
+    /// Every matcher goes in ONE brace block: two adjacent blocks
+    /// (<c>metric{a="1"}{b="2"}</c>) are a PromQL parse error, and Prometheus answers the whole
+    /// request with 400 Bad Request rather than ignoring the second one.
+    ///
+    /// Which label carries the cluster name depends on how the instances are scraped: CNPG's own
+    /// exporter emits <c>cluster</c>, while some setups relabel it to <c>cluster_name</c>. Both are
+    /// matched with <c>or</c> so the panel works either way — an unmatched alternative contributes
+    /// no series rather than an error.
+    /// </summary>
+    public static string CnpgSelector(string metric, string cnpgClusterName, string? extraMatcher = null)
+    {
+        string extra = string.IsNullOrEmpty(extraMatcher) ? "" : $",{extraMatcher}";
+        return $"{metric}{{cluster=\"{cnpgClusterName}\"{extra}}}"
+             + $" or {metric}{{cluster_name=\"{cnpgClusterName}\"{extra}}}";
+    }
+
+    /// <summary>
+    /// Works out why a CNPG database produces no metrics, by comparing the two halves that have
+    /// to line up: the PodMonitor CNPG creates for the database, and the selector the Prometheus
+    /// resource uses to decide which PodMonitors it will scrape.
+    ///
+    /// Both halves are read from the cluster, so this reports what is actually there rather than
+    /// what the configuration implies.
+    /// </summary>
+    public async Task<KubernetesOperationResult<CnpgScrapeDiagnosis>> DiagnoseCnpgScrapeAsync(
+        Guid clusterId, string cnpgClusterName, string cnpgNamespace, CancellationToken ct = default)
+    {
+        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        if (info is null) return KubernetesOperationResult<CnpgScrapeDiagnosis>.Failure(error!);
+
+        try
+        {
+            using Kubernetes k8s = CreateK8sClient(info.Kubeconfig);
+
+            JsonNode? podMonitor = await FindCnpgPodMonitorAsync(k8s, cnpgNamespace, cnpgClusterName, ct);
+            JsonNode? prometheus = await FindPrometheusResourceAsync(k8s, ct);
+
+            Dictionary<string, string> pmLabels = ReadLabels(podMonitor?["metadata"]?["labels"]);
+            Dictionary<string, string> selector = ReadLabels(prometheus?["spec"]?["podMonitorSelector"]?["matchLabels"]);
+
+            // An empty (but present) podMonitorSelector means "every PodMonitor"; a selector with
+            // matchLabels means "only the ones carrying these labels", which is what the
+            // kube-prometheus-stack default produces via its release label.
+            bool selectorPresent = prometheus?["spec"]?["podMonitorSelector"] is not null;
+            bool selectsAll = !selectorPresent || selector.Count == 0;
+            bool matches = selectsAll || selector.All(kv =>
+                pmLabels.TryGetValue(kv.Key, out string? v) && v == kv.Value);
+
+            List<string> findings = [];
+            string? remedy = null;
+
+            if (podMonitor is null)
+            {
+                findings.Add(
+                    $"No PodMonitor for '{cnpgClusterName}' exists in namespace {cnpgNamespace}. " +
+                    "CNPG creates one only when the Cluster resource sets spec.monitoring.enablePodMonitor.");
+                remedy = "Use \"Enable metrics\" above, then give the operator a few seconds to reconcile.";
+            }
+            else if (!matches)
+            {
+                string want = string.Join(", ", selector.Select(kv => $"{kv.Key}={kv.Value}"));
+                string have = pmLabels.Count == 0 ? "(no labels)" : string.Join(", ", pmLabels.Select(kv => $"{kv.Key}={kv.Value}"));
+                findings.Add($"The PodMonitor exists but Prometheus does not select it: it scrapes only PodMonitors labelled {want}, and this one has {have}.");
+                remedy =
+                    "Add these to the kube-prometheus-stack component's values (Cluster → Components → " +
+                    "kube-prometheus-stack → Values), then Save & Apply:\n" +
+                    "prometheus:\n  prometheusSpec:\n    podMonitorSelectorNilUsesHelmValues: false\n" +
+                    "    serviceMonitorSelectorNilUsesHelmValues: false";
+            }
+            else
+            {
+                findings.Add("The PodMonitor exists and Prometheus's selector accepts it.");
+                remedy =
+                    "Scraping should be running. If metrics are still missing, check the CNPG pods' " +
+                    "metrics port in Prometheus → Targets — a target listed as down points at the database, not the wiring.";
+            }
+
+            // A namespace selector that is absent (rather than empty) confines Prometheus to its
+            // own namespace, which no database namespace would ever satisfy.
+            bool nsSelectorPresent = prometheus?["spec"]?["podMonitorNamespaceSelector"] is not null;
+            if (podMonitor is not null && !nsSelectorPresent)
+            {
+                findings.Add(
+                    "Prometheus has no podMonitorNamespaceSelector, so it only looks in its own namespace — " +
+                    $"it will not see anything in {cnpgNamespace}.");
+            }
+
+            return KubernetesOperationResult<CnpgScrapeDiagnosis>.Success(new CnpgScrapeDiagnosis
+            {
+                PodMonitorExists = podMonitor is not null,
+                PodMonitorLabels = pmLabels,
+                PrometheusSelector = selector,
+                SelectorAcceptsPodMonitor = podMonitor is not null && matches,
+                Findings = findings,
+                Remedy = remedy,
+            });
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "CNPG scrape diagnosis failed for {Cluster}", cnpgClusterName);
+            return KubernetesOperationResult<CnpgScrapeDiagnosis>.Failure(DescribeK8sError(ex));
+        }
+    }
+
+    /// <summary>
+    /// CNPG names the PodMonitor after the Cluster, but a hand-written or relabelled one may not
+    /// follow that, so a name miss falls back to the label CNPG stamps on everything it owns.
+    /// </summary>
+    private static async Task<JsonNode?> FindCnpgPodMonitorAsync(
+        Kubernetes k8s, string ns, string cnpgClusterName, CancellationToken ct)
+    {
+        JsonArray items = await ListCustomObjectsAsync(
+            k8s, "monitoring.coreos.com", "v1", ns, "podmonitors", ct);
+
+        foreach (JsonNode? item in items)
+        {
+            if (item?["metadata"]?["name"]?.GetValue<string>() == cnpgClusterName)
+                return item;
+        }
+
+        foreach (JsonNode? item in items)
+        {
+            string? owned = item?["spec"]?["selector"]?["matchLabels"]?["cnpg.io/cluster"]?.GetValue<string>();
+            if (owned == cnpgClusterName) return item;
+        }
+
+        return null;
+    }
+
+    private static async Task<JsonNode?> FindPrometheusResourceAsync(Kubernetes k8s, CancellationToken ct)
+    {
+        try
+        {
+            object raw = await k8s.CustomObjects.ListCustomObjectForAllNamespacesAsync(
+                "monitoring.coreos.com", "v1", "prometheuses", cancellationToken: ct);
+            JsonNode? root = JsonNode.Parse(JsonSerializer.Serialize(raw));
+            return (root?["items"] as JsonArray)?.FirstOrDefault();
+        }
+        catch
+        {
+            return null;   // no prometheus-operator CRDs — the caller reports what it can
+        }
+    }
+
+    private static async Task<JsonArray> ListCustomObjectsAsync(
+        Kubernetes k8s, string group, string version, string ns, string plural, CancellationToken ct)
+    {
+        try
+        {
+            object raw = await k8s.CustomObjects.ListNamespacedCustomObjectAsync(
+                group, version, ns, plural, cancellationToken: ct);
+            JsonNode? root = JsonNode.Parse(JsonSerializer.Serialize(raw));
+            return root?["items"] as JsonArray ?? [];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static Dictionary<string, string> ReadLabels(JsonNode? node)
+    {
+        Dictionary<string, string> result = new(StringComparer.Ordinal);
+        if (node is not JsonObject obj) return result;
+        foreach (KeyValuePair<string, JsonNode?> kv in obj)
+        {
+            if (kv.Value?.GetValue<string>() is { } value)
+                result[kv.Key] = value;
+        }
+        return result;
+    }
+
+    private static string DescribeK8sError(Exception ex) =>
+        ex is k8s.Autorest.HttpOperationException http && http.Response is not null
+            ? $"{http.Response.StatusCode}: {http.Message}"
+            : ex.Message;
 
     /// <summary>
     /// Retrieves all active scrape targets from Prometheus with their health (up/down).
@@ -734,32 +1131,462 @@ public class PrometheusService(
             info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             async (http, baseUrl, token) =>
             {
-                string label = $"{{rabbitmq_cluster=\"{rabbitMQName}\"}}";
+                Dictionary<string, List<PrometheusMetricResult>> r =
+                    await QueryManyAsync(http, baseUrl, BuildRabbitMQQueries(rabbitMQName), token);
 
-                string readyJson    = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q($"sum(rabbitmq_identity_info{label})")}", token);
-                string msgJson      = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q($"sum(rabbitmq_queue_messages{label})")}", token);
-                string readyMsgJson = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q($"sum(rabbitmq_queue_messages_ready{label})")}", token);
-                string unackJson    = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q($"sum(rabbitmq_queue_messages_unacknowledged{label})")}", token);
-                string connJson     = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q($"sum(rabbitmq_connections{label})")}", token);
-                string chanJson     = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q($"sum(rabbitmq_channels{label})")}", token);
-                string pubRateJson  = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q($"sum(rate(rabbitmq_queue_messages_published_total{label}[5m]))")}", token);
-                string conRateJson  = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q($"sum(rate(rabbitmq_queue_messages_delivered_total{label}[5m]))")}", token);
+                Dictionary<string, RabbitMQNodeMetrics> nodes = [];
+                void PerNode(string key, Action<RabbitMQNodeMetrics, double> assign)
+                {
+                    foreach (PrometheusMetricResult m in r[key])
+                    {
+                        // The node families carry no labels of their own; rabbitmq_node arrives
+                        // from the identity join. Falling back to the scrape target keeps the
+                        // rows distinguishable if that join ever comes back without it.
+                        string node = m.Labels.GetValueOrDefault("rabbitmq_node", "");
+                        if (string.IsNullOrEmpty(node)) node = m.Labels.GetValueOrDefault("instance", "");
+                        if (string.IsNullOrEmpty(node)) continue;
+
+                        if (!nodes.TryGetValue(node, out RabbitMQNodeMetrics? nm))
+                            nodes[node] = nm = new RabbitMQNodeMetrics { Node = node };
+                        assign(nm, m.Value);
+                    }
+                }
+
+                PerNode("mem",        (n, v) => n.MemoryUsedBytes    = v);
+                PerNode("memLimit",   (n, v) => n.MemoryLimitBytes   = v);
+                PerNode("disk",       (n, v) => n.DiskFreeBytes      = v);
+                PerNode("diskLimit",  (n, v) => n.DiskFreeLimitBytes = v);
+                PerNode("fds",        (n, v) => n.OpenFds            = v);
+                PerNode("fdsMax",     (n, v) => n.MaxFds             = v);
+                PerNode("sockets",    (n, v) => n.OpenSockets        = v);
+                PerNode("socketsMax", (n, v) => n.MaxSockets         = v);
 
                 return new RabbitMQMetricsSummary
                 {
-                    ClusterName        = rabbitMQName,
-                    Nodes              = (int)ExtractScalarValue(readyJson),
-                    TotalMessages      = (long)ExtractScalarValue(msgJson),
-                    ReadyMessages      = (long)ExtractScalarValue(readyMsgJson),
-                    UnackedMessages    = (long)ExtractScalarValue(unackJson),
-                    Connections        = (int)ExtractScalarValue(connJson),
-                    Channels           = (int)ExtractScalarValue(chanJson),
-                    PublishRatePerSec  = Math.Round(ExtractScalarValue(pubRateJson), 2),
-                    DeliverRatePerSec  = Math.Round(ExtractScalarValue(conRateJson), 2)
+                    ClusterName             = rabbitMQName,
+                    HasData                 = r.Values.Any(v => v.Count > 0),
+                    Nodes                   = (int)Scalar(r["nodes"]),
+                    TotalMessages           = (long)Scalar(r["total"]),
+                    ReadyMessages           = (long)Scalar(r["ready"]),
+                    UnackedMessages         = (long)Scalar(r["unacked"]),
+                    MessageBytes            = (long)Scalar(r["bytes"]),
+                    Connections             = (int)Scalar(r["connections"]),
+                    Channels                = (int)Scalar(r["channels"]),
+                    Consumers               = (int)Scalar(r["consumers"]),
+                    Queues                  = (int)Scalar(r["queues"]),
+                    PublishRatePerSec       = Math.Round(Scalar(r["publish"]), 2),
+                    DeliverRatePerSec       = Math.Round(Scalar(r["deliver"]), 2),
+                    ManualAckDeliverPerSec  = Math.Round(Scalar(r["deliverAck"]), 2),
+                    AckRatePerSec           = Math.Round(Scalar(r["ack"]), 2),
+                    RedeliverRatePerSec     = Math.Round(Scalar(r["redeliver"]), 2),
+                    UnroutableRatePerSec    = Math.Round(Scalar(r["unroutable"]), 2),
+                    UnconfirmedMessages     = (long)Scalar(r["unconfirmed"]),
+                    ConnectionsClosedPerSec = Math.Round(Scalar(r["connClosed"]), 2),
+                    ChannelsClosedPerSec    = Math.Round(Scalar(r["chanClosed"]), 2),
+                    NodeMetrics             = [.. nodes.Values.OrderBy(n => n.Node)],
                 };
             },
             $"RabbitMQ metrics for {rabbitMQName}", ct);
     }
+
+    /// <summary>
+    /// The PromQL behind the RabbitMQ panel, keyed by the field it populates.
+    ///
+    /// Separated from the query execution so the metric names are assertable: a name that does
+    /// not exist returns an empty vector rather than an error, so a typo shows up as a tile that
+    /// reads zero forever — indistinguishable from a genuinely idle broker.
+    ///
+    /// Every name here comes from the rabbitmq_prometheus plugin's own metrics reference. Note
+    /// that the counters for delivery, acknowledgement and routing failures live on the
+    /// <c>channel</c>, not the queue; only publishes are counted on both.
+    /// </summary>
+    public static Dictionary<string, string> BuildRabbitMQQueries(string rabbitMQName)
+    {
+        // Identity is the only family carrying the cluster name, so it doubles as the node count.
+        string identity = RabbitMQIdentity(rabbitMQName);
+
+        return new Dictionary<string, string>
+        {
+            ["nodes"]       = $"sum({identity})",
+            ["total"]       = Agg("rabbitmq_queue_messages", rabbitMQName),
+            ["ready"]       = Agg("rabbitmq_queue_messages_ready", rabbitMQName),
+            ["unacked"]     = Agg("rabbitmq_queue_messages_unacked", rabbitMQName),
+            ["bytes"]       = Agg("rabbitmq_queue_messages_bytes", rabbitMQName),
+            ["connections"] = Agg("rabbitmq_connections", rabbitMQName),
+            ["channels"]    = Agg("rabbitmq_channels", rabbitMQName),
+            ["consumers"]   = Agg("rabbitmq_consumers", rabbitMQName),
+            ["queues"]      = Agg("rabbitmq_queues", rabbitMQName),
+
+            ["publish"]     = Rate("rabbitmq_channel_messages_published_total", rabbitMQName),
+
+            // Delivery is split by acknowledgement mode, and the two counters are disjoint:
+            // "_delivered_total" counts only auto-ack deliveries, "_delivered_ack_total" only
+            // manual-ack ones. Querying just the former reports zero for every manual-ack
+            // consumer, which is the normal case. basic.get is included so polling consumers
+            // are not invisible either.
+            ["deliver"]     = RateSum(rabbitMQName,
+                                  "rabbitmq_channel_messages_delivered_ack_total",
+                                  "rabbitmq_channel_messages_delivered_total",
+                                  "rabbitmq_channel_get_ack_total",
+                                  "rabbitmq_channel_get_total"),
+
+            // Only manual-ack deliveries can be acknowledged, so this is the half that the ack
+            // rate is comparable with — auto-ack traffic never produces an ack.
+            ["deliverAck"]  = RateSum(rabbitMQName,
+                                  "rabbitmq_channel_messages_delivered_ack_total",
+                                  "rabbitmq_channel_get_ack_total"),
+
+            ["ack"]         = Rate("rabbitmq_channel_messages_acked_total", rabbitMQName),
+            ["redeliver"]   = Rate("rabbitmq_channel_messages_redelivered_total", rabbitMQName),
+            // Dropped (published non-mandatory) and returned (published mandatory) are two halves
+            // of the same fault — a message that matched no binding — so they are one rate here.
+            ["unroutable"]  = RateSum(rabbitMQName,
+                                  "rabbitmq_channel_messages_unroutable_dropped_total",
+                                  "rabbitmq_channel_messages_unroutable_returned_total"),
+            ["unconfirmed"] = Agg("rabbitmq_channel_messages_unconfirmed", rabbitMQName),
+            ["connClosed"]  = Rate("rabbitmq_connections_closed_total", rabbitMQName),
+            ["chanClosed"]  = Rate("rabbitmq_channels_closed_total", rabbitMQName),
+
+            // Per-node, deliberately unaggregated: one node hitting its memory watermark blocks
+            // publishers cluster-wide, and a sum across nodes would hide which one. The join also
+            // supplies rabbitmq_node, since the node families themselves carry no labels at all.
+            ["mem"]         = PerNode("rabbitmq_process_resident_memory_bytes", rabbitMQName),
+            ["memLimit"]    = PerNode("rabbitmq_resident_memory_limit_bytes", rabbitMQName),
+            ["disk"]        = PerNode("rabbitmq_disk_space_available_bytes", rabbitMQName),
+            ["diskLimit"]   = PerNode("rabbitmq_disk_space_available_limit_bytes", rabbitMQName),
+            ["fds"]         = PerNode("rabbitmq_process_open_fds", rabbitMQName),
+            ["fdsMax"]      = PerNode("rabbitmq_process_max_fds", rabbitMQName),
+            ["sockets"]     = PerNode("rabbitmq_process_open_tcp_sockets", rabbitMQName),
+            ["socketsMax"]  = PerNode("rabbitmq_process_max_tcp_sockets", rabbitMQName),
+        };
+    }
+
+    /// <summary>
+    /// The <c>rabbitmq_identity_info</c> series for one cluster — the join partner that carries
+    /// the cluster name.
+    ///
+    /// The endpoint is pinned because the plugin emits identity info once per scrape path: a
+    /// ServiceMonitor that also scrapes <c>/metrics/detailed</c> (the operator's published one
+    /// does) produces a second series per node, distinguished only by <c>rabbitmq_endpoint</c>.
+    /// Left unpinned that doubles the node count and makes every join ambiguous, which Prometheus
+    /// rejects outright with "multiple matches for labels".
+    /// </summary>
+    public static string RabbitMQIdentity(string rabbitMQName) =>
+        $"rabbitmq_identity_info{{rabbitmq_cluster=\"{rabbitMQName}\",rabbitmq_endpoint=\"aggregated\"}}";
+
+    /// <summary>
+    /// Scopes a metric to one cluster.
+    ///
+    /// The plugin labels almost nothing: every aggregated family is emitted with no labels at
+    /// all, and <c>rabbitmq_cluster</c> exists only on <c>rabbitmq_identity_info</c> and
+    /// <c>rabbitmq_build_info</c>. Writing <c>metric{rabbitmq_cluster="x"}</c> therefore matches
+    /// no series and silently yields zero — so the cluster name has to be brought in by joining
+    /// against identity info on the scrape target, which is what RabbitMQ's own dashboards do.
+    /// </summary>
+    public static string RabbitMQScoped(string expr, string rabbitMQName, string? extraJoinLabels = null)
+    {
+        string labels = string.IsNullOrEmpty(extraJoinLabels)
+            ? "rabbitmq_cluster"
+            : $"rabbitmq_cluster,{extraJoinLabels}";
+
+        return $"{expr} * on(instance, job) group_left({labels}) {RabbitMQIdentity(rabbitMQName)}";
+    }
+
+    private static string Agg(string metric, string cluster) =>
+        $"sum({RabbitMQScoped(metric, cluster)})";
+
+    private static string Rate(string metric, string cluster) =>
+        $"sum({RabbitMQScoped($"rate({metric}[5m])", cluster)})";
+
+    private static string PerNode(string metric, string cluster) =>
+        RabbitMQScoped(metric, cluster, "rabbitmq_node");
+
+    /// <summary>
+    /// Adds several counters' rates into one figure.
+    ///
+    /// Each term is defaulted with <c>or vector(0)</c> because vector arithmetic drops to an
+    /// empty result when either side has no series: one counter a broker happens not to export
+    /// would otherwise zero the whole sum and, with it, the warning that depends on it.
+    /// </summary>
+    private static string RateSum(string cluster, params string[] metrics) =>
+        string.Join(" + ", metrics.Select(m => $"({Rate(m, cluster)} or vector(0))"));
+
+    private async Task<KeycloakMetricsSummary> QueryKeycloakMetricsAsync(
+        HttpClient http, string baseUrl, string instanceName, string ns, CancellationToken ct)
+    {
+        Dictionary<string, List<PrometheusMetricResult>> r =
+            await QueryManyAsync(http, baseUrl, BuildKeycloakQueries(ns), ct);
+
+        return new KeycloakMetricsSummary
+        {
+            InstanceName           = instanceName,
+            Namespace              = ns,
+            // Keyed on the HTTP series specifically: those exist for any running Keycloak, while
+            // the JVM and pool series would also be absent on a partial scrape.
+            HasData                = r["requests"].Count > 0 || r["active"].Count > 0
+                                     || r["heapUsed"].Count > 0,
+            RequestsPerSec         = Math.Round(Scalar(r["requests"]), 2),
+            ServerErrorsPerSec     = Math.Round(Scalar(r["errors5xx"]), 3),
+            ClientErrorsPerSec     = Math.Round(Scalar(r["errors4xx"]), 3),
+            AvgLatencyMs           = Math.Round(Scalar(r["latency"]) * 1000, 1),
+            ActiveRequests         = Scalar(r["active"]),
+
+            HeapUsedBytes          = Scalar(r["heapUsed"]),
+            HeapCommittedBytes     = Scalar(r["heapComm"]),
+            GcPauseSecondsPerSec   = Math.Round(Scalar(r["gcPause"]), 4),
+            GcOverheadPercent      = Math.Round(Scalar(r["gcOverhead"]) * 100, 2),
+
+            DbActiveConnections    = Scalar(r["dbActive"]),
+            DbAvailableConnections = Scalar(r["dbAvail"]),
+            DbAwaitingThreads      = Scalar(r["dbAwait"]),
+            DbBlockingTimeAvgMs    = Math.Round(Scalar(r["dbBlock"]), 2),
+            DbMaxUsedConnections   = Scalar(r["dbMaxUsed"]),
+
+            HasUserEventMetrics    = r["anyEvent"].Count > 0,
+            LoginsPerSec           = Math.Round(Scalar(r["logins"]), 3),
+            LoginErrorsPerSec      = Math.Round(Scalar(r["loginErr"]), 3),
+            TokenRefreshPerSec     = Math.Round(Scalar(r["refresh"]), 3),
+            RegistrationsPerSec    = Math.Round(Scalar(r["register"]), 3),
+            TopErrors =
+            [
+                .. r["topErrors"]
+                    .Select(m => new KeycloakEventBreakdown
+                    {
+                        Realm      = m.Labels.GetValueOrDefault("realm", ""),
+                        Event      = m.Labels.GetValueOrDefault("event", ""),
+                        Error      = m.Labels.GetValueOrDefault("error", ""),
+                        RatePerSec = Math.Round(m.Value, 4),
+                    })
+                    .Where(e => e.RatePerSec > 0)
+                    .OrderByDescending(e => e.RatePerSec)
+            ],
+        };
+    }
+
+    /// <summary>
+    /// The PromQL behind the Keycloak panel, keyed by the field it populates.
+    ///
+    /// Separated from the query execution so the metric names are assertable — see the note on
+    /// <see cref="BuildRabbitMQQueries"/> for why a wrong name fails silently.
+    ///
+    /// The HTTP, JVM and pool names are Quarkus/Micrometer conventions rather than Keycloak's
+    /// own; only <c>keycloak_user_events_total</c> is Keycloak-specific, and it is absent unless
+    /// user event metrics were explicitly enabled.
+    /// </summary>
+    public static Dictionary<string, string> BuildKeycloakQueries(string ns)
+    {
+        string sel = $"{{namespace=\"{ns}\"}}";
+        string evt = $"namespace=\"{ns}\"";
+
+        return new Dictionary<string, string>
+        {
+            ["requests"]   = $"sum(rate(http_server_requests_seconds_count{sel}[5m]))",
+            ["errors5xx"]  = $"sum(rate(http_server_requests_seconds_count{{{evt},status=~\"5..\"}}[5m]))",
+            ["errors4xx"]  = $"sum(rate(http_server_requests_seconds_count{{{evt},status=~\"4..\"}}[5m]))",
+            // Micrometer timers expose _sum and _count; their ratio is the mean latency over the
+            // window. Keycloak publishes no histogram buckets by default, so a true quantile is
+            // not available without turning them on.
+            ["latency"]    = $"sum(rate(http_server_requests_seconds_sum{sel}[5m]))"
+                             + $" / sum(rate(http_server_requests_seconds_count{sel}[5m]))",
+            ["active"]     = $"sum(http_server_active_requests{sel})",
+
+            ["heapUsed"]   = $"sum(jvm_memory_used_bytes{{{evt},area=\"heap\"}})",
+            ["heapComm"]   = $"sum(jvm_memory_committed_bytes{{{evt},area=\"heap\"}})",
+            // Per-JVM quantities are reduced with max, not sum: these are compared against
+            // per-instance thresholds, and summing three healthy replicas' GC time would cross
+            // a single JVM's threshold while every JVM is fine. Max reports the worst pod.
+            ["gcPause"]    = $"max(rate(jvm_gc_pause_seconds_sum{sel}[5m]))",
+            ["gcOverhead"] = $"max(jvm_gc_overhead{sel})",
+
+            // Pool figures are per-pod for the same reason, and mixing aggregations across them
+            // produces impossible readings — a summed "active" happily exceeds a maxed "peak
+            // used". Available takes min, since the pod with the fewest spare connections is the
+            // one about to block.
+            ["dbActive"]   = $"max(agroal_active_count{sel})",
+            ["dbAvail"]    = $"min(agroal_available_count{sel})",
+            ["dbAwait"]    = $"max(agroal_awaiting_count{sel})",
+            ["dbBlock"]    = $"max(agroal_blocking_time_average_milliseconds{sel})",
+            ["dbMaxUsed"]  = $"max(agroal_max_used_count{sel})",
+
+            // A failed login is not its own event type: it is event="login" carrying a non-empty
+            // error label. Querying event="login_error" matches nothing, and counting every
+            // event="login" as a success silently folds the failures back in.
+            ["logins"]     = $"sum(rate(keycloak_user_events_total{{{evt},event=\"login\",error=\"\"}}[5m]))",
+            ["loginErr"]   = $"sum(rate(keycloak_user_events_total{{{evt},event=\"login\",error!=\"\"}}[5m]))",
+            ["refresh"]    = $"sum(rate(keycloak_user_events_total{{{evt},event=\"refresh_token\"}}[5m]))",
+            ["register"]   = $"sum(rate(keycloak_user_events_total{{{evt},event=\"register\"}}[5m]))",
+            ["anyEvent"]   = $"sum(keycloak_user_events_total{sel})",
+            ["topErrors"]  = $"topk(5, sum by (realm,event,error) "
+                             + $"(rate(keycloak_user_events_total{{{evt},error!=\"\"}}[5m])))",
+        };
+    }
+
+    /// <summary>
+    /// Retrieves Keycloak instance metrics from Prometheus. Keycloak serves Quarkus/Micrometer
+    /// metrics on its management interface (port 9000), so the series carry no Keycloak-specific
+    /// identity label — they are scoped by the namespace the release was installed into.
+    /// </summary>
+    public async Task<KubernetesOperationResult<KeycloakMetricsSummary>> GetKeycloakMetricsAsync(
+        Guid clusterId, string instanceName, string keycloakNamespace, CancellationToken ct = default)
+    {
+        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        if (info is null) return KubernetesOperationResult<KeycloakMetricsSummary>.Failure(error!);
+
+        return await WithServiceAsync<KeycloakMetricsSummary>(
+            info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+            (http, baseUrl, token) => QueryKeycloakMetricsAsync(http, baseUrl, instanceName, keycloakNamespace, token),
+            $"Keycloak metrics for {instanceName}", ct);
+    }
+
+    /// <summary>
+    /// Works out why a workload that should be exporting metrics produces none, by comparing the
+    /// two halves that have to line up: a ServiceMonitor in the workload's namespace, and the
+    /// selector the Prometheus resource uses to decide which ServiceMonitors it will scrape.
+    ///
+    /// Shared by RabbitMQ and Keycloak, which differ only in what the monitor is expected to be
+    /// called and what creates it. Both halves are read from the cluster, so this reports what is
+    /// actually there rather than what the configuration implies.
+    /// </summary>
+    /// <param name="workloadNamespace">Namespace the workload runs in.</param>
+    /// <param name="monitorNameHint">Substring identifying the workload's own ServiceMonitor.</param>
+    /// <param name="absentRemedy">What to tell the operator when no monitor exists at all.</param>
+    public async Task<KubernetesOperationResult<ScrapeDiagnosis>> DiagnoseServiceMonitorScrapeAsync(
+        Guid clusterId, string workloadNamespace, string monitorNameHint, string absentRemedy,
+        CancellationToken ct = default)
+    {
+        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        if (info is null) return KubernetesOperationResult<ScrapeDiagnosis>.Failure(error!);
+
+        try
+        {
+            using Kubernetes k8s = CreateK8sClient(info.Kubeconfig);
+
+            JsonArray monitors = await ListCustomObjectsAsync(
+                k8s, "monitoring.coreos.com", "v1", workloadNamespace, "servicemonitors", ct);
+
+            JsonNode? monitor = monitors.FirstOrDefault(m =>
+                m?["metadata"]?["name"]?.GetValue<string>() is { } n
+                && n.Contains(monitorNameHint, StringComparison.OrdinalIgnoreCase));
+
+            JsonNode? prometheus = await FindPrometheusResourceAsync(k8s, ct);
+
+            Dictionary<string, string> smLabels = ReadLabels(monitor?["metadata"]?["labels"]);
+            Dictionary<string, string> selector =
+                ReadLabels(prometheus?["spec"]?["serviceMonitorSelector"]?["matchLabels"]);
+
+            // An empty (but present) serviceMonitorSelector means "every ServiceMonitor"; one with
+            // matchLabels means "only those carrying these labels", which is what an untouched
+            // kube-prometheus-stack produces via its release label.
+            bool selectorPresent = prometheus?["spec"]?["serviceMonitorSelector"] is not null;
+            bool selectsAll = !selectorPresent || selector.Count == 0;
+            bool matches = selectsAll || selector.All(kv =>
+                smLabels.TryGetValue(kv.Key, out string? v) && v == kv.Value);
+
+            List<string> findings = [];
+            string? remedy = null;
+
+            if (monitor is null)
+            {
+                findings.Add(
+                    $"No ServiceMonitor matching '{monitorNameHint}' exists in namespace "
+                    + $"{workloadNamespace}, so Prometheus was never told to scrape this workload.");
+                remedy = absentRemedy;
+            }
+            else if (!matches)
+            {
+                string want = string.Join(", ", selector.Select(kv => $"{kv.Key}={kv.Value}"));
+                string have = smLabels.Count == 0
+                    ? "(no labels)"
+                    : string.Join(", ", smLabels.Select(kv => $"{kv.Key}={kv.Value}"));
+
+                findings.Add(
+                    $"The ServiceMonitor exists but Prometheus does not select it: it scrapes only "
+                    + $"ServiceMonitors labelled {want}, and this one has {have}.");
+                remedy =
+                    "Add these to the kube-prometheus-stack component's values (Cluster → Components → "
+                    + "kube-prometheus-stack → Values), then Save & Apply:\n"
+                    + "prometheus:\n  prometheusSpec:\n    serviceMonitorSelectorNilUsesHelmValues: false\n"
+                    + "    podMonitorSelectorNilUsesHelmValues: false";
+            }
+            else
+            {
+                findings.Add("The ServiceMonitor exists and Prometheus's selector accepts it.");
+                remedy =
+                    "Scraping should be running. If metrics are still missing, check Prometheus → Targets — "
+                    + "a target listed as down points at the workload's metrics port, not the wiring.";
+            }
+
+            // A namespace selector that is absent (rather than empty) confines Prometheus to its
+            // own namespace, which the workload's namespace would never satisfy.
+            bool nsSelectorPresent = prometheus?["spec"]?["serviceMonitorNamespaceSelector"] is not null;
+            if (monitor is not null && !nsSelectorPresent)
+            {
+                findings.Add(
+                    "Prometheus has no serviceMonitorNamespaceSelector, so it only looks in its own "
+                    + $"namespace — it will not see anything in {workloadNamespace}.");
+            }
+
+            return KubernetesOperationResult<ScrapeDiagnosis>.Success(new ScrapeDiagnosis
+            {
+                MonitorExists          = monitor is not null,
+                MonitorLabels          = smLabels,
+                PrometheusSelector     = selector,
+                SelectorAcceptsMonitor = monitor is not null && matches,
+                Findings               = findings,
+                Remedy                 = remedy,
+            });
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Scrape diagnosis failed for {Hint} in {Namespace}",
+                monitorNameHint, workloadNamespace);
+            return KubernetesOperationResult<ScrapeDiagnosis>.Failure(DescribeK8sError(ex));
+        }
+    }
+
+    /// <summary>
+    /// Runs several instant queries against one Prometheus concurrently.
+    ///
+    /// Prometheus evaluates each of these in single-digit milliseconds, so the round-trip through
+    /// the API-server pod proxy — not the evaluation — dominates; issuing them together makes a
+    /// wide panel cost roughly its slowest query instead of the sum of all of them.
+    ///
+    /// A query that fails contributes an empty vector rather than propagating, so one metric the
+    /// running broker or server happens not to export cannot blank out the whole panel.
+    /// </summary>
+    private async Task<Dictionary<string, List<PrometheusMetricResult>>> QueryManyAsync(
+        HttpClient http, string baseUrl, Dictionary<string, string> queries, CancellationToken ct)
+    {
+        KeyValuePair<string, string>[] pairs = [.. queries];
+
+        List<PrometheusMetricResult>[] results = await Task.WhenAll(
+            pairs.Select(kv => InstantAsync(http, baseUrl, kv.Value, ct)));
+
+        Dictionary<string, List<PrometheusMetricResult>> byKey = [];
+        for (int i = 0; i < pairs.Length; i++)
+            byKey[pairs[i].Key] = results[i];
+
+        return byKey;
+    }
+
+    private async Task<List<PrometheusMetricResult>> InstantAsync(
+        HttpClient http, string baseUrl, string query, CancellationToken ct)
+    {
+        try
+        {
+            string json = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q(query)}", ct);
+            return ParseInstantQueryResult(json);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Instant query failed, treating as no data: {Query}", query);
+            return [];
+        }
+    }
+
+    /// <summary>First value of a vector, or 0 when the query matched nothing.</summary>
+    private static double Scalar(List<PrometheusMetricResult> results)
+        => results.Count > 0 ? results[0].Value : 0;
 
     // ──────── Static Parsing Methods ────────
 
@@ -1430,4 +2257,27 @@ public class PrometheusService(
         List<PrometheusMetricResult> results = ParseInstantQueryResult(json);
         return results.Count > 0 ? results[0].Value : 0;
     }
+}
+
+/// <summary>
+/// Why a CNPG database's metrics are (or are not) reaching Prometheus. Read from the cluster:
+/// the PodMonitor CNPG created for the database, and the selector Prometheus filters with.
+/// </summary>
+public class CnpgScrapeDiagnosis
+{
+    public bool PodMonitorExists { get; init; }
+
+    /// <summary>Labels on the PodMonitor — what Prometheus's selector is matched against.</summary>
+    public Dictionary<string, string> PodMonitorLabels { get; init; } = [];
+
+    /// <summary>The Prometheus resource's podMonitorSelector.matchLabels. Empty means "select all".</summary>
+    public Dictionary<string, string> PrometheusSelector { get; init; } = [];
+
+    public bool SelectorAcceptsPodMonitor { get; init; }
+
+    /// <summary>What was found, in plain words, worst first.</summary>
+    public List<string> Findings { get; init; } = [];
+
+    /// <summary>The concrete next step, including any YAML to paste.</summary>
+    public string? Remedy { get; init; }
 }

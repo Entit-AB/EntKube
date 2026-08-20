@@ -551,4 +551,254 @@ public class PrometheusServiceTests : IDisposable
         silences[0].Matchers[0].Name.Should().Be("instance");
         silences[1].State.Should().Be("expired");
     }
+
+    // ════════════════════════════════════════════════════════════════
+    //  CNPG metric selectors
+    // ════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public void CnpgSelector_KeepsEveryMatcherInOneBraceBlock()
+    {
+        // Two adjacent brace blocks — metric{a="1"}{b="2"} — do not narrow the query, they fail
+        // to parse, and Prometheus rejects the whole request with 400 Bad Request.
+        string query = PrometheusService.CnpgSelector("cnpg_pg_stat_activity_count", "postgres", "state=\"active\"");
+
+        query.Should().NotContain("}{");
+        query.Should().Contain("cnpg_pg_stat_activity_count{cluster=\"postgres\",state=\"active\"}");
+    }
+
+    [Fact]
+    public void CnpgSelector_MatchesEitherClusterLabelSpelling()
+    {
+        // CNPG's exporter labels series with `cluster`; some scrape setups relabel to
+        // `cluster_name`. Matching both keeps the panel working on either.
+        string query = PrometheusService.CnpgSelector("cnpg_backends_total", "postgres");
+
+        query.Should().Be(
+            "cnpg_backends_total{cluster=\"postgres\"} or cnpg_backends_total{cluster_name=\"postgres\"}");
+    }
+
+    [Fact]
+    public void CnpgSelector_OmitsTheSeparatorWhenThereIsNoExtraMatcher()
+    {
+        PrometheusService.CnpgSelector("cnpg_pg_replication_lag", "postgres")
+            .Should().NotContain(",}");
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  CNPG scrape diagnosis — selector matching
+    // ════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public void CnpgSelector_IsUsedForEveryMetricQuery()
+    {
+        // Guards the shape the diagnosis explains to the operator: one brace block per metric.
+        foreach (string metric in new[]
+                 { "cnpg_pg_replication_lag", "cnpg_backends_total", "cnpg_pg_database_size_bytes" })
+        {
+            PrometheusService.CnpgSelector(metric, "postgres").Should().NotContain("}{");
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  RabbitMQ query construction
+    //
+    //  A metric name that does not exist returns an empty vector rather than an
+    //  error, so a typo surfaces as a tile that reads zero forever — which looks
+    //  exactly like an idle broker. These names are therefore pinned against the
+    //  rabbitmq_prometheus plugin's published metrics reference.
+    // ════════════════════════════════════════════════════════════════
+
+    [Theory]
+    [InlineData("unacked",     "rabbitmq_queue_messages_unacked")]
+    [InlineData("ready",       "rabbitmq_queue_messages_ready")]
+    [InlineData("total",       "rabbitmq_queue_messages")]
+    [InlineData("deliver",     "rabbitmq_channel_messages_delivered_total")]
+    [InlineData("ack",         "rabbitmq_channel_messages_acked_total")]
+    [InlineData("publish",     "rabbitmq_channel_messages_published_total")]
+    [InlineData("redeliver",   "rabbitmq_channel_messages_redelivered_total")]
+    [InlineData("unconfirmed", "rabbitmq_channel_messages_unconfirmed")]
+    [InlineData("consumers",   "rabbitmq_consumers")]
+    [InlineData("memLimit",    "rabbitmq_resident_memory_limit_bytes")]
+    [InlineData("diskLimit",   "rabbitmq_disk_space_available_limit_bytes")]
+    public void BuildRabbitMQQueries_UsesThePublishedMetricName(string key, string expectedMetric)
+    {
+        PrometheusService.BuildRabbitMQQueries("broker")[key].Should().Contain(expectedMetric);
+    }
+
+    [Fact]
+    public void BuildRabbitMQQueries_DoesNotUseNamesThePluginNeverExported()
+    {
+        // Both of these were queried previously and always answered with nothing:
+        // the unacknowledged gauge is spelled "_unacked", and delivery is counted on
+        // the channel rather than the queue.
+        string all = string.Join("\n", PrometheusService.BuildRabbitMQQueries("broker").Values);
+
+        all.Should().NotContain("rabbitmq_queue_messages_unacknowledged");
+        all.Should().NotContain("rabbitmq_queue_messages_delivered_total");
+    }
+
+    [Fact]
+    public void BuildRabbitMQQueries_ScopesEveryQueryToTheNamedCluster()
+    {
+        // Without the cluster label every broker on the cluster would be summed into one card.
+        foreach (KeyValuePair<string, string> q in PrometheusService.BuildRabbitMQQueries("orders"))
+        {
+            q.Value.Should().Contain("rabbitmq_cluster=\"orders\"", $"query '{q.Key}' must be scoped");
+        }
+    }
+
+    [Fact]
+    public void BuildRabbitMQQueries_ReachTheClusterNameByJoiningIdentityInfo()
+    {
+        // The plugin emits its aggregated families with no labels whatsoever — rabbitmq_cluster
+        // exists only on rabbitmq_identity_info. Writing metric{rabbitmq_cluster="x"} directly
+        // matches no series and reports zero forever, so every non-identity query has to join.
+        Dictionary<string, string> queries = PrometheusService.BuildRabbitMQQueries("orders");
+
+        foreach (KeyValuePair<string, string> q in queries.Where(q => q.Key != "nodes"))
+        {
+            q.Value.Should().Contain("group_left", $"query '{q.Key}' must join rabbitmq_identity_info");
+            q.Value.Should().Contain("rabbitmq_identity_info", $"query '{q.Key}' must join identity info");
+        }
+    }
+
+    [Fact]
+    public void BuildRabbitMQQueries_PinTheIdentityEndpointSoNodesAreNotDoubleCounted()
+    {
+        // The plugin emits identity info once per scrape path. If /metrics/detailed is also
+        // scraped, an unpinned join finds two identity series per node — Prometheus rejects the
+        // ambiguity, and the node count doubles.
+        foreach (KeyValuePair<string, string> q in PrometheusService.BuildRabbitMQQueries("orders"))
+        {
+            q.Value.Should().Contain("rabbitmq_endpoint=\"aggregated\"",
+                $"query '{q.Key}' must pin the identity endpoint");
+        }
+    }
+
+    [Fact]
+    public void BuildRabbitMQQueries_CountDeliveriesInBothAcknowledgementModes()
+    {
+        // "_delivered_total" counts auto-ack deliveries only; manual-ack ones — the normal case —
+        // land in "_delivered_ack_total". Querying one alone reports zero for real workloads.
+        string deliver = PrometheusService.BuildRabbitMQQueries("orders")["deliver"];
+
+        deliver.Should().Contain("rabbitmq_channel_messages_delivered_ack_total");
+        deliver.Should().Contain("rabbitmq_channel_messages_delivered_total");
+    }
+
+    [Fact]
+    public void BuildRabbitMQQueries_CompareAckRateAgainstManualAckDeliveriesOnly()
+    {
+        // Auto-ack deliveries are never acknowledged, so including them would show permanent
+        // ack lag on a healthy auto-ack consumer.
+        string deliverAck = PrometheusService.BuildRabbitMQQueries("orders")["deliverAck"];
+
+        deliverAck.Should().Contain("rabbitmq_channel_messages_delivered_ack_total");
+        deliverAck.Should().NotContain("rabbitmq_channel_messages_delivered_total");
+    }
+
+    [Fact]
+    public void BuildRabbitMQQueries_KeepsPerNodeResourceQueriesUnaggregated()
+    {
+        // One node at its memory watermark blocks publishers cluster-wide; summing across
+        // nodes would hide which node, and comparing a sum to a single limit is meaningless.
+        // The join must also carry rabbitmq_node, since the node families carry no labels.
+        foreach (string key in new[] { "mem", "memLimit", "disk", "diskLimit", "fds", "fdsMax" })
+        {
+            string q = PrometheusService.BuildRabbitMQQueries("broker")[key];
+            q.Should().NotStartWith("sum(");
+            q.Should().Contain("rabbitmq_node", $"query '{key}' must carry the node identity");
+        }
+    }
+
+    [Fact]
+    public void BuildRabbitMQQueries_DefaultSummedRatesToZeroSoOneAbsentCounterCannotBlankThem()
+    {
+        // Vector arithmetic yields an empty result when either side has no series, which would
+        // silently zero the value and the warning that depends on it.
+        PrometheusService.BuildRabbitMQQueries("orders")["unroutable"].Should().Contain("or vector(0)");
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  Keycloak query construction
+    // ════════════════════════════════════════════════════════════════
+
+    [Theory]
+    [InlineData("requests",   "http_server_requests_seconds_count")]
+    [InlineData("latency",    "http_server_requests_seconds_sum")]
+    [InlineData("active",     "http_server_active_requests")]
+    [InlineData("heapUsed",   "jvm_memory_used_bytes")]
+    [InlineData("gcPause",    "jvm_gc_pause_seconds_sum")]
+    [InlineData("dbActive",   "agroal_active_count")]
+    [InlineData("dbAwait",    "agroal_awaiting_count")]
+    [InlineData("dbBlock",    "agroal_blocking_time_average_milliseconds")]
+    [InlineData("logins",     "keycloak_user_events_total")]
+    public void BuildKeycloakQueries_UsesThePublishedMetricName(string key, string expectedMetric)
+    {
+        PrometheusService.BuildKeycloakQueries("keycloak")[key].Should().Contain(expectedMetric);
+    }
+
+    [Fact]
+    public void BuildKeycloakQueries_ScopesEveryQueryToTheReleaseNamespace()
+    {
+        // Keycloak's metrics carry no instance-identifying label, so the namespace is the
+        // only thing separating two Keycloaks on the same cluster.
+        foreach (KeyValuePair<string, string> q in PrometheusService.BuildKeycloakQueries("sso"))
+        {
+            q.Value.Should().Contain("namespace=\"sso\"", $"query '{q.Key}' must be scoped");
+        }
+    }
+
+    [Fact]
+    public void BuildKeycloakQueries_PutsEveryMatcherInOneBraceBlock()
+    {
+        // Two adjacent brace blocks are a PromQL parse error and Prometheus rejects the
+        // whole request with 400 rather than ignoring the second one.
+        foreach (KeyValuePair<string, string> q in PrometheusService.BuildKeycloakQueries("sso"))
+        {
+            q.Value.Should().NotContain("}{", $"query '{q.Key}' must use a single matcher block");
+        }
+    }
+
+    [Fact]
+    public void BuildKeycloakQueries_TreatAFailedLoginAsALoginCarryingAnError()
+    {
+        // Keycloak has no "login_error" event value: a failed login is event="login" with a
+        // non-empty error label. Querying login_error matches nothing, and counting every
+        // event="login" as a success folds the failures back into the success count.
+        Dictionary<string, string> q = PrometheusService.BuildKeycloakQueries("sso");
+
+        q["loginErr"].Should().Contain("event=\"login\"").And.Contain("error!=\"\"");
+        q["logins"].Should().Contain("event=\"login\"").And.Contain("error=\"\"");
+
+        string all = string.Join("\n", q.Values);
+        all.Should().NotContain("login_error");
+    }
+
+    [Fact]
+    public void BuildKeycloakQueries_ReducePerJvmMetricsWithoutSummingAcrossReplicas()
+    {
+        // These are compared against per-instance thresholds. Summing three healthy replicas'
+        // GC time crosses a single JVM's threshold while every JVM is fine, and a summed
+        // "active" happily exceeds a maxed "peak used", which is impossible on its face.
+        Dictionary<string, string> q = PrometheusService.BuildKeycloakQueries("sso");
+
+        foreach (string key in new[] { "gcPause", "gcOverhead", "dbActive", "dbAwait", "dbMaxUsed" })
+        {
+            q[key].Should().StartWith("max(", $"query '{key}' is a per-pod quantity");
+        }
+
+        // The pod with the fewest spare connections is the one about to block.
+        q["dbAvail"].Should().StartWith("min(");
+    }
+
+    [Fact]
+    public void BuildKeycloakQueries_RestrictsHeapToTheHeapArea()
+    {
+        // jvm_memory_used_bytes covers non-heap pools too; without the area matcher the
+        // "heap used" tile silently includes metaspace and code cache.
+        PrometheusService.BuildKeycloakQueries("sso")["heapUsed"].Should().Contain("area=\"heap\"");
+        PrometheusService.BuildKeycloakQueries("sso")["heapComm"].Should().Contain("area=\"heap\"");
+    }
 }

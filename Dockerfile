@@ -37,10 +37,24 @@ RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
     KUBECTL_VERSION=$(curl -fsSL https://dl.k8s.io/release/stable.txt) && \
     curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" \
          -o /usr/local/bin/kubectl && \
-    chmod +x /usr/local/bin/kubectl
+    chmod +x /usr/local/bin/kubectl && \
+    kubectl version --client
 
-# helm — latest stable via official installer script
-RUN curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+# helm — architecture-aware, from the official release tarball.
+#
+# Pinned to the 3.x line, and deliberately NOT installed via `curl … | bash`: the exit status of
+# a pipeline is the last command's, so a failed download left bash reading empty input, exiting 0,
+# and the build succeeding with no helm in the image. That is exactly how a 429 from
+# raw.githubusercontent.com shipped an image whose every Helm operation failed with
+# "An error occurred trying to start process 'helm'". Chaining with && and finishing on
+# `helm version` makes a broken download fail the build instead.
+ARG HELM_VERSION=v3.21.4
+RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
+    curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz" -o /tmp/helm.tar.gz && \
+    tar -xzf /tmp/helm.tar.gz -C /tmp && \
+    install -m 0755 "/tmp/linux-${ARCH}/helm" /usr/local/bin/helm && \
+    rm -rf /tmp/helm.tar.gz "/tmp/linux-${ARCH}" && \
+    helm version
 
 # clusterctl — Cluster API CLI, architecture-aware. Resolves the latest release tag so
 # the download URL always points at a real asset (override with --build-arg CLUSTERCTL_VERSION).

@@ -118,13 +118,28 @@ else
             }
             <div class="d-flex gap-2 align-items-center flex-wrap">
                 <input class="form-control form-control-sm font-monospace" style="max-width:280px"
-                       @bind="nsValue" placeholder="e.g. customer-prod" />
+                       list="gov-ns-suggestions"
+                       @bind="nsValue" @bind:after="CheckNamespace" placeholder="e.g. customer-prod" />
+                <datalist id="gov-ns-suggestions">
+                    @if (nsCheck is not null)
+                    {
+                        @foreach (string known in nsCheck.KnownNamespaces)
+                        {
+                            <option value="@known"></option>
+                        }
+                    }
+                </datalist>
                 <button class="btn btn-sm btn-primary" @onclick="SaveNamespace" disabled="@savingNs">
                     @if (savingNs) { <span class="spinner-border spinner-border-sm me-1"></span> }
                     Save
                 </button>
                 @if (!string.IsNullOrWhiteSpace(nsValue))
                 {
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="CheckNamespace" disabled="@checkingNs">
+                        @if (checkingNs) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                        else { <i class="bi bi-arrow-repeat me-1"></i> }
+                        Re-check clusters
+                    </button>
                     <button class="btn btn-sm btn-outline-danger" @onclick="ClearNamespace">
                         <i class="bi bi-x me-1"></i>Remove lock
                     </button>
@@ -140,6 +155,91 @@ else
             else
             {
                 <div class="form-text mt-1">No namespace lock — deployments may use any namespace.</div>
+            }
+
+            @* ── Cluster existence check ── *@
+            @if (nsNameError is not null)
+            {
+                <div class="alert alert-warning py-1 small mt-2 mb-0">
+                    <i class="bi bi-exclamation-triangle me-1"></i>@nsNameError
+                </div>
+            }
+            else if (checkingNs)
+            {
+                <div class="small text-muted mt-2">
+                    <span class="spinner-border spinner-border-sm me-1"></span>Checking clusters for namespace <code>@nsValue</code>…
+                </div>
+            }
+            else if (nsCheck is not null && nsCheck.Clusters.Count > 0)
+            {
+                <div class="mt-2 border-top pt-2">
+                    <div class="small text-muted mb-1">
+                        @if (nsCheck.FromDeployments)
+                        {
+                            <text>Namespace <code>@nsCheck.Namespace</code> on the clusters this environment deploys to:</text>
+                        }
+                        else
+                        {
+                            <text>No deployments in this environment yet — checked every cluster assigned to it:</text>
+                        }
+                    </div>
+                    @foreach (NamespaceClusterStatus c in nsCheck.Clusters)
+                    {
+                        <div class="d-flex align-items-center gap-2 small py-1">
+                            <i class="bi bi-hdd-network text-muted"></i>
+                            <span class="fw-medium">@c.ClusterName</span>
+                            @if (c.Error is not null)
+                            {
+                                <span class="badge bg-secondary">Unknown</span>
+                                <span class="text-muted">@c.Error</span>
+                            }
+                            else if (c.Exists)
+                            {
+                                <span class="badge bg-success-subtle text-success-emphasis">
+                                    <i class="bi bi-check-circle me-1"></i>Namespace exists
+                                </span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-warning-subtle text-warning-emphasis">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>Not found
+                                </span>
+                                <button class="btn btn-sm btn-outline-primary py-0"
+                                        @onclick="() => CreateNamespaceOnCluster(c.ClusterId)"
+                                        disabled="@(creatingNsClusterId is not null)">
+                                    @if (creatingNsClusterId == c.ClusterId)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                    }
+                                    else
+                                    {
+                                        <i class="bi bi-plus-lg me-1"></i>
+                                    }
+                                    Create namespace
+                                </button>
+                            }
+                        </div>
+                    }
+                    @if (nsCheck.Missing.Count > 1)
+                    {
+                        <button class="btn btn-sm btn-primary mt-1" @onclick="CreateNamespaceEverywhere"
+                                disabled="@(creatingNsClusterId is not null)">
+                            <i class="bi bi-plus-lg me-1"></i>Create on all @nsCheck.Missing.Count clusters
+                        </button>
+                    }
+                    @if (nsCreateMessage is not null)
+                    {
+                        <div class="small mt-1 @(nsCreateOk ? "text-success" : "text-danger")">
+                            <i class="bi @(nsCreateOk ? "bi-check-circle" : "bi-x-circle") me-1"></i>@nsCreateMessage
+                        </div>
+                    }
+                </div>
+            }
+            else if (nsCheck is not null && !string.IsNullOrWhiteSpace(nsCheck.Namespace))
+            {
+                <div class="form-text mt-2">
+                    No clusters are assigned to this environment, so the namespace could not be checked.
+                </div>
             }
         </div>
     </div>
@@ -730,6 +830,14 @@ else
     private string? nsMessage;
     private bool nsOk;
 
+    // Namespace existence on the environment's clusters
+    private NamespaceCheckResult? nsCheck;
+    private bool checkingNs;
+    private string? nsNameError;
+    private Guid? creatingNsClusterId;
+    private string? nsCreateMessage;
+    private bool nsCreateOk;
+
     // Copy from environment
     private bool showCopyFrom;
     private List<Data.Environment>? otherEnvironments;
@@ -803,6 +911,19 @@ else
             await LoadOtherEnvironments();
     }
 
+    /// <summary>
+    /// The cluster round-trip happens after the first render so an unreachable cluster
+    /// delays only the namespace status line, not the whole tab.
+    /// </summary>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !loading && !checkingNs && nsCheck is null && !string.IsNullOrWhiteSpace(nsValue))
+        {
+            await CheckNamespace();
+            StateHasChanged();
+        }
+    }
+
     private async Task LoadAsync()
     {
         AppGovernanceData data = await GovernanceService.LoadAsync(AppId, EnvironmentId);
@@ -866,12 +987,107 @@ else
         await GovernanceService.SaveNamespaceAsync(AppId, EnvironmentId, nsValue);
         nsValue = nsValue.Trim().ToLowerInvariant();
         savingNs = false; nsOk = true; nsMessage = "Namespace saved.";
+        await CheckNamespace();
     }
 
     private async Task ClearNamespace()
     {
         await GovernanceService.SaveNamespaceAsync(AppId, EnvironmentId, null);
         nsValue = ""; nsMessage = null;
+        nsCheck = null; nsNameError = null; nsCreateMessage = null;
+    }
+
+    /// <summary>
+    /// Asks each cluster this environment governs whether the namespace already exists, so a
+    /// missing one can be created here instead of failing later during apply or deploy.
+    /// </summary>
+    private async Task CheckNamespace()
+    {
+        nsCreateMessage = null;
+
+        string ns = nsValue.Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(ns))
+        {
+            nsCheck = null; nsNameError = null;
+            return;
+        }
+
+        nsNameError = AppGovernanceService.ValidateNamespaceName(ns);
+        if (nsNameError is not null)
+        {
+            nsCheck = null;
+            return;
+        }
+
+        checkingNs = true;
+        StateHasChanged();
+        try
+        {
+            nsCheck = await GovernanceService.CheckNamespaceAsync(AppId, EnvironmentId, ns);
+        }
+        catch (Exception ex)
+        {
+            nsCheck = null;
+            nsCreateOk = false;
+            nsCreateMessage = $"Namespace check failed: {ex.Message}";
+        }
+        finally { checkingNs = false; }
+    }
+
+    private async Task CreateNamespaceOnCluster(Guid clusterId)
+    {
+        creatingNsClusterId = clusterId;
+        nsCreateMessage = null;
+        StateHasChanged();
+        try
+        {
+            (bool ok, string output) = await GovernanceService.CreateNamespaceOnClusterAsync(clusterId, nsValue);
+            nsCreateOk = ok;
+            nsCreateMessage = ok ? $"Namespace {nsValue.Trim().ToLowerInvariant()} created." : output;
+        }
+        catch (OperationCanceledException)
+        {
+            nsCreateOk = false;
+            nsCreateMessage = "Namespace creation cancelled.";
+        }
+        catch (Exception ex)
+        {
+            nsCreateOk = false;
+            nsCreateMessage = ex.Message;
+        }
+        finally { creatingNsClusterId = null; }
+
+        // Refresh so the row flips to "exists" (and preserve the create message).
+        string? message = nsCreateMessage;
+        bool ok2 = nsCreateOk;
+        await CheckNamespace();
+        nsCreateMessage = message; nsCreateOk = ok2;
+    }
+
+    private async Task CreateNamespaceEverywhere()
+    {
+        if (nsCheck is null) return;
+
+        var failures = new List<string>();
+        foreach (NamespaceClusterStatus c in nsCheck.Missing)
+        {
+            creatingNsClusterId = c.ClusterId;
+            StateHasChanged();
+            try
+            {
+                (bool ok, string output) = await GovernanceService.CreateNamespaceOnClusterAsync(c.ClusterId, nsValue);
+                if (!ok) failures.Add($"{c.ClusterName}: {output}");
+            }
+            catch (OperationCanceledException) { failures.Add($"{c.ClusterName}: cancelled"); }
+            catch (Exception ex) { failures.Add($"{c.ClusterName}: {ex.Message}"); }
+        }
+        creatingNsClusterId = null;
+
+        await CheckNamespace();
+        nsCreateOk = failures.Count == 0;
+        nsCreateMessage = nsCreateOk
+            ? $"Namespace {nsValue.Trim().ToLowerInvariant()} created on all clusters."
+            : string.Join(" · ", failures);
     }
 
     // ── Quota ──────────────────────────────────────────────────────────────────

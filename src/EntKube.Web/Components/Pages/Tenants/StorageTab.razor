@@ -792,10 +792,31 @@
                                     <div class="col-12 mb-1">
                                         <i class="bi bi-link-45deg me-1"></i><code class="small text-break">@conn.AuthUrl</code>
                                     </div>
+                                    @if (!string.IsNullOrWhiteSpace(conn.ProxyUrl))
+                                    {
+                                        <div class="col-12 mb-1">
+                                            <i class="bi bi-shuffle me-1 text-info"></i>via <code class="small text-break">@conn.ProxyUrl</code>
+                                        </div>
+                                    }
                                 </div>
+                                @if (osTestResults.TryGetValue(conn.Id, out (bool Ok, string Message) result))
+                                {
+                                    <div class="alert @(result.Ok ? "alert-success" : "alert-danger") py-1 px-2 small mt-2 mb-0">
+                                        <i class="bi @(result.Ok ? "bi-check-circle" : "bi-exclamation-triangle") me-1"></i>@result.Message
+                                    </div>
+                                }
                             </div>
-                            <div class="card-footer bg-white py-1">
+                            <div class="card-footer bg-white py-1 d-flex align-items-center justify-content-between">
                                 <small class="text-muted">Added @conn.CreatedAt.ToString("yyyy-MM-dd")</small>
+                                <button class="btn btn-sm btn-outline-secondary border-0 py-0"
+                                        @onclick="() => TestOpenStackConnection(conn.Id)"
+                                        disabled="@(osTesting == conn.Id)">
+                                    @if (osTesting == conn.Id)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                    }
+                                    Test
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -848,6 +869,42 @@
                             <input type="password" class="form-control form-control-sm" @bind="osFormPassword" placeholder="Stored in vault" />
                         </div>
                     </div>
+
+                    @* ── Outbound proxy (for IP-allowlisted clouds) ── *@
+                    <hr class="my-3" />
+                    <div class="d-flex align-items-center gap-2 mb-2">
+                        <i class="bi bi-shuffle text-info"></i>
+                        <span class="small fw-semibold">Outbound proxy</span>
+                        <span class="badge bg-secondary-subtle text-secondary-emphasis rounded-pill">Optional</span>
+                    </div>
+                    <p class="small text-muted mb-2">
+                        Use this when the cloud's API is restricted to an IP allowlist that this server is not on.
+                        Every call to this cloud is tunnelled through the proxy, so OpenStack sees an allowed
+                        source address. A plain <code>ssh -D 1080 user@@host</code> tunnel on a permitted network works.
+                    </p>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold">Proxy URL</label>
+                            <input type="text" class="form-control form-control-sm" @bind="osFormProxyUrl"
+                                   placeholder="socks5://10.0.0.5:1080" />
+                            <div class="form-text small">http, https, socks4, socks4a or socks5. No credentials in the URL.</div>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small fw-semibold">Proxy Username</label>
+                            <input type="text" class="form-control form-control-sm" @bind="osFormProxyUsername" placeholder="Only if required" />
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small fw-semibold">Proxy Password</label>
+                            <input type="password" class="form-control form-control-sm" @bind="osFormProxyPassword" placeholder="Stored in vault" />
+                        </div>
+                    </div>
+
+                    @if (osFormError is not null)
+                    {
+                        <div class="alert alert-danger py-2 px-3 small mt-3 mb-0">
+                            <i class="bi bi-exclamation-triangle me-1"></i>@osFormError
+                        </div>
+                    }
                     <div class="mt-3 d-flex gap-2">
                         <button class="btn btn-sm btn-info text-white" @onclick="SaveOpenStackConnection" disabled="@savingOs">
                             @if (savingOs)
@@ -946,6 +1003,12 @@
     private string osFormProjectDomain = "";
     private string osFormUsername = "";
     private string osFormPassword = "";
+    private string osFormProxyUrl = "";
+    private string osFormProxyUsername = "";
+    private string osFormProxyPassword = "";
+    private string? osFormError;
+    private Guid? osTesting;
+    private readonly Dictionary<Guid, (bool Ok, string Message)> osTestResults = [];
 
     // Bucket management state
     private StorageLink? managedLink;
@@ -1502,6 +1565,7 @@
         }
 
         savingOs = true;
+        osFormError = null;
         StateHasChanged();
 
         try
@@ -1516,16 +1580,40 @@
                 string.IsNullOrWhiteSpace(osFormUserDomain) ? null : osFormUserDomain.Trim(),
                 string.IsNullOrWhiteSpace(osFormProjectDomain) ? null : osFormProjectDomain.Trim(),
                 string.IsNullOrWhiteSpace(osFormUsername) ? null : osFormUsername.Trim(),
-                string.IsNullOrWhiteSpace(osFormPassword) ? null : osFormPassword.Trim());
+                string.IsNullOrWhiteSpace(osFormPassword) ? null : osFormPassword.Trim(),
+                string.IsNullOrWhiteSpace(osFormProxyUrl) ? null : osFormProxyUrl.Trim(),
+                string.IsNullOrWhiteSpace(osFormProxyUsername) ? null : osFormProxyUsername.Trim(),
+                string.IsNullOrWhiteSpace(osFormProxyPassword) ? null : osFormProxyPassword.Trim());
 
             showOsForm = false;
             ResetOsForm();
             openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
         cubeFsComponents = await StorageService.GetCubeFSComponentsAsync(TenantId);
         }
+        catch (InvalidOperationException ex)
+        {
+            // Proxy URL validation and other save-time rejections belong on the form.
+            osFormError = ex.Message;
+        }
         finally
         {
             savingOs = false;
+        }
+    }
+
+    private async Task TestOpenStackConnection(Guid connectionId)
+    {
+        osTesting = connectionId;
+        osTestResults.Remove(connectionId);
+        StateHasChanged();
+
+        try
+        {
+            osTestResults[connectionId] = await StorageService.TestOpenStackConnectionAsync(TenantId, connectionId);
+        }
+        finally
+        {
+            osTesting = null;
         }
     }
 
@@ -1659,6 +1747,10 @@
         osFormProjectDomain = "";
         osFormUsername = "";
         osFormPassword = "";
+        osFormProxyUrl = "";
+        osFormProxyUsername = "";
+        osFormProxyPassword = "";
+        osFormError = null;
     }
 
     private string GetEndpointPlaceholder() => formProvider switch

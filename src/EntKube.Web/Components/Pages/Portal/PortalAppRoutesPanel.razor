@@ -370,6 +370,10 @@ else
     private string editPath = "/";
     private string editService = "";
     private int editPort = 80;
+    // Not editable in the portal, but carried through the update so a path/service edit
+    // doesn't silently reset what an operator configured in the admin UI.
+    private string? editRewritePath;
+    private int? editTimeoutSeconds;
     private string? editError;
     private bool saving;
     private bool editLoadingServices;
@@ -526,6 +530,8 @@ else
         editPath = dr.PathPrefix;
         editService = dr.ServiceName;
         editPort = dr.ServicePort;
+        editRewritePath = dr.RewritePath;
+        editTimeoutSeconds = dr.RequestTimeoutSeconds;
         editError = null;
         editAvailableServices = [];
         editAvailablePorts = [];
@@ -582,7 +588,9 @@ else
             {
                 ServiceName = editService,
                 ServicePort = editPort,
-                PathPrefix = editPath
+                PathPrefix = editPath,
+                RewritePath = editRewritePath,
+                RequestTimeoutSeconds = editTimeoutSeconds
             });
             CancelEdit();
             routes = await AppRouteService.GetRoutesForAppAsync(App.Id);

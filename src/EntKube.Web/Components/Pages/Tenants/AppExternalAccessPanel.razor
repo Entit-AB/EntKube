@@ -243,6 +243,7 @@
                                                 <th class="small">Env</th>
                                                 <th class="small">Path</th>
                                                 <th class="small">Service</th>
+                                                <th class="small" title="Gateway request timeout. 0 waits forever — only for long-lived streams.">Timeout</th>
                                                 <th class="small">Cluster</th>
                                                 <th class="small">Health</th>
                                                 <th></th>
@@ -263,6 +264,20 @@
                                                         }
                                                     </td>
                                                     <td class="small align-middle text-muted">@dr.ServiceName:@dr.ServicePort</td>
+                                                    <td class="small align-middle" style="width: 7rem;">
+                                                        <div class="input-group input-group-sm">
+                                                            <input type="number" min="0" class="form-control form-control-sm"
+                                                                   style="max-width: 4.5rem;"
+                                                                   aria-label="@($"Request timeout in seconds for {dr.PathPrefix}")"
+                                                                   value="@(dr.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds)"
+                                                                   @onchange="e => SaveDrTimeout(dr, e.Value?.ToString())" />
+                                                            <span class="input-group-text px-1 small">s</span>
+                                                        </div>
+                                                        @if ((dr.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds) == 0)
+                                                        {
+                                                            <small class="text-warning">waits forever</small>
+                                                        }
+                                                    </td>
                                                     <td class="small align-middle">@ClusterStatusBadge(dr)</td>
                                                     <td class="small align-middle">@HealthBadge(dr)</td>
                                                     <td class="text-end align-middle" style="white-space: nowrap;">
@@ -410,6 +425,14 @@
                                                        @bind="newDrRewritePath" />
                                                 <div class="form-text small text-muted">Rewrites the path prefix before forwarding. Leave empty to forward as-is.</div>
                                             </div>
+
+                                            @* Request timeout — bounds the whole exchange at the gateway *@
+                                            <div class="col-md-2">
+                                                <label class="form-label small">Timeout (s)</label>
+                                                <input type="number" min="0" class="form-control form-control-sm"
+                                                       @bind="newDrTimeoutSeconds" />
+                                                <div class="form-text small text-muted">0 = no timeout. Only for websockets or streaming paths.</div>
+                                            </div>
                                         </div>
 
                                         @* Endpoint health preview *@
@@ -520,6 +543,7 @@
     private string? newDrRewritePath;
     private string newDrService = "";
     private int newDrPort = 80;
+    private int newDrTimeoutSeconds = ExternalRouteService.DefaultRequestTimeoutSeconds;
     private string? addDrError;
     private bool addingDr;
 
@@ -736,6 +760,7 @@
         newDrRewritePath = null;
         newDrService = "";
         newDrPort = 80;
+        newDrTimeoutSeconds = ExternalRouteService.DefaultRequestTimeoutSeconds;
         addDrError = null;
         availableServices = [];
         availablePorts = [];
@@ -824,7 +849,8 @@
                 ServiceName = newDrService,
                 ServicePort = newDrPort,
                 PathPrefix = newDrPath,
-                RewritePath = newDrRewritePath
+                RewritePath = newDrRewritePath,
+                RequestTimeoutSeconds = newDrTimeoutSeconds
             });
             CancelAddDr();
             await LoadAsync();
@@ -852,6 +878,32 @@
         {
             Toasts.Error($"Failed to remove deployment route: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Persists an edited request timeout. The route is marked as needing a re-apply rather than
+    /// applied here — the new value only takes effect with the regenerated HTTPRoute, and
+    /// observed-only routes must never be applied by EntKube at all.
+    /// </summary>
+    private async Task SaveDrTimeout(AppDeploymentRoute dr, string? raw)
+    {
+        applyRouteError = null;
+
+        if (!int.TryParse(raw, out int seconds) || seconds < 0)
+        {
+            applyRouteError = "Timeout must be 0 or a positive number of seconds.";
+            return;
+        }
+
+        if (seconds == (dr.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds))
+            return;
+
+        try
+        {
+            await AppRouteService.UpdateDeploymentRouteTimeoutAsync(dr.Id, seconds);
+            await LoadAsync();
+        }
+        catch (Exception ex) { applyRouteError = ex.Message; }
     }
 
     private async Task ApplyRouteToCluster(Guid drId)

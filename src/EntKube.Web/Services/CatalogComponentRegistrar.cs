@@ -379,7 +379,10 @@ public class CatalogComponentRegistrar(
             TlsMode = isManual ? TlsMode.Manual : TlsMode.ClusterIssuer,
             ClusterIssuerName = isManual ? null : issuerName,
             TlsCertificate = isManual ? tlsCert : null,
-            TlsPrivateKey = isManual && !string.IsNullOrWhiteSpace(tlsKey) ? tlsKey : null
+            TlsPrivateKey = isManual && !string.IsNullOrWhiteSpace(tlsKey) ? tlsKey : null,
+            // Harbor serves image pushes/pulls over this route; a single layer can run for
+            // minutes, so it gets the registry budget instead of the default request timeout.
+            RequestTimeoutSeconds = isKeycloak ? null : ExternalRouteService.RegistryRequestTimeoutSeconds
         };
 
         await routeService.AddRouteAsync(componentId, routeRequest);

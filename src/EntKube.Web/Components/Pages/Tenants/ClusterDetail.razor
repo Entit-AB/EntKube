@@ -90,6 +90,11 @@
         </button>
     </li>
     <li class="nav-item" role="presentation">
+        <button class="nav-link @(section == "workloads" ? "active" : "")" @onclick='() => section = "workloads"' role="tab" aria-selected="@(section == "workloads")" tabindex="@(section == "workloads" ? 0 : -1)">
+            <i class="bi bi-boxes me-1"></i>Workloads
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "components" ? "active" : "")" @onclick='() => section = "components"' role="tab" aria-selected="@(section == "components")" tabindex="@(section == "components" ? 0 : -1)">
             <i class="bi bi-puzzle me-1"></i>Components
         </button>
@@ -133,6 +138,10 @@
 else if (section == "nodes")
 {
     <ClusterNodes ClusterId="Cluster.Id" />
+}
+else if (section == "workloads")
+{
+    <WorkloadsTab ClusterId="Cluster.Id" />
 }
 else if (section == "logs")
 {
@@ -1182,12 +1191,24 @@ else if (section == "components")
                                                     <div class="row g-2 mt-1">
                                                         <div class="col-md-4">
                                                             <label class="form-label small mb-0">Namespace</label>
-                                                            <input type="text" class="form-control form-control-sm" @bind="editNamespace" @bind:event="oninput" />
+                                                            <input type="text" class="form-control form-control-sm" @bind="editNamespace" @bind:event="oninput"
+                                                                   disabled="@(comp.Status == ComponentStatus.Installed)" />
                                                         </div>
                                                         <div class="col-md-4">
                                                             <label class="form-label small mb-0">Release name</label>
-                                                            <input type="text" class="form-control form-control-sm" @bind="editReleaseName" @bind:event="oninput" />
+                                                            <input type="text" class="form-control form-control-sm" @bind="editReleaseName" @bind:event="oninput"
+                                                                   disabled="@(comp.Status == ComponentStatus.Installed)" />
                                                         </div>
+                                                        @if (comp.Status == ComponentStatus.Installed)
+                                                        {
+                                                            <div class="col-12">
+                                                                <small class="text-muted">
+                                                                    <i class="bi bi-lock me-1"></i>Helm identifies a release by its namespace and name.
+                                                                    Uninstall this component to move it — changing these in place would leave the running
+                                                                    release behind.
+                                                                </small>
+                                                            </div>
+                                                        }
                                                     </div>
                                                 </div>
                                             }
@@ -1345,22 +1366,28 @@ else if (section == "components")
                                         <div class="card border-0 bg-light mb-3">
                                             <div class="card-body py-2">
                                                 <div class="row g-2 mb-2">
-                                                    <div class="col-md-5">
+                                                    <div class="col-md-4">
                                                         <label class="form-label small mb-0">Hostname</label>
                                                         <input type="text" class="form-control form-control-sm"
                                                                placeholder="e.g. grafana.example.com"
                                                                @bind="routeHostname" @bind:event="oninput" />
                                                     </div>
-                                                    <div class="col-md-4">
+                                                    <div class="col-md-3">
                                                         <label class="form-label small mb-0">Service name</label>
                                                         <input type="text" class="form-control form-control-sm"
                                                                placeholder="@(comp.ReleaseName ?? comp.Name)"
                                                                @bind="routeServiceName" @bind:event="oninput" />
                                                     </div>
-                                                    <div class="col-md-3">
+                                                    <div class="col-md-2">
                                                         <label class="form-label small mb-0">Port</label>
                                                         <input type="number" class="form-control form-control-sm"
                                                                @bind="routeServicePort" />
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small mb-0">Timeout (s)</label>
+                                                        <input type="number" min="0" class="form-control form-control-sm"
+                                                               @bind="routeTimeoutSeconds" />
+                                                        <small class="text-muted">0 = no timeout (websockets, streams)</small>
                                                     </div>
                                                 </div>
                                                 <div class="row g-2 mb-2">
@@ -1435,6 +1462,7 @@ else if (section == "components")
                                                             <th>Hostname</th>
                                                             <th>Service</th>
                                                             <th>TLS</th>
+                                                            <th title="Gateway request timeout. 0 waits forever — only for long-lived streams.">Timeout</th>
                                                             <th>Health</th>
                                                             <th class="text-end" style="width: 140px;">Actions</th>
                                                         </tr>
@@ -1461,6 +1489,20 @@ else if (section == "components")
                                                                         <span class="badge bg-info text-dark">
                                                                             <i class="bi bi-file-earmark-lock me-1"></i>Manual
                                                                         </span>
+                                                                    }
+                                                                </td>
+                                                                <td style="width: 120px;">
+                                                                    <div class="input-group input-group-sm">
+                                                                        <input type="number" min="0" class="form-control form-control-sm"
+                                                                               style="max-width: 5rem;"
+                                                                               aria-label="@($"Request timeout in seconds for {route.Hostname}")"
+                                                                               value="@(route.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds)"
+                                                                               @onchange="e => SaveRouteTimeout(route, comp.Id, e.Value?.ToString())" />
+                                                                        <span class="input-group-text px-1 small">s</span>
+                                                                    </div>
+                                                                    @if ((route.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds) == 0)
+                                                                    {
+                                                                        <small class="text-warning">waits forever</small>
                                                                     }
                                                                 </td>
                                                                 <td>
@@ -1640,6 +1682,7 @@ else if (section == "components")
     private string routeHostname = "";
     private string routeServiceName = "";
     private int routeServicePort = 80;
+    private int routeTimeoutSeconds = ExternalRouteService.DefaultRequestTimeoutSeconds;
     private string routeTlsMode = "ClusterIssuer";
     private string routeIssuerName = "letsencrypt-prod";
     private string routeTlsCert = "";
@@ -2190,20 +2233,36 @@ else if (section == "components")
             // Secret-marked fields are stored in the vault instead of plain YAML.
 
             ClusterComponent comp = components!.First(c => c.Id == componentId);
-            comp.HelmRepoUrl = string.IsNullOrWhiteSpace(editRepoUrl) ? null : editRepoUrl.Trim();
-            comp.HelmChartName = string.IsNullOrWhiteSpace(editChartName) ? null : editChartName.Trim();
-            comp.HelmChartVersion = string.IsNullOrWhiteSpace(editChartVersion) ? null : editChartVersion.Trim();
-            comp.Namespace = string.IsNullOrWhiteSpace(editNamespace) ? null : editNamespace.Trim();
-            comp.ReleaseName = string.IsNullOrWhiteSpace(editReleaseName) ? null : editReleaseName.Trim();
+
+            string? repoUrl      = string.IsNullOrWhiteSpace(editRepoUrl)      ? null : editRepoUrl.Trim();
+            string? chartName    = string.IsNullOrWhiteSpace(editChartName)    ? null : editChartName.Trim();
+            string? chartVersion = string.IsNullOrWhiteSpace(editChartVersion) ? null : editChartVersion.Trim();
+            string? ns           = string.IsNullOrWhiteSpace(editNamespace)    ? null : editNamespace.Trim();
+            string? releaseName  = string.IsNullOrWhiteSpace(editReleaseName)  ? null : editReleaseName.Trim();
 
             string mergedValues = MergeEditFormFields();
-            comp.HelmValues = string.IsNullOrWhiteSpace(mergedValues) ? null : mergedValues;
+            string? helmValues = string.IsNullOrWhiteSpace(mergedValues) ? null : mergedValues;
 
-            await LifecycleService.UpdateConfigurationAsync(
+            // Persist first, then mirror onto the in-memory component. Assigning first left the
+            // card showing values the database had rejected (an installed component refuses a
+            // namespace move) until the next reload.
+            ClusterComponent saved = await LifecycleService.UpdateConfigurationAsync(
                 componentId,
-                helmValues: comp.HelmValues,
-                chartVersion: comp.HelmChartVersion,
-                helmRepoUrl: comp.HelmRepoUrl);
+                helmValues: helmValues,
+                chartVersion: chartVersion,
+                helmRepoUrl: repoUrl,
+                componentNamespace: ns,
+                releaseName: releaseName,
+                chartName: chartName);
+
+            // Mirror what was actually stored, not what was typed — a blank field means "leave
+            // it alone" to the service, and the card should say so rather than show it empty.
+            comp.HelmValues = saved.HelmValues;
+            comp.HelmChartVersion = saved.HelmChartVersion;
+            comp.HelmRepoUrl = saved.HelmRepoUrl;
+            comp.HelmChartName = saved.HelmChartName;
+            comp.Namespace = saved.Namespace;
+            comp.ReleaseName = saved.ReleaseName;
 
             // Store any secret-marked form field values in the vault.
 
@@ -3357,7 +3416,10 @@ else if (section == "components")
             TlsMode = isManual ? TlsMode.Manual : TlsMode.ClusterIssuer,
             ClusterIssuerName = isManual ? null : issuerName,
             TlsCertificate = isManual ? tlsCert : null,
-            TlsPrivateKey = isManual && !string.IsNullOrWhiteSpace(tlsKey) ? tlsKey : null
+            TlsPrivateKey = isManual && !string.IsNullOrWhiteSpace(tlsKey) ? tlsKey : null,
+            // Image pushes/pulls run through this route and a single layer can take minutes,
+            // so Harbor gets the registry budget rather than the default request timeout.
+            RequestTimeoutSeconds = ExternalRouteService.RegistryRequestTimeoutSeconds
         };
 
         await RouteService.AddRouteAsync(componentId, routeRequest);
@@ -3417,7 +3479,8 @@ else if (section == "components")
                 TlsMode = routeTlsMode == "Manual" ? TlsMode.Manual : TlsMode.ClusterIssuer,
                 ClusterIssuerName = routeTlsMode == "ClusterIssuer" ? routeIssuerName.Trim() : null,
                 TlsCertificate = routeTlsMode == "Manual" ? routeTlsCert : null,
-                TlsPrivateKey = routeTlsMode == "Manual" && !string.IsNullOrWhiteSpace(routeTlsKey) ? routeTlsKey : null
+                TlsPrivateKey = routeTlsMode == "Manual" && !string.IsNullOrWhiteSpace(routeTlsKey) ? routeTlsKey : null,
+                RequestTimeoutSeconds = routeTimeoutSeconds
             };
 
             await RouteService.AddRouteAsync(componentId, request);
@@ -3427,9 +3490,41 @@ else if (section == "components")
             routeHostname = "";
             routeServiceName = "";
             routeServicePort = 80;
+            routeTimeoutSeconds = ExternalRouteService.DefaultRequestTimeoutSeconds;
             routeTlsCert = "";
             routeTlsKey = "";
 
+            componentRoutes = await RouteService.GetRoutesAsync(componentId);
+            await LifecycleService.ApplyExternalRoutesAsync(componentId);
+        }
+        catch (InvalidOperationException ex)
+        {
+            routeError = ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// Persists an edited request timeout and re-applies the route — the new value only takes
+    /// effect once the regenerated HTTPRoute reaches the cluster.
+    /// </summary>
+    private async Task SaveRouteTimeout(ExternalRoute route, Guid componentId, string? raw)
+    {
+        routeError = null;
+
+        if (!int.TryParse(raw, out int seconds) || seconds < 0)
+        {
+            routeError = "Timeout must be 0 or a positive number of seconds.";
+            return;
+        }
+
+        if (seconds == (route.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds))
+        {
+            return;
+        }
+
+        try
+        {
+            await RouteService.UpdateRouteTimeoutAsync(route.Id, seconds);
             componentRoutes = await RouteService.GetRoutesAsync(componentId);
             await LifecycleService.ApplyExternalRoutesAsync(componentId);
         }

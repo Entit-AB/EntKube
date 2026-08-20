@@ -327,7 +327,7 @@ else
         new("Advisor", "bi-lightbulb",
         [ new("advisor", "Priorities", "bi-lightbulb") ]),
         new("Monitoring", "bi-speedometer2",
-        [ new("overview", "Overview", "bi-speedometer2"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
+        [ new("overview", "Overview", "bi-speedometer2"), new("workloads", "Workloads", "bi-boxes"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
@@ -670,6 +670,7 @@ else
                 break;
             case "groups": builder.OpenComponent<GroupTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "ingress": builder.OpenComponent<IngressDashboardTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "workloads": builder.OpenComponent<WorkloadsTab>(0); builder.AddComponentParameter(1, "TenantId", (Guid?)tid); builder.CloseComponent(); break;
             case "networking": builder.OpenComponent<NetworkingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "blueprints": builder.OpenComponent<BlueprintsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "databases": OpenEnvScoped<DatabaseTab>(builder, tid); break;
