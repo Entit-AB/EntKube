@@ -111,13 +111,20 @@ public class RabbitMQCascadeItem
     public required string Display { get; set; }
 }
 
-// kept for backward compat with any existing callers
-public class RabbitMQLiveTopology
+/// <summary>
+/// Outcome of a "Discover existing" sweep, split by how each broker is managed so the UI can
+/// explain what it adopted — an external count is the signal that a Helm-installed broker was
+/// picked up with reduced capabilities.
+/// </summary>
+public class RabbitMQDiscoveryResult
 {
-    public List<string> Vhosts { get; set; } = [];
-    public List<string> Queues { get; set; } = [];
-    public List<string> Exchanges { get; set; } = [];
-    public List<string> Users { get; set; } = [];
+    /// <summary>Brokers adopted from RabbitmqCluster CRs (full lifecycle).</summary>
+    public int OperatorManaged { get; set; }
+
+    /// <summary>Brokers adopted from plain StatefulSets (read-only adoption).</summary>
+    public int External { get; set; }
+
+    public int Total => OperatorManaged + External;
 }
 
 public class RabbitMQOperatorStatus
@@ -133,10 +140,16 @@ public class RabbitMQOperatorStatus
 /// <summary>
 /// Manages RabbitMQ clusters and their definitions backups within EntKube.
 ///
-/// Cluster infrastructure is handled by the RabbitMQ Cluster Operator (RabbitmqCluster CRD).
-/// Messaging topology (vhosts, queues, exchanges, bindings) is handled by the RabbitMQ
-/// Messaging Topology Operator and discovered live from Kubernetes — EntKube does not
-/// own topology lifecycle, only surfaces it for visibility.
+/// <para><b>Operator-managed brokers.</b> Cluster infrastructure is handled by the RabbitMQ
+/// Cluster Operator (RabbitmqCluster CRD). Messaging topology (vhosts, queues, exchanges,
+/// bindings) is handled by the RabbitMQ Messaging Topology Operator and discovered live from
+/// Kubernetes — EntKube does not own topology lifecycle, only surfaces it for visibility.</para>
+///
+/// <para><b>External brokers.</b> Brokers installed outside EntKube (Helm charts, hand-rolled
+/// StatefulSets) have no CRs of any kind, so every method that would apply, read or delete a CR
+/// branches on <see cref="RabbitMQCluster.IsOperatorManaged"/> and drives rabbitmqctl on the
+/// broker pod instead. Infrastructure lifecycle is refused outright for these — the workload
+/// belongs to whoever installed it.</para>
 ///
 /// Backup/restore exports the full broker definitions.json via rabbitmqctl and stores it
 /// in S3, mirroring the Keycloak realm export pattern.
@@ -147,6 +160,70 @@ public class RabbitMQService(
     VaultService vaultService,
     ILogger<RabbitMQService>? logger = null)
 {
+    // ── Topology capability ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Per-Kubernetes-cluster cache of "are the Messaging Topology Operator CRDs registered",
+    /// so the probe costs one kubectl per cluster rather than one per topology read. Entries
+    /// expire so that installing or removing the operator is picked up without a restart.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (bool Present, DateTime CheckedAt)>
+        TopologyCrdCache = new();
+
+    private static readonly TimeSpan TopologyCrdCacheTtl = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Decides how a cluster's topology is managed.
+    ///
+    /// The CRD path is used only when the Messaging Topology Operator is actually installed —
+    /// checked against the live cluster, not against EntKube's component records, which can
+    /// disagree with reality. Everything else falls back to rabbitmqctl on the broker pod,
+    /// which works for any reachable broker.
+    ///
+    /// This matters for a cluster created by the Cluster Operator without the Topology Operator
+    /// alongside it: querying vhosts.rabbitmq.com there fails with "the server doesn't have a
+    /// resource type", and before this check that made every topology tab unusable even though
+    /// the broker itself was perfectly reachable.
+    /// </summary>
+    private async Task<bool> UseTopologyCrdsAsync(RabbitMQCluster cluster, CancellationToken ct)
+    {
+        // An external broker has no CRs by definition — don't even probe.
+        if (!cluster.IsOperatorManaged) return false;
+
+        if (TopologyCrdCache.TryGetValue(cluster.KubernetesClusterId, out (bool Present, DateTime CheckedAt) cached)
+            && DateTime.UtcNow - cached.CheckedAt < TopologyCrdCacheTtl)
+        {
+            return cached.Present;
+        }
+
+        bool present;
+        try
+        {
+            // CRDs are cluster-scoped; the namespace argument is ignored by kubectl here.
+            await k8s.GetJsonAsync(
+                "crd/vhosts.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!, ct: ct);
+            present = true;
+        }
+        catch
+        {
+            present = false;
+        }
+
+        TopologyCrdCache[cluster.KubernetesClusterId] = (present, DateTime.UtcNow);
+        return present;
+    }
+
+    /// <summary>
+    /// Whether this cluster's topology is backed by Messaging Topology Operator CRs (true) or
+    /// driven directly through rabbitmqctl (false). The UI uses this to decide whether to show
+    /// K8s object names and whether exchange/binding deletes are possible.
+    /// </summary>
+    public async Task<bool> UsesTopologyCrdsAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+        return await UseTopologyCrdsAsync(cluster, ct);
+    }
+
     // ── Cluster queries ───────────────────────────────────────────────────────
 
     public async Task<List<RabbitMQCluster>> GetClustersAsync(Guid tenantId, CancellationToken ct = default)
@@ -301,6 +378,12 @@ public class RabbitMQService(
             .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("RabbitMQ cluster not found.");
 
+        if (!cluster.IsOperatorManaged)
+            throw new InvalidOperationException(
+                $"'{cluster.Name}' was installed outside EntKube and is owned by its Helm release. "
+                + "Change its version, replicas or storage through that release — EntKube would "
+                + "either be reverted by the next helm upgrade or fight it.");
+
         cluster.RabbitMQVersion = version;
         cluster.Replicas = replicas;
         cluster.StorageSize = storageSize;
@@ -320,6 +403,12 @@ public class RabbitMQService(
         }
     }
 
+    /// <summary>
+    /// Deletes an operator-managed cluster from Kubernetes and drops its EntKube record.
+    ///
+    /// For an external broker there is nothing safe to delete — the workload belongs to a Helm
+    /// release EntKube does not own — so this only forgets the record, leaving the broker running.
+    /// </summary>
     public async Task DeleteClusterAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
@@ -328,6 +417,15 @@ public class RabbitMQService(
             .Include(c => c.KubernetesCluster)
             .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("RabbitMQ cluster not found.");
+
+        if (!cluster.IsOperatorManaged)
+        {
+            // Stop tracking only. Deleting the StatefulSet would destroy a broker whose
+            // lifecycle belongs to Helm, and the next `helm upgrade` would recreate it anyway.
+            db.RabbitMQClusters.Remove(cluster);
+            await db.SaveChangesAsync(ct);
+            return;
+        }
 
         cluster.Status = RabbitMQClusterStatus.Deleting;
         await db.SaveChangesAsync(ct);
@@ -352,24 +450,35 @@ public class RabbitMQService(
     // ── Reverse discovery (adopt live clusters) ───────────────────────────────
 
     /// <summary>
-    /// Scans every Kubernetes cluster the tenant owns for live <c>RabbitmqCluster</c>
-    /// resources and adopts any that EntKube doesn't already track as
-    /// <see cref="RabbitMQCluster"/> records. This makes pre-existing clusters (created
-    /// outside EntKube, or by the operator before it was imported) visible in the
-    /// Messaging tab. Idempotent — a cluster already tracked by (k8s cluster, ns, name)
-    /// is skipped, so it is safe to re-run.
+    /// Scans every Kubernetes cluster the tenant owns, in every namespace, for RabbitMQ
+    /// brokers EntKube doesn't already track, and adopts them as <see cref="RabbitMQCluster"/>
+    /// records so they show up in the Messaging tab.
     ///
-    /// Returns the number of newly adopted clusters.
+    /// Two sweeps run per Kubernetes cluster:
+    /// <list type="bullet">
+    /// <item>live <c>RabbitmqCluster</c> CRs — brokers run by the cluster operator, adopted
+    /// with full lifecycle;</item>
+    /// <item>StatefulSets running a RabbitMQ image with no operator owning them — brokers
+    /// installed by a Helm chart or by hand, adopted read-only. Without this sweep such
+    /// brokers are invisible to EntKube no matter which namespace they live in, because
+    /// there is no CR to find.</item>
+    /// </list>
+    ///
+    /// Idempotent — a broker already tracked by (k8s cluster, namespace, name) is skipped,
+    /// so it is safe to re-run.
     /// </summary>
-    public async Task<int> DiscoverClustersAsync(Guid tenantId, CancellationToken ct = default)
+    public async Task<RabbitMQDiscoveryResult> DiscoverClustersAsync(
+        Guid tenantId, CancellationToken ct = default)
     {
+        RabbitMQDiscoveryResult result = new();
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         List<KubernetesCluster> k8sClusters = await db.KubernetesClusters
             .Where(c => c.TenantId == tenantId && c.KubeconfigSecretId != null)
             .ToListAsync(ct);
 
-        if (k8sClusters.Count == 0) return 0;
+        if (k8sClusters.Count == 0) return result;
 
         HashSet<(Guid, string, string)> existing = (await db.RabbitMQClusters
             .Where(c => c.TenantId == tenantId)
@@ -382,37 +491,61 @@ public class RabbitMQService(
 
         foreach (KubernetesCluster k in k8sClusters)
         {
-            string json;
+            // ── Sweep 1: operator-managed brokers (RabbitmqCluster CRs) ──
+            string? crJson = null;
             try
             {
-                json = await k8s.GetJsonAllNamespacesAsync(
+                crJson = await k8s.GetJsonAllNamespacesAsync(
                     "rabbitmqclusters.rabbitmq.com", k.Kubeconfig!, ct: ct);
             }
             catch
             {
-                // Operator/CRD not installed on this cluster, or unreachable — skip.
-                continue;
+                // Operator/CRD not installed on this cluster, or unreachable. Not fatal —
+                // the StatefulSet sweep below is exactly the case that matters here.
             }
 
-            foreach (RabbitMQCluster discovered in ParseDiscoveredClusters(json, tenantId, k.Id))
+            if (crJson is not null)
+            {
+                foreach (RabbitMQCluster discovered in ParseDiscoveredClusters(crJson, tenantId, k.Id))
+                {
+                    if (!existing.Add((k.Id, discovered.Namespace, discovered.Name))) continue;
+                    db.RabbitMQClusters.Add(discovered);
+                    newClusterIds.Add(discovered.Id);
+                    result.OperatorManaged++;
+                }
+            }
+
+            // ── Sweep 2: external brokers (unowned StatefulSets) ──
+            string stsJson;
+            try
+            {
+                stsJson = await k8s.GetJsonAllNamespacesAsync("statefulsets", k.Kubeconfig!, ct: ct);
+            }
+            catch
+            {
+                continue; // Cluster unreachable.
+            }
+
+            foreach (RabbitMQCluster discovered in ParseDiscoveredStatefulSets(stsJson, tenantId, k.Id))
             {
                 if (!existing.Add((k.Id, discovered.Namespace, discovered.Name))) continue;
                 db.RabbitMQClusters.Add(discovered);
                 newClusterIds.Add(discovered.Id);
+                result.External++;
             }
         }
 
         if (newClusterIds.Count > 0) await db.SaveChangesAsync(ct);
 
         // Best-effort: pull admin credentials for each newly adopted cluster into the
-        // vault. The operator secret exists for a running cluster; failures are ignored.
+        // vault. The secret exists for a running broker; failures are ignored.
         foreach (Guid id in newClusterIds)
         {
             try { await SyncCredentialsToVaultAsync(tenantId, id, ct); }
             catch { }
         }
 
-        return newClusterIds.Count;
+        return result;
     }
 
     /// <summary>Parses a RabbitmqCluster list (kubectl -o json) into unsaved RabbitMQCluster records.</summary>
@@ -441,13 +574,14 @@ public class RabbitMQService(
                         && rep.ValueKind == JsonValueKind.Number
                 ? rep.GetInt32() : 1;
 
+            // The CR may omit spec.image, in which case the operator picks its own default.
             string version = "3.13";
             if (spec.ValueKind == JsonValueKind.Object
                 && spec.TryGetProperty("image", out JsonElement img)
-                && img.GetString() is string image && image.Contains(':'))
+                && img.GetString() is string image
+                && ParseVersionFromImage(image) is string parsed && parsed != "unknown")
             {
-                // Use the LAST colon so a registry port (host:5000/rabbitmq:3.13) isn't mistaken for the tag.
-                version = image[(image.LastIndexOf(':') + 1)..].Replace("-management", "");
+                version = parsed;
             }
 
             string storageSize = "10Gi";
@@ -499,6 +633,240 @@ public class RabbitMQService(
         return RabbitMQClusterStatus.Running;
     }
 
+    /// <summary>
+    /// Finds RabbitMQ brokers that run as plain StatefulSets — Helm charts (bitnami/rabbitmq,
+    /// the community chart) and hand-rolled installs alike.
+    ///
+    /// Detection is deliberately chart-agnostic: a StatefulSet qualifies when it has a container
+    /// running a RabbitMQ image and is not owned by the cluster operator. Rather than assume any
+    /// chart's naming conventions for the credentials secret, the broker container's environment
+    /// is read to find exactly which Secret and key hold the admin password — charts must wire
+    /// that up for the broker itself to start, so it is the one place the answer is always right.
+    /// </summary>
+    private static IEnumerable<RabbitMQCluster> ParseDiscoveredStatefulSets(
+        string json, Guid tenantId, Guid k8sClusterId)
+    {
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(json); }
+        catch { yield break; }
+
+        using JsonDocument _ = doc;
+
+        if (!doc.RootElement.TryGetProperty("items", out JsonElement items) || items.ValueKind != JsonValueKind.Array)
+            yield break;
+
+        foreach (JsonElement sts in items.EnumerateArray())
+        {
+            if (!sts.TryGetProperty("metadata", out JsonElement meta)) continue;
+            string? name = meta.TryGetProperty("name", out JsonElement n) ? n.GetString() : null;
+            string? ns = meta.TryGetProperty("namespace", out JsonElement nsEl) ? nsEl.GetString() : null;
+            if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(ns)) continue;
+
+            // Skip StatefulSets the cluster operator owns — sweep 1 already adopted those via
+            // their CR, and adopting the child workload too would duplicate the broker.
+            if (IsOwnedByRabbitmqCluster(meta)) continue;
+
+            if (!sts.TryGetProperty("spec", out JsonElement spec) || spec.ValueKind != JsonValueKind.Object)
+                continue;
+
+            JsonElement? broker = FindBrokerContainer(spec);
+            if (broker is null) continue;
+
+            int replicas = spec.TryGetProperty("replicas", out JsonElement rep) && rep.ValueKind == JsonValueKind.Number
+                ? rep.GetInt32() : 1;
+
+            string image = broker.Value.TryGetProperty("image", out JsonElement img) ? img.GetString() ?? "" : "";
+
+            (string? secretName, string? usernameKey, string? passwordKey, string? literalUsername) =
+                ReadCredentialRefs(broker.Value);
+
+            (string storageSize, string? storageClass) = ReadFirstVolumeClaim(spec);
+
+            yield return new RabbitMQCluster
+            {
+                Id = Guid.NewGuid(),
+                TenantId = tenantId,
+                KubernetesClusterId = k8sClusterId,
+                Name = name,
+                Namespace = ns,
+                RabbitMQVersion = ParseVersionFromImage(image),
+                Replicas = replicas,
+                StorageSize = storageSize,
+                StorageClass = storageClass,
+                // A StatefulSet exists, so the broker is deployed. ReconcileStatusAsync
+                // corrects this from readyReplicas on the next refresh.
+                Status = RabbitMQClusterStatus.Running,
+                IsOperatorManaged = false,
+                StatefulSetName = name,
+                ServiceName = spec.TryGetProperty("serviceName", out JsonElement svc) ? svc.GetString() : null,
+                CredentialsSecretName = secretName,
+                CredentialsUsernameKey = usernameKey,
+                CredentialsPasswordKey = passwordKey,
+                AdminUsername = literalUsername
+            };
+        }
+    }
+
+    /// <summary>True when a RabbitmqCluster CR owns this object, i.e. the cluster operator created it.</summary>
+    private static bool IsOwnedByRabbitmqCluster(JsonElement metadata)
+    {
+        if (!metadata.TryGetProperty("ownerReferences", out JsonElement owners)
+            || owners.ValueKind != JsonValueKind.Array)
+            return false;
+
+        foreach (JsonElement owner in owners.EnumerateArray())
+        {
+            if (owner.TryGetProperty("kind", out JsonElement kind)
+                && string.Equals(kind.GetString(), "RabbitmqCluster", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Picks the container actually running the broker. A container named "rabbitmq" wins
+    /// outright; otherwise the image name decides. Sidecars that merely mention rabbitmq —
+    /// most commonly the Prometheus exporter — are excluded, since adopting one would point
+    /// every exec at a pod that has no rabbitmqctl.
+    /// </summary>
+    private static JsonElement? FindBrokerContainer(JsonElement stsSpec)
+    {
+        if (!stsSpec.TryGetProperty("template", out JsonElement template)
+            || !template.TryGetProperty("spec", out JsonElement podSpec)
+            || !podSpec.TryGetProperty("containers", out JsonElement containers)
+            || containers.ValueKind != JsonValueKind.Array)
+            return null;
+
+        JsonElement? candidate = null;
+
+        foreach (JsonElement c in containers.EnumerateArray())
+        {
+            string cName = c.TryGetProperty("name", out JsonElement n) ? n.GetString() ?? "" : "";
+            string image = c.TryGetProperty("image", out JsonElement i) ? i.GetString() ?? "" : "";
+
+            if (image.Contains("exporter", StringComparison.OrdinalIgnoreCase)
+                || image.Contains("prometheus", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (string.Equals(cName, "rabbitmq", StringComparison.OrdinalIgnoreCase))
+                return c;
+
+            if (image.Contains("rabbitmq", StringComparison.OrdinalIgnoreCase))
+                candidate ??= c;
+        }
+
+        return candidate;
+    }
+
+    /// <summary>
+    /// Locates the admin credentials by reading the broker container's environment. Returns the
+    /// referenced Secret plus the keys holding username and password; the username is returned
+    /// as a literal instead when the chart passes it inline (bitnami/rabbitmq sets RABBITMQ_USERNAME
+    /// as a plain value and only the password as a secretKeyRef).
+    /// </summary>
+    private static (string? SecretName, string? UsernameKey, string? PasswordKey, string? LiteralUsername)
+        ReadCredentialRefs(JsonElement container)
+    {
+        if (!container.TryGetProperty("env", out JsonElement env) || env.ValueKind != JsonValueKind.Array)
+            return (null, null, null, null);
+
+        string[] passwordVars = ["RABBITMQ_PASSWORD", "RABBITMQ_DEFAULT_PASS", "RABBITMQ_ADMIN_PASSWORD"];
+        string[] usernameVars = ["RABBITMQ_USERNAME", "RABBITMQ_DEFAULT_USER", "RABBITMQ_ADMIN_USER"];
+
+        string? secretName = null, usernameKey = null, passwordKey = null, literalUsername = null;
+
+        foreach (JsonElement e in env.EnumerateArray())
+        {
+            string varName = e.TryGetProperty("name", out JsonElement n) ? n.GetString() ?? "" : "";
+            bool isPassword = passwordVars.Contains(varName, StringComparer.OrdinalIgnoreCase);
+            bool isUsername = usernameVars.Contains(varName, StringComparer.OrdinalIgnoreCase);
+            if (!isPassword && !isUsername) continue;
+
+            (string? refSecret, string? refKey) = ReadSecretKeyRef(e);
+
+            if (isPassword && refSecret is not null)
+            {
+                secretName ??= refSecret;
+                passwordKey = refKey;
+            }
+            else if (isUsername)
+            {
+                if (refSecret is not null)
+                {
+                    secretName ??= refSecret;
+                    usernameKey = refKey;
+                }
+                else if (e.TryGetProperty("value", out JsonElement v) && v.GetString() is string literal
+                         && !string.IsNullOrWhiteSpace(literal))
+                {
+                    literalUsername = literal;
+                }
+            }
+        }
+
+        return (secretName, usernameKey, passwordKey, literalUsername);
+    }
+
+    /// <summary>Extracts valueFrom.secretKeyRef from an env var entry, if present.</summary>
+    private static (string? SecretName, string? Key) ReadSecretKeyRef(JsonElement envVar)
+    {
+        if (!envVar.TryGetProperty("valueFrom", out JsonElement from)
+            || !from.TryGetProperty("secretKeyRef", out JsonElement keyRef))
+            return (null, null);
+
+        string? name = keyRef.TryGetProperty("name", out JsonElement n) ? n.GetString() : null;
+        string? key = keyRef.TryGetProperty("key", out JsonElement k) ? k.GetString() : null;
+        return (name, key);
+    }
+
+    /// <summary>Reads storage size and class from the StatefulSet's first volumeClaimTemplate.</summary>
+    private static (string StorageSize, string? StorageClass) ReadFirstVolumeClaim(JsonElement stsSpec)
+    {
+        if (!stsSpec.TryGetProperty("volumeClaimTemplates", out JsonElement templates)
+            || templates.ValueKind != JsonValueKind.Array)
+            return ("unknown", null);
+
+        foreach (JsonElement t in templates.EnumerateArray())
+        {
+            if (!t.TryGetProperty("spec", out JsonElement spec)) continue;
+
+            string size = "unknown";
+            if (spec.TryGetProperty("resources", out JsonElement res)
+                && res.TryGetProperty("requests", out JsonElement req)
+                && req.TryGetProperty("storage", out JsonElement s)
+                && s.GetString() is string sv)
+                size = sv;
+
+            string? sc = spec.TryGetProperty("storageClassName", out JsonElement scEl) ? scEl.GetString() : null;
+            return (size, sc);
+        }
+
+        return ("unknown", null);
+    }
+
+    /// <summary>
+    /// Extracts a version from an image reference. Takes the text after the LAST colon so a
+    /// registry port (host:5000/rabbitmq:3.13) isn't mistaken for the tag, then drops any
+    /// distribution suffix ("3.13-management", "3.13.7-debian-12-r0"). Digest-pinned images
+    /// carry no version, so they report as unknown rather than a truncated hash.
+    /// </summary>
+    private static string ParseVersionFromImage(string image)
+    {
+        if (string.IsNullOrWhiteSpace(image) || image.Contains('@')) return "unknown";
+
+        int colon = image.LastIndexOf(':');
+        if (colon < 0 || colon == image.Length - 1) return "unknown";
+
+        string tag = image[(colon + 1)..];
+
+        // A slash after the colon means it was a registry port, not a tag.
+        if (tag.Contains('/')) return "unknown";
+
+        int dash = tag.IndexOf('-');
+        return dash > 0 ? tag[..dash] : tag;
+    }
+
     // ── Live K8s status ───────────────────────────────────────────────────────
 
     public async Task<RabbitMQClusterInfo?> GetLiveStatusAsync(
@@ -514,6 +882,18 @@ public class RabbitMQService(
         try
         {
             string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+
+            // External brokers have no CR to read conditions from; readiness comes straight
+            // off the StatefulSet instead.
+            if (!cluster.IsOperatorManaged)
+            {
+                string stsJson = await k8s.GetJsonAsync(
+                    $"statefulset/{cluster.StatefulSetName ?? cluster.Name}",
+                    cluster.Namespace, kubeconfig, ct: ct);
+
+                return ParseStatefulSetStatus(stsJson, cluster.Name, cluster.Namespace);
+            }
+
             string json = await k8s.GetJsonAsync(
                 $"rabbitmqcluster/{cluster.Name}", cluster.Namespace, kubeconfig, ct: ct);
 
@@ -540,10 +920,16 @@ public class RabbitMQService(
             .FirstOrDefaultAsync(c => c.Id == clusterId, ct)
             ?? throw new InvalidOperationException("RabbitMQ cluster not found.");
 
-        if (info.ClusterAvailable && info.AllReplicasReady)
+        // Availability is the health signal: it means the broker is serving. Replicas not all
+        // being ready is a rolling restart, a pod reschedule or a scale-up in progress — normal
+        // operation, not a failure. Treating it as one marked healthy, usable clusters Failed,
+        // and they stayed that way because the poller used to skip Failed clusters entirely.
+        if (info.ClusterAvailable)
         {
             cluster.Status = RabbitMQClusterStatus.Running;
-            cluster.LastError = null;
+            cluster.LastError = info.AllReplicasReady
+                ? null
+                : "Serving, but not every replica is ready — a restart or scale-up may be in progress.";
         }
         else if (cluster.Status != RabbitMQClusterStatus.Creating)
         {
@@ -562,9 +948,12 @@ public class RabbitMQService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // Failed must be included: it is a verdict from a previous poll, not a terminal state.
+        // Excluding it meant a cluster marked Failed by a transient blip could never be observed
+        // recovering, so the badge stayed wrong until someone hit "Refresh Status" by hand.
+        // Only Deleting is skipped — that one is mid-teardown and owned by DeleteClusterAsync.
         List<RabbitMQCluster> clusters = await db.RabbitMQClusters
-            .Where(c => c.Status == RabbitMQClusterStatus.Creating
-                     || c.Status == RabbitMQClusterStatus.Running)
+            .Where(c => c.Status != RabbitMQClusterStatus.Deleting)
             .ToListAsync(ct);
 
         foreach (RabbitMQCluster cluster in clusters)
@@ -575,59 +964,15 @@ public class RabbitMQService(
         }
     }
 
-    // ── Live topology (read from K8s topology operator CRDs) ──────────────────
-
-    public async Task<RabbitMQLiveTopology> GetLiveTopologyAsync(
-        Guid tenantId, Guid clusterId, CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-
-        RabbitMQCluster cluster = await db.RabbitMQClusters
-            .Include(c => c.KubernetesCluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
-            ?? throw new InvalidOperationException("RabbitMQ cluster not found.");
-
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
-        string labelSelector = $"rabbitmq.com/cluster={cluster.Name}";
-
-        RabbitMQLiveTopology topology = new();
-
-        try
-        {
-            topology.Vhosts = await GetTopologyCrdNamesAsync(
-                "vhosts.rabbitmq.com", cluster.Namespace, kubeconfig, labelSelector, ct);
-        }
-        catch { /* operator not installed or no resources */ }
-
-        try
-        {
-            topology.Queues = await GetTopologyCrdNamesAsync(
-                "queues.rabbitmq.com", cluster.Namespace, kubeconfig, labelSelector, ct);
-        }
-        catch { }
-
-        try
-        {
-            topology.Exchanges = await GetTopologyCrdNamesAsync(
-                "exchanges.rabbitmq.com", cluster.Namespace, kubeconfig, labelSelector, ct);
-        }
-        catch { }
-
-        try
-        {
-            topology.Users = await GetTopologyCrdNamesAsync(
-                "users.rabbitmq.com", cluster.Namespace, kubeconfig, labelSelector, ct);
-        }
-        catch { }
-
-        return topology;
-    }
-
     // ── Admin credentials ─────────────────────────────────────────────────────
 
     /// <summary>
-    /// Reads the admin username and password from the K8s Secret created by the cluster operator.
-    /// The operator always names this secret {cluster-name}-default-user.
+    /// Reads the admin username and password from the broker's K8s Secret.
+    ///
+    /// For operator-managed clusters the secret is always {cluster-name}-default-user with
+    /// username/password keys. For external brokers the secret and keys were recorded at
+    /// discovery time from the broker container's environment, since chart naming varies;
+    /// the username may be a literal there rather than a secret key.
     /// </summary>
     public async Task<(string Username, string Password)?> GetAdminCredentialsAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
@@ -640,12 +985,34 @@ public class RabbitMQService(
             ?? throw new InvalidOperationException("RabbitMQ cluster not found.");
 
         string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
-        string secretName = $"{cluster.Name}-default-user";
 
-        string? username = await k8s.GetSecretValueAsync(secretName, "username", cluster.Namespace, kubeconfig, ct);
-        string? password = await k8s.GetSecretValueAsync(secretName, "password", cluster.Namespace, kubeconfig, ct);
+        if (cluster.IsOperatorManaged)
+        {
+            string secretName = $"{cluster.Name}-default-user";
 
-        if (username is null || password is null) return null;
+            string? opUsername = await k8s.GetSecretValueAsync(secretName, "username", cluster.Namespace, kubeconfig, ct);
+            string? opPassword = await k8s.GetSecretValueAsync(secretName, "password", cluster.Namespace, kubeconfig, ct);
+
+            if (opUsername is null || opPassword is null) return null;
+            return (opUsername, opPassword);
+        }
+
+        if (cluster.CredentialsSecretName is null || cluster.CredentialsPasswordKey is null)
+            return null;
+
+        string? password = await k8s.GetSecretValueAsync(
+            cluster.CredentialsSecretName, cluster.CredentialsPasswordKey, cluster.Namespace, kubeconfig, ct);
+
+        if (password is null) return null;
+
+        string? username = cluster.CredentialsUsernameKey is not null
+            ? await k8s.GetSecretValueAsync(
+                cluster.CredentialsSecretName, cluster.CredentialsUsernameKey, cluster.Namespace, kubeconfig, ct)
+            : cluster.AdminUsername;
+
+        // Neither a secret key nor an inline value — the chart relied on the image default.
+        username ??= "guest";
+
         return (username, password);
     }
 
@@ -734,7 +1101,7 @@ public class RabbitMQService(
         try
         {
             string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
-            string primaryPod = $"{cluster.Name}-server-0";
+            string primaryPod = cluster.PrimaryPodName;
 
             // rabbitmqctl export_definitions - writes the JSON definitions to stdout.
             string json = await k8s.RunCommandOnPodAsync(
@@ -796,7 +1163,7 @@ public class RabbitMQService(
         string json = Encoding.UTF8.GetString(data);
 
         string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
-        string primaryPod = $"{cluster.Name}-server-0";
+        string primaryPod = cluster.PrimaryPodName;
 
         // rabbitmqctl import_definitions - reads JSON from stdin.
         await k8s.RunCommandOnPodWithStdinAsync(
@@ -1000,6 +1367,17 @@ public class RabbitMQService(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            return [.. (await ListExternalVhostsAsync(cluster, ct))
+                .Select(v => new RabbitMQVhostInfo
+                {
+                    K8sName = ExternalHandle(v, v),
+                    VhostName = v
+                })];
+        }
+
         string json = await k8s.GetJsonAsync(
             "vhosts.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!,
             $"rabbitmq.com/cluster={cluster.Name}", ct);
@@ -1015,6 +1393,13 @@ public class RabbitMQService(
         Guid tenantId, Guid clusterId, string vhostName, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            await RunCtlAsync(cluster, ["add_vhost", vhostName], ct);
+            return;
+        }
+
         string k8sName = ToK8sName(cluster.Name, "vh", vhostName);
         string manifest = $"""
             apiVersion: rabbitmq.com/v1beta1
@@ -1037,6 +1422,14 @@ public class RabbitMQService(
         Guid tenantId, Guid clusterId, string k8sName, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            (_, string vhost) = ParseExternalHandle(k8sName);
+            await RunCtlAsync(cluster, ["delete_vhost", vhost], ct);
+            return;
+        }
+
         await k8s.DeleteManifestAsync("vhost", k8sName, cluster.Namespace,
             cluster.KubernetesCluster.Kubeconfig!, ct);
     }
@@ -1047,6 +1440,31 @@ public class RabbitMQService(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            // list_queues is scoped to one vhost at a time, so walk them.
+            List<RabbitMQQueueInfo> queues = [];
+
+            foreach (string vhost in await ListExternalVhostsAsync(cluster, ct))
+            {
+                List<JsonElement> rows = await RunCtlListAsync(cluster,
+                    ["list_queues", "--vhost", vhost, "name", "type", "durable", "auto_delete"], ct);
+
+                queues.AddRange(rows.Select(r => new RabbitMQQueueInfo
+                {
+                    K8sName = ExternalHandle(vhost, CtlString(r, "name")),
+                    QueueName = CtlString(r, "name"),
+                    Vhost = vhost,
+                    QueueType = CtlString(r, "type") is { Length: > 0 } t ? t : "classic",
+                    Durable = CtlBool(r, "durable"),
+                    AutoDelete = CtlBool(r, "auto_delete")
+                }));
+            }
+
+            return queues;
+        }
+
         string json = await k8s.GetJsonAsync(
             "queues.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!,
             $"rabbitmq.com/cluster={cluster.Name}", ct);
@@ -1136,6 +1554,28 @@ public class RabbitMQService(
         string type, bool durable, bool autoDelete, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            string definitions = JsonSerializer.Serialize(new
+            {
+                queues = new[]
+                {
+                    new
+                    {
+                        name,
+                        vhost,
+                        durable,
+                        auto_delete = autoDelete,
+                        arguments = new Dictionary<string, string> { ["x-queue-type"] = type }
+                    }
+                }
+            });
+
+            await ImportPartialDefinitionsAsync(cluster, definitions, ct);
+            return;
+        }
+
         string k8sName = ToK8sName(cluster.Name, "q", name);
         string manifest = $"""
             apiVersion: rabbitmq.com/v1beta1
@@ -1162,6 +1602,14 @@ public class RabbitMQService(
         Guid tenantId, Guid clusterId, string k8sName, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            (string vhost, string queue) = ParseExternalHandle(k8sName);
+            await RunCtlAsync(cluster, ["delete_queue", "--vhost", vhost, queue], ct);
+            return;
+        }
+
         await k8s.DeleteManifestAsync("queue", k8sName, cluster.Namespace,
             cluster.KubernetesCluster.Kubeconfig!, ct);
     }
@@ -1172,6 +1620,34 @@ public class RabbitMQService(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            List<RabbitMQExchangeInfo> exchanges = [];
+
+            foreach (string vhost in await ListExternalVhostsAsync(cluster, ct))
+            {
+                List<JsonElement> rows = await RunCtlListAsync(cluster,
+                    ["list_exchanges", "--vhost", vhost, "name", "type", "durable", "auto_delete"], ct);
+
+                exchanges.AddRange(rows
+                    // The broker's built-in exchanges include one with an empty name (the
+                    // default exchange); it isn't addressable topology, so leave it out.
+                    .Where(r => CtlString(r, "name").Length > 0)
+                    .Select(r => new RabbitMQExchangeInfo
+                    {
+                        K8sName = ExternalHandle(vhost, CtlString(r, "name")),
+                        ExchangeName = CtlString(r, "name"),
+                        Vhost = vhost,
+                        ExchangeType = CtlString(r, "type") is { Length: > 0 } t ? t : "direct",
+                        Durable = CtlBool(r, "durable"),
+                        AutoDelete = CtlBool(r, "auto_delete")
+                    }));
+            }
+
+            return exchanges;
+        }
+
         string json = await k8s.GetJsonAsync(
             "exchanges.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!,
             $"rabbitmq.com/cluster={cluster.Name}", ct);
@@ -1191,6 +1667,29 @@ public class RabbitMQService(
         string type, bool durable, bool autoDelete, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            string definitions = JsonSerializer.Serialize(new
+            {
+                exchanges = new[]
+                {
+                    new
+                    {
+                        name,
+                        vhost,
+                        type,
+                        durable,
+                        auto_delete = autoDelete,
+                        arguments = new Dictionary<string, string>()
+                    }
+                }
+            });
+
+            await ImportPartialDefinitionsAsync(cluster, definitions, ct);
+            return;
+        }
+
         string k8sName = ToK8sName(cluster.Name, "ex", name);
         string manifest = $"""
             apiVersion: rabbitmq.com/v1beta1
@@ -1217,6 +1716,9 @@ public class RabbitMQService(
         Guid tenantId, Guid clusterId, string k8sName, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct)) throw NoCliVerb("delete an exchange");
+
         await k8s.DeleteManifestAsync("exchange", k8sName, cluster.Namespace,
             cluster.KubernetesCluster.Kubeconfig!, ct);
     }
@@ -1227,6 +1729,36 @@ public class RabbitMQService(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            List<RabbitMQRoutingBindingInfo> bindings = [];
+
+            foreach (string vhost in await ListExternalVhostsAsync(cluster, ct))
+            {
+                List<JsonElement> rows = await RunCtlListAsync(cluster,
+                    ["list_bindings", "--vhost", vhost,
+                     "source_name", "destination_name", "destination_kind", "routing_key"], ct);
+
+                bindings.AddRange(rows
+                    // Every queue has an implicit binding from the default exchange; those have
+                    // an empty source and can't be managed, so they aren't shown.
+                    .Where(r => CtlString(r, "source_name").Length > 0)
+                    .Select(r => new RabbitMQRoutingBindingInfo
+                    {
+                        K8sName = ExternalHandle(vhost,
+                            $"{CtlString(r, "source_name")}→{CtlString(r, "destination_name")}"),
+                        Source = CtlString(r, "source_name"),
+                        Destination = CtlString(r, "destination_name"),
+                        DestinationType = CtlString(r, "destination_kind") is { Length: > 0 } k ? k : "queue",
+                        Vhost = vhost,
+                        RoutingKey = CtlString(r, "routing_key")
+                    }));
+            }
+
+            return bindings;
+        }
+
         string json = await k8s.GetJsonAsync(
             "bindings.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!,
             $"rabbitmq.com/cluster={cluster.Name}", ct);
@@ -1247,6 +1779,29 @@ public class RabbitMQService(
         CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            string definitions = JsonSerializer.Serialize(new
+            {
+                bindings = new[]
+                {
+                    new
+                    {
+                        source,
+                        vhost,
+                        destination,
+                        destination_type = destType,
+                        routing_key = routingKey,
+                        arguments = new Dictionary<string, string>()
+                    }
+                }
+            });
+
+            await ImportPartialDefinitionsAsync(cluster, definitions, ct);
+            return;
+        }
+
         string k8sName = ToK8sName(cluster.Name, "b", $"{source}-{destination}");
         string manifest = $"""
             apiVersion: rabbitmq.com/v1beta1
@@ -1273,6 +1828,9 @@ public class RabbitMQService(
         Guid tenantId, Guid clusterId, string k8sName, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct)) throw NoCliVerb("unbind a queue or exchange");
+
         await k8s.DeleteManifestAsync("binding", k8sName, cluster.Namespace,
             cluster.KubernetesCluster.Kubeconfig!, ct);
     }
@@ -1328,8 +1886,12 @@ public class RabbitMQService(
     }
 
     /// <summary>
-    /// Deletes the supplied dependent topology CRDs (in the given order) and then the target
-    /// CRD itself. <paramref name="targetKind"/> is a CRD short name (vhost/queue/exchange/binding).
+    /// Deletes the supplied dependent topology objects (in the given order) and then the target
+    /// itself. <paramref name="targetKind"/> is a CRD short name (vhost/queue/exchange/binding).
+    ///
+    /// On an external broker, deleting a vhost already removes everything inside it, so the
+    /// dependents are dropped in one step rather than object by object — which also sidesteps
+    /// the exchange and binding deletes that rabbitmqctl cannot perform.
     /// </summary>
     public async Task DeleteTopologyCascadeAsync(
         Guid tenantId, Guid clusterId, string targetKind, string targetK8sName,
@@ -1337,6 +1899,28 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
         string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            (string vhost, string name) = ParseExternalHandle(targetK8sName);
+
+            switch (targetKind)
+            {
+                case "vhost":
+                    // delete_vhost takes its contents with it.
+                    await RunCtlAsync(cluster, ["delete_vhost", vhost], ct);
+                    return;
+                case "queue":
+                    await RunCtlAsync(cluster, ["delete_queue", "--vhost", vhost, name], ct);
+                    return;
+                case "exchange":
+                    throw NoCliVerb("delete an exchange");
+                case "binding":
+                    throw NoCliVerb("unbind a queue or exchange");
+                default:
+                    throw new InvalidOperationException($"Unknown topology kind '{targetKind}'.");
+            }
+        }
 
         foreach (RabbitMQCascadeItem dep in dependents)
             await k8s.DeleteManifestAsync(dep.Kind, dep.K8sName, cluster.Namespace, kubeconfig, ct);
@@ -1351,6 +1935,20 @@ public class RabbitMQService(
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
         string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            List<JsonElement> rows = await RunCtlListAsync(cluster, ["list_users"], ct);
+
+            return [.. rows.Select(r => new RabbitMQUserInfo
+            {
+                K8sName = ExternalHandle("/", CtlString(r, "user")),
+                Username = CtlString(r, "user"),
+                Tags = r.TryGetProperty("tags", out JsonElement tagEl) && tagEl.ValueKind == JsonValueKind.Array
+                    ? [.. tagEl.EnumerateArray().Select(t => t.GetString()).OfType<string>()]
+                    : []
+            })];
+        }
 
         string json = await k8s.GetJsonAsync(
             "users.rabbitmq.com", cluster.Namespace, kubeconfig,
@@ -1398,6 +1996,21 @@ public class RabbitMQService(
         IEnumerable<string> tags, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            // The password is passed as an argv entry, not through a shell, so it is never
+            // word-split or expanded — but it is briefly visible in the pod's process list.
+            // rabbitmqctl offers no non-interactive way to avoid that.
+            await RunCtlAsync(cluster, ["add_user", username, password], ct);
+
+            string[] tagList = [.. tags];
+            if (tagList.Length > 0)
+                await RunCtlAsync(cluster, ["set_user_tags", username, .. tagList], ct);
+
+            return;
+        }
+
         string k8sName = ToK8sName(cluster.Name, "u", username);
         string credSecretName = $"{k8sName}-credentials";
 
@@ -1441,6 +2054,14 @@ public class RabbitMQService(
         Guid tenantId, Guid clusterId, string k8sName, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            (_, string username) = ParseExternalHandle(k8sName);
+            await RunCtlAsync(cluster, ["delete_user", username], ct);
+            return;
+        }
+
         await k8s.DeleteManifestAsync("user", k8sName, cluster.Namespace,
             cluster.KubernetesCluster.Kubeconfig!, ct);
         // Best-effort cleanup of the credentials secret.
@@ -1462,6 +2083,30 @@ public class RabbitMQService(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            List<RabbitMQPermissionInfo> permissions = [];
+
+            foreach (string vhost in await ListExternalVhostsAsync(cluster, ct))
+            {
+                List<JsonElement> rows = await RunCtlListAsync(cluster,
+                    ["list_permissions", "--vhost", vhost], ct);
+
+                permissions.AddRange(rows.Select(r => new RabbitMQPermissionInfo
+                {
+                    K8sName = ExternalHandle(vhost, CtlString(r, "user")),
+                    User = CtlString(r, "user"),
+                    Vhost = vhost,
+                    Configure = CtlString(r, "configure"),
+                    Write = CtlString(r, "write"),
+                    Read = CtlString(r, "read")
+                }));
+            }
+
+            return permissions;
+        }
+
         string json = await k8s.GetJsonAsync(
             "permissions.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!,
             $"rabbitmq.com/cluster={cluster.Name}", ct);
@@ -1493,6 +2138,14 @@ public class RabbitMQService(
         CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
+
+        if (!await UseTopologyCrdsAsync(cluster, ct))
+        {
+            await RunCtlAsync(cluster,
+                ["set_permissions", "--vhost", vhost, username, configure, write, read], ct);
+            return;
+        }
+
         string k8sName = ToK8sName(cluster.Name, "perm", $"{username}-{vhost}");
         string manifest = $"""
             apiVersion: rabbitmq.com/v1beta1
@@ -1644,7 +2297,7 @@ public class RabbitMQService(
                 tenantId, binding.RabbitMQClusterId, passwordKey, appPassword, ct);
         }
 
-        string host = $"{binding.Cluster.Name}-svc.{binding.Cluster.Namespace}.svc.cluster.local";
+        string host = $"{binding.Cluster.AmqpServiceName}.{binding.Cluster.Namespace}.svc.cluster.local";
         string encodedVhost = Uri.EscapeDataString(binding.Vhost == "/" ? "/" : binding.Vhost.TrimStart('/'));
         string amqpUrl = $"amqp://{appUsername}:{appPassword}@{host}:5672/{encodedVhost}";
 
@@ -1774,28 +2427,41 @@ public class RabbitMQService(
         }
     }
 
-    private async Task<List<string>> GetTopologyCrdNamesAsync(
-        string crdResource, string ns, string kubeconfig, string labelSelector, CancellationToken ct)
+    /// <summary>
+    /// Derives readiness for an external broker from its StatefulSet. There are no operator
+    /// conditions here, so "available" means at least one ready replica and "all ready" means
+    /// readyReplicas has caught up with the desired count.
+    /// </summary>
+    private static RabbitMQClusterInfo? ParseStatefulSetStatus(string json, string name, string ns)
     {
-        string json = await k8s.GetJsonAsync(crdResource, ns, kubeconfig, labelSelector, ct);
-        using JsonDocument doc = JsonDocument.Parse(json);
-
-        List<string> names = [];
-
-        if (doc.RootElement.TryGetProperty("items", out JsonElement items))
+        try
         {
-            foreach (JsonElement item in items.EnumerateArray())
-            {
-                if (item.TryGetProperty("metadata", out JsonElement meta)
-                    && meta.TryGetProperty("name", out JsonElement nameEl))
-                {
-                    string? name = nameEl.GetString();
-                    if (name is not null) names.Add(name);
-                }
-            }
-        }
+            using JsonDocument doc = JsonDocument.Parse(json);
+            JsonElement root = doc.RootElement;
 
-        return names;
+            int desired = root.TryGetProperty("spec", out JsonElement spec)
+                          && spec.TryGetProperty("replicas", out JsonElement r)
+                          && r.ValueKind == JsonValueKind.Number
+                ? r.GetInt32() : 1;
+
+            int ready = root.TryGetProperty("status", out JsonElement status)
+                        && status.TryGetProperty("readyReplicas", out JsonElement rr)
+                        && rr.ValueKind == JsonValueKind.Number
+                ? rr.GetInt32() : 0;
+
+            return new RabbitMQClusterInfo
+            {
+                Name = name,
+                Namespace = ns,
+                ReadyReplicas = ready,
+                AllReplicasReady = ready >= desired && desired > 0,
+                ClusterAvailable = ready > 0
+            };
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async Task PruneBackupsAsync(
@@ -1941,6 +2607,14 @@ public class RabbitMQService(
 
         if (!string.IsNullOrWhiteSpace(cluster.BackupSchedule) && cluster.StorageLink is not null)
         {
+            // The CronJob authenticates to the management API from a Secret reference, so an
+            // external broker whose credentials we never resolved can't be scheduled.
+            if (!cluster.IsOperatorManaged
+                && (cluster.CredentialsSecretName is null || cluster.CredentialsPasswordKey is null))
+                throw new InvalidOperationException(
+                    $"EntKube could not determine where '{cluster.Name}' keeps its admin credentials, "
+                    + "so it cannot schedule backups. On-demand backups still work.");
+
             string s3SecretName = $"{cluster.Name}-s3-credentials";
             await EnsureStorageSecretsInK8sAsync(tenantId, cluster.StorageLink, s3SecretName, cluster.Namespace, kubeconfig, ct);
             await k8s.ApplyManifestAsync(
@@ -1984,9 +2658,16 @@ public class RabbitMQService(
     private static string BuildScheduledBackupCronJobManifest(
         RabbitMQCluster cluster, StorageLink storageLink, string s3SecretName)
     {
-        string mgmtUrl = $"http://{cluster.Name}.{cluster.Namespace}.svc.cluster.local:15672/api/definitions";
+        // The operator exposes the management API on the cluster's own Service; an external
+        // broker's Service name and credentials secret were recorded at discovery time.
+        string mgmtHost = cluster.IsOperatorManaged ? cluster.Name : cluster.AmqpServiceName;
+        string mgmtUrl = $"http://{mgmtHost}.{cluster.Namespace}.svc.cluster.local:15672/api/definitions";
         string s3Base = $"s3://{storageLink.BucketName}/rabbitmq/{cluster.Name}";
-        string defaultUserSecret = $"{cluster.Name}-default-user";
+
+        string credSecret = cluster.IsOperatorManaged
+            ? $"{cluster.Name}-default-user"
+            : cluster.CredentialsSecretName!;
+        string passwordKey = cluster.IsOperatorManaged ? "password" : cluster.CredentialsPasswordKey!;
 
         // Kubernetes CronJob accepts a 5-field cron; drop a leading seconds field if present.
         string cronSchedule = cluster.BackupSchedule!;
@@ -2021,15 +2702,27 @@ public class RabbitMQService(
         sb.AppendLine($"              args: [\"curl -sfS -u \\\"$RABBITMQ_USERNAME:$RABBITMQ_PASSWORD\\\" {mgmtUrl} -o /backup/definitions.json\"]");
         sb.AppendLine("              env:");
         sb.AppendLine("                - name: RABBITMQ_USERNAME");
-        sb.AppendLine("                  valueFrom:");
-        sb.AppendLine("                    secretKeyRef:");
-        sb.AppendLine($"                      name: {defaultUserSecret}");
-        sb.AppendLine("                      key: username");
+
+        // Charts commonly pass the username inline and only the password by reference,
+        // so the username may have no secret key to point at.
+        string? usernameKey = cluster.IsOperatorManaged ? "username" : cluster.CredentialsUsernameKey;
+        if (usernameKey is not null)
+        {
+            sb.AppendLine("                  valueFrom:");
+            sb.AppendLine("                    secretKeyRef:");
+            sb.AppendLine($"                      name: {credSecret}");
+            sb.AppendLine($"                      key: {usernameKey}");
+        }
+        else
+        {
+            sb.AppendLine($"                  value: \"{cluster.AdminUsername ?? "guest"}\"");
+        }
+
         sb.AppendLine("                - name: RABBITMQ_PASSWORD");
         sb.AppendLine("                  valueFrom:");
         sb.AppendLine("                    secretKeyRef:");
-        sb.AppendLine($"                      name: {defaultUserSecret}");
-        sb.AppendLine("                      key: password");
+        sb.AppendLine($"                      name: {credSecret}");
+        sb.AppendLine($"                      key: {passwordKey}");
         sb.AppendLine("              volumeMounts:");
         sb.AppendLine("                - name: backup-data");
         sb.AppendLine("                  mountPath: /backup");

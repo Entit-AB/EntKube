@@ -629,7 +629,19 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
         StateHasChanged();
         var r = await K8sOps.GetPodLogsAsync(DeploymentId, podName, _selectedContainer, _panelTailLines);
         _panelLoading = false;
-        if (r.IsSuccess) { _panelText = r.Data ?? "(no output)"; _pendingLogScroll = true; }
+        if (r.IsSuccess)
+        {
+            // The API returns an empty string (not null) when the container has no retained
+            // log content — so `?? "(no output)"` never fired and the panel rendered blank,
+            // indistinguishable from a fetch that never ran. Say what actually happened:
+            // for a long-running container this usually means the kubelet has rotated the
+            // history away and nothing has been written since.
+            _panelText = string.IsNullOrWhiteSpace(r.Data)
+                ? "(no log output retained for this container — the kubelet rotates container "
+                  + "logs by size, so older output may be gone and nothing new has been written since)"
+                : r.Data;
+            _pendingLogScroll = true;
+        }
         else _panelError = r.Error;
         StateHasChanged();
     }

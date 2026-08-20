@@ -4,6 +4,7 @@ using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.SqlServer
 {
     [DbContext(typeof(SqlServerApplicationDbContext))]
-    partial class SqlServerApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260815125553_RepairScaffoldedZeroDefaults")]
+    partial class RepairScaffoldedZeroDefaults
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -546,9 +549,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
-
-                    b.Property<int?>("RequestTimeoutSeconds")
-                        .HasColumnType("int");
 
                     b.Property<string>("RewritePath")
                         .HasColumnType("nvarchar(max)");
@@ -2458,9 +2458,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
 
-                    b.Property<int?>("RequestTimeoutSeconds")
-                        .HasColumnType("int");
-
                     b.Property<string>("ServiceName")
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
@@ -3005,9 +3002,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<Guid>("AppId")
                         .HasColumnType("uniqueidentifier");
 
-                    b.Property<string>("BehaviorYaml")
-                        .HasColumnType("nvarchar(max)");
-
                     b.Property<int?>("CooldownPeriod")
                         .HasColumnType("int");
 
@@ -3046,12 +3040,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<string>("ScaleTargetName")
                         .HasColumnType("nvarchar(max)");
-
-                    b.Property<int?>("TargetCpuUtilization")
-                        .HasColumnType("int");
-
-                    b.Property<int?>("TargetMemoryUtilization")
-                        .HasColumnType("int");
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uniqueidentifier");
@@ -4151,12 +4139,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<string>("ProjectName")
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<string>("ProxyUrl")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("ProxyUsername")
-                        .HasColumnType("nvarchar(max)");
-
                     b.Property<string>("Region")
                         .HasColumnType("nvarchar(max)");
 
@@ -4231,27 +4213,12 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
-                    b.Property<string>("AdminUsername")
-                        .HasColumnType("nvarchar(max)");
-
                     b.Property<string>("BackupSchedule")
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
-
-                    b.Property<string>("CredentialsPasswordKey")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("CredentialsSecretName")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("CredentialsUsernameKey")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<bool>("IsOperatorManaged")
-                        .HasColumnType("bit");
 
                     b.Property<Guid>("KubernetesClusterId")
                         .HasColumnType("uniqueidentifier");
@@ -4281,12 +4248,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<int>("Replicas")
                         .HasColumnType("int");
-
-                    b.Property<string>("ServiceName")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("StatefulSetName")
-                        .HasColumnType("nvarchar(max)");
 
                     b.Property<int>("Status")
                         .HasColumnType("int");

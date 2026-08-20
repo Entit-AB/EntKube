@@ -4224,12 +4224,27 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("AdminUsername")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("BackupSchedule")
                         .HasMaxLength(100)
                         .HasColumnType("TEXT");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("TEXT");
+
+                    b.Property<string>("CredentialsPasswordKey")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CredentialsSecretName")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CredentialsUsernameKey")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsOperatorManaged")
+                        .HasColumnType("INTEGER");
 
                     b.Property<Guid>("KubernetesClusterId")
                         .HasColumnType("TEXT");
@@ -4259,6 +4274,12 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<int>("Replicas")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("ServiceName")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("StatefulSetName")
+                        .HasColumnType("TEXT");
 
                     b.Property<int>("Status")
                         .HasColumnType("INTEGER");

@@ -1492,6 +1492,41 @@ public static class ComponentCatalog
                     # nodes (1Gi+).
                     memory: 512Mi
 
+                # Host directory for the filelog receiver's read checkpoints. Without a
+                # persisted offset store the receiver keeps them in memory only, so every
+                # collector restart (upgrade, OOMKill, node drain, DaemonSet rollout) forgets
+                # where it was. Combined with the chart preset's `start_at: end` that silently
+                # skips everything written while the collector was down — a long-running pod
+                # that logs infrequently then shows NOTHING, while a freshly created pod looks
+                # fine because its log file is new. See config.extensions.file_storage below.
+                extraVolumes:
+                  - name: filelog-checkpoints
+                    hostPath:
+                      path: /var/lib/otelcol/filelog
+                      type: DirectoryOrCreate
+                extraVolumeMounts:
+                  - name: filelog-checkpoints
+                    mountPath: /var/lib/otelcol/filelog
+
+                # The kubelet creates a DirectoryOrCreate hostPath as root:root 0755, but the
+                # collector image runs as UID 10001, so it could not write its checkpoint DB —
+                # the file_storage extension would fail at startup and crashloop the whole
+                # DaemonSet. fsGroup does not apply to hostPath volumes, so hand the directory
+                # over with a root init container instead of running the collector as root.
+                # 10001 is the contrib image's built-in user; keep in sync if that changes.
+                initContainers:
+                  - name: init-filelog-checkpoints
+                    image: busybox:1.37
+                    command:
+                      - sh
+                      - -c
+                      - chown -R 10001:10001 /var/lib/otelcol/filelog
+                    securityContext:
+                      runAsUser: 0
+                    volumeMounts:
+                      - name: filelog-checkpoints
+                        mountPath: /var/lib/otelcol/filelog
+
                 config:
                   extensions:
                     # Liveness/readiness endpoint. The chart ships this by default and wires its
@@ -1506,8 +1541,28 @@ public static class ComponentCatalog
                     bearertokenauth:
                       scheme: "Bearer"
                       token: "REPLACE_WITH_INGEST_TOKEN"
+                    # Persists the filelog receiver's per-file read offsets to the host volume
+                    # mounted above, so a collector restart resumes exactly where it stopped
+                    # instead of jumping to the end of every file and dropping the gap.
+                    file_storage/filelog:
+                      directory: /var/lib/otelcol/filelog
+                      # The hostPath mount + init container already provide the directory with
+                      # the right owner; the collector cannot mkdir under a root-owned parent.
+                      create_directory: false
 
                   receivers:
+                    # The chart preset builds the filelog receiver (include globs, container
+                    # parser, hostPath mounts); these two keys are merged into it.
+                    #
+                    # storage: checkpoints survive restarts (see the extension above).
+                    # start_at: beginning — on FIRST sight of a log file, read it from the top
+                    # rather than the preset's `end`. Without this, pods that were already
+                    # running when the collector started contribute no history at all. Offsets
+                    # are checkpointed from then on, so this is a one-time backfill per file,
+                    # not a re-read on every restart. Expect an ingest burst on install.
+                    filelog:
+                      storage: file_storage/filelog
+                      start_at: beginning
                     # Accept traces/metrics/logs from instrumented apps now so Phase 3 needs no redeploy.
                     otlp:
                       protocols:
@@ -1560,7 +1615,7 @@ public static class ComponentCatalog
                         authenticator: bearertokenauth
 
                   service:
-                    extensions: [health_check, bearertokenauth]
+                    extensions: [health_check, bearertokenauth, file_storage/filelog]
                     pipelines:
                       logs:
                         receivers: [filelog, otlp]

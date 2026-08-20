@@ -344,7 +344,7 @@ else
                                 <label class="form-label small">Type</label>
                                 <select class="form-select form-select-sm" @bind="newNpType">
                                     <option value="@AppNetworkPolicyType.DenyAll">Deny all (ingress + egress)</option>
-                                    <option value="@AppNetworkPolicyType.AllowFromIngress">Allow from ingress controller</option>
+                                    <option value="@AppNetworkPolicyType.AllowFromIngress" title="Allows the ingress-nginx, traefik and istio-system namespaces. Use Custom YAML if this cluster fronts traffic with a different controller.">Allow from ingress controller (nginx / traefik / istio)</option>
                                     <option value="@AppNetworkPolicyType.AllowFromSameNamespace">Allow from same namespace</option>
                                     <option value="@AppNetworkPolicyType.AllowFromNamespace">Allow from specific namespace</option>
                                     <option value="@AppNetworkPolicyType.Custom">Custom YAML</option>

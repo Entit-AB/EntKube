@@ -667,6 +667,12 @@ public class AppGovernanceService(
                 AppNetworkPolicyType.DenyAll =>
                     header + "\n  policyTypes:\n    - Ingress\n    - Egress",
 
+                // The namespace list must name whatever actually terminates external traffic on
+                // the target cluster. Omitting the one in use does not fail loudly: the packets
+                // are dropped, so callers see a TIMEOUT rather than a refusal, and the pod stays
+                // Ready the whole time — it reads as a hung backend, not a blocked one. istio-system
+                // is included because an Istio ingress gateway is the common case on EntKube-managed
+                // clusters; add more via a Custom policy when a cluster fronts traffic differently.
                 AppNetworkPolicyType.AllowFromIngress =>
                     header + Y(
                         "  ingress:",
@@ -677,7 +683,8 @@ public class AppGovernanceService(
                         "                operator: In",
                         "                values:",
                         "                  - ingress-nginx",
-                        "                  - traefik"),
+                        "                  - traefik",
+                        "                  - istio-system"),
 
                 AppNetworkPolicyType.AllowFromSameNamespace =>
                     header + Y(
