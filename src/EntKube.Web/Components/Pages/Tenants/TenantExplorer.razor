@@ -344,6 +344,7 @@ else
         new("customers", "Customers", "bi-people"),
         new("groups", "Groups", "bi-diagram-2"),
         new("blueprints", "Blueprints", "bi-diagram-2-fill"),
+        new("api-tokens", "API tokens", "bi-key"),
     ];
 
     private Tenant? tenant;
@@ -723,6 +724,11 @@ else
                 builder.OpenComponent<SecretExpiryTab>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);
                 builder.AddComponentParameter(2, "OnNavigateTab", EventCallback.Factory.Create<string>(this, NavigateToSection));
+                builder.CloseComponent();
+                break;
+            case "api-tokens":
+                builder.OpenComponent<ApiTokensTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
                 builder.CloseComponent();
                 break;
             case "supply-chain":
