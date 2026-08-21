@@ -4201,6 +4201,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<Guid?>("RouteViaClusterId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("S3Endpoint")
+                        .HasColumnType("TEXT");
+
                     b.Property<Guid>("TenantId")
                         .HasColumnType("TEXT");
 

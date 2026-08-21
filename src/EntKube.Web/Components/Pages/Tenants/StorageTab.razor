@@ -819,7 +819,7 @@
                                 </div>
                                 @if (osTestResults.TryGetValue(conn.Id, out (bool Ok, string Message) result))
                                 {
-                                    <div class="alert @(result.Ok ? "alert-success" : "alert-danger") py-1 px-2 small mt-2 mb-0">
+                                    <div class="alert @(result.Ok ? "alert-success" : "alert-danger") py-1 px-2 small mt-2 mb-0 text-break">
                                         <i class="bi @(result.Ok ? "bi-check-circle" : "bi-exclamation-triangle") me-1"></i>@result.Message
                                     </div>
                                 }
@@ -895,6 +895,15 @@
                         <div class="col-md-6">
                             <label class="form-label small fw-semibold">Password</label>
                             <input type="password" class="form-control form-control-sm" @bind="osFormPassword" placeholder="Stored in vault" />
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small fw-semibold">S3 Endpoint <span class="text-muted fw-normal">(optional)</span></label>
+                            <input type="text" class="form-control form-control-sm" @bind="osFormS3Endpoint"
+                                   placeholder="Leave empty — read from the Keystone service catalog" />
+                            <div class="form-text small">
+                                Only set this if the catalog advertises no object store, or advertises one that is not
+                                the S3 host. Use <strong>Test</strong> to see what the catalog reports.
+                            </div>
                         </div>
                     </div>
 
@@ -1243,6 +1252,7 @@
     private string osFormProjectDomain = "";
     private string osFormUsername = "";
     private string osFormPassword = "";
+    private string osFormS3Endpoint = "";
     /// <summary>How a connection reaches its cloud — mutually exclusive options in the form.</summary>
     private enum OsRoute { Direct, Cluster, Agent, Proxy }
 
@@ -1837,6 +1847,7 @@
                 string.IsNullOrWhiteSpace(osFormProjectDomain) ? null : osFormProjectDomain.Trim(),
                 string.IsNullOrWhiteSpace(osFormUsername) ? null : osFormUsername.Trim(),
                 string.IsNullOrWhiteSpace(osFormPassword) ? null : osFormPassword.Trim(),
+                string.IsNullOrWhiteSpace(osFormS3Endpoint) ? null : osFormS3Endpoint.Trim(),
                 osFormRoute == OsRoute.Proxy && !string.IsNullOrWhiteSpace(osFormProxyUrl) ? osFormProxyUrl.Trim() : null,
                 osFormRoute == OsRoute.Proxy && !string.IsNullOrWhiteSpace(osFormProxyUsername) ? osFormProxyUsername.Trim() : null,
                 osFormRoute == OsRoute.Proxy && !string.IsNullOrWhiteSpace(osFormProxyPassword) ? osFormProxyPassword.Trim() : null,
@@ -2065,6 +2076,7 @@
         osFormProjectDomain = "";
         osFormUsername = "";
         osFormPassword = "";
+        osFormS3Endpoint = "";
         osFormRoute = OsRoute.Direct;
         osFormRouteClusterId = "";
         osFormRouteAgentId = "";

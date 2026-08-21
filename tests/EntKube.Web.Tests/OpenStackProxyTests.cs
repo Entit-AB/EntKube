@@ -153,7 +153,7 @@ public class OpenStackProxyTests : IDisposable
             tenant.Id, "Cleura Prod", "https://identity.example.com:5000/v3",
             region: "Kna1", projectName: "proj", projectId: null,
             userDomainName: null, projectDomainName: null,
-            username: "osuser", password: "ospass",
+            username: "osuser", password: "ospass", s3Endpoint: null,
             proxyUrl: "socks5://10.0.0.5:1080",
             proxyUsername: "proxyuser", proxyPassword: "proxypass", routeViaClusterId: null, routeViaAgentId: null);
 
@@ -179,7 +179,7 @@ public class OpenStackProxyTests : IDisposable
             tenant.Id, "Bad Proxy", "https://identity.example.com:5000/v3",
             region: null, projectName: null, projectId: null,
             userDomainName: null, projectDomainName: null,
-            username: null, password: null,
+            username: null, password: null, s3Endpoint: null,
             proxyUrl: "ftp://nope:21", proxyUsername: null, proxyPassword: null, routeViaClusterId: null, routeViaAgentId: null);
 
         await act.Should().ThrowAsync<InvalidOperationException>();
@@ -197,7 +197,7 @@ public class OpenStackProxyTests : IDisposable
             tenant.Id, "Direct", "https://identity.example.com:5000/v3",
             region: null, projectName: null, projectId: null,
             userDomainName: null, projectDomainName: null,
-            username: "osuser", password: "ospass",
+            username: "osuser", password: "ospass", s3Endpoint: null,
             proxyUrl: null, proxyUsername: null, proxyPassword: null, routeViaClusterId: null, routeViaAgentId: null);
 
         OpenStackConnection stored = await db.OpenStackConnections.AsNoTracking()
@@ -216,7 +216,7 @@ public class OpenStackProxyTests : IDisposable
 
         OpenStackConnection created = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "Direct", "https://identity.example.com:5000/v3",
-            null, null, null, null, null, "osuser", "ospass", null, null, null, null, null);
+            null, null, null, null, null, "osuser", "ospass", null, null, null, null, null, null);
 
         OpenStackConnection stored = await db.OpenStackConnections.AsNoTracking()
             .FirstAsync(c => c.Id == created.Id);
@@ -231,7 +231,7 @@ public class OpenStackProxyTests : IDisposable
 
         OpenStackConnection created = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "Proxied", "https://identity.example.com:5000/v3",
-            null, null, null, null, null, "osuser", "ospass",
+            null, null, null, null, null, "osuser", "ospass", null,
             "socks5://10.0.0.5:1080", "proxyuser", "proxypass", null, null);
 
         OpenStackConnection stored = await db.OpenStackConnections.AsNoTracking()
@@ -253,8 +253,9 @@ public class OpenStackProxyTests : IDisposable
 
         OpenStackConnection created = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "Tunnel", "https://identity.example.com:5000/v3",
-            null, null, null, null, null, "osuser", "ospass",
-            "socks5://127.0.0.1:1080", proxyUsername: null, proxyPassword: null, routeViaClusterId: null, routeViaAgentId: null);
+            null, null, null, null, null, "osuser", "ospass", s3Endpoint: null,
+            proxyUrl: "socks5://127.0.0.1:1080", proxyUsername: null, proxyPassword: null,
+            routeViaClusterId: null, routeViaAgentId: null);
 
         OpenStackConnection stored = await db.OpenStackConnections.AsNoTracking()
             .FirstAsync(c => c.Id == created.Id);

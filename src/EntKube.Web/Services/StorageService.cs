@@ -1016,6 +1016,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         string? projectDomainName,
         string? username,
         string? password,
+        string? s3Endpoint,
         string? proxyUrl,
         string? proxyUsername,
         string? proxyPassword,
@@ -1041,6 +1042,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
             UserDomainName = userDomainName,
             ProjectDomainName = projectDomainName,
             Username = username,
+            S3Endpoint = string.IsNullOrWhiteSpace(s3Endpoint) ? null : s3Endpoint.Trim().TrimEnd('/'),
             ProxyUrl = proxyUrl,
             ProxyUsername = proxyUsername,
             RouteViaClusterId = routeViaClusterId,
@@ -1086,6 +1088,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         string? projectDomainName,
         string? username,
         string? password,
+        string? s3Endpoint,
         string? proxyUrl,
         string? proxyUsername,
         string? proxyPassword,
@@ -1113,6 +1116,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         connection.UserDomainName = userDomainName;
         connection.ProjectDomainName = projectDomainName;
         connection.Username = username;
+        connection.S3Endpoint = string.IsNullOrWhiteSpace(s3Endpoint) ? null : s3Endpoint.Trim().TrimEnd('/');
         connection.ProxyUrl = proxyUrl;
         connection.ProxyUsername = proxyUsername;
         connection.RouteViaClusterId = routeViaClusterId;
@@ -1282,10 +1286,12 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         try
         {
+            // Before authenticating there is no catalog to consult, so start with
+            // what is known and widen once the catalog is available.
             List<string> hosts =
             [
                 connection.AuthUrl,
-                OpenStackS3Service.GetS3Endpoint(connection.Region ?? "Kna1")
+                connection.S3Endpoint ?? OpenStackS3Service.GetS3Endpoint(connection.Region ?? "Kna1")
             ];
 
             await egressRelay.EnsureAsync(kubeconfig, hosts, ct);
@@ -1304,8 +1310,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
             KeystoneSession session = await keystone.AuthenticateAsync(connection, password, ct);
 
-            // Widen the allowlist to everything the catalog advertises.
-            List<string> catalogHosts = [.. hosts, .. session.Endpoints.Values];
+            // Widen the allowlist to every host the connection will actually use.
+            List<string> catalogHosts = [.. hosts, .. OpenStackS3Service.GetRequiredHosts(connection, session)];
             List<string> normalized = ClusterEgressRelay.NormalizeHosts(catalogHosts);
 
             if (normalized.Count > ClusterEgressRelay.NormalizeHosts(hosts).Count)
@@ -1410,11 +1416,22 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
                 _ => ""
             };
 
-            string objectStore = session.GetEndpoint("object-store") is not null
-                ? "object-store available"
-                : "no object-store endpoint in the catalog";
+            // Name the hosts this connection will actually use. When traffic is
+            // routed through an agent, these are exactly what its allowlist needs,
+            // and finding them out one refused call at a time is miserable.
+            string s3Endpoint = OpenStackS3Service.ResolveS3Endpoint(connection, session);
+            List<string> hosts = OpenStackS3Service.GetRequiredHosts(connection, session);
 
-            return (true, $"Authenticated{route} — project {session.ProjectId}, {objectStore}.");
+            string detail = $"Authenticated{route} — project {session.ProjectId}. "
+                + $"S3 endpoint: {s3Endpoint}. "
+                + $"Hosts this connection needs to reach: {string.Join(", ", hosts)}";
+
+            if (connection.RouteViaAgentId is not null)
+            {
+                detail += " — every one of these must be in the agent's AllowedHosts.";
+            }
+
+            return (true, detail);
         }
         catch (Exception ex)
         {

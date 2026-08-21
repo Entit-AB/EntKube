@@ -87,7 +87,7 @@ public class OpenStackS3Service(VaultService vaultService, OpenStackHttpFactory 
 
         // Step 4: Determine the S3 endpoint from the region.
 
-        string endpoint = GetS3Endpoint(connection.Region ?? "Kna1");
+        string endpoint = ResolveS3Endpoint(connection, session);
 
         // Step 5: Create the bucket using the S3 API.
 
@@ -198,12 +198,65 @@ public class OpenStackS3Service(VaultService vaultService, OpenStackHttpFactory 
     /// Maps a Cleura region code to the S3 endpoint URL.
     /// Cleura exposes S3-compatible object storage at region-specific endpoints.
     /// </summary>
-    public static string GetS3Endpoint(string region)
+    /// <summary>
+    /// Works out the S3 endpoint for a connection, preferring what the cloud
+    /// actually says over anything derived from its region name.
+    ///
+    /// Order:
+    /// 1. An explicit endpoint on the connection, if the operator set one.
+    /// 2. The service catalog. Ceph RADOS Gateway serves the S3 and Swift APIs on
+    ///    the same host, and the catalog advertises the Swift path, so the origin
+    ///    of the <c>object-store</c> URL is the S3 endpoint.
+    /// 3. Only then the regional name pattern.
+    ///
+    /// The pattern used to be the only option, which produced a hostname that did
+    /// not exist for any region whose name is not a bare code — a DNS failure well
+    /// after authentication had already succeeded, which reads as a network fault
+    /// rather than the configuration mistake it is.
+    /// </summary>
+    public static string ResolveS3Endpoint(OpenStackConnection connection, KeystoneSession session)
     {
-        // Cleura/City Cloud S3 endpoint pattern (standard HTTPS port).
-        // Known regions: Kna1, Sto2, Fra1, Lon1, etc.
+        if (!string.IsNullOrWhiteSpace(connection.S3Endpoint))
+        {
+            return connection.S3Endpoint.TrimEnd('/');
+        }
 
-        return $"https://s3-{region.ToLowerInvariant()}.citycloud.com";
+        // Some clouds advertise the S3 API in its own right; prefer that when present.
+        foreach (string serviceType in (string[])["s3", "object-store"])
+        {
+            if (session.GetEndpoint(serviceType) is { Length: > 0 } url
+                && Uri.TryCreate(url, UriKind.Absolute, out Uri? parsed))
+            {
+                return parsed.GetLeftPart(UriPartial.Authority);
+            }
+        }
+
+        return GetS3Endpoint(connection.Region ?? "Kna1");
+    }
+
+    /// <summary>
+    /// Last-resort guess at a Cleura/City Cloud S3 endpoint from the region code,
+    /// used only when the service catalog advertises no object store. Correct for
+    /// bare region codes (Kna1, Sto2, Fra1) and wrong for anything else, which is
+    /// why the catalog is consulted first.
+    /// </summary>
+    public static string GetS3Endpoint(string region)
+        => $"https://s3-{region.ToLowerInvariant()}.citycloud.com";
+
+    /// <summary>
+    /// Every hostname this connection will be asked to reach, given a live
+    /// session: Keystone, everything in the service catalog, and the resolved S3
+    /// endpoint.
+    ///
+    /// Surfaced so an operator can see exactly what to put in an egress agent's
+    /// allowlist, rather than discovering each missing host one refused call at a
+    /// time.
+    /// </summary>
+    public static List<string> GetRequiredHosts(OpenStackConnection connection, KeystoneSession session)
+    {
+        List<string> urls = [connection.AuthUrl, ResolveS3Endpoint(connection, session), .. session.Endpoints.Values];
+
+        return ClusterEgressRelay.NormalizeHosts(urls);
     }
 
     /// <summary>
@@ -573,7 +626,7 @@ public class OpenStackS3Service(VaultService vaultService, OpenStackHttpFactory 
 
         // Verify the new credentials work by listing the bucket.
 
-        string endpoint = GetS3Endpoint(connection.Region ?? "Kna1");
+        string endpoint = ResolveS3Endpoint(connection, session);
 
         using AmazonS3Client s3Client = CreateS3Client(endpoint, newAccessKey, newSecretKey, connection.Region ?? "Kna1", session.Egress);
 

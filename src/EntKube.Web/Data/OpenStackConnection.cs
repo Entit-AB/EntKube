@@ -56,6 +56,15 @@ public class OpenStackConnection
     public string? Username { get; set; }
 
     /// <summary>
+    /// Explicit S3 endpoint for this cloud, e.g. "https://s3-sto2.citycloud.com".
+    ///
+    /// Normally left empty: the endpoint is read from the Keystone service
+    /// catalog, which is authoritative. Set this only when the catalog does not
+    /// advertise an object store, or advertises one that is not the S3 host.
+    /// </summary>
+    public string? S3Endpoint { get; set; }
+
+    /// <summary>
     /// Optional outbound proxy for every call to this cloud's APIs, e.g.
     /// "socks5://10.0.0.5:1080" or "http://proxy.corp:3128".
     ///

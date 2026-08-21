@@ -430,7 +430,7 @@ public class StorageServiceTests : IDisposable
             "Default",
             "admin@example.com",
             "supersecret",
-            null, null, null, null, null);
+            null, null, null, null, null, null);
 
         // Assert — connection is persisted with metadata.
 
@@ -461,7 +461,7 @@ public class StorageServiceTests : IDisposable
 
         OpenStackConnection connection = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "ToDelete", "https://auth.example.com/v3",
-            "Sto2", null, null, null, null, "user", "pass123", null, null, null, null, null);
+            "Sto2", null, null, null, null, "user", "pass123", null, null, null, null, null, null);
 
         // Act
 
@@ -487,7 +487,7 @@ public class StorageServiceTests : IDisposable
 
         OpenStackConnection connection = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "InUse", "https://auth.example.com/v3",
-            "Kna1", null, null, null, null, null, null, null, null, null, null, null);
+            "Kna1", null, null, null, null, null, null, null, null, null, null, null, null);
 
         StorageLink link = new()
         {
@@ -522,7 +522,7 @@ public class StorageServiceTests : IDisposable
 
         OpenStackConnection connection = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "Cleura", "https://auth.example.com/v3",
-            "Kna1", null, null, null, null, null, null, null, null, null, null, null);
+            "Kna1", null, null, null, null, null, null, null, null, null, null, null, null);
 
         // Act
 

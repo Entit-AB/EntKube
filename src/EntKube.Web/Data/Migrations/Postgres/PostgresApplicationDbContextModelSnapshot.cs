@@ -4206,6 +4206,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid?>("RouteViaClusterId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("S3Endpoint")
+                        .HasColumnType("text");
+
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uuid");
 
