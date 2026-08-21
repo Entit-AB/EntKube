@@ -442,6 +442,7 @@ public class KyvernoPolicyService(
         ["disallow-host-pid"]               = KyvernoPolicyType.DisallowHostPID,
         ["disallow-host-path"]              = KyvernoPolicyType.DisallowHostPath,
         ["restrict-image-registries"]       = KyvernoPolicyType.RestrictImageRegistries,
+        ["verify-image-signatures"]         = KyvernoPolicyType.VerifyImageSignatures,
         ["require-resource-limits"]         = KyvernoPolicyType.RequireResourceLimits,
         ["require-resource-requests"]       = KyvernoPolicyType.RequireResourceRequests,
         ["require-seccomp-profile"]         = KyvernoPolicyType.RequireSeccompProfile,
@@ -857,6 +858,8 @@ public class KyvernoPolicyService(
 
             KyvernoPolicyType.RestrictImageRegistries => BuildImageRegistriesPolicy(policy, ns, mode, excl),
 
+            KyvernoPolicyType.VerifyImageSignatures => BuildVerifyImagesPolicy(policy, ns, mode),
+
             KyvernoPolicyType.RequireResourceLimits => $"""
                 apiVersion: kyverno.io/v1
                 kind: Policy
@@ -1024,6 +1027,122 @@ public class KyvernoPolicyService(
                         containers:
                           - image: "{pattern}"
             """;
+    }
+
+    /// <summary>
+    /// Configuration for <see cref="KyvernoPolicyType.VerifyImageSignatures"/>. Stored as
+    /// JSON in <see cref="KyvernoPolicy.Configuration"/> because, unlike the other built-ins,
+    /// this policy needs structured settings rather than a flat list of strings.
+    /// </summary>
+    public sealed record VerifyImagesConfig
+    {
+        /// <summary>Image glob patterns the rule applies to, e.g. "registry.example.com/*".</summary>
+        public List<string> ImagePatterns { get; init; } = [];
+
+        /// <summary>Cosign public key (PEM). Set this OR the keyless issuer/subject pair.</summary>
+        public string? PublicKey { get; init; }
+
+        /// <summary>Keyless (OIDC) issuer, e.g. "https://token.actions.githubusercontent.com".</summary>
+        public string? Issuer { get; init; }
+
+        /// <summary>Keyless identity, e.g. "https://github.com/acme/app/.github/workflows/build.yml@refs/heads/main".</summary>
+        public string? Subject { get; init; }
+
+        /// <summary>
+        /// When true an unsigned image is rejected. When false Kyverno only verifies
+        /// signatures that exist, which is a materially weaker guarantee.
+        /// </summary>
+        public bool Required { get; init; } = true;
+
+        /// <summary>True when this config has enough to produce a usable policy.</summary>
+        public bool IsUsable =>
+            ImagePatterns.Count > 0
+            && (!string.IsNullOrWhiteSpace(PublicKey)
+                || (!string.IsNullOrWhiteSpace(Issuer) && !string.IsNullOrWhiteSpace(Subject)));
+    }
+
+    public static VerifyImagesConfig GetVerifyImagesConfig(KyvernoPolicy? policy)
+    {
+        if (policy?.Configuration is null) return new VerifyImagesConfig();
+        try { return JsonSerializer.Deserialize<VerifyImagesConfig>(policy.Configuration) ?? new(); }
+        catch { return new VerifyImagesConfig(); }
+    }
+
+    public static string SerializeVerifyImagesConfig(VerifyImagesConfig config) =>
+        JsonSerializer.Serialize(config);
+
+    /// <summary>
+    /// Builds a Kyverno <c>verifyImages</c> rule — signature verification, not a validate
+    /// pattern, so it uses a different rule shape from every other built-in here.
+    ///
+    /// Written with explicit indentation rather than an interpolated raw string literal:
+    /// the attestor block nests seven levels deep and embeds a PEM block scalar, and
+    /// getting that alignment wrong produces YAML that parses as a different shape (or
+    /// not at all) while still looking plausible in the source.
+    ///
+    /// Returns null when the config is incomplete rather than emitting a policy that would
+    /// verify nothing: a signature policy that silently passes everything is worse than no
+    /// policy, because it reads as protection on the governance page.
+    /// </summary>
+    private static string? BuildVerifyImagesPolicy(KyvernoPolicy policy, string ns, string mode)
+    {
+        VerifyImagesConfig config = GetVerifyImagesConfig(policy);
+        if (!config.IsUsable) return null;
+
+        StringBuilder yaml = new();
+        yaml.Append("apiVersion: kyverno.io/v1\n");
+        yaml.Append("kind: Policy\n");
+        yaml.Append("metadata:\n");
+        yaml.Append("  name: verify-image-signatures\n");
+        yaml.Append($"  namespace: {ns}\n");
+        yaml.Append("spec:\n");
+        yaml.Append($"  validationFailureAction: {mode}\n");
+        // Signature verification must run at admission, not as a background re-scan: the
+        // point is to stop an unsigned image being admitted in the first place.
+        yaml.Append("  background: false\n");
+        yaml.Append("  rules:\n");
+        yaml.Append("    - name: verify-signature\n");
+        yaml.Append("      match:\n");
+        yaml.Append("        any:\n");
+        yaml.Append("          - resources:\n");
+        yaml.Append("              kinds:\n");
+        yaml.Append("                - Pod\n");
+        yaml.Append("      verifyImages:\n");
+        yaml.Append("        - imageReferences:\n");
+
+        foreach (string pattern in config.ImagePatterns.Select(p => p.Trim()).Where(p => p.Length > 0))
+        {
+            yaml.Append($"            - \"{pattern}\"\n");
+        }
+
+        yaml.Append($"          required: {(config.Required ? "true" : "false")}\n");
+        // mutateDigest rewrites the tag to the verified digest, so what is admitted is
+        // exactly what was verified — a mutable tag cannot be swapped afterwards.
+        yaml.Append("          mutateDigest: true\n");
+        yaml.Append("          verifyDigest: true\n");
+        yaml.Append("          attestors:\n");
+        yaml.Append("            - count: 1\n");
+        yaml.Append("              entries:\n");
+
+        if (!string.IsNullOrWhiteSpace(config.PublicKey))
+        {
+            yaml.Append("                - keys:\n");
+            yaml.Append("                    publicKeys: |-\n");
+            foreach (string line in config.PublicKey.Replace("\r\n", "\n").Split('\n'))
+            {
+                yaml.Append("                      ").Append(line).Append('\n');
+            }
+        }
+        else
+        {
+            yaml.Append("                - keyless:\n");
+            yaml.Append($"                    issuer: \"{config.Issuer}\"\n");
+            yaml.Append($"                    subject: \"{config.Subject}\"\n");
+            yaml.Append("                    rekor:\n");
+            yaml.Append("                      url: https://rekor.sigstore.dev\n");
+        }
+
+        return yaml.ToString();
     }
 
     private static string? BuildRequirePodLabelsPolicy(KyvernoPolicy policy, string ns, string mode, string excl)

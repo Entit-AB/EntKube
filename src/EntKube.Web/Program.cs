@@ -405,6 +405,9 @@ public class Program
         // server-side dry-run per deployment while rendering a page.
         builder.Services.AddSingleton<EntKube.Web.Services.Upgrades.DriftScanCache>();
         builder.Services.AddHostedService<EntKube.Web.Services.Upgrades.DriftScanService>();
+        builder.Services.AddScoped<EntKube.Web.Services.SupplyChain.SupplyChainService>();
+        builder.Services.AddSingleton<EntKube.Web.Services.SupplyChain.SupplyChainScanCache>();
+        builder.Services.AddHostedService<EntKube.Web.Services.SupplyChain.SupplyChainScanService>();
         builder.Services.AddScoped<OperationsAdvisorService>();
         builder.Services.AddScoped<CustomerNotificationService>();
 

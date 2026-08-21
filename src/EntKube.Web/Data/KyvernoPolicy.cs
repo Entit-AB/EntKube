@@ -16,6 +16,7 @@ public enum KyvernoPolicyType
 
     // Image control
     RestrictImageRegistries = 7,
+    VerifyImageSignatures   = 13,
 
     // Resource governance
     RequireResourceLimits   = 8,

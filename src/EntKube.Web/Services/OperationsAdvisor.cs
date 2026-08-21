@@ -35,6 +35,7 @@ public enum AdvisorCategory
     DataProtection,  // backups missing, failed, or stale
     Capacity,        // resources trending toward their ceiling (PVC fill, memory-vs-limit)
     Maintenance,     // components behind upstream, Kubernetes versions nearing end-of-life
+    SupplyChain,     // vulnerable, unscanned or unsigned images running in the fleet
 }
 
 /// <summary>
@@ -143,6 +144,7 @@ public class OperationsAdvisorService(
     AdvisorStateService stateService,
     EntKube.Web.Services.Upgrades.ComponentUpgradeService componentUpgrades,
     EntKube.Web.Services.Upgrades.DriftScanCache driftCache,
+    EntKube.Web.Services.SupplyChain.SupplyChainScanCache supplyChainCache,
     ILogger<OperationsAdvisorService> logger)
 {
     /// <summary>Overdue findings older than this, still unacknowledged, are escalated.</summary>
@@ -162,6 +164,7 @@ public class OperationsAdvisorService(
         findings.AddRange(await BuildBlueprintFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildUpgradeFindingsAsync(tenantId, now, ct));
         findings.AddRange(BuildDriftFindings(tenantId, now));
+        findings.AddRange(BuildSupplyChainFindings(tenantId, now));
 
         var merged = await MergeStateAsync(tenantId, findings, now, ct);
 
@@ -1165,6 +1168,89 @@ public class OperationsAdvisorService(
                 LinkSection = "drift",
                 ClusterId = cluster.Key,
                 Source = "drift",
+            });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Turns the last supply-chain sweep into findings. Reads the cache only, for the
+    /// same reason as drift: the sweep walks every cluster and registry.
+    ///
+    /// Grouped per cluster rather than per image. A base-image CVE typically lands in
+    /// every service at once, and thirty rows saying the same thing would bury the one
+    /// finding that is actually distinct.
+    /// </summary>
+    private List<OperationsFinding> BuildSupplyChainFindings(Guid tenantId, DateTime now)
+    {
+        var result = new List<OperationsFinding>();
+
+        EntKube.Web.Services.SupplyChain.SupplyChainReport? report = supplyChainCache.Get(tenantId);
+        if (report is null)
+        {
+            return result;
+        }
+
+        foreach (var cluster in report.Images
+            .Where(i => i.State == EntKube.Web.Services.SupplyChain.ImageScanState.Vulnerable)
+            .GroupBy(i => i.ClusterId))
+        {
+            var images = cluster.ToList();
+            int critical = images.Sum(i => i.CriticalCount);
+            int high = images.Sum(i => i.HighCount);
+            int fixable = images.Sum(i => i.FixableCount);
+            string clusterName = images[0].ClusterName;
+
+            result.Add(new OperationsFinding
+            {
+                Id = $"cve:{cluster.Key}",
+                Category = AdvisorCategory.SupplyChain,
+                // Critical CVEs in running images are a today problem; High alone can wait
+                // for the week's patching window.
+                Severity = critical > 0 ? AdvisorSeverity.Critical : AdvisorSeverity.Warning,
+                Horizon = critical > 0 ? AdvisorHorizon.Today : AdvisorHorizon.ThisWeek,
+                Title = $"{images.Count} running image{(images.Count == 1 ? "" : "s")} on “{clusterName}” "
+                    + $"carry {critical} critical and {high} high vulnerabilities",
+                Detail = string.Join(", ", images
+                    .OrderByDescending(i => i.CriticalCount)
+                    .Take(3)
+                    .Select(i => $"{i.Image} ({i.CriticalCount}C/{i.HighCount}H)"))
+                    + (fixable > 0 ? $". {fixable} have a fix available." : ". No fixes published yet."),
+                ScopeLabel = $"Cluster: {clusterName}",
+                Remediation = fixable > 0
+                    ? "Rebuild against patched base images and redeploy."
+                    : "Track upstream for fixes; consider mitigations in the meantime.",
+                LinkSection = "supply-chain",
+                ClusterId = cluster.Key,
+                Source = "supply-chain",
+            });
+        }
+
+        foreach (var cluster in report.Images
+            .Where(i => i.State == EntKube.Web.Services.SupplyChain.ImageScanState.Unscanned)
+            .GroupBy(i => i.ClusterId))
+        {
+            var images = cluster.ToList();
+            string clusterName = images[0].ClusterName;
+
+            result.Add(new OperationsFinding
+            {
+                Id = $"unscanned-images:{cluster.Key}",
+                Category = AdvisorCategory.SupplyChain,
+                Severity = AdvisorSeverity.Warning,
+                Horizon = AdvisorHorizon.Later,
+                Title = $"{images.Count} running image{(images.Count == 1 ? " has" : "s have")} "
+                    + $"no scan result on “{clusterName}”",
+                // An unscanned image is not a clean one — say so, because the natural
+                // reading of "no findings" is "no problems".
+                Detail = "These images are in a managed registry but have no completed scan, so their "
+                    + "vulnerability status is unknown — not clean.",
+                ScopeLabel = $"Cluster: {clusterName}",
+                Remediation = "Trigger a Harbor scan for these repositories, or enable scan-on-push.",
+                LinkSection = "supply-chain",
+                ClusterId = cluster.Key,
+                Source = "supply-chain",
             });
         }
 

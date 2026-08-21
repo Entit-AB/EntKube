@@ -337,7 +337,7 @@ else
         new("Reliability", "bi-check2-square",
         [ new("sla", "SLA", "bi-check2-square"), new("maintenance", "Maintenance", "bi-tools"), new("secret-expiry", "Secret expiry", "bi-clock-history") ]),
         new("Lifecycle", "bi-arrow-up-circle",
-        [ new("upgrades", "Upgrades", "bi-arrow-up-circle"), new("drift", "Drift", "bi-shuffle") ]),
+        [ new("upgrades", "Upgrades", "bi-arrow-up-circle"), new("drift", "Drift", "bi-shuffle"), new("supply-chain", "Supply chain", "bi-box-seam") ]),
     ];
     private static readonly SectionItem[] ManageItems =
     [
@@ -723,6 +723,11 @@ else
                 builder.OpenComponent<SecretExpiryTab>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);
                 builder.AddComponentParameter(2, "OnNavigateTab", EventCallback.Factory.Create<string>(this, NavigateToSection));
+                builder.CloseComponent();
+                break;
+            case "supply-chain":
+                builder.OpenComponent<SupplyChainTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
                 builder.CloseComponent();
                 break;
             case "drift":

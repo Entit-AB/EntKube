@@ -209,6 +209,109 @@
                 </div>
             </div>
 
+            @* ── Image signature verification ── *@
+            <div class="list-group list-group-flush mb-3">
+                @{
+                    KyvernoPolicy? sigPolicy = GetPolicy(KyvernoPolicyType.VerifyImageSignatures);
+                    bool sigEnabled = sigPolicy is not null;
+                    KyvernoPolicyService.VerifyImagesConfig sigConfig =
+                        KyvernoPolicyService.GetVerifyImagesConfig(sigPolicy);
+                }
+                <div class="list-group-item px-0 py-2">
+                    <div class="d-flex align-items-center">
+                        <div class="flex-grow-1">
+                            <div class="fw-medium small">Verify image signatures (cosign)</div>
+                            <div class="text-muted" style="font-size:0.78rem">
+                                Admit only images signed by a key or identity you trust. Verified images are
+                                rewritten to their digest so the tag cannot be repointed afterwards.
+                            </div>
+                        </div>
+                        <div class="d-flex align-items-center gap-2 ms-3">
+                            @if (sigEnabled)
+                            {
+                                <select class="form-select form-select-sm" style="width:145px"
+                                        value="@sigPolicy!.ValidationFailureAction.ToString()"
+                                        @onchange="@(e => SetMode(KyvernoPolicyType.VerifyImageSignatures, ParseMode(e.Value?.ToString())))">
+                                    <option value="Audit">Audit (log only)</option>
+                                    <option value="Enforce">Enforce (block)</option>
+                                </select>
+                            }
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" checked="@sigEnabled"
+                                       @onchange="@(e => TogglePolicy(KyvernoPolicyType.VerifyImageSignatures, (bool)e.Value!))" />
+                            </div>
+                        </div>
+                    </div>
+                    @if (sigEnabled)
+                    {
+                        <div class="mt-2 ps-1">
+                            @if (!sigConfig.IsUsable)
+                            {
+                                <div class="alert alert-warning py-1 px-2 small mb-2">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>
+                                    Incomplete — this policy is <strong>not applied</strong> until it has at least one
+                                    image pattern and either a public key or both a keyless issuer and subject.
+                                </div>
+                            }
+
+                            <div class="row g-2">
+                                <div class="col-md-6">
+                                    <label class="form-label small mb-1">Image patterns (one per line)</label>
+                                    <textarea class="form-control form-control-sm font-monospace" rows="2"
+                                              @bind="sigPatternsInput"
+                                              placeholder="registry.example.com/*"></textarea>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small mb-1">Verification method</label>
+                                    <select class="form-select form-select-sm" @bind="sigMethod">
+                                        <option value="keyless">Keyless (OIDC identity)</option>
+                                        <option value="key">Cosign public key</option>
+                                    </select>
+                                </div>
+
+                                @if (sigMethod == "key")
+                                {
+                                    <div class="col-12">
+                                        <label class="form-label small mb-1">Cosign public key (PEM)</label>
+                                        <textarea class="form-control form-control-sm font-monospace" rows="4"
+                                                  @bind="sigPublicKeyInput"
+                                                  placeholder="-----BEGIN PUBLIC KEY-----"></textarea>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="col-md-6">
+                                        <label class="form-label small mb-1">Issuer</label>
+                                        <input class="form-control form-control-sm font-monospace" @bind="sigIssuerInput"
+                                               placeholder="https://token.actions.githubusercontent.com" />
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label small mb-1">Subject</label>
+                                        <input class="form-control form-control-sm font-monospace" @bind="sigSubjectInput"
+                                               placeholder="https://github.com/acme/app/*" />
+                                    </div>
+                                }
+
+                                <div class="col-12 d-flex align-items-center gap-3">
+                                    <div class="form-check form-switch mb-0">
+                                        <input class="form-check-input" type="checkbox" id="sigRequired" @bind="sigRequiredInput" />
+                                        <label class="form-check-label small" for="sigRequired">
+                                            Reject unsigned images
+                                        </label>
+                                    </div>
+                                    <span class="text-muted" style="font-size:0.78rem">
+                                        With this off, Kyverno only checks signatures that already exist — a much weaker guarantee.
+                                    </span>
+                                    <button class="btn btn-sm btn-outline-secondary ms-auto" @onclick="SaveSignatureConfig">
+                                        <i class="bi bi-save me-1"></i>Save
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+
             @* ── Resource Governance ── *@
             <h6 class="text-muted fw-semibold mb-2 d-flex align-items-center gap-1">
                 <i class="bi bi-speedometer text-success"></i> Resource Governance
@@ -437,6 +540,7 @@
             kyvernoPolicies  = await KyvernoService.GetPoliciesAsync(TenantId, EnvironmentId);
             kyvernoAvailable = await KyvernoService.IsKyvernoAvailableAsync(TenantId, EnvironmentId);
             clusterPolicies  = await KyvernoService.GetClusterPoliciesAsync(TenantId, EnvironmentId);
+            LoadSignatureConfig();
         }
         catch (Exception ex)
         {
@@ -563,6 +667,60 @@
         KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(existing.Id, mode, existing.Configuration);
         int idx = kyvernoPolicies.IndexOf(existing);
         if (idx >= 0) kyvernoPolicies[idx] = updated;
+    }
+
+    private string sigPatternsInput = "";
+    private string sigMethod = "keyless";
+    private string sigPublicKeyInput = "";
+    private string sigIssuerInput = "";
+    private string sigSubjectInput = "";
+    private bool sigRequiredInput = true;
+
+    /// <summary>
+    /// Loads the stored signature config into the form fields. Called after the policy list
+    /// loads so an already-configured policy shows its settings rather than empty boxes.
+    /// </summary>
+    private void LoadSignatureConfig()
+    {
+        KyvernoPolicy? policy = GetPolicy(KyvernoPolicyType.VerifyImageSignatures);
+        if (policy is null) return;
+
+        KyvernoPolicyService.VerifyImagesConfig config =
+            KyvernoPolicyService.GetVerifyImagesConfig(policy);
+
+        sigPatternsInput = string.Join("\n", config.ImagePatterns);
+        sigPublicKeyInput = config.PublicKey ?? "";
+        sigIssuerInput = config.Issuer ?? "";
+        sigSubjectInput = config.Subject ?? "";
+        sigRequiredInput = config.Required;
+        sigMethod = string.IsNullOrWhiteSpace(config.PublicKey) ? "keyless" : "key";
+    }
+
+    private async Task SaveSignatureConfig()
+    {
+        KyvernoPolicy? policy = GetPolicy(KyvernoPolicyType.VerifyImageSignatures);
+        if (policy is null) return;
+
+        List<string> patterns = [.. sigPatternsInput
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
+
+        // Only persist the fields for the selected method, so switching from key to keyless
+        // doesn't leave a stale key behind that would silently win at generation time.
+        KyvernoPolicyService.VerifyImagesConfig config = sigMethod == "key"
+            ? new() { ImagePatterns = patterns, PublicKey = sigPublicKeyInput.Trim(), Required = sigRequiredInput }
+            : new()
+            {
+                ImagePatterns = patterns,
+                Issuer = sigIssuerInput.Trim(),
+                Subject = sigSubjectInput.Trim(),
+                Required = sigRequiredInput,
+            };
+
+        KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(
+            policy.Id, policy.ValidationFailureAction,
+            KyvernoPolicyService.SerializeVerifyImagesConfig(config));
+
+        kyvernoPolicies[kyvernoPolicies.IndexOf(policy)] = updated;
     }
 
     private async Task AddRegistry()

@@ -1,0 +1,394 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.SupplyChain
+@inject SupplyChainService SupplyChain
+@inject SupplyChainScanCache ScanCache
+@inject HarborService Harbor
+
+@* ═══════════════════════════════════════════════════════════════════
+   Supply chain — what is running, where it came from, what is wrong
+   with it. Joins live workload images to Harbor's Trivy scan results.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3 mt-4">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span><i class="bi bi-box-seam me-2 text-primary"></i><strong>Running image inventory</strong></span>
+        <div class="d-flex align-items-center gap-2">
+            @if (report is not null)
+            {
+                <span class="text-muted small">Swept @report.GeneratedAt.ToString("yyyy-MM-dd HH:mm") UTC</span>
+            }
+            <button class="btn btn-sm btn-outline-secondary" @onclick="RescanAsync" disabled="@scanning">
+                @if (scanning)
+                {
+                    <span class="spinner-border spinner-border-sm me-1"></span>
+                    <span>Scanning…</span>
+                }
+                else
+                {
+                    <i class="bi bi-arrow-clockwise me-1"></i>
+                    <span>Rescan now</span>
+                }
+            </button>
+        </div>
+    </div>
+    <div class="card-body pt-3">
+        <p class="text-muted small mb-3">
+            Every image running across this tenant's clusters, matched to its registry scan.
+            <strong>An unscanned image is not a clean image</strong> — it is one whose status is unknown.
+        </p>
+
+        @if (scanError is not null)
+        {
+            <div class="alert alert-danger">Scan failed: @scanError</div>
+        }
+
+        @if (report is null)
+        {
+            <div class="alert alert-light border mb-0">
+                <i class="bi bi-info-circle me-1"></i>
+                No sweep has completed yet. The background scan runs every six hours, or
+                <a href="#" @onclick:preventDefault @onclick="RescanAsync">scan now</a>.
+            </div>
+        }
+        else
+        {
+            @if (report.Warnings.Count > 0)
+            {
+                <div class="alert alert-warning py-2">
+                    <div class="fw-semibold small mb-1">
+                        <i class="bi bi-exclamation-triangle me-1"></i>Coverage was incomplete
+                    </div>
+                    <ul class="small mb-0 ps-3">
+                        @foreach (string warning in report.Warnings)
+                        {
+                            <li>@warning</li>
+                        }
+                    </ul>
+                </div>
+            }
+
+            <div class="row g-2 mb-3">
+                @SummaryCard("Vulnerable", report.VulnerableCount, "text-danger", "bi-shield-exclamation")
+                @SummaryCard("Unscanned", report.UnscannedCount, "text-warning", "bi-question-circle")
+                @SummaryCard("Unmanaged registry", report.UnmanagedCount, "text-muted", "bi-box-arrow-up-right")
+                @SummaryCard("Clean", report.CleanCount, "text-success", "bi-check2-circle")
+            </div>
+
+            @if (report.Images.Count > 0)
+            {
+                <div class="d-flex flex-wrap gap-3 small text-muted mb-3">
+                    <span><strong class="text-danger">@report.TotalCritical</strong> critical findings</span>
+                    <span><strong class="text-warning">@report.TotalHigh</strong> high findings</span>
+                    <span title="Images running from a mutable tag rather than a pinned digest — the tag can be repointed after verification.">
+                        <strong>@report.MutableTagCount</strong> on mutable tags
+                    </span>
+                </div>
+            }
+
+            <div class="row g-2 align-items-end mb-3">
+                <div class="col-md-3">
+                    <label class="form-label small mb-1">Show</label>
+                    <select class="form-select form-select-sm" @bind="stateFilter">
+                        <option value="attention">Needs attention</option>
+                        <option value="all">All images</option>
+                        <option value="vulnerable">Vulnerable only</option>
+                        <option value="unscanned">Unscanned only</option>
+                        <option value="unmanaged">Unmanaged registry only</option>
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small mb-1">Search</label>
+                    <input class="form-control form-control-sm" placeholder="Image or workload"
+                           @bind="search" @bind:event="oninput" />
+                </div>
+            </div>
+
+            @if (Filtered().Count == 0)
+            {
+                <p class="text-muted small mb-0">Nothing matches the current filters.</p>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead>
+                            <tr class="text-muted small">
+                                <th style="width:2rem"></th>
+                                <th>Image</th>
+                                <th>Cluster</th>
+                                <th>State</th>
+                                <th>Findings</th>
+                                <th>Used by</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (RunningImage image in Filtered())
+                            {
+                                <tr>
+                                    <td>
+                                        <button class="btn btn-sm btn-link p-0" @onclick="() => Toggle(image)">
+                                            <i class="bi @(IsExpanded(image) ? "bi-chevron-down" : "bi-chevron-right")"></i>
+                                        </button>
+                                    </td>
+                                    <td>
+                                        <code class="small">@image.Image</code>
+                                        @if (!image.IsDigestPinned && image.State != ImageScanState.Unmanaged)
+                                        {
+                                            <span class="badge bg-light text-muted border ms-1"
+                                                  title="Running from a mutable tag. The tag can be repointed to different content after it was scanned.">
+                                                mutable tag
+                                            </span>
+                                        }
+                                    </td>
+                                    <td class="small">@image.ClusterName</td>
+                                    <td><span class="badge @StateClass(image.State)">@StateText(image.State)</span></td>
+                                    <td class="small">
+                                        @if (image.Scan is not null && image.Scan.IsScanned)
+                                        {
+                                            <span class="text-danger fw-semibold">@image.Scan.Critical C</span>
+                                            <span class="text-warning fw-semibold ms-1">@image.Scan.High H</span>
+                                            <span class="text-muted ms-1">@image.Scan.Medium M</span>
+                                            @if (image.Scan.Fixable > 0)
+                                            {
+                                                <div class="text-success">@image.Scan.Fixable fixable</div>
+                                            }
+                                        }
+                                        else
+                                        {
+                                            <span class="text-muted">—</span>
+                                        }
+                                    </td>
+                                    <td class="small text-muted">@image.Workloads.Count workload@(image.Workloads.Count == 1 ? "" : "s")</td>
+                                </tr>
+
+                                @if (IsExpanded(image))
+                                {
+                                    <tr>
+                                        <td colspan="6" class="bg-light">
+                                            <div class="small mb-2">
+                                                <strong>Used by</strong>
+                                                <ul class="mb-2 ps-3">
+                                                    @foreach (string workload in image.Workloads)
+                                                    {
+                                                        <li><code>@workload</code></li>
+                                                    }
+                                                </ul>
+                                                @if (image.Note is not null)
+                                                {
+                                                    <div class="text-muted"><i class="bi bi-info-circle me-1"></i>@image.Note</div>
+                                                }
+                                            </div>
+
+                                            @if (image.State is ImageScanState.Vulnerable or ImageScanState.Clean)
+                                            {
+                                                <button class="btn btn-sm btn-outline-primary mb-2"
+                                                        @onclick="() => LoadCvesAsync(image)" disabled="@loadingCves">
+                                                    <i class="bi bi-list-ul me-1"></i>Load CVE detail
+                                                </button>
+
+                                                @if (cveError is not null && cveKey == Key(image))
+                                                {
+                                                    <div class="alert alert-warning py-1 small mb-0">@cveError</div>
+                                                }
+                                                else if (cves.TryGetValue(Key(image), out List<HarborVulnerability>? list))
+                                                {
+                                                    @if (list.Count == 0)
+                                                    {
+                                                        <p class="small text-muted mb-0">Harbor returned no vulnerability detail for this artifact.</p>
+                                                    }
+                                                    else
+                                                    {
+                                                        <div class="table-responsive">
+                                                            <table class="table table-sm mb-0">
+                                                                <thead>
+                                                                    <tr class="text-muted small">
+                                                                        <th>CVE</th><th>Severity</th><th>Package</th>
+                                                                        <th>Installed</th><th>Fixed in</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                    @foreach (HarborVulnerability cve in list.Take(100))
+                                                                    {
+                                                                        <tr>
+                                                                            <td class="small"><code>@cve.Id</code></td>
+                                                                            <td><span class="badge @SeverityClass(cve.Severity)">@cve.Severity</span></td>
+                                                                            <td class="small">@cve.Package</td>
+                                                                            <td class="small text-muted">@cve.Version</td>
+                                                                            <td class="small">
+                                                                                @if (cve.IsFixable)
+                                                                                {
+                                                                                    <span class="text-success">@cve.FixVersion</span>
+                                                                                }
+                                                                                else
+                                                                                {
+                                                                                    <span class="text-muted">no fix</span>
+                                                                                }
+                                                                            </td>
+                                                                        </tr>
+                                                                    }
+                                                                </tbody>
+                                                            </table>
+                                                            @if (list.Count > 100)
+                                                            {
+                                                                <p class="small text-muted mt-2 mb-0">
+                                                                    Showing the first 100 of @list.Count findings.
+                                                                </p>
+                                                            }
+                                                        </div>
+                                                    }
+                                                }
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private SupplyChainReport? report;
+    private bool scanning;
+    private string? scanError;
+
+    private string stateFilter = "attention";
+    private string search = "";
+
+    private readonly HashSet<string> expanded = [];
+    private readonly Dictionary<string, List<HarborVulnerability>> cves = [];
+    private bool loadingCves;
+    private string? cveError;
+    private string? cveKey;
+
+    protected override void OnInitialized() => report = ScanCache.Get(TenantId);
+
+    private static string Key(RunningImage image) => $"{image.ClusterId}|{image.Image}";
+
+    private bool IsExpanded(RunningImage image) => expanded.Contains(Key(image));
+
+    private void Toggle(RunningImage image)
+    {
+        if (!expanded.Add(Key(image)))
+        {
+            expanded.Remove(Key(image));
+        }
+    }
+
+    private async Task RescanAsync()
+    {
+        scanning = true;
+        scanError = null;
+        try
+        {
+            report = await SupplyChain.GetTenantReportAsync(TenantId, DateTime.UtcNow);
+            // Publish so the advisor reflects this sweep instead of the superseded one.
+            ScanCache.Set(TenantId, report);
+        }
+        catch (Exception ex)
+        {
+            scanError = ex.Message;
+        }
+        finally
+        {
+            scanning = false;
+        }
+    }
+
+    private List<RunningImage> Filtered()
+    {
+        if (report is null) return [];
+
+        IEnumerable<RunningImage> rows = stateFilter switch
+        {
+            "all" => report.Images,
+            "vulnerable" => report.Images.Where(i => i.State == ImageScanState.Vulnerable),
+            "unscanned" => report.Images.Where(i => i.State == ImageScanState.Unscanned),
+            "unmanaged" => report.Images.Where(i => i.State == ImageScanState.Unmanaged),
+            _ => report.Images.Where(i =>
+                i.State is ImageScanState.Vulnerable or ImageScanState.Unscanned),
+        };
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            string term = search.Trim();
+            rows = rows.Where(i =>
+                i.Image.Contains(term, StringComparison.OrdinalIgnoreCase)
+                || i.Workloads.Any(w => w.Contains(term, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        return [.. rows];
+    }
+
+    private async Task LoadCvesAsync(RunningImage image)
+    {
+        loadingCves = true;
+        cveError = null;
+        cveKey = Key(image);
+        try
+        {
+            List<HarborComponentConfig> configs =
+                await Harbor.GetConfigsForClusterAsync(TenantId, image.ClusterId);
+
+            HarborComponentConfig? config = configs.FirstOrDefault(c =>
+                ImageReference.NormalizeRegistryHost(c.RegistryUrl) is string host
+                && string.Equals(host, image.Registry, StringComparison.OrdinalIgnoreCase));
+
+            if (config is null || image.Project is null || image.Repository is null || image.Reference is null)
+            {
+                cveError = "This image is not in a managed Harbor registry, so no CVE detail is available.";
+                return;
+            }
+
+            cves[Key(image)] = await Harbor.GetVulnerabilitiesAsync(
+                TenantId, config, image.Project, image.Repository, image.Reference);
+        }
+        catch (Exception ex)
+        {
+            cveError = ex.Message;
+        }
+        finally
+        {
+            loadingCves = false;
+        }
+    }
+
+    private static RenderFragment SummaryCard(string label, int value, string textClass, string icon) =>
+        @<div class="col-6 col-md-3">
+            <div class="border rounded p-2 h-100">
+                <div class="text-muted small"><i class="bi @icon me-1"></i>@label</div>
+                <div class="fs-4 fw-semibold @textClass">@value</div>
+            </div>
+        </div>;
+
+    private static string StateText(ImageScanState state) => state switch
+    {
+        ImageScanState.Vulnerable => "Vulnerable",
+        ImageScanState.Unscanned => "Unscanned",
+        ImageScanState.Unmanaged => "Unmanaged registry",
+        _ => "Clean",
+    };
+
+    private static string StateClass(ImageScanState state) => state switch
+    {
+        ImageScanState.Vulnerable => "bg-danger",
+        ImageScanState.Unscanned => "bg-warning text-dark",
+        ImageScanState.Unmanaged => "bg-secondary",
+        _ => "bg-success",
+    };
+
+    private static string SeverityClass(string severity) => severity.ToLowerInvariant() switch
+    {
+        "critical" => "bg-danger",
+        "high" => "bg-warning text-dark",
+        "medium" => "bg-info text-dark",
+        "low" => "bg-secondary",
+        _ => "bg-light text-dark border",
+    };
+}
