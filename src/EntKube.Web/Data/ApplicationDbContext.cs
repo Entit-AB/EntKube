@@ -24,6 +24,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<KubernetesCluster> KubernetesClusters => Set<KubernetesCluster>();
     public DbSet<EgressAgent> EgressAgents => Set<EgressAgent>();
     public DbSet<ApiToken> ApiTokens => Set<ApiToken>();
+    public DbSet<ClusterCostRate> ClusterCostRates => Set<ClusterCostRate>();
     public DbSet<SecretVault> SecretVaults => Set<SecretVault>();
     public DbSet<VaultSecret> VaultSecrets => Set<VaultSecret>();
     public DbSet<VaultSecretVersion> VaultSecretVersions => Set<VaultSecretVersion>();
@@ -169,6 +170,28 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(t => t.Tenant)
                   .WithMany()
                   .HasForeignKey(t => t.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ClusterCostRate — at most one price sheet per cluster, so the unique index is
+        // what prevents two rates silently disagreeing about what a core costs.
+
+        builder.Entity<ClusterCostRate>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => r.ClusterId).IsUnique();
+            entity.Property(r => r.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(r => r.UpdatedBy).HasMaxLength(256);
+            // Money: an explicit precision rather than the provider default, which for
+            // SQL Server would silently round to 2 decimals — useless for a per-core-hour
+            // rate that is routinely fractions of a cent.
+            entity.Property(r => r.CpuCoreHourCost).HasPrecision(18, 6);
+            entity.Property(r => r.MemoryGiBHourCost).HasPrecision(18, 6);
+            entity.Property(r => r.StorageGiBMonthCost).HasPrecision(18, 6);
+            entity.Property(r => r.ClusterMonthlyOverhead).HasPrecision(18, 2);
+            entity.HasOne(r => r.Cluster)
+                  .WithMany()
+                  .HasForeignKey(r => r.ClusterId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
 

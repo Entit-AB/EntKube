@@ -174,6 +174,17 @@ public static class EntKubeTools
 
         new McpTool
         {
+            Name = "entkube_cost",
+            Description = "What the fleet costs at the current rate of consumption, broken down "
+                        + "by customer, environment and namespace. These are run-rate projections "
+                        + "over a 730-hour month, not a historical bill — they reflect what is "
+                        + "reserved right now. Returns 503 if no calculation has run yet.",
+            InputSchema = NoArgs(),
+            Handler = (api, _, ct) => api.GetAsync("/api/v1/cost", ct),
+        },
+
+        new McpTool
+        {
             Name = "entkube_acknowledge_finding",
             Description = "Acknowledge an Operations Advisor finding, marking it as being handled. "
                         + "Does not change any cluster.",

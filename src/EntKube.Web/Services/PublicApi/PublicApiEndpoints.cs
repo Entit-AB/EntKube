@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Services.Cost;
 using EntKube.Web.Services.SupplyChain;
 using EntKube.Web.Services.Upgrades;
 using Microsoft.EntityFrameworkCore;
@@ -377,6 +378,53 @@ public static class PublicApiEndpoints
                     fixable = i.FixableCount,
                     digestPinned = i.IsDigestPinned,
                     workloads = i.Workloads,
+                }),
+            });
+        }).RequireApiScope(ApiScopes.OpsRead);
+
+        api.MapGet("/cost", (HttpContext ctx, CostScanCache cache) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+            CostReport? report = cache.Get(tenantId);
+
+            if (report is null)
+            {
+                return Results.Problem(
+                    "No cost calculation has completed yet for this tenant.",
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            return Results.Ok(new
+            {
+                generatedAt = report.GeneratedAt,
+                currency = report.Currency,
+                totalMonthlyCost = report.TotalMonthlyCost,
+                totalHourlyCost = report.TotalHourlyCost,
+                unattributedMonthlyCost = report.UnattributedMonthlyCost,
+                warnings = report.Warnings,
+                byCustomer = report.ByCustomer.Select(c => new
+                {
+                    customerId = c.CustomerId,
+                    customer = c.CustomerName,
+                    monthlyCost = c.MonthlyCost,
+                }),
+                byEnvironment = report.ByEnvironment.Select(e => new
+                {
+                    environment = e.Environment,
+                    monthlyCost = e.MonthlyCost,
+                }),
+                namespaces = report.Namespaces.Select(n => new
+                {
+                    ns = n.Namespace,
+                    cluster = n.ClusterName,
+                    customer = n.CustomerName,
+                    app = n.AppName,
+                    environment = n.EnvironmentName,
+                    cpuCores = n.CpuCores,
+                    memoryGiB = n.MemoryGiB,
+                    storageGiB = n.StorageGiB,
+                    monthlyCost = n.TotalMonthlyCost,
+                    unattributed = n.IsUnattributed,
                 }),
             });
         }).RequireApiScope(ApiScopes.OpsRead);

@@ -409,6 +409,10 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.SupplyChain.SupplyChainService>();
         builder.Services.AddSingleton<EntKube.Web.Services.SupplyChain.SupplyChainScanCache>();
         builder.Services.AddHostedService<EntKube.Web.Services.SupplyChain.SupplyChainScanService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Cost.CostReportService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Cost.CostRateService>();
+        builder.Services.AddSingleton<EntKube.Web.Services.Cost.CostScanCache>();
+        builder.Services.AddHostedService<EntKube.Web.Services.Cost.CostScanService>();
         builder.Services.AddScoped<OperationsAdvisorService>();
         builder.Services.AddScoped<CustomerNotificationService>();
 
