@@ -1385,7 +1385,7 @@ public class ComponentLifecycleService(
                 ? ExternalRouteService.GenerateTlsRouteYaml(r)
                 : ExternalRouteService.GenerateHttpRouteYaml(r));
 
-        string combinedYaml = string.Join("\n---\n", new[] { gatewayYaml }.Concat(httpRoutes));
+        List<string> documents = [gatewayYaml, .. httpRoutes];
 
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-routes-{Guid.NewGuid()}.yaml");
@@ -1393,6 +1393,36 @@ public class ComponentLifecycleService(
         try
         {
             await File.WriteAllTextAsync(tempKubeconfig, component.Cluster.Kubeconfig, ct);
+
+            // On Istio, a backend port that serves TLS needs the gateway to originate TLS to it.
+            // Without that the gateway connects in plaintext, the backend drops the connection and
+            // the browser gets "upstream connect error ... reset reason: connection termination".
+            // Nothing is emitted for services whose ports are all plaintext, so clusters that work
+            // today are left exactly as they are.
+            if (gatewayClass == "istio")
+            {
+                foreach (ExternalRoute r in allRoutes.Where(r => r.TlsMode != TlsMode.Passthrough))
+                {
+                    string svcNs = r.Component?.Namespace ?? "default";
+                    if (string.IsNullOrWhiteSpace(r.ServiceName))
+                    {
+                        continue;
+                    }
+
+                    List<KubeServicePort> ports = await GetServicePortsAsync(
+                        tempKubeconfig, svcNs, r.ServiceName, ct);
+
+                    string destinationRule = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+                        r.ServiceName, svcNs, gatewayNamespace, ports, alwaysEmit: false);
+
+                    if (destinationRule.Length > 0)
+                    {
+                        documents.Add(destinationRule);
+                    }
+                }
+            }
+
+            string combinedYaml = string.Join("\n---\n", documents);
             await File.WriteAllTextAsync(tempManifest, combinedYaml, ct);
 
             // Delete orphaned service-name-based HTTPRoutes before applying hostname-based ones.
@@ -1854,6 +1884,56 @@ public class ComponentLifecycleService(
     /// <summary>
     /// Runs a CLI process (helm or kubectl) and captures its output.
     /// </summary>
+    /// <summary>
+    /// Reads a Service's ports with kubectl, for deciding how the Istio gateway should connect to
+    /// each of them. Returns an empty list when the service can't be read or parsed — callers must
+    /// read that as "nothing known about the ports", never as "no TLS ports".
+    /// </summary>
+    private static async Task<List<KubeServicePort>> GetServicePortsAsync(
+        string kubeconfigPath, string ns, string serviceName, CancellationToken ct)
+    {
+        HelmExecutionResult result = await RunProcessAsync("kubectl",
+            $"get svc {serviceName} -n {ns} -o json --kubeconfig {kubeconfigPath}", ct);
+
+        if (!result.Success || string.IsNullOrWhiteSpace(result.Output))
+        {
+            return [];
+        }
+
+        try
+        {
+            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(result.Output);
+            if (!doc.RootElement.TryGetProperty("spec", out System.Text.Json.JsonElement spec)
+                || !spec.TryGetProperty("ports", out System.Text.Json.JsonElement ports)
+                || ports.ValueKind != System.Text.Json.JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            List<KubeServicePort> parsed = [];
+            foreach (System.Text.Json.JsonElement port in ports.EnumerateArray())
+            {
+                if (!port.TryGetProperty("port", out System.Text.Json.JsonElement number)
+                    || !number.TryGetInt32(out int portNumber))
+                {
+                    continue;
+                }
+
+                parsed.Add(new KubeServicePort(
+                    port.TryGetProperty("name", out System.Text.Json.JsonElement name) ? name.GetString() : null,
+                    portNumber,
+                    port.TryGetProperty("protocol", out System.Text.Json.JsonElement proto) ? proto.GetString() ?? "TCP" : "TCP",
+                    port.TryGetProperty("appProtocol", out System.Text.Json.JsonElement app) ? app.GetString() : null));
+            }
+
+            return parsed;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return [];
+        }
+    }
+
     private static async Task<HelmExecutionResult> RunProcessAsync(
         string program, string arguments, CancellationToken ct)
     {

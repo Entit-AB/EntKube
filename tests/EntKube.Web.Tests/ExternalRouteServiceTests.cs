@@ -491,6 +491,111 @@ public class ExternalRouteServiceTests : IDisposable
         await act.Should().ThrowAsync<InvalidOperationException>();
     }
 
+    // ──────── Backend TLS (Istio DestinationRule) ────────
+
+    [Theory]
+    [InlineData("https", null, true)]
+    [InlineData("tls", null, true)]
+    [InlineData("https-keycloak", null, true)]
+    [InlineData("tls-grpc", null, true)]
+    [InlineData("http", null, false)]
+    [InlineData("management", null, false)]
+    [InlineData(null, "https", true)]
+    [InlineData(null, "tls", true)]
+    [InlineData(null, "http", false)]
+    [InlineData(null, null, false)]
+    public void IsTlsBackendPort_JudgesByNameAndAppProtocol(string? name, string? appProtocol, bool expected)
+    {
+        ExternalRouteService.IsTlsBackendPort(new KubeServicePort(name, 8443, "TCP", appProtocol))
+            .Should().Be(expected);
+    }
+
+    [Fact]
+    public void IsTlsBackendPort_PortNumberAloneIsNotEvidence()
+    {
+        // 8443 with a plaintext name must stay plaintext — guessing from the number would
+        // break a working backend, which is the expensive direction to be wrong in.
+        ExternalRouteService.IsTlsBackendPort(new KubeServicePort("http", 8443, "TCP"))
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_TlsPort_OverridesTheServiceWideDisable()
+    {
+        // keycloakx-http shape: plaintext 80, TLS 8443, plaintext management 9000.
+        List<KubeServicePort> ports =
+        [
+            new("http", 80, "TCP"),
+            new("https", 8443, "TCP"),
+            new("management", 9000, "TCP")
+        ];
+
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "keycloak-keycloakx-http", "identity", "istio-system", ports, alwaysEmit: true);
+
+        yaml.Should().Contain("host: keycloak-keycloakx-http.identity.svc.cluster.local");
+        yaml.Should().Contain("      mode: DISABLE");
+        yaml.Should().Contain("    portLevelSettings:");
+        yaml.Should().Contain("          number: 8443");
+        yaml.Should().Contain("          mode: SIMPLE");
+        yaml.Should().Contain("          insecureSkipVerify: true");
+
+        // Only the TLS port is overridden — the plaintext ports keep the service-wide DISABLE.
+        yaml.Should().NotContain("number: 80");
+        yaml.Should().NotContain("number: 9000");
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_KeepsTheExistingResourceName()
+    {
+        // Renaming would orphan the old service-wide rule in the cluster, where it would keep
+        // breaking the very port this one fixes.
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [new KubeServicePort("https", 443, "TCP")], alwaysEmit: true);
+
+        yaml.Should().Contain("name: entkube-disable-mtls-svc");
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_NoTlsPort_EmitsNothingWhenNotAlwaysEmit()
+    {
+        // Call sites that don't already ship a DestinationRule must not start shipping one for
+        // a plaintext-only service — that would change clusters that work today.
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [new KubeServicePort("http", 80, "TCP")], alwaysEmit: false);
+
+        yaml.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_UnknownPorts_FallsBackToTodaysServiceWideRule()
+    {
+        // Service unreadable → empty port list. The rule must be exactly what this call site
+        // applied before, not a guess.
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [], alwaysEmit: true);
+
+        yaml.Should().Contain("      mode: DISABLE");
+        yaml.Should().NotContain("portLevelSettings");
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_MultipleTlsPorts_ListsEachInPortOrder()
+    {
+        List<KubeServicePort> ports =
+        [
+            new("https-alt", 8443, "TCP"),
+            new("http", 80, "TCP"),
+            new(null, 443, "TCP", "https")
+        ];
+
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", ports, alwaysEmit: true);
+
+        yaml.IndexOf("number: 443", StringComparison.Ordinal)
+            .Should().BeLessThan(yaml.IndexOf("number: 8443", StringComparison.Ordinal));
+    }
+
     // ──────── Gateway resolution ────────
 
     [Fact]

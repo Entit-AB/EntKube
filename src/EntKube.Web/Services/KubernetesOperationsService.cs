@@ -67,7 +67,12 @@ public class ContainerInfo
 }
 
 /// A Kubernetes Service port entry (name optional, port number, protocol).
-public record KubeServicePort(string? Name, int Port, string Protocol);
+/// <summary>
+/// A port on a Kubernetes Service. <paramref name="AppProtocol"/> carries the Service's
+/// appProtocol field — with the port name it is how we tell a TLS-serving port from a
+/// plaintext one when configuring how the gateway connects to the backend.
+/// </summary>
+public record KubeServicePort(string? Name, int Port, string Protocol, string? AppProtocol = null);
 
 /// <summary>A Kubernetes Service with its exposed ports.</summary>
 public record KubeServiceInfo(string Name, string Type, string? ClusterIP, List<KubeServicePort> Ports);
@@ -1178,17 +1183,16 @@ public class KubernetesOperationsService(
             {
                 string svc = enabledRoute.ServiceName;
                 string svcNs = enabledRoute.AppDeployment?.Namespace ?? dr.AppDeployment.Namespace;
-                string destinationRuleYaml =
-                    $"apiVersion: networking.istio.io/v1beta1\n" +
-                    $"kind: DestinationRule\n" +
-                    $"metadata:\n" +
-                    $"  name: entkube-disable-mtls-{svc}\n" +
-                    $"  namespace: {gwNamespace}\n" +
-                    $"spec:\n" +
-                    $"  host: {svc}.{svcNs}.svc.cluster.local\n" +
-                    $"  trafficPolicy:\n" +
-                    $"    tls:\n" +
-                    $"      mode: DISABLE\n";
+
+                // Read the live Service so TLS-serving ports keep TLS. A service-wide DISABLE
+                // would push plaintext into them and the backend would drop the connection.
+                // An empty list (service missing, API unreachable) yields exactly the
+                // service-wide rule this call site has always applied.
+                List<KubeServicePort> ports = await GetServicePortsAsync(kubeconfig, svcNs, svc, ct);
+
+                string destinationRuleYaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+                    svc, svcNs, gwNamespace, ports, alwaysEmit: true);
+
                 await ApplyRawYamlAsync(kubeconfig, destinationRuleYaml, ct);
             }
         }
@@ -2801,7 +2805,7 @@ public class KubernetesOperationsService(
                     svc.Spec?.Type ?? "ClusterIP",
                     svc.Spec?.ClusterIP,
                     (svc.Spec?.Ports ?? [])
-                        .Select(p => new KubeServicePort(p.Name, p.Port, p.Protocol ?? "TCP"))
+                        .Select(p => new KubeServicePort(p.Name, p.Port, p.Protocol ?? "TCP", p.AppProtocol))
                         .ToList()))
                 .OrderBy(s => s.Name)
                 .ToList();
@@ -2860,6 +2864,31 @@ public class KubernetesOperationsService(
     /// Creates a Kubernetes client from a raw kubeconfig YAML string.
     /// The kubeconfig is parsed in-memory — never written to disk.
     /// </summary>
+    /// <summary>
+    /// Reads one Service's ports straight from the cluster, for deciding how the gateway should
+    /// connect to each of them. Returns an empty list when the service can't be read — callers
+    /// must treat that as "nothing known about the ports", never as "no TLS ports".
+    /// </summary>
+    private async Task<List<KubeServicePort>> GetServicePortsAsync(
+        string kubeconfig, string ns, string serviceName, CancellationToken ct)
+    {
+        try
+        {
+            using Kubernetes client = CreateClient(kubeconfig);
+            V1Service svc = await client.CoreV1.ReadNamespacedServiceAsync(serviceName, ns, cancellationToken: ct);
+
+            return (svc.Spec?.Ports ?? [])
+                .Select(p => new KubeServicePort(p.Name, p.Port, p.Protocol ?? "TCP", p.AppProtocol))
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not read service {Service} in {Namespace} for backend TLS detection",
+                serviceName, ns);
+            return [];
+        }
+    }
+
     private static Kubernetes CreateClient(string kubeconfig)
     {
         using MemoryStream stream = new(System.Text.Encoding.UTF8.GetBytes(kubeconfig));

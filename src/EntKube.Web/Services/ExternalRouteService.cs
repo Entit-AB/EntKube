@@ -271,6 +271,104 @@ public class ExternalRouteService(
             rule.ToString().TrimEnd() + "\n";
     }
 
+    /// <summary>
+    /// True when a Service port serves TLS, judged the way Istio itself judges it: the
+    /// appProtocol field, or the port name (exactly "https"/"tls", or the "https-"/"tls-"
+    /// prefix convention).
+    ///
+    /// Deliberately no port-number heuristic. Guessing that 8443 means TLS would break a
+    /// working plaintext backend that happens to use that number; failing to spot a TLS port
+    /// leaves the route exactly as broken as it already was, which is the safer direction to
+    /// be wrong in.
+    /// </summary>
+    public static bool IsTlsBackendPort(KubeServicePort port)
+    {
+        if (port.AppProtocol is string app
+            && (app.Equals("https", StringComparison.OrdinalIgnoreCase)
+                || app.Equals("tls", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        if (port.Name is not string name)
+        {
+            return false;
+        }
+
+        return name.Equals("https", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("tls", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("https-", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("tls-", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Generates the DestinationRule that tells an Istio ingress gateway how to connect to a
+    /// backend Service, per port.
+    ///
+    /// The service-wide <c>trafficPolicy.tls.mode: DISABLE</c> exists so the gateway can reach
+    /// sidecar-less pods without attempting mTLS. But it applies to EVERY port of the service,
+    /// so on a service that mixes plaintext and TLS ports (keycloakx-http serves 80 and 8443)
+    /// it also forces plaintext into the TLS port — the backend closes the connection and Envoy
+    /// answers "upstream connect error or disconnect/reset before headers. reset reason:
+    /// connection termination". <c>portLevelSettings</c> overrides the service-wide policy for
+    /// exactly those ports, so the gateway originates TLS to them instead.
+    ///
+    /// Returns "" when <paramref name="alwaysEmit"/> is false and the service has no TLS port —
+    /// callers that don't already ship a DestinationRule then ship nothing, leaving working
+    /// clusters untouched.
+    /// </summary>
+    /// <param name="alwaysEmit">
+    /// True for call sites that already emit a service-wide DISABLE rule today and must keep
+    /// doing so; false for call sites adding a rule only because a TLS port needs one.
+    /// </param>
+    public static string GenerateBackendDestinationRuleYaml(
+        string serviceName, string serviceNamespace, string gatewayNamespace,
+        IEnumerable<KubeServicePort> ports, bool alwaysEmit)
+    {
+        List<KubeServicePort> tlsPorts = ports.Where(IsTlsBackendPort).ToList();
+
+        if (tlsPorts.Count == 0 && !alwaysEmit)
+        {
+            return "";
+        }
+
+        System.Text.StringBuilder yaml = new();
+        yaml.Append(
+            // The name is unchanged from when this rule only disabled mTLS. Renaming it would
+            // leave the old service-wide rule orphaned in the cluster, still breaking the very
+            // port this one fixes.
+            $"apiVersion: networking.istio.io/v1beta1\n" +
+            $"kind: DestinationRule\n" +
+            $"metadata:\n" +
+            $"  name: entkube-disable-mtls-{serviceName}\n" +
+            $"  namespace: {gatewayNamespace}\n" +
+            $"spec:\n" +
+            $"  host: {serviceName}.{serviceNamespace}.svc.cluster.local\n" +
+            $"  trafficPolicy:\n" +
+            $"    tls:\n" +
+            $"      mode: DISABLE\n");
+
+        if (tlsPorts.Count > 0)
+        {
+            yaml.Append("    portLevelSettings:\n");
+            foreach (KubeServicePort port in tlsPorts.OrderBy(p => p.Port))
+            {
+                // insecureSkipVerify because in-cluster backends almost always present a
+                // self-signed certificate. This hop previously carried no encryption at all
+                // (mode DISABLE), so encrypted-but-unverified is strictly an improvement on
+                // what it replaces — it is not a downgrade of a verified path.
+                yaml.Append(
+                    $"      - port:\n" +
+                    $"          number: {port.Port}\n" +
+                    $"        tls:\n" +
+                    $"          mode: SIMPLE\n" +
+                    $"          insecureSkipVerify: true\n");
+            }
+        }
+
+        return yaml.ToString();
+    }
+
     /// <summary>The request timeout applied to generated HTTPRoute rules when a route sets none.</summary>
     public const int DefaultRequestTimeoutSeconds = 60;
 
