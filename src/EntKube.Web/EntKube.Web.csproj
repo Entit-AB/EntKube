@@ -31,6 +31,7 @@
     <PackageReference Include="YamlDotNet" Version="17.1.0" />
     <PackageReference Include="ZstdSharp.Port" Version="0.8.1" />
     <ProjectReference Include="..\EntKube.Web.Client\EntKube.Web.Client.csproj" />
+    <ProjectReference Include="..\EntKube.Agents.Protocol\EntKube.Agents.Protocol.csproj" />
     <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" Version="10.0.1" />
     <PackageReference Include="Microsoft.AspNetCore.Diagnostics.EntityFrameworkCore" Version="10.0.1" />
     <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="10.0.1" />

@@ -87,6 +87,18 @@ public class OpenStackConnection
     /// </summary>
     public Guid? RouteViaClusterId { get; set; }
 
+    /// <summary>
+    /// Route this cloud's API traffic through an <see cref="EgressAgent"/> running
+    /// inside a network that is allowed to reach it.
+    ///
+    /// The last resort, and the only option when neither the EntKube server nor any
+    /// managed cluster can reach the endpoint — the agent dials out from a network
+    /// that can, so nothing has to be published inbound anywhere.
+    ///
+    /// Takes precedence over <see cref="RouteViaClusterId"/> and <see cref="ProxyUrl"/>.
+    /// </summary>
+    public Guid? RouteViaAgentId { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation

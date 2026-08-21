@@ -1,6 +1,8 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/EntKube.Web.Client/EntKube.Web.Client.csproj" />
+    <Project Path="src/EntKube.Agents.Protocol/EntKube.Agents.Protocol.csproj" />
+    <Project Path="src/EntKube.Agent/EntKube.Agent.csproj" />
     <Project Path="src/EntKube.Web/EntKube.Web.csproj" />
   </Folder>
   <Folder Name="/tests/">

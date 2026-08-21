@@ -22,6 +22,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<App> Apps => Set<App>();
     public DbSet<AppEnvironment> AppEnvironments => Set<AppEnvironment>();
     public DbSet<KubernetesCluster> KubernetesClusters => Set<KubernetesCluster>();
+    public DbSet<EgressAgent> EgressAgents => Set<EgressAgent>();
     public DbSet<SecretVault> SecretVaults => Set<SecretVault>();
     public DbSet<VaultSecret> VaultSecrets => Set<VaultSecret>();
     public DbSet<VaultSecretVersion> VaultSecretVersions => Set<VaultSecretVersion>();

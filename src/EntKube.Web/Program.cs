@@ -11,6 +11,7 @@ using EntKube.Web.Components;
 using EntKube.Web.Components.Account;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
+using EntKube.Web.Services.Agents;
 using EntKube.Web.Services.Telemetry;
 using StackExchange.Redis;
 
@@ -348,6 +349,8 @@ public class Program
         builder.Services.AddSingleton<OpenStackHttpFactory>();
         // Singleton: owns long-lived `kubectl port-forward` processes to cluster relays.
         builder.Services.AddSingleton<ClusterEgressTunnel>();
+        // Singleton: an agent link outlives any request or circuit that uses it.
+        builder.Services.AddSingleton<AgentRegistry>();
         builder.Services.AddScoped<ClusterEgressRelay>();
         builder.Services.AddScoped<OpenStackKeystoneClient>();
         builder.Services.AddScoped<OpenStackS3Service>();
@@ -553,6 +556,10 @@ public class Program
 
         app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
         app.UseHttpsRedirection();
+
+        // Required for the egress agent endpoint to accept its upgrade request;
+        // must sit ahead of endpoint execution.
+        app.UseWebSockets();
 
         app.UseAntiforgery();
 
@@ -772,6 +779,10 @@ public class Program
             }
             return Results.NoContent();
         }).DisableAntiforgery();
+
+        // Egress agents dial in here from customer networks that permit no inbound
+        // traffic. Token-authenticated inside the handler, not by the cookie scheme.
+        app.MapAgentEndpoint();
 
         app.Run();
     }

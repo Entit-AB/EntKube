@@ -73,12 +73,18 @@ public class OpenStackKeystoneClient(
     /// the cluster relay tunnel if that is the configured route. Returns null when
     /// the connection talks to OpenStack directly.
     ///
-    /// Routing through a cluster takes precedence over an explicit proxy: it is the
-    /// more specific choice, and the UI offers them as alternatives.
+    /// The routes are alternatives in the UI, so precedence only matters for data
+    /// written before this existed: agent, then cluster, then proxy — most specific
+    /// first.
     /// </summary>
     public async Task<ResolvedEgress?> ResolveEgressAsync(
         OpenStackConnection connection, CancellationToken ct = default)
     {
+        if (connection.RouteViaAgentId is { } agentId)
+        {
+            return new ResolvedEgress(AgentId: agentId);
+        }
+
         if (connection.RouteViaClusterId is { } clusterId)
         {
             string kubeconfig = await LoadKubeconfigAsync(clusterId, ct);

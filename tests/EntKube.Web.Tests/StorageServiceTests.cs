@@ -1,5 +1,6 @@
 using EntKube.Web.Data;
 using EntKube.Web.Services;
+using EntKube.Web.Services.Agents;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -44,14 +45,15 @@ public class StorageServiceTests : IDisposable
         VaultEncryptionService encryption = new(TestRootKey);
         vaultService = new VaultService(dbFactory, encryption);
         Mock<IHttpClientFactory> innerHttpFactory = new();
-        OpenStackHttpFactory httpFactory = new(innerHttpFactory.Object);
+        AgentRegistry agentRegistry = new(dbFactory, NullLogger<AgentRegistry>.Instance);
+        OpenStackHttpFactory httpFactory = new(innerHttpFactory.Object, agentRegistry);
         Mock<IKubernetesClientFactory> k8sMock = new();
         ClusterEgressRelay egressRelay = new(k8sMock.Object, NullLogger<ClusterEgressRelay>.Instance);
         ClusterEgressTunnel egressTunnel = new(NullLogger<ClusterEgressTunnel>.Instance);
         OpenStackKeystoneClient keystone = new(httpFactory, vaultService, egressTunnel, dbFactory);
         OpenStackS3Service openStackS3 = new(vaultService, httpFactory, keystone);
         StorageLinkClientFactory storageClientFactory = new(vaultService, dbFactory, httpFactory, keystone);
-        sut = new StorageService(dbFactory, vaultService, openStackS3, keystone, egressRelay, egressTunnel, k8sMock.Object, storageClientFactory);
+        sut = new StorageService(dbFactory, vaultService, openStackS3, keystone, egressRelay, egressTunnel, agentRegistry, k8sMock.Object, storageClientFactory);
     }
 
     public void Dispose()
@@ -428,7 +430,7 @@ public class StorageServiceTests : IDisposable
             "Default",
             "admin@example.com",
             "supersecret",
-            null, null, null, null);
+            null, null, null, null, null);
 
         // Assert — connection is persisted with metadata.
 
@@ -459,7 +461,7 @@ public class StorageServiceTests : IDisposable
 
         OpenStackConnection connection = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "ToDelete", "https://auth.example.com/v3",
-            "Sto2", null, null, null, null, "user", "pass123", null, null, null, null);
+            "Sto2", null, null, null, null, "user", "pass123", null, null, null, null, null);
 
         // Act
 
@@ -485,7 +487,7 @@ public class StorageServiceTests : IDisposable
 
         OpenStackConnection connection = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "InUse", "https://auth.example.com/v3",
-            "Kna1", null, null, null, null, null, null, null, null, null, null);
+            "Kna1", null, null, null, null, null, null, null, null, null, null, null);
 
         StorageLink link = new()
         {
@@ -520,7 +522,7 @@ public class StorageServiceTests : IDisposable
 
         OpenStackConnection connection = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "Cleura", "https://auth.example.com/v3",
-            "Kna1", null, null, null, null, null, null, null, null, null, null);
+            "Kna1", null, null, null, null, null, null, null, null, null, null, null);
 
         // Act
 

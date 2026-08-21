@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Services.Agents;
 using k8s;
 using k8s.Models;
 using Microsoft.EntityFrameworkCore;
@@ -36,7 +37,7 @@ public class MinioBucketInfo
 /// External providers are registered manually — the service stores metadata
 /// in StorageLink entities and credentials in the VaultSecret table.
 /// </summary>
-public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, OpenStackKeystoneClient keystone, ClusterEgressRelay egressRelay, ClusterEgressTunnel egressTunnel, IKubernetesClientFactory k8sFactory, StorageLinkClientFactory storageClientFactory)
+public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, OpenStackKeystoneClient keystone, ClusterEgressRelay egressRelay, ClusterEgressTunnel egressTunnel, AgentRegistry agentRegistry, IKubernetesClientFactory k8sFactory, StorageLinkClientFactory storageClientFactory)
 {
     // ──────── Operator Status ────────
 
@@ -1019,6 +1020,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         string? proxyUsername,
         string? proxyPassword,
         Guid? routeViaClusterId,
+        Guid? routeViaAgentId,
         CancellationToken ct = default)
     {
         // Fail fast on a malformed proxy rather than storing a value that only
@@ -1041,7 +1043,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
             Username = username,
             ProxyUrl = proxyUrl,
             ProxyUsername = proxyUsername,
-            RouteViaClusterId = routeViaClusterId
+            RouteViaClusterId = routeViaClusterId,
+            RouteViaAgentId = routeViaAgentId
         };
 
         db.OpenStackConnections.Add(connection);
@@ -1087,6 +1090,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         string? proxyUsername,
         string? proxyPassword,
         Guid? routeViaClusterId,
+        Guid? routeViaAgentId,
         Guid tenantId,
         CancellationToken ct = default)
     {
@@ -1112,6 +1116,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         connection.ProxyUrl = proxyUrl;
         connection.ProxyUsername = proxyUsername;
         connection.RouteViaClusterId = routeViaClusterId;
+        connection.RouteViaAgentId = routeViaAgentId;
         await db.SaveChangesAsync(ct);
 
         // Update passwords only when a new one was supplied — an empty field means
@@ -1142,6 +1147,78 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         => string.IsNullOrWhiteSpace(proxyUrl)
             ? null
             : OpenStackHttpFactory.ParseProxyUri(proxyUrl).ToString().TrimEnd('/');
+
+    /// <summary>
+    /// Registers an egress agent and returns the enrolment token, which is shown
+    /// once and never stored — only its hash is kept, so the database holds
+    /// nothing that could impersonate the agent.
+    /// </summary>
+    public async Task<(EgressAgent Agent, string Token)> CreateEgressAgentAsync(
+        Guid tenantId, string name, string? description, CancellationToken ct = default)
+    {
+        string token = AgentRegistry.GenerateToken();
+
+        EgressAgent agent = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            Name = name,
+            Description = description,
+            TokenHash = AgentRegistry.HashToken(token)
+        };
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        db.EgressAgents.Add(agent);
+        await db.SaveChangesAsync(ct);
+
+        return (agent, token);
+    }
+
+    /// <summary>Egress agents registered for this tenant.</summary>
+    public async Task<List<EgressAgent>> GetEgressAgentsAsync(Guid tenantId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.EgressAgents
+            .Where(a => a.TenantId == tenantId)
+            .OrderBy(a => a.Name)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>Whether an agent currently has a link open. Live state, not persisted.</summary>
+    public bool IsEgressAgentConnected(Guid agentId) => agentRegistry.IsConnected(agentId);
+
+    /// <summary>Live link details for an agent, or null when it is not connected.</summary>
+    public (DateTime ConnectedAt, string RemoteAddress, int ActiveStreams)? GetEgressAgentStatus(Guid agentId)
+        => agentRegistry.GetStatus(agentId);
+
+    /// <summary>
+    /// Deletes an egress agent. Refused while an OpenStack connection still routes
+    /// through it, since that would silently break the connection.
+    /// </summary>
+    public async Task<(bool Deleted, string? Reason)> DeleteEgressAgentAsync(
+        Guid tenantId, Guid agentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        EgressAgent? agent = await db.EgressAgents
+            .FirstOrDefaultAsync(a => a.Id == agentId && a.TenantId == tenantId, ct);
+
+        if (agent is null) return (false, "Agent not found.");
+
+        int inUse = await db.OpenStackConnections.CountAsync(c => c.RouteViaAgentId == agentId, ct);
+
+        if (inUse > 0)
+        {
+            return (false,
+                $"{inUse} OpenStack connection(s) still route through this agent. "
+                + "Point them elsewhere first.");
+        }
+
+        db.EgressAgents.Remove(agent);
+        await db.SaveChangesAsync(ct);
+        return (true, null);
+    }
 
     /// <summary>
     /// Clusters this tenant could route OpenStack traffic through. Only clusters
@@ -1325,9 +1402,13 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         {
             KeystoneSession session = await keystone.AuthenticateAsync(connection, password, ct);
 
-            string route = connection.RouteViaClusterId is not null
-                ? " via the cluster egress relay"
-                : connection.ProxyUrl is { Length: > 0 } proxy ? $" via {proxy}" : "";
+            string route = connection switch
+            {
+                { RouteViaAgentId: not null } => " via the egress agent",
+                { RouteViaClusterId: not null } => " via the cluster egress relay",
+                { ProxyUrl: { Length: > 0 } proxy } => $" via {proxy}",
+                _ => ""
+            };
 
             string objectStore = session.GetEndpoint("object-store") is not null
                 ? "object-store available"

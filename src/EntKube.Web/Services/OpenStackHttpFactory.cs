@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using Amazon.Runtime;
+using EntKube.Web.Services.Agents;
 
 namespace EntKube.Web.Services;
 
@@ -31,10 +32,11 @@ public sealed record OpenStackProxy(string Url, string? Username = null, string?
 /// </summary>
 /// <param name="Proxy">Explicit outbound proxy, or null.</param>
 /// <param name="RelayClusterId">Cluster whose in-cluster relay to route through, or null.</param>
-public sealed record OpenStackEgress(OpenStackProxy? Proxy = null, Guid? RelayClusterId = null)
+public sealed record OpenStackEgress(
+    OpenStackProxy? Proxy = null, Guid? RelayClusterId = null, Guid? AgentId = null)
 {
     /// <summary>True when this describes no egress hop at all — a direct connection.</summary>
-    public bool IsDirect => Proxy is null && RelayClusterId is null;
+    public bool IsDirect => Proxy is null && RelayClusterId is null && AgentId is null;
 }
 
 /// <summary>
@@ -47,12 +49,20 @@ public sealed record OpenStackEgress(OpenStackProxy? Proxy = null, Guid? RelayCl
 /// </summary>
 /// <param name="Proxy">Proxy to route through, or null.</param>
 /// <param name="RelayLocalPort">Loopback port forwarding to a cluster relay, or null.</param>
-public sealed record ResolvedEgress(OpenStackProxy? Proxy = null, int? RelayLocalPort = null)
+/// <param name="AgentId">Egress agent to open streams through, or null.</param>
+public sealed record ResolvedEgress(
+    OpenStackProxy? Proxy = null, int? RelayLocalPort = null, Guid? AgentId = null)
 {
+    /// <summary>True when no hop is configured and traffic should leave directly.</summary>
+    public bool IsDirect => Proxy is null && RelayLocalPort is null && AgentId is null;
+
     /// <summary>Identity of the underlying connection pool — distinct transports must not share a handler.</summary>
-    internal string CacheKey => Proxy is not null
-        ? $"proxy\n{Proxy.CacheKey}"
-        : $"relay\n{RelayLocalPort}";
+    internal string CacheKey => this switch
+    {
+        { Proxy: not null } => $"proxy\n{Proxy.CacheKey}",
+        { AgentId: not null } => $"agent\n{AgentId}",
+        _ => $"relay\n{RelayLocalPort}"
+    };
 }
 
 /// <summary>
@@ -64,7 +74,7 @@ public sealed record ResolvedEgress(OpenStackProxy? Proxy = null, int? RelayLoca
 /// A null egress falls through to the default direct client, so connections that
 /// do not need this pay nothing.
 /// </summary>
-public sealed class OpenStackHttpFactory(IHttpClientFactory inner) : IDisposable
+public sealed class OpenStackHttpFactory(IHttpClientFactory inner, AgentRegistry agents) : IDisposable
 {
     private readonly ConcurrentDictionary<string, SocketsHttpHandler> handlers = new();
 
@@ -78,7 +88,7 @@ public sealed class OpenStackHttpFactory(IHttpClientFactory inner) : IDisposable
     /// </summary>
     public HttpClient CreateClient(ResolvedEgress? egress)
     {
-        if (egress is null || (egress.Proxy is null && egress.RelayLocalPort is null))
+        if (egress is null || egress.IsDirect)
         {
             return inner.CreateClient();
         }
@@ -97,11 +107,9 @@ public sealed class OpenStackHttpFactory(IHttpClientFactory inner) : IDisposable
     /// matters here.
     /// </summary>
     public HttpClientFactory? CreateAwsHttpClientFactory(ResolvedEgress? egress)
-        => egress is null || (egress.Proxy is null && egress.RelayLocalPort is null)
-            ? null
-            : new ProxiedAwsHttpClientFactory(this, egress);
+        => egress is null || egress.IsDirect ? null : new ProxiedAwsHttpClientFactory(this, egress);
 
-    private static SocketsHttpHandler BuildHandler(ResolvedEgress egress)
+    private SocketsHttpHandler BuildHandler(ResolvedEgress egress)
     {
         SocketsHttpHandler handler = new()
         {
@@ -124,8 +132,22 @@ public sealed class OpenStackHttpFactory(IHttpClientFactory inner) : IDisposable
             return handler;
         }
 
+        if (egress.AgentId is { } agentId)
+        {
+            // Ask the agent to dial the destination from inside its own network and
+            // hand back the stream. The request URI is untouched, so TLS is still
+            // negotiated end-to-end with the real host — the agent relays ciphertext
+            // and certificate validation and request signing are unaffected.
+            handler.UseProxy = false;
+            handler.ConnectCallback = async (context, ct) =>
+                await agents.OpenStreamAsync(
+                    agentId, context.DnsEndPoint.Host, context.DnsEndPoint.Port, ct);
+
+            return handler;
+        }
+
         int port = egress.RelayLocalPort
-            ?? throw new InvalidOperationException("Egress has neither a proxy nor a relay port.");
+            ?? throw new InvalidOperationException("Egress has no proxy, relay port or agent.");
 
         // Dial the forwarded loopback port instead of the real endpoint, while
         // leaving the request URI untouched. TLS is negotiated end-to-end with the

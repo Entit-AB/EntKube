@@ -2342,6 +2342,48 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("DockerRegistryCredentials");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.EgressAgent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("LastRemoteAddress")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("LastSeenAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ReportedAllowlist")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("EgressAgents");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4159,6 +4201,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<string>("Region")
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid?>("RouteViaAgentId")
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<Guid?>("RouteViaClusterId")
                         .HasColumnType("uniqueidentifier");
@@ -6310,6 +6355,17 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("KubernetesCluster");
 
                     b.Navigation("Vault");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.EgressAgent", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>

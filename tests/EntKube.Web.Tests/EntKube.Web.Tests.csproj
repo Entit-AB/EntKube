@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\EntKube.Web\EntKube.Web.csproj" />
+    <ProjectReference Include="..\..\src\EntKube.Agent\EntKube.Agent.csproj" />
   </ItemGroup>
 
 </Project>

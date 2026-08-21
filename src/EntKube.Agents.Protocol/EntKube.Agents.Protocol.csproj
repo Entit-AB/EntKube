@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The agent link's wire format, shared by the EntKube server and the agent
+       binary. A real project rather than a linked source file so the type exists
+       once: compiling it into both assemblies makes it ambiguous for anything
+       that references them together, such as the integration tests. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>EntKube.Agents.Protocol</RootNamespace>
+  </PropertyGroup>
+
+</Project>

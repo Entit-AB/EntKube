@@ -2336,6 +2336,48 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("DockerRegistryCredentials");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.EgressAgent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LastRemoteAddress")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("LastSeenAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReportedAllowlist")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("EgressAgents");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4151,6 +4193,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Region")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("RouteViaAgentId")
                         .HasColumnType("TEXT");
 
                     b.Property<Guid?>("RouteViaClusterId")
@@ -6297,6 +6342,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("KubernetesCluster");
 
                     b.Navigation("Vault");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.EgressAgent", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>

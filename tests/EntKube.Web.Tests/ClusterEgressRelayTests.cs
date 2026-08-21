@@ -281,7 +281,7 @@ public class ClusterEgressRelayTests
     [Fact]
     public void A_relay_egress_and_a_proxy_egress_are_distinct_transports()
     {
-        using OpenStackHttpFactory factory = new(new Mock<IHttpClientFactory>().Object);
+        using OpenStackHttpFactory factory = new(new Mock<IHttpClientFactory>().Object, null!);
         Amazon.S3.AmazonS3Config config = new();
 
         string relay = factory.CreateAwsHttpClientFactory(new ResolvedEgress(RelayLocalPort: 5000))!
@@ -297,7 +297,7 @@ public class ClusterEgressRelayTests
     {
         // A restarted tunnel gets a new local port; reusing the old handler would
         // keep dialling a port nothing listens on.
-        using OpenStackHttpFactory factory = new(new Mock<IHttpClientFactory>().Object);
+        using OpenStackHttpFactory factory = new(new Mock<IHttpClientFactory>().Object, null!);
         Amazon.S3.AmazonS3Config config = new();
 
         factory.CreateAwsHttpClientFactory(new ResolvedEgress(RelayLocalPort: 5000))!.GetConfigUniqueString(config)
@@ -308,7 +308,7 @@ public class ClusterEgressRelayTests
     [Fact]
     public void A_direct_egress_produces_no_aws_override()
     {
-        using OpenStackHttpFactory factory = new(new Mock<IHttpClientFactory>().Object);
+        using OpenStackHttpFactory factory = new(new Mock<IHttpClientFactory>().Object, null!);
 
         factory.CreateAwsHttpClientFactory(new ResolvedEgress()).Should().BeNull();
     }

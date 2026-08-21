@@ -792,7 +792,18 @@
                                     <div class="col-12 mb-1">
                                         <i class="bi bi-link-45deg me-1"></i><code class="small text-break">@conn.AuthUrl</code>
                                     </div>
-                                    @if (conn.RouteViaClusterId is not null)
+                                    @if (conn.RouteViaAgentId is not null)
+                                    {
+                                        <div class="col-12 mb-1">
+                                            <i class="bi bi-hdd-network me-1 text-info"></i>via agent
+                                            <strong>@(egressAgents.FirstOrDefault(a => a.Id == conn.RouteViaAgentId)?.Name ?? "(removed)")</strong>
+                                            @if (conn.RouteViaAgentId is { } routedAgentId && !StorageService.IsEgressAgentConnected(routedAgentId))
+                                            {
+                                                <span class="badge bg-warning-subtle text-warning-emphasis ms-1">offline</span>
+                                            }
+                                        </div>
+                                    }
+                                    else if (conn.RouteViaClusterId is not null)
                                     {
                                         <div class="col-12 mb-1">
                                             <i class="bi bi-signpost-split me-1 text-info"></i>via cluster
@@ -816,7 +827,7 @@
                             <div class="card-footer bg-white py-1 d-flex align-items-center justify-content-between">
                                 <small class="text-muted">Added @conn.CreatedAt.ToString("yyyy-MM-dd")</small>
                                 <div class="d-flex gap-1">
-                                    @if (conn.RouteViaClusterId is not null)
+                                    @if (conn.RouteViaClusterId is not null && conn.RouteViaAgentId is null)
                                     {
                                         <button class="btn btn-sm btn-outline-info border-0 py-0"
                                                 @onclick="() => DeployEgressRelay(conn.Id)"
@@ -951,6 +962,45 @@
                     }
 
                     <div class="form-check">
+                        <input class="form-check-input" type="radio" id="osRouteAgent"
+                               checked="@(osFormRoute == OsRoute.Agent)"
+                               @onchange="() => osFormRoute = OsRoute.Agent" />
+                        <label class="form-check-label small" for="osRouteAgent">
+                            <strong>Through an EntKube agent</strong>
+                            <span class="text-muted"> — when neither this server nor any cluster can reach the cloud.</span>
+                        </label>
+                    </div>
+
+                    @if (osFormRoute == OsRoute.Agent)
+                    {
+                        <div class="ms-4 mt-2">
+                            <p class="small text-muted mb-2">
+                                A small process you run inside a network that <em>is</em> allowed to reach the cloud.
+                                It dials out to EntKube and holds the connection open, so nothing is published inbound
+                                on your network. The agent decides for itself which hosts it will reach, from its own
+                                local config — EntKube cannot widen that.
+                            </p>
+                            @if (egressAgents.Count == 0)
+                            {
+                                <div class="alert alert-warning py-2 px-3 small mb-0">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>
+                                    No agents registered yet. Add one below, then run it inside the permitted network.
+                                </div>
+                            }
+                            else
+                            {
+                                <select class="form-select form-select-sm" @bind="osFormRouteAgentId">
+                                    <option value="">-- Select an agent --</option>
+                                    @foreach (EgressAgent agent in egressAgents)
+                                    {
+                                        <option value="@agent.Id">@agent.Name</option>
+                                    }
+                                </select>
+                            }
+                        </div>
+                    }
+
+                    <div class="form-check">
                         <input class="form-check-input" type="radio" id="osRouteProxy"
                                checked="@(osFormRoute == OsRoute.Proxy)"
                                @onchange="() => osFormRoute = OsRoute.Proxy" />
@@ -1001,6 +1051,112 @@
                     </div>
                 </div>
             </div>
+        }
+    </div>
+
+    @* ── Egress agents ── *@
+    <div class="mt-4">
+        <div class="d-flex align-items-center justify-content-between mb-2">
+            <h6 class="mb-0 d-flex align-items-center gap-2">
+                <i class="bi bi-hdd-network text-info"></i>Egress Agents
+                @if (egressAgents.Count > 0)
+                {
+                    <span class="badge bg-info rounded-pill">@egressAgents.Count</span>
+                }
+            </h6>
+            <button class="btn btn-sm btn-outline-info" @onclick="() => showAgentForm = true">
+                <i class="bi bi-plus-lg me-1"></i>Add Agent
+            </button>
+        </div>
+        <p class="small text-muted">
+            For clouds that only accept traffic from a network EntKube is not on. You run the agent inside
+            that network; it connects out to EntKube and relays connections to hosts you allow in its config.
+        </p>
+
+        @if (newAgentToken is not null)
+        {
+            <div class="alert alert-success py-2 px-3 small">
+                <div class="fw-semibold mb-1"><i class="bi bi-key me-1"></i>Enrolment token — copy it now</div>
+                <div>This is shown once and is not stored. Put it in the agent's <code>agent.json</code>.</div>
+                <code class="d-block mt-2 text-break">@newAgentToken</code>
+                <button class="btn btn-sm btn-outline-secondary mt-2" @onclick="() => newAgentToken = null">Done</button>
+            </div>
+        }
+
+        @if (showAgentForm)
+        {
+            <div class="card shadow-sm border-info mb-3">
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label class="form-label small fw-semibold">Agent Name</label>
+                            <input type="text" class="form-control form-control-sm" @bind="agentFormName" placeholder="e.g. Head office network" />
+                        </div>
+                        <div class="col-md-8">
+                            <label class="form-label small fw-semibold">Description</label>
+                            <input type="text" class="form-control form-control-sm" @bind="agentFormDescription" placeholder="Which network it runs in, who operates it" />
+                        </div>
+                    </div>
+                    <div class="mt-3 d-flex gap-2">
+                        <button class="btn btn-sm btn-info text-white" @onclick="CreateEgressAgent" disabled="@savingAgent">Create Agent</button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelAgentForm">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (egressAgents.Count > 0)
+        {
+            <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                    <thead>
+                        <tr class="small text-muted">
+                            <th>Name</th><th>Status</th><th>Last seen</th><th>Will reach</th><th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (EgressAgent agent in egressAgents)
+                        {
+                            <tr>
+                                <td class="small">
+                                    <strong>@agent.Name</strong>
+                                    @if (!string.IsNullOrWhiteSpace(agent.Description))
+                                    {
+                                        <div class="text-muted">@agent.Description</div>
+                                    }
+                                </td>
+                                <td class="small">
+                                    @if (StorageService.GetEgressAgentStatus(agent.Id) is { } status)
+                                    {
+                                        <span class="badge bg-success-subtle text-success-emphasis">Connected</span>
+                                        <div class="text-muted">from @status.RemoteAddress, @status.ActiveStreams stream(s)</div>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-secondary-subtle text-secondary-emphasis">Offline</span>
+                                    }
+                                </td>
+                                <td class="small text-muted">
+                                    @(agent.LastSeenAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                </td>
+                                <td class="small text-muted text-break">
+                                    @(string.IsNullOrWhiteSpace(agent.ReportedAllowlist) ? "—" : agent.ReportedAllowlist)
+                                </td>
+                                <td class="text-end">
+                                    <button class="btn btn-sm btn-outline-danger border-0 py-0"
+                                            @onclick="() => DeleteEgressAgent(agent.Id)" title="Delete">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            @if (agentError is not null)
+            {
+                <div class="alert alert-danger py-2 px-3 small">@agentError</div>
+            }
         }
     </div>
 
@@ -1088,10 +1244,18 @@
     private string osFormUsername = "";
     private string osFormPassword = "";
     /// <summary>How a connection reaches its cloud — mutually exclusive options in the form.</summary>
-    private enum OsRoute { Direct, Cluster, Proxy }
+    private enum OsRoute { Direct, Cluster, Agent, Proxy }
 
     private OsRoute osFormRoute = OsRoute.Direct;
     private string osFormRouteClusterId = "";
+    private string osFormRouteAgentId = "";
+    private List<EgressAgent> egressAgents = [];
+    private bool showAgentForm;
+    private bool savingAgent;
+    private string agentFormName = "";
+    private string agentFormDescription = "";
+    private string? newAgentToken;
+    private string? agentError;
     private List<KubernetesCluster> routableClusters = [];
     private string osFormProxyUrl = "";
     private string osFormProxyUsername = "";
@@ -1159,6 +1323,7 @@
         environments = await StorageService.GetEnvironmentsAsync(TenantId);
         openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
         routableClusters = await StorageService.GetRoutableClustersAsync(TenantId);
+        egressAgents = await StorageService.GetEgressAgentsAsync(TenantId);
         cubeFsComponents = await StorageService.GetCubeFSComponentsAsync(TenantId);
 
         // When scoped to a single environment, restrict the env picker to that
@@ -1675,12 +1840,14 @@
                 osFormRoute == OsRoute.Proxy && !string.IsNullOrWhiteSpace(osFormProxyUrl) ? osFormProxyUrl.Trim() : null,
                 osFormRoute == OsRoute.Proxy && !string.IsNullOrWhiteSpace(osFormProxyUsername) ? osFormProxyUsername.Trim() : null,
                 osFormRoute == OsRoute.Proxy && !string.IsNullOrWhiteSpace(osFormProxyPassword) ? osFormProxyPassword.Trim() : null,
-                osFormRoute == OsRoute.Cluster && Guid.TryParse(osFormRouteClusterId, out Guid routeCluster) ? routeCluster : null);
+                osFormRoute == OsRoute.Cluster && Guid.TryParse(osFormRouteClusterId, out Guid routeCluster) ? routeCluster : null,
+                osFormRoute == OsRoute.Agent && Guid.TryParse(osFormRouteAgentId, out Guid routeAgent) ? routeAgent : null);
 
             showOsForm = false;
             ResetOsForm();
             openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
         routableClusters = await StorageService.GetRoutableClustersAsync(TenantId);
+        egressAgents = await StorageService.GetEgressAgentsAsync(TenantId);
         cubeFsComponents = await StorageService.GetCubeFSComponentsAsync(TenantId);
         }
         catch (InvalidOperationException ex)
@@ -1692,6 +1859,46 @@
         {
             savingOs = false;
         }
+    }
+
+    private void CancelAgentForm()
+    {
+        showAgentForm = false;
+        agentFormName = "";
+        agentFormDescription = "";
+    }
+
+    private async Task CreateEgressAgent()
+    {
+        if (string.IsNullOrWhiteSpace(agentFormName)) return;
+
+        savingAgent = true;
+        agentError = null;
+
+        try
+        {
+            (EgressAgent _, string token) = await StorageService.CreateEgressAgentAsync(
+                TenantId, agentFormName.Trim(),
+                string.IsNullOrWhiteSpace(agentFormDescription) ? null : agentFormDescription.Trim());
+
+            newAgentToken = token;
+            CancelAgentForm();
+            egressAgents = await StorageService.GetEgressAgentsAsync(TenantId);
+        }
+        finally
+        {
+            savingAgent = false;
+        }
+    }
+
+    private async Task DeleteEgressAgent(Guid agentId)
+    {
+        agentError = null;
+        (bool deleted, string? reason) = await StorageService.DeleteEgressAgentAsync(TenantId, agentId);
+
+        if (!deleted) agentError = reason;
+
+        egressAgents = await StorageService.GetEgressAgentsAsync(TenantId);
     }
 
     private async Task DeployEgressRelay(Guid connectionId)
@@ -1736,6 +1943,7 @@
             {
                 openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
         routableClusters = await StorageService.GetRoutableClustersAsync(TenantId);
+        egressAgents = await StorageService.GetEgressAgentsAsync(TenantId);
         cubeFsComponents = await StorageService.GetCubeFSComponentsAsync(TenantId);
                 Toasts.Success("OpenStack connection deleted.");
             }
@@ -1859,6 +2067,7 @@
         osFormPassword = "";
         osFormRoute = OsRoute.Direct;
         osFormRouteClusterId = "";
+        osFormRouteAgentId = "";
         osFormProxyUrl = "";
         osFormProxyUsername = "";
         osFormProxyPassword = "";
