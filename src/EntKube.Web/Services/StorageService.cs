@@ -36,7 +36,7 @@ public class MinioBucketInfo
 /// External providers are registered manually — the service stores metadata
 /// in StorageLink entities and credentials in the VaultSecret table.
 /// </summary>
-public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, OpenStackKeystoneClient keystone, IKubernetesClientFactory k8sFactory, StorageLinkClientFactory storageClientFactory)
+public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, OpenStackKeystoneClient keystone, ClusterEgressRelay egressRelay, ClusterEgressTunnel egressTunnel, IKubernetesClientFactory k8sFactory, StorageLinkClientFactory storageClientFactory)
 {
     // ──────── Operator Status ────────
 
@@ -625,7 +625,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         return await openStackS3.ListBucketsAsync(
             link.Endpoint ?? "", accessKey, secretKey, link.Region ?? "",
-            await ResolveOpenStackProxyAsync(link, ct), ct);
+            await ResolveOpenStackEgressAsync(link, ct), ct);
     }
 
     /// <summary>
@@ -653,7 +653,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
             {
                 await openStackS3.DeleteBucketAsync(
                     link.Endpoint, accessKey, secretKey, link.BucketName, link.Region,
-                    await ResolveOpenStackProxyAsync(link, ct), ct);
+                    await ResolveOpenStackEgressAsync(link, ct), ct);
             }
             // If credentials are missing the bucket cannot be deleted via the S3 API,
             // but we still remove the StorageLink record so the link can be cleaned up.
@@ -698,7 +698,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         return await openStackS3.ListBucketsAsync(
             link.Endpoint ?? "", accessKey, secretKey, link.Region ?? "us-east-1",
-            await ResolveOpenStackProxyAsync(link, ct), ct);
+            await ResolveOpenStackEgressAsync(link, ct), ct);
     }
 
     /// <summary>
@@ -724,7 +724,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         return await openStackS3.GetBucketCorsAsync(
             link.Endpoint!, accessKey, secretKey, link.BucketName!, link.Region!,
-            await ResolveOpenStackProxyAsync(link, ct), ct);
+            await ResolveOpenStackEgressAsync(link, ct), ct);
     }
 
     /// <summary>
@@ -751,7 +751,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         await openStackS3.SetBucketCorsAsync(
             link.Endpoint!, accessKey, secretKey, link.BucketName!, link.Region!, rules,
-            await ResolveOpenStackProxyAsync(link, ct), ct);
+            await ResolveOpenStackEgressAsync(link, ct), ct);
     }
 
     /// <summary>
@@ -777,7 +777,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         return await openStackS3.GetBucketPolicyAsync(
             link.Endpoint!, accessKey, secretKey, link.BucketName!, link.Region!,
-            await ResolveOpenStackProxyAsync(link, ct), ct);
+            await ResolveOpenStackEgressAsync(link, ct), ct);
     }
 
     /// <summary>
@@ -804,7 +804,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         await openStackS3.SetBucketPolicyAsync(
             link.Endpoint!, accessKey, secretKey, link.BucketName!, link.Region!, policyJson,
-            await ResolveOpenStackProxyAsync(link, ct), ct);
+            await ResolveOpenStackEgressAsync(link, ct), ct);
     }
 
     /// <summary>
@@ -839,7 +839,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     // ──────── Private Helpers ────────
 
     /// <summary>
-    /// Returns the outbound proxy configured on the link's OpenStack connection,
+    /// Returns the egress transport configured on the link's OpenStack connection,
     /// or null when the link has no connection (MinIO, AWS, Azure, CubeFS) or the
     /// connection talks to OpenStack directly.
     ///
@@ -847,7 +847,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     /// credentials rather than a Keystone session, so there is no session to
     /// inherit the proxy from.
     /// </summary>
-    private async Task<OpenStackProxy?> ResolveOpenStackProxyAsync(
+    private async Task<ResolvedEgress?> ResolveOpenStackEgressAsync(
         StorageLink link, CancellationToken ct)
     {
         if (!link.OpenStackConnectionId.HasValue)
@@ -860,7 +860,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         OpenStackConnection? connection = await db.OpenStackConnections
             .FirstOrDefaultAsync(c => c.Id == link.OpenStackConnectionId.Value, ct);
 
-        return connection is null ? null : await keystone.ResolveProxyAsync(connection, ct);
+        return connection is null ? null : await keystone.ResolveEgressAsync(connection, ct);
     }
 
     /// <summary>
@@ -1018,6 +1018,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         string? proxyUrl,
         string? proxyUsername,
         string? proxyPassword,
+        Guid? routeViaClusterId,
         CancellationToken ct = default)
     {
         // Fail fast on a malformed proxy rather than storing a value that only
@@ -1039,7 +1040,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
             ProjectDomainName = projectDomainName,
             Username = username,
             ProxyUrl = proxyUrl,
-            ProxyUsername = proxyUsername
+            ProxyUsername = proxyUsername,
+            RouteViaClusterId = routeViaClusterId
         };
 
         db.OpenStackConnections.Add(connection);
@@ -1084,6 +1086,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         string? proxyUrl,
         string? proxyUsername,
         string? proxyPassword,
+        Guid? routeViaClusterId,
         Guid tenantId,
         CancellationToken ct = default)
     {
@@ -1108,6 +1111,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         connection.Username = username;
         connection.ProxyUrl = proxyUrl;
         connection.ProxyUsername = proxyUsername;
+        connection.RouteViaClusterId = routeViaClusterId;
         await db.SaveChangesAsync(ct);
 
         // Update passwords only when a new one was supplied — an empty field means
@@ -1138,6 +1142,155 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         => string.IsNullOrWhiteSpace(proxyUrl)
             ? null
             : OpenStackHttpFactory.ParseProxyUri(proxyUrl).ToString().TrimEnd('/');
+
+    /// <summary>
+    /// Clusters this tenant could route OpenStack traffic through. Only clusters
+    /// with a kubeconfig qualify, since reaching the relay goes through the API
+    /// server.
+    /// </summary>
+    public async Task<List<KubernetesCluster>> GetRoutableClustersAsync(
+        Guid tenantId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.KubernetesClusters
+            .Where(c => c.TenantId == tenantId && c.KubeconfigSecretId != null)
+            .OrderBy(c => c.Name)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Deploys (or updates) the egress relay on the cluster this connection routes
+    /// through, then proves the whole path by authenticating over it.
+    ///
+    /// The allowlist starts from what we know without talking to the cloud — the
+    /// Keystone host and the S3 endpoint — because the relay has to exist before
+    /// the first call can be made. Once authenticated, the service catalog names
+    /// the remaining hosts (Nova, Neutron, Swift…), so the relay is re-applied with
+    /// those included; otherwise the first call to one of them would be dropped by
+    /// the very allowlist that makes this safe.
+    /// </summary>
+    public async Task<(bool Ok, string Message)> DeployEgressRelayAsync(
+        Guid tenantId, Guid connectionId, CancellationToken ct = default)
+    {
+        OpenStackConnection connection;
+        string kubeconfig;
+
+        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        {
+            OpenStackConnection? found = await db.OpenStackConnections
+                .FirstOrDefaultAsync(c => c.Id == connectionId && c.TenantId == tenantId, ct);
+
+            if (found is null)
+            {
+                return (false, "OpenStack connection not found.");
+            }
+
+            if (found.RouteViaClusterId is not { } clusterId)
+            {
+                return (false, "This connection is not set to route through a cluster.");
+            }
+
+            KubernetesCluster? cluster = await db.KubernetesClusters
+                .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
+
+            if (string.IsNullOrWhiteSpace(cluster?.Kubeconfig))
+            {
+                return (false, "The selected cluster has no kubeconfig, so EntKube cannot deploy the relay.");
+            }
+
+            connection = found;
+            kubeconfig = cluster.Kubeconfig;
+        }
+
+        try
+        {
+            List<string> hosts =
+            [
+                connection.AuthUrl,
+                OpenStackS3Service.GetS3Endpoint(connection.Region ?? "Kna1")
+            ];
+
+            await egressRelay.EnsureAsync(kubeconfig, hosts, ct);
+            await WaitForRelayAsync(kubeconfig, ct);
+
+            // Drop any forward from a previous generation of the relay pod.
+            egressTunnel.Close(connection.RouteViaClusterId!.Value);
+
+            string? password = await vaultService.GetOpenStackSecretValueAsync(
+                tenantId, connectionId, "OS_PASSWORD", ct);
+
+            if (string.IsNullOrWhiteSpace(password))
+            {
+                return (true, "Relay deployed, but there is no stored password to verify the route with.");
+            }
+
+            KeystoneSession session = await keystone.AuthenticateAsync(connection, password, ct);
+
+            // Widen the allowlist to everything the catalog advertises.
+            List<string> catalogHosts = [.. hosts, .. session.Endpoints.Values];
+            List<string> normalized = ClusterEgressRelay.NormalizeHosts(catalogHosts);
+
+            if (normalized.Count > ClusterEgressRelay.NormalizeHosts(hosts).Count)
+            {
+                await egressRelay.EnsureAsync(kubeconfig, catalogHosts, ct);
+                await WaitForRelayAsync(kubeconfig, ct);
+                egressTunnel.Close(connection.RouteViaClusterId.Value);
+            }
+
+            return (true,
+                $"Relay deployed and verified — authenticated as project {session.ProjectId} "
+                + $"through the cluster, allowing {normalized.Count} host(s).");
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Waits for the relay Deployment to report a ready replica. Without this the
+    /// port-forward races the rollout and fails with a confusing "no pods" error.
+    /// </summary>
+    private async Task WaitForRelayAsync(string kubeconfig, CancellationToken ct)
+    {
+        for (int attempt = 0; attempt < 30; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            try
+            {
+                string json = await k8sFactory.GetJsonAsync(
+                    "deployment", ClusterEgressRelay.Namespace, kubeconfig, ct: ct);
+
+                using JsonDocument doc = JsonDocument.Parse(json);
+
+                if (doc.RootElement.TryGetProperty("items", out JsonElement items))
+                {
+                    foreach (JsonElement item in items.EnumerateArray())
+                    {
+                        if (item.GetProperty("metadata").GetProperty("name").GetString() == ClusterEgressRelay.Name
+                            && item.TryGetProperty("status", out JsonElement status)
+                            && status.TryGetProperty("readyReplicas", out JsonElement ready)
+                            && ready.GetInt32() >= 1)
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // Namespace may not have materialized yet — keep waiting.
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(2), ct);
+        }
+
+        throw new TimeoutException(
+            "The egress relay did not become ready within 60s. Check the pods in the "
+            + $"'{ClusterEgressRelay.Namespace}' namespace — the image may not be pullable from this cluster.");
+    }
 
     /// <summary>
     /// Authenticates against Keystone to prove the connection works end to end —
@@ -1172,9 +1325,9 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         {
             KeystoneSession session = await keystone.AuthenticateAsync(connection, password, ct);
 
-            string route = connection.ProxyUrl is { Length: > 0 } proxy
-                ? $" via {proxy}"
-                : "";
+            string route = connection.RouteViaClusterId is not null
+                ? " via the cluster egress relay"
+                : connection.ProxyUrl is { Length: > 0 } proxy ? $" via {proxy}" : "";
 
             string objectStore = session.GetEndpoint("object-store") is not null
                 ? "object-store available"

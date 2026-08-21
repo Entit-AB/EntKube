@@ -344,8 +344,11 @@ public class Program
         builder.Services.AddScoped<RegisteredPostgresService>();
         builder.Services.AddScoped<EntKube.Web.Services.ClusterChanges.IClusterChangeGate, EntKube.Web.Services.ClusterChanges.ClusterChangeGate>();
         builder.Services.AddScoped<IKubernetesClientFactory, KubernetesClientFactory>();
-        // Singleton: pools one HTTP handler per distinct OpenStack proxy setting.
+        // Singleton: pools one HTTP handler per distinct OpenStack egress transport.
         builder.Services.AddSingleton<OpenStackHttpFactory>();
+        // Singleton: owns long-lived `kubectl port-forward` processes to cluster relays.
+        builder.Services.AddSingleton<ClusterEgressTunnel>();
+        builder.Services.AddScoped<ClusterEgressRelay>();
         builder.Services.AddScoped<OpenStackKeystoneClient>();
         builder.Services.AddScoped<OpenStackS3Service>();
         builder.Services.AddScoped<OpenStackComputeService>();

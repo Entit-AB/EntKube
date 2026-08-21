@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
 
@@ -18,11 +19,11 @@ public sealed class KeystoneSession
     public required string ProjectId { get; init; }
 
     /// <summary>
-    /// Outbound proxy the session was established through, or null for a direct
+    /// Transport the session was established over, or null for a direct
     /// connection. Carried here so Nova/Neutron/Glance/Swift calls made with this
     /// session automatically leave from the same address Keystone accepted.
     /// </summary>
-    public OpenStackProxy? Proxy { get; init; }
+    public ResolvedEgress? Egress { get; init; }
 
     /// <summary>Public endpoint URL per service type ("compute", "network", "image", "load-balancer", "object-store", "identity").</summary>
     public required IReadOnlyDictionary<string, string> Endpoints { get; init; }
@@ -58,19 +59,34 @@ public sealed class ApplicationCredential
 /// <see cref="OpenStackS3Service"/> and the compute/provisioning services build
 /// on top of the <see cref="KeystoneSession"/> it returns.
 /// </summary>
-public class OpenStackKeystoneClient(OpenStackHttpFactory httpFactory, VaultService vaultService)
+public class OpenStackKeystoneClient(
+    OpenStackHttpFactory httpFactory,
+    VaultService vaultService,
+    ClusterEgressTunnel egressTunnel,
+    IDbContextFactory<ApplicationDbContext> dbFactory)
 {
     /// <summary>Vault key holding the proxy password for an OpenStack connection.</summary>
     public const string ProxyPasswordSecretName = "OS_PROXY_PASSWORD";
 
     /// <summary>
-    /// Builds the proxy settings for a connection, pulling the proxy password out
-    /// of the vault when the proxy authenticates. Returns null when the connection
-    /// talks to OpenStack directly.
+    /// Works out how this connection's traffic should leave EntKube, bringing up
+    /// the cluster relay tunnel if that is the configured route. Returns null when
+    /// the connection talks to OpenStack directly.
+    ///
+    /// Routing through a cluster takes precedence over an explicit proxy: it is the
+    /// more specific choice, and the UI offers them as alternatives.
     /// </summary>
-    public async Task<OpenStackProxy?> ResolveProxyAsync(
+    public async Task<ResolvedEgress?> ResolveEgressAsync(
         OpenStackConnection connection, CancellationToken ct = default)
     {
+        if (connection.RouteViaClusterId is { } clusterId)
+        {
+            string kubeconfig = await LoadKubeconfigAsync(clusterId, ct);
+            int localPort = await egressTunnel.GetLocalPortAsync(clusterId, kubeconfig, ct);
+
+            return new ResolvedEgress(RelayLocalPort: localPort);
+        }
+
         if (string.IsNullOrWhiteSpace(connection.ProxyUrl))
         {
             return null;
@@ -81,7 +97,35 @@ public class OpenStackKeystoneClient(OpenStackHttpFactory httpFactory, VaultServ
             : await vaultService.GetOpenStackSecretValueAsync(
                 connection.TenantId, connection.Id, ProxyPasswordSecretName, ct);
 
-        return new OpenStackProxy(connection.ProxyUrl, connection.ProxyUsername, proxyPassword);
+        return new ResolvedEgress(new OpenStackProxy(connection.ProxyUrl, connection.ProxyUsername, proxyPassword));
+    }
+
+    /// <summary>
+    /// Loads the kubeconfig for the relay cluster, with an error that names the
+    /// actual problem — a cluster that was deleted or never had one attached is a
+    /// configuration mistake the operator can fix.
+    /// </summary>
+    private async Task<string> LoadKubeconfigAsync(Guid clusterId, CancellationToken ct)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        KubernetesCluster? cluster = await db.KubernetesClusters
+            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+
+        if (cluster is null)
+        {
+            throw new InvalidOperationException(
+                "The cluster this connection routes through no longer exists. "
+                + "Pick another cluster, or switch the connection back to a direct connection.");
+        }
+
+        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        {
+            throw new InvalidOperationException(
+                $"Cluster '{cluster.Name}' has no kubeconfig, so EntKube cannot reach its egress relay.");
+        }
+
+        return cluster.Kubeconfig;
     }
 
     /// <summary>
@@ -120,9 +164,9 @@ public class OpenStackKeystoneClient(OpenStackHttpFactory httpFactory, VaultServ
 
         string json = JsonSerializer.Serialize(authBody);
 
-        OpenStackProxy? proxy = await ResolveProxyAsync(connection, ct);
+        ResolvedEgress? egress = await ResolveEgressAsync(connection, ct);
 
-        using HttpClient client = httpFactory.CreateClient(proxy);
+        using HttpClient client = httpFactory.CreateClient(egress);
         string authUrl = NormalizeV3(connection.AuthUrl);
 
         using HttpRequestMessage request = new(HttpMethod.Post, $"{authUrl}/auth/tokens")
@@ -154,7 +198,7 @@ public class OpenStackKeystoneClient(OpenStackHttpFactory httpFactory, VaultServ
             Token = token,
             UserId = userId,
             ProjectId = projectId,
-            Proxy = proxy,
+            Egress = egress,
             Endpoints = ParsePublicEndpoints(tokenElement)
         };
     }
@@ -172,7 +216,7 @@ public class OpenStackKeystoneClient(OpenStackHttpFactory httpFactory, VaultServ
         object requestBody = new { tenant_id = session.ProjectId };
         string json = JsonSerializer.Serialize(requestBody);
 
-        using HttpClient client = httpFactory.CreateClient(session.Proxy);
+        using HttpClient client = httpFactory.CreateClient(session.Egress);
         using HttpRequestMessage request = new(HttpMethod.Post, url)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
@@ -216,7 +260,7 @@ public class OpenStackKeystoneClient(OpenStackHttpFactory httpFactory, VaultServ
         };
         string json = JsonSerializer.Serialize(requestBody);
 
-        using HttpClient client = httpFactory.CreateClient(session.Proxy);
+        using HttpClient client = httpFactory.CreateClient(session.Egress);
         using HttpRequestMessage request = new(HttpMethod.Post, url)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")

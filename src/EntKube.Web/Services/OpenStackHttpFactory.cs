@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Sockets;
 using Amazon.Runtime;
 
 namespace EntKube.Web.Services;
@@ -24,13 +25,44 @@ public sealed record OpenStackProxy(string Url, string? Username = null, string?
 }
 
 /// <summary>
-/// Hands out <see cref="HttpClient"/> instances (and an AWS SDK factory) that
-/// honour a connection's <see cref="OpenStackProxy"/>. Registered as a singleton
-/// because it pools one <see cref="SocketsHttpHandler"/> per distinct proxy
-/// setting — building a handler per request would leak sockets.
+/// How a connection's traffic should leave EntKube. Either an explicit proxy, or
+/// a relay running inside a cluster EntKube already manages — see
+/// <see cref="ClusterEgressRelay"/> for why the cluster option exists.
+/// </summary>
+/// <param name="Proxy">Explicit outbound proxy, or null.</param>
+/// <param name="RelayClusterId">Cluster whose in-cluster relay to route through, or null.</param>
+public sealed record OpenStackEgress(OpenStackProxy? Proxy = null, Guid? RelayClusterId = null)
+{
+    /// <summary>True when this describes no egress hop at all — a direct connection.</summary>
+    public bool IsDirect => Proxy is null && RelayClusterId is null;
+}
+
+/// <summary>
+/// An <see cref="OpenStackEgress"/> after any tunnel has been established: the
+/// concrete transport a client can be built on, synchronously.
 ///
-/// A null proxy falls through to the default unproxied client, so connections
-/// that do not need this pay nothing.
+/// Separate from <see cref="OpenStackEgress"/> because bringing a relay tunnel up
+/// is async, while the AWS SDK builds its clients synchronously — resolving once
+/// up front keeps that boundary clean.
+/// </summary>
+/// <param name="Proxy">Proxy to route through, or null.</param>
+/// <param name="RelayLocalPort">Loopback port forwarding to a cluster relay, or null.</param>
+public sealed record ResolvedEgress(OpenStackProxy? Proxy = null, int? RelayLocalPort = null)
+{
+    /// <summary>Identity of the underlying connection pool — distinct transports must not share a handler.</summary>
+    internal string CacheKey => Proxy is not null
+        ? $"proxy\n{Proxy.CacheKey}"
+        : $"relay\n{RelayLocalPort}";
+}
+
+/// <summary>
+/// Hands out <see cref="HttpClient"/> instances (and an AWS SDK factory) that
+/// honour a connection's <see cref="ResolvedEgress"/>. Registered as a singleton
+/// because it pools one <see cref="SocketsHttpHandler"/> per distinct transport —
+/// building a handler per request would leak sockets.
+///
+/// A null egress falls through to the default direct client, so connections that
+/// do not need this pay nothing.
 /// </summary>
 public sealed class OpenStackHttpFactory(IHttpClientFactory inner) : IDisposable
 {
@@ -44,14 +76,14 @@ public sealed class OpenStackHttpFactory(IHttpClientFactory inner) : IDisposable
     /// default client when it is null. The caller owns the returned client, but
     /// disposing it leaves the pooled handler (and its connections) intact.
     /// </summary>
-    public HttpClient CreateClient(OpenStackProxy? proxy)
+    public HttpClient CreateClient(ResolvedEgress? egress)
     {
-        if (proxy is null)
+        if (egress is null || (egress.Proxy is null && egress.RelayLocalPort is null))
         {
             return inner.CreateClient();
         }
 
-        SocketsHttpHandler handler = handlers.GetOrAdd(proxy.CacheKey, _ => BuildHandler(proxy));
+        SocketsHttpHandler handler = handlers.GetOrAdd(egress.CacheKey, _ => BuildHandler(egress));
         return new HttpClient(handler, disposeHandler: false);
     }
 
@@ -64,26 +96,62 @@ public sealed class OpenStackHttpFactory(IHttpClientFactory inner) : IDisposable
     /// used: they only speak HTTP proxies, and the SOCKS case is the one that
     /// matters here.
     /// </summary>
-    public HttpClientFactory? CreateAwsHttpClientFactory(OpenStackProxy? proxy)
-        => proxy is null ? null : new ProxiedAwsHttpClientFactory(this, proxy);
+    public HttpClientFactory? CreateAwsHttpClientFactory(ResolvedEgress? egress)
+        => egress is null || (egress.Proxy is null && egress.RelayLocalPort is null)
+            ? null
+            : new ProxiedAwsHttpClientFactory(this, egress);
 
-    private static SocketsHttpHandler BuildHandler(OpenStackProxy proxy)
+    private static SocketsHttpHandler BuildHandler(ResolvedEgress egress)
     {
-        WebProxy webProxy = new(ParseProxyUri(proxy.Url));
-
-        if (!string.IsNullOrWhiteSpace(proxy.Username))
+        SocketsHttpHandler handler = new()
         {
-            webProxy.Credentials = new NetworkCredential(proxy.Username, proxy.Password ?? "");
-        }
-
-        return new SocketsHttpHandler
-        {
-            Proxy = webProxy,
-            UseProxy = true,
-            // Recycle pooled connections so a restarted tunnel is picked up without
-            // an app restart.
+            // Recycle pooled connections so a restarted tunnel or proxy is picked up
+            // without an app restart.
             PooledConnectionLifetime = TimeSpan.FromMinutes(5)
         };
+
+        if (egress.Proxy is { } proxy)
+        {
+            WebProxy webProxy = new(ParseProxyUri(proxy.Url));
+
+            if (!string.IsNullOrWhiteSpace(proxy.Username))
+            {
+                webProxy.Credentials = new NetworkCredential(proxy.Username, proxy.Password ?? "");
+            }
+
+            handler.Proxy = webProxy;
+            handler.UseProxy = true;
+            return handler;
+        }
+
+        int port = egress.RelayLocalPort
+            ?? throw new InvalidOperationException("Egress has neither a proxy nor a relay port.");
+
+        // Dial the forwarded loopback port instead of the real endpoint, while
+        // leaving the request URI untouched. TLS is negotiated end-to-end with the
+        // real host, so SNI (which is what the relay routes on), certificate
+        // validation and S3 request signing all continue to see the true endpoint.
+        handler.UseProxy = false;
+        handler.ConnectCallback = async (context, ct) =>
+        {
+            Socket socket = new(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+            {
+                NoDelay = true
+            };
+
+            try
+            {
+                await socket.ConnectAsync(IPAddress.Loopback, port, ct);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+        };
+
+        return handler;
     }
 
     /// <summary>
@@ -151,14 +219,14 @@ public sealed class OpenStackHttpFactory(IHttpClientFactory inner) : IDisposable
     /// are turned off on the SDK side because <see cref="OpenStackHttpFactory"/>
     /// already owns the handler's lifetime.
     /// </summary>
-    private sealed class ProxiedAwsHttpClientFactory(OpenStackHttpFactory owner, OpenStackProxy proxy) : HttpClientFactory
+    private sealed class ProxiedAwsHttpClientFactory(OpenStackHttpFactory owner, ResolvedEgress egress) : HttpClientFactory
     {
-        public override HttpClient CreateHttpClient(IClientConfig clientConfig) => owner.CreateClient(proxy);
+        public override HttpClient CreateHttpClient(IClientConfig clientConfig) => owner.CreateClient(egress);
 
         public override bool UseSDKHttpClientCaching(IClientConfig clientConfig) => false;
 
         public override bool DisposeHttpClientsAfterUse(IClientConfig clientConfig) => false;
 
-        public override string GetConfigUniqueString(IClientConfig clientConfig) => proxy.CacheKey;
+        public override string GetConfigUniqueString(IClientConfig clientConfig) => egress.CacheKey;
     }
 }

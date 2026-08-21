@@ -72,6 +72,21 @@ public class OpenStackConnection
     /// </summary>
     public string? ProxyUsername { get; set; }
 
+    /// <summary>
+    /// Route this cloud's API traffic through the egress relay running in this
+    /// registered cluster, instead of straight out of the EntKube server.
+    ///
+    /// This is the option that fits a provider-side IP allowlist: the cluster
+    /// already lives inside the provider's environment, so calls made from it
+    /// arrive from an address the provider trusts — and EntKube reaches the relay
+    /// over the cluster's API server, which it can already talk to, rather than
+    /// needing anything published inbound.
+    ///
+    /// Mutually exclusive with <see cref="ProxyUrl"/>; the relay wins if both are
+    /// somehow set.
+    /// </summary>
+    public Guid? RouteViaClusterId { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation

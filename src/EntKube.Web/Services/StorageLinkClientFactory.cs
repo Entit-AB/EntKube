@@ -77,10 +77,10 @@ public sealed class StorageLinkClientFactory(
             MaxErrorRetry = 1,
         };
 
-        // Cleura links inherit their OpenStack connection's outbound proxy, so browsing
+        // Cleura links inherit their OpenStack connection's egress route, so browsing
         // and telemetry blob access reach an IP-allowlisted object store the same way
         // bucket provisioning does.
-        if (openStackHttpFactory.CreateAwsHttpClientFactory(await ResolveOpenStackProxyAsync(link, ct)) is { } awsFactory)
+        if (openStackHttpFactory.CreateAwsHttpClientFactory(await ResolveOpenStackEgressAsync(link, ct)) is { } awsFactory)
         {
             s3Config.HttpClientFactory = awsFactory;
         }
@@ -89,10 +89,10 @@ public sealed class StorageLinkClientFactory(
     }
 
     /// <summary>
-    /// Returns the outbound proxy of the OpenStack connection behind this link, or
-    /// null when the link has no connection or the connection talks directly.
+    /// Returns the egress transport of the OpenStack connection behind this link,
+    /// or null when the link has no connection or the connection talks directly.
     /// </summary>
-    private async Task<OpenStackProxy?> ResolveOpenStackProxyAsync(StorageLink link, CancellationToken ct)
+    private async Task<ResolvedEgress?> ResolveOpenStackEgressAsync(StorageLink link, CancellationToken ct)
     {
         if (!link.OpenStackConnectionId.HasValue)
             return null;
@@ -102,7 +102,7 @@ public sealed class StorageLinkClientFactory(
         OpenStackConnection? connection = await db.OpenStackConnections
             .FirstOrDefaultAsync(c => c.Id == link.OpenStackConnectionId.Value, ct);
 
-        return connection is null ? null : await keystone.ResolveProxyAsync(connection, ct);
+        return connection is null ? null : await keystone.ResolveEgressAsync(connection, ct);
     }
 
     /// <summary>

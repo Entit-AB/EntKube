@@ -792,7 +792,14 @@
                                     <div class="col-12 mb-1">
                                         <i class="bi bi-link-45deg me-1"></i><code class="small text-break">@conn.AuthUrl</code>
                                     </div>
-                                    @if (!string.IsNullOrWhiteSpace(conn.ProxyUrl))
+                                    @if (conn.RouteViaClusterId is not null)
+                                    {
+                                        <div class="col-12 mb-1">
+                                            <i class="bi bi-signpost-split me-1 text-info"></i>via cluster
+                                            <strong>@(routableClusters.FirstOrDefault(c => c.Id == conn.RouteViaClusterId)?.Name ?? "(removed)")</strong>
+                                        </div>
+                                    }
+                                    else if (!string.IsNullOrWhiteSpace(conn.ProxyUrl))
                                     {
                                         <div class="col-12 mb-1">
                                             <i class="bi bi-shuffle me-1 text-info"></i>via <code class="small text-break">@conn.ProxyUrl</code>
@@ -808,15 +815,25 @@
                             </div>
                             <div class="card-footer bg-white py-1 d-flex align-items-center justify-content-between">
                                 <small class="text-muted">Added @conn.CreatedAt.ToString("yyyy-MM-dd")</small>
-                                <button class="btn btn-sm btn-outline-secondary border-0 py-0"
-                                        @onclick="() => TestOpenStackConnection(conn.Id)"
-                                        disabled="@(osTesting == conn.Id)">
-                                    @if (osTesting == conn.Id)
+                                <div class="d-flex gap-1">
+                                    @if (conn.RouteViaClusterId is not null)
                                     {
-                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                        <button class="btn btn-sm btn-outline-info border-0 py-0"
+                                                @onclick="() => DeployEgressRelay(conn.Id)"
+                                                disabled="@(osTesting == conn.Id)">
+                                            @if (osTesting == conn.Id)
+                                            {
+                                                <span class="spinner-border spinner-border-sm me-1"></span>
+                                            }
+                                            Deploy relay
+                                        </button>
                                     }
-                                    Test
-                                </button>
+                                    <button class="btn btn-sm btn-outline-secondary border-0 py-0"
+                                            @onclick="() => TestOpenStackConnection(conn.Id)"
+                                            disabled="@(osTesting == conn.Id)">
+                                        Test
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -870,34 +887,101 @@
                         </div>
                     </div>
 
-                    @* ── Outbound proxy (for IP-allowlisted clouds) ── *@
+                    @* ── How EntKube reaches this cloud ── *@
                     <hr class="my-3" />
-                    <div class="d-flex align-items-center gap-2 mb-2">
-                        <i class="bi bi-shuffle text-info"></i>
-                        <span class="small fw-semibold">Outbound proxy</span>
-                        <span class="badge bg-secondary-subtle text-secondary-emphasis rounded-pill">Optional</span>
+                    <div class="d-flex align-items-center gap-2 mb-1">
+                        <i class="bi bi-signpost-split text-info"></i>
+                        <span class="small fw-semibold">How EntKube reaches this cloud</span>
                     </div>
                     <p class="small text-muted mb-2">
-                        Use this when the cloud's API is restricted to an IP allowlist that this server is not on.
-                        Every call to this cloud is tunnelled through the proxy, so OpenStack sees an allowed
-                        source address. A plain <code>ssh -D 1080 user@@host</code> tunnel on a permitted network works.
+                        Only change this if the cloud's API rejects EntKube by IP. The EntKube server's own
+                        address must be allowed for the direct option to work.
                     </p>
-                    <div class="row g-3">
-                        <div class="col-md-6">
-                            <label class="form-label small fw-semibold">Proxy URL</label>
-                            <input type="text" class="form-control form-control-sm" @bind="osFormProxyUrl"
-                                   placeholder="socks5://10.0.0.5:1080" />
-                            <div class="form-text small">http, https, socks4, socks4a or socks5. No credentials in the URL.</div>
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label small fw-semibold">Proxy Username</label>
-                            <input type="text" class="form-control form-control-sm" @bind="osFormProxyUsername" placeholder="Only if required" />
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label small fw-semibold">Proxy Password</label>
-                            <input type="password" class="form-control form-control-sm" @bind="osFormProxyPassword" placeholder="Stored in vault" />
-                        </div>
+
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" id="osRouteDirect"
+                               checked="@(osFormRoute == OsRoute.Direct)"
+                               @onchange="() => osFormRoute = OsRoute.Direct" />
+                        <label class="form-check-label small" for="osRouteDirect">
+                            <strong>Direct</strong>
+                            <span class="text-muted"> — EntKube connects straight to the cloud. Use this unless it fails.</span>
+                        </label>
                     </div>
+
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" id="osRouteCluster"
+                               checked="@(osFormRoute == OsRoute.Cluster)"
+                               @onchange="() => osFormRoute = OsRoute.Cluster" />
+                        <label class="form-check-label small" for="osRouteCluster">
+                            <strong>Through one of your clusters</strong>
+                            <span class="text-muted"> — for a provider IP allowlist that excludes this server.</span>
+                        </label>
+                    </div>
+
+                    @if (osFormRoute == OsRoute.Cluster)
+                    {
+                        <div class="ms-4 mt-2">
+                            <p class="small text-muted mb-2">
+                                EntKube deploys a small nginx relay into the cluster you pick and reaches it over that
+                                cluster's API server — nothing is published inbound anywhere. Calls to the cloud then
+                                leave from the cluster's address, which the provider already trusts because the cluster
+                                runs in their environment. Pick a cluster hosted by the same provider as this cloud.
+                            </p>
+                            @if (routableClusters.Count == 0)
+                            {
+                                <div class="alert alert-warning py-2 px-3 small mb-0">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>
+                                    No registered cluster has a kubeconfig, so there is nothing to route through.
+                                </div>
+                            }
+                            else
+                            {
+                                <select class="form-select form-select-sm" @bind="osFormRouteClusterId">
+                                    <option value="">-- Select a cluster --</option>
+                                    @foreach (KubernetesCluster cluster in routableClusters)
+                                    {
+                                        <option value="@cluster.Id">@cluster.Name</option>
+                                    }
+                                </select>
+                                <div class="form-text small">
+                                    After saving, use <strong>Deploy relay</strong> on the connection to install it and verify the route.
+                                </div>
+                            }
+                        </div>
+                    }
+
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" id="osRouteProxy"
+                               checked="@(osFormRoute == OsRoute.Proxy)"
+                               @onchange="() => osFormRoute = OsRoute.Proxy" />
+                        <label class="form-check-label small" for="osRouteProxy">
+                            <strong>Through a proxy I run</strong>
+                            <span class="text-muted"> — only if you already have one on an allowed network that this server can reach.</span>
+                        </label>
+                    </div>
+
+                    @if (osFormRoute == OsRoute.Proxy)
+                    {
+                        <div class="row g-3 ms-1 mt-1">
+                            <div class="col-md-6">
+                                <label class="form-label small fw-semibold">Proxy URL</label>
+                                <input type="text" class="form-control form-control-sm" @bind="osFormProxyUrl"
+                                       placeholder="socks5://10.0.0.5:1080" />
+                                <div class="form-text small">
+                                    http, https, socks4, socks4a or socks5. No credentials in the URL. The EntKube
+                                    server must be able to open a connection to this address.
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small fw-semibold">Proxy Username</label>
+                                <input type="text" class="form-control form-control-sm" @bind="osFormProxyUsername" placeholder="Only if required" />
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small fw-semibold">Proxy Password</label>
+                                <input type="password" class="form-control form-control-sm" @bind="osFormProxyPassword" placeholder="Stored in vault" />
+                            </div>
+                        </div>
+                    }
 
                     @if (osFormError is not null)
                     {
@@ -1003,6 +1087,12 @@
     private string osFormProjectDomain = "";
     private string osFormUsername = "";
     private string osFormPassword = "";
+    /// <summary>How a connection reaches its cloud — mutually exclusive options in the form.</summary>
+    private enum OsRoute { Direct, Cluster, Proxy }
+
+    private OsRoute osFormRoute = OsRoute.Direct;
+    private string osFormRouteClusterId = "";
+    private List<KubernetesCluster> routableClusters = [];
     private string osFormProxyUrl = "";
     private string osFormProxyUsername = "";
     private string osFormProxyPassword = "";
@@ -1068,6 +1158,7 @@
 
         environments = await StorageService.GetEnvironmentsAsync(TenantId);
         openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+        routableClusters = await StorageService.GetRoutableClustersAsync(TenantId);
         cubeFsComponents = await StorageService.GetCubeFSComponentsAsync(TenantId);
 
         // When scoped to a single environment, restrict the env picker to that
@@ -1581,13 +1672,15 @@
                 string.IsNullOrWhiteSpace(osFormProjectDomain) ? null : osFormProjectDomain.Trim(),
                 string.IsNullOrWhiteSpace(osFormUsername) ? null : osFormUsername.Trim(),
                 string.IsNullOrWhiteSpace(osFormPassword) ? null : osFormPassword.Trim(),
-                string.IsNullOrWhiteSpace(osFormProxyUrl) ? null : osFormProxyUrl.Trim(),
-                string.IsNullOrWhiteSpace(osFormProxyUsername) ? null : osFormProxyUsername.Trim(),
-                string.IsNullOrWhiteSpace(osFormProxyPassword) ? null : osFormProxyPassword.Trim());
+                osFormRoute == OsRoute.Proxy && !string.IsNullOrWhiteSpace(osFormProxyUrl) ? osFormProxyUrl.Trim() : null,
+                osFormRoute == OsRoute.Proxy && !string.IsNullOrWhiteSpace(osFormProxyUsername) ? osFormProxyUsername.Trim() : null,
+                osFormRoute == OsRoute.Proxy && !string.IsNullOrWhiteSpace(osFormProxyPassword) ? osFormProxyPassword.Trim() : null,
+                osFormRoute == OsRoute.Cluster && Guid.TryParse(osFormRouteClusterId, out Guid routeCluster) ? routeCluster : null);
 
             showOsForm = false;
             ResetOsForm();
             openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+        routableClusters = await StorageService.GetRoutableClustersAsync(TenantId);
         cubeFsComponents = await StorageService.GetCubeFSComponentsAsync(TenantId);
         }
         catch (InvalidOperationException ex)
@@ -1598,6 +1691,22 @@
         finally
         {
             savingOs = false;
+        }
+    }
+
+    private async Task DeployEgressRelay(Guid connectionId)
+    {
+        osTesting = connectionId;
+        osTestResults.Remove(connectionId);
+        StateHasChanged();
+
+        try
+        {
+            osTestResults[connectionId] = await StorageService.DeployEgressRelayAsync(TenantId, connectionId);
+        }
+        finally
+        {
+            osTesting = null;
         }
     }
 
@@ -1626,6 +1735,7 @@
             if (deleted)
             {
                 openStackConnections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+        routableClusters = await StorageService.GetRoutableClustersAsync(TenantId);
         cubeFsComponents = await StorageService.GetCubeFSComponentsAsync(TenantId);
                 Toasts.Success("OpenStack connection deleted.");
             }
@@ -1747,6 +1857,8 @@
         osFormProjectDomain = "";
         osFormUsername = "";
         osFormPassword = "";
+        osFormRoute = OsRoute.Direct;
+        osFormRouteClusterId = "";
         osFormProxyUrl = "";
         osFormProxyUsername = "";
         osFormProxyPassword = "";

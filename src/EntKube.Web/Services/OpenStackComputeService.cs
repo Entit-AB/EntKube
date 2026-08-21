@@ -230,7 +230,7 @@ public class OpenStackComputeService(OpenStackHttpFactory httpFactory, ILogger<O
 
     private async Task<JsonDocument?> SendAsync(HttpMethod method, string url, KeystoneSession session, object? body, CancellationToken ct)
     {
-        using HttpClient client = httpFactory.CreateClient(session.Proxy);
+        using HttpClient client = httpFactory.CreateClient(session.Egress);
         using HttpRequestMessage request = new(method, url);
         request.Headers.Add("X-Auth-Token", session.Token);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));

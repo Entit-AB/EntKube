@@ -4160,6 +4160,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<string>("Region")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<Guid?>("RouteViaClusterId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uniqueidentifier");
 

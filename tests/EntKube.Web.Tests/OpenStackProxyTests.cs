@@ -3,6 +3,7 @@ using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 
 namespace EntKube.Web.Tests;
@@ -48,14 +49,17 @@ public class OpenStackProxyTests : IDisposable
         innerHttpFactory.Setup(f => f.CreateClient(It.IsAny<string>())).Returns(() => new HttpClient());
 
         OpenStackHttpFactory httpFactory = new(innerHttpFactory.Object);
-        keystone = new OpenStackKeystoneClient(httpFactory, vaultService);
+        Mock<IKubernetesClientFactory> k8sMock = new();
+        ClusterEgressRelay egressRelay = new(k8sMock.Object, NullLogger<ClusterEgressRelay>.Instance);
+        ClusterEgressTunnel egressTunnel = new(NullLogger<ClusterEgressTunnel>.Instance);
+        keystone = new OpenStackKeystoneClient(httpFactory, vaultService, egressTunnel, dbFactory);
 
         OpenStackS3Service openStackS3 = new(vaultService, httpFactory, keystone);
         StorageLinkClientFactory storageClientFactory = new(vaultService, dbFactory, httpFactory, keystone);
 
         sut = new StorageService(
-            dbFactory, vaultService, openStackS3, keystone,
-            new Mock<IKubernetesClientFactory>().Object, storageClientFactory);
+            dbFactory, vaultService, openStackS3, keystone, egressRelay, egressTunnel,
+            k8sMock.Object, storageClientFactory);
     }
 
     public void Dispose()
@@ -149,7 +153,7 @@ public class OpenStackProxyTests : IDisposable
             userDomainName: null, projectDomainName: null,
             username: "osuser", password: "ospass",
             proxyUrl: "socks5://10.0.0.5:1080",
-            proxyUsername: "proxyuser", proxyPassword: "proxypass");
+            proxyUsername: "proxyuser", proxyPassword: "proxypass", routeViaClusterId: null);
 
         OpenStackConnection stored = await db.OpenStackConnections.AsNoTracking()
             .FirstAsync(c => c.Id == created.Id);
@@ -174,7 +178,7 @@ public class OpenStackProxyTests : IDisposable
             region: null, projectName: null, projectId: null,
             userDomainName: null, projectDomainName: null,
             username: null, password: null,
-            proxyUrl: "ftp://nope:21", proxyUsername: null, proxyPassword: null);
+            proxyUrl: "ftp://nope:21", proxyUsername: null, proxyPassword: null, routeViaClusterId: null);
 
         await act.Should().ThrowAsync<InvalidOperationException>();
 
@@ -192,7 +196,7 @@ public class OpenStackProxyTests : IDisposable
             region: null, projectName: null, projectId: null,
             userDomainName: null, projectDomainName: null,
             username: "osuser", password: "ospass",
-            proxyUrl: null, proxyUsername: null, proxyPassword: null);
+            proxyUrl: null, proxyUsername: null, proxyPassword: null, routeViaClusterId: null);
 
         OpenStackConnection stored = await db.OpenStackConnections.AsNoTracking()
             .FirstAsync(c => c.Id == created.Id);
@@ -210,12 +214,12 @@ public class OpenStackProxyTests : IDisposable
 
         OpenStackConnection created = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "Direct", "https://identity.example.com:5000/v3",
-            null, null, null, null, null, "osuser", "ospass", null, null, null);
+            null, null, null, null, null, "osuser", "ospass", null, null, null, null);
 
         OpenStackConnection stored = await db.OpenStackConnections.AsNoTracking()
             .FirstAsync(c => c.Id == created.Id);
 
-        (await keystone.ResolveProxyAsync(stored)).Should().BeNull();
+        (await keystone.ResolveEgressAsync(stored)).Should().BeNull();
     }
 
     [Fact]
@@ -226,12 +230,13 @@ public class OpenStackProxyTests : IDisposable
         OpenStackConnection created = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "Proxied", "https://identity.example.com:5000/v3",
             null, null, null, null, null, "osuser", "ospass",
-            "socks5://10.0.0.5:1080", "proxyuser", "proxypass");
+            "socks5://10.0.0.5:1080", "proxyuser", "proxypass", null);
 
         OpenStackConnection stored = await db.OpenStackConnections.AsNoTracking()
             .FirstAsync(c => c.Id == created.Id);
 
-        OpenStackProxy? proxy = await keystone.ResolveProxyAsync(stored);
+        ResolvedEgress? egress = await keystone.ResolveEgressAsync(stored);
+        OpenStackProxy? proxy = egress?.Proxy;
 
         proxy.Should().NotBeNull();
         proxy!.Url.Should().Be("socks5://10.0.0.5:1080");
@@ -247,12 +252,13 @@ public class OpenStackProxyTests : IDisposable
         OpenStackConnection created = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "Tunnel", "https://identity.example.com:5000/v3",
             null, null, null, null, null, "osuser", "ospass",
-            "socks5://127.0.0.1:1080", proxyUsername: null, proxyPassword: null);
+            "socks5://127.0.0.1:1080", proxyUsername: null, proxyPassword: null, routeViaClusterId: null);
 
         OpenStackConnection stored = await db.OpenStackConnections.AsNoTracking()
             .FirstAsync(c => c.Id == created.Id);
 
-        OpenStackProxy? proxy = await keystone.ResolveProxyAsync(stored);
+        ResolvedEgress? egress = await keystone.ResolveEgressAsync(stored);
+        OpenStackProxy? proxy = egress?.Proxy;
 
         proxy.Should().NotBeNull();
         proxy!.Username.Should().BeNull();
@@ -280,7 +286,7 @@ public class OpenStackProxyTests : IDisposable
         Mock<IHttpClientFactory> inner = new();
 
         using OpenStackHttpFactory factory = new(inner.Object);
-        using HttpClient client = factory.CreateClient(new OpenStackProxy("socks5://10.0.0.5:1080"));
+        using HttpClient client = factory.CreateClient(new ResolvedEgress(new OpenStackProxy("socks5://10.0.0.5:1080")));
 
         client.Should().NotBeNull();
         inner.Verify(f => f.CreateClient(It.IsAny<string>()), Times.Never);
@@ -301,7 +307,7 @@ public class OpenStackProxyTests : IDisposable
         using OpenStackHttpFactory factory = new(new Mock<IHttpClientFactory>().Object);
 
         Amazon.Runtime.HttpClientFactory? awsFactory =
-            factory.CreateAwsHttpClientFactory(new OpenStackProxy("socks5://10.0.0.5:1080"));
+            factory.CreateAwsHttpClientFactory(new ResolvedEgress(new OpenStackProxy("socks5://10.0.0.5:1080")));
 
         awsFactory.Should().NotBeNull();
         awsFactory!.UseSDKHttpClientCaching(new Amazon.S3.AmazonS3Config()).Should().BeFalse();
@@ -317,11 +323,11 @@ public class OpenStackProxyTests : IDisposable
         Amazon.S3.AmazonS3Config config = new();
 
         string a = factory.CreateAwsHttpClientFactory(
-            new OpenStackProxy("socks5://10.0.0.5:1080", "user", "one"))!.GetConfigUniqueString(config);
+            new ResolvedEgress(new OpenStackProxy("socks5://10.0.0.5:1080", "user", "one")))!.GetConfigUniqueString(config);
         string b = factory.CreateAwsHttpClientFactory(
-            new OpenStackProxy("socks5://10.0.0.5:1080", "user", "two"))!.GetConfigUniqueString(config);
+            new ResolvedEgress(new OpenStackProxy("socks5://10.0.0.5:1080", "user", "two")))!.GetConfigUniqueString(config);
         string sameAsA = factory.CreateAwsHttpClientFactory(
-            new OpenStackProxy("socks5://10.0.0.5:1080", "user", "one"))!.GetConfigUniqueString(config);
+            new ResolvedEgress(new OpenStackProxy("socks5://10.0.0.5:1080", "user", "one")))!.GetConfigUniqueString(config);
 
         a.Should().NotBe(b);
         a.Should().Be(sameAsA);

@@ -3,6 +3,7 @@ using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 
 namespace EntKube.Web.Tests;
@@ -48,10 +49,13 @@ public class CleuraS3ManagementTests : IDisposable
         vaultService = new VaultService(dbFactory, encryption);
         httpFactory = new Mock<IHttpClientFactory>();
         OpenStackHttpFactory osHttpFactory = new(httpFactory.Object);
-        OpenStackKeystoneClient keystone = new(osHttpFactory, vaultService);
+        Mock<IKubernetesClientFactory> k8sMock = new();
+        ClusterEgressRelay egressRelay = new(k8sMock.Object, NullLogger<ClusterEgressRelay>.Instance);
+        ClusterEgressTunnel egressTunnel = new(NullLogger<ClusterEgressTunnel>.Instance);
+        OpenStackKeystoneClient keystone = new(osHttpFactory, vaultService, egressTunnel, dbFactory);
         OpenStackS3Service openStackS3 = new(vaultService, osHttpFactory, keystone);
         StorageLinkClientFactory storageClientFactory = new(vaultService, dbFactory, osHttpFactory, keystone);
-        sut = new StorageService(dbFactory, vaultService, openStackS3, keystone, new Mock<IKubernetesClientFactory>().Object, storageClientFactory);
+        sut = new StorageService(dbFactory, vaultService, openStackS3, keystone, egressRelay, egressTunnel, k8sMock.Object, storageClientFactory);
     }
 
     public void Dispose()

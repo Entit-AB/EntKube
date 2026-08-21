@@ -4153,6 +4153,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<string>("Region")
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid?>("RouteViaClusterId")
+                        .HasColumnType("TEXT");
+
                     b.Property<Guid>("TenantId")
                         .HasColumnType("TEXT");
 
