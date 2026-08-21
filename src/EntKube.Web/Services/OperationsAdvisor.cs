@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Services.Upgrades;
 
 namespace EntKube.Web.Services;
 
@@ -33,6 +34,7 @@ public enum AdvisorCategory
     Reliability,     // firing / unresolved incidents
     DataProtection,  // backups missing, failed, or stale
     Capacity,        // resources trending toward their ceiling (PVC fill, memory-vs-limit)
+    Maintenance,     // components behind upstream, Kubernetes versions nearing end-of-life
 }
 
 /// <summary>
@@ -138,7 +140,9 @@ public class OperationsAdvisorService(
     SecretExpiryService secretExpiry,
     IncidentCorrelationService correlation,
     ErrorBudgetService errorBudget,
-    AdvisorStateService stateService)
+    AdvisorStateService stateService,
+    EntKube.Web.Services.Upgrades.ComponentUpgradeService componentUpgrades,
+    ILogger<OperationsAdvisorService> logger)
 {
     /// <summary>Overdue findings older than this, still unacknowledged, are escalated.</summary>
     private static readonly TimeSpan EscalateAfter = TimeSpan.FromDays(3);
@@ -155,6 +159,7 @@ public class OperationsAdvisorService(
         findings.AddRange(await BuildPostureFindingsAsync(tenantId, ct));
         findings.AddRange(await BuildCapacityFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildBlueprintFindingsAsync(tenantId, now, ct));
+        findings.AddRange(await BuildUpgradeFindingsAsync(tenantId, now, ct));
 
         var merged = await MergeStateAsync(tenantId, findings, now, ct);
 
@@ -979,6 +984,125 @@ public class OperationsAdvisorService(
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Turns the fleet upgrade report into advisor findings.
+    ///
+    /// Deliberately aggregated per cluster rather than one finding per component: a
+    /// ten-cluster fleet running thirty components each would otherwise bury every
+    /// other signal in the feed under routine patch drift. Only two things earn a
+    /// row of their own — a chart version the author has deprecated, and a cluster
+    /// carrying major-version-behind components — because those are the ones with a
+    /// real deadline behind them.
+    /// </summary>
+    private async Task<List<OperationsFinding>> BuildUpgradeFindingsAsync(
+        Guid tenantId, DateTime now, CancellationToken ct)
+    {
+        var result = new List<OperationsFinding>();
+
+        UpgradeReport report;
+        try
+        {
+            report = await componentUpgrades.GetTenantReportAsync(tenantId, now, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Chart repositories are third-party and off the critical path. Losing them must
+            // never take down the whole advisor feed, which carries expiry and incident
+            // findings an operator depends on.
+            logger.LogWarning(ex, "Upgrade findings skipped for tenant {TenantId}", tenantId);
+            return result;
+        }
+
+        foreach (ComponentUpgrade deprecated in report.Components.Where(c => c.Status == UpgradeStatus.Deprecated))
+        {
+            result.Add(new OperationsFinding
+            {
+                Id = $"chart-deprecated:{deprecated.ComponentId}",
+                Category = AdvisorCategory.Maintenance,
+                Severity = AdvisorSeverity.Warning,
+                Horizon = AdvisorHorizon.ThisWeek,
+                Title = $"{deprecated.DisplayName} runs a deprecated chart version",
+                Detail = $"Chart {deprecated.ChartName} {deprecated.InstalledVersion} is marked deprecated by its "
+                    + "author and will stop receiving fixes.",
+                ScopeLabel = $"Cluster: {deprecated.ClusterName}",
+                Remediation = "Move to a supported chart version, or replace the component.",
+                LinkSection = "upgrades",
+                ClusterId = deprecated.ClusterId,
+                Source = "upgrade",
+            });
+        }
+
+        foreach (IGrouping<Guid, ComponentUpgrade> cluster in report.Components
+            .Where(c => c.Status == UpgradeStatus.UpgradeAvailable)
+            .GroupBy(c => c.ClusterId))
+        {
+            List<ComponentUpgrade> upgrades = [.. cluster];
+            string clusterName = upgrades[0].ClusterName;
+
+            List<ComponentUpgrade> major = [.. upgrades.Where(u => u.Lag == VersionLag.Major)];
+            if (major.Count > 0)
+            {
+                result.Add(new OperationsFinding
+                {
+                    Id = $"chart-major:{cluster.Key}",
+                    Category = AdvisorCategory.Maintenance,
+                    Severity = AdvisorSeverity.Warning,
+                    Horizon = AdvisorHorizon.ThisWeek,
+                    Title = major.Count == 1
+                        ? $"{major[0].DisplayName} is a major version behind on “{clusterName}”"
+                        : $"{major.Count} components are a major version behind on “{clusterName}”",
+                    Detail = DescribeUpgrades(major),
+                    ScopeLabel = $"Cluster: {clusterName}",
+                    Remediation = "Review the upstream changelogs, then upgrade from the Upgrades tab.",
+                    LinkSection = "upgrades",
+                    ClusterId = cluster.Key,
+                    Source = "upgrade",
+                });
+            }
+
+            List<ComponentUpgrade> routine = [.. upgrades.Where(u => u.Lag != VersionLag.Major)];
+            if (routine.Count > 0)
+            {
+                result.Add(new OperationsFinding
+                {
+                    Id = $"chart-behind:{cluster.Key}",
+                    Category = AdvisorCategory.Maintenance,
+                    Severity = AdvisorSeverity.Info,
+                    Horizon = AdvisorHorizon.Later,
+                    Title = $"{routine.Count} component{(routine.Count == 1 ? " has" : "s have")} "
+                        + $"updates available on “{clusterName}”",
+                    Detail = DescribeUpgrades(routine),
+                    ScopeLabel = $"Cluster: {clusterName}",
+                    Remediation = "Apply the pending chart updates from the Upgrades tab.",
+                    LinkSection = "upgrades",
+                    ClusterId = cluster.Key,
+                    Source = "upgrade",
+                });
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>Renders up to a handful of upgrades as "name 1.2.3 → 1.3.0", then a tail count.</summary>
+    private static string DescribeUpgrades(List<ComponentUpgrade> upgrades)
+    {
+        const int MaxListed = 4;
+
+        IEnumerable<string> listed = upgrades
+            .OrderBy(u => u.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .Take(MaxListed)
+            .Select(u => $"{u.DisplayName} {u.InstalledVersion} → {u.LatestVersion}");
+
+        string text = string.Join(", ", listed);
+        int remaining = upgrades.Count - MaxListed;
+        return remaining > 0 ? $"{text}, and {remaining} more." : $"{text}.";
     }
 
     private static string FmtHours(double hours)

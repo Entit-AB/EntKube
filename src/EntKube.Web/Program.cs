@@ -39,6 +39,8 @@ public class Program
             })
             .AddIdentityCookies();
 
+
+
         // The app runs behind the Caddy reverse proxy which terminates TLS. Honor the
         // X-Forwarded-Proto/For headers so the app knows the original request was HTTPS —
         // otherwise Kestrel sees plain HTTP and cookies with the default SameAsRequest policy
@@ -394,6 +396,10 @@ public class Program
         builder.Services.AddScoped<ErrorBudgetService>();
         builder.Services.AddScoped<AdvisorStateService>();
         builder.Services.AddScoped<AdvisorDigestConfigService>();
+        // Singleton so the fetched chart indexes are shared: one repo backs several catalog
+        // entries, and a per-scope client would refetch a multi-megabyte index per component.
+        builder.Services.AddSingleton<EntKube.Web.Services.Upgrades.HelmRepoIndexClient>();
+        builder.Services.AddScoped<EntKube.Web.Services.Upgrades.ComponentUpgradeService>();
         builder.Services.AddScoped<OperationsAdvisorService>();
         builder.Services.AddScoped<CustomerNotificationService>();
 

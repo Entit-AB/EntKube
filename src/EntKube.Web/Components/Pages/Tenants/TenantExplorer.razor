@@ -336,6 +336,8 @@ else
         [ new("ingress", "Routes & Ingress", "bi-signpost-split"), new("networking", "VPN mesh", "bi-hdd-network") ]),
         new("Reliability", "bi-check2-square",
         [ new("sla", "SLA", "bi-check2-square"), new("maintenance", "Maintenance", "bi-tools"), new("secret-expiry", "Secret expiry", "bi-clock-history") ]),
+        new("Lifecycle", "bi-arrow-up-circle",
+        [ new("upgrades", "Upgrades", "bi-arrow-up-circle") ]),
     ];
     private static readonly SectionItem[] ManageItems =
     [
@@ -721,6 +723,12 @@ else
                 builder.OpenComponent<SecretExpiryTab>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);
                 builder.AddComponentParameter(2, "OnNavigateTab", EventCallback.Factory.Create<string>(this, NavigateToSection));
+                builder.CloseComponent();
+                break;
+            case "upgrades":
+                builder.OpenComponent<UpgradesTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.AddComponentParameter(2, "TenantSlug", tenant!.Slug);
                 builder.CloseComponent();
                 break;
             case "advisor":
