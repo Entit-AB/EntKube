@@ -262,6 +262,10 @@ Generated_Code/
 # because we have git ;-)
 _UpgradeReport_Files/
 Backup*/
+# ...but Data/Backup/ is source, not a Visual Studio upgrade artifact. Without this
+# negation the rule above silently excludes BackupBundle.cs and a fresh clone does
+# not compile.
+!src/EntKube.Web/Data/Backup/
 UpgradeLog*.XML
 UpgradeLog*.htm
 ServiceFabricBackup/
