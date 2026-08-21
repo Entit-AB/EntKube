@@ -227,7 +227,28 @@ See `docs/cli.md`.
   rather than 0, so a pipeline cannot mistake an unmeasured fleet for a clean one.
 - Tables by default (a person is reading), `--json` for `jq`.
 
-**Outstanding**: outbound webhooks and the Terraform provider.
+**Outbound webhooks: hardened rather than rebuilt.** A Webhook notification channel
+already existed, so the work was to make it safe rather than to add a second one.
+
+- **SSRF fix.** The channel posted to an operator-supplied URL with no destination
+  validation at all. Since the management plane can reach every managed cluster, its
+  own loopback and the cloud metadata service — while the URL is supplied by a
+  *tenant* user — "send my alerts here" was a request for EntKube to dial anything it
+  could reach. `OutboundUrlGuard` now default-denies everything not publicly routable,
+  including IPv4-mapped IPv6 forms of private ranges, and resolves hostnames requiring
+  every returned address to be public. Applied to the Slack, Teams and generic webhook
+  senders; the hard-coded Graph endpoint needs no check. Instance-wide opt-in for
+  operators with a genuine internal receiver, deliberately not per-tenant.
+- **HMAC signing.** Deliveries can now carry `X-EntKube-Signature-256` over
+  `{timestamp}.{body}`. The timestamp is inside the signed material so a captured
+  delivery cannot be replayed with a fresh one. Verification uses a fixed-time compare.
+
+Residual risk, stated in `docs/webhooks.md`: DNS rebinding between validation and the
+request still gets through. Closing it needs the connection pinned to the validated
+address via a `SocketsHttpHandler` connect callback.
+
+**Outstanding**: the Terraform provider, and broadening webhook events beyond alerts
+to the newer signals (advisor findings, rollbacks, drift).
 
 ## Phase 3 — Prove and control value
 
