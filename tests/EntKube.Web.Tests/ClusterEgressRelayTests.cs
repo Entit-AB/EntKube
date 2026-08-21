@@ -171,6 +171,47 @@ public class ClusterEgressRelayTests
     }
 
     [Fact]
+    public void Manifest_satisfies_the_restricted_pod_security_standards()
+    {
+        // Clusters commonly enforce these via Kyverno, and admission rejects the
+        // pod outright if the seccomp profile is missing — the relay is useless if
+        // it cannot be admitted.
+        ClusterEgressRelay relay = CreateRelay();
+        string manifest = relay.BuildManifest(
+            ClusterEgressRelay.BuildNginxConfig(["identity.example.com"], "10.96.0.10"));
+
+        manifest.Should().Contain("seccompProfile:");
+        manifest.Should().Contain("type: RuntimeDefault");
+        manifest.Should().Contain("runAsNonRoot: true");
+        manifest.Should().Contain("allowPrivilegeEscalation: false");
+        manifest.Should().Contain("readOnlyRootFilesystem: true");
+        manifest.Should().Contain("drop: [\"ALL\"]");
+    }
+
+    [Fact]
+    public void Manifest_pins_the_image_rather_than_tracking_latest()
+    {
+        // A floating tag both breaks reproducibility and trips the common
+        // disallow-latest-tag admission policy.
+        ClusterEgressRelay relay = CreateRelay();
+        string manifest = relay.BuildManifest(
+            ClusterEgressRelay.BuildNginxConfig(["identity.example.com"], "10.96.0.10"));
+
+        manifest.Should().NotContain(":latest");
+        manifest.Should().MatchRegex(@"image: \S+:\d+\.\d+");
+    }
+
+    [Fact]
+    public void Manifest_does_not_mount_a_service_account_token()
+    {
+        // The relay forwards TCP and never calls the API server.
+        ClusterEgressRelay relay = CreateRelay();
+
+        relay.BuildManifest(ClusterEgressRelay.BuildNginxConfig(["identity.example.com"], "10.96.0.10"))
+            .Should().Contain("automountServiceAccountToken: false");
+    }
+
+    [Fact]
     public void Manifest_names_the_service_and_port_the_tunnel_forwards_to()
     {
         ClusterEgressRelay relay = CreateRelay();

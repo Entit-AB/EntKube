@@ -42,6 +42,11 @@ public class ClusterEgressRelay(IKubernetesClientFactory k8s, ILogger<ClusterEgr
     /// Container image for the relay. The official nginx alpine image is built
     /// <c>--with-stream_ssl_preread_module</c>, which is the whole mechanism; an
     /// air-gapped install can point this at a mirror.
+    ///
+    /// Verified to run as uid 101 on a read-only root filesystem with only /tmp
+    /// writable: a stream-only config registers no HTTP temp paths, so nginx never
+    /// needs /var/cache. The image entrypoint notices it is not root and skips its
+    /// root-only steps with a warning.
     /// </summary>
     public string Image { get; init; } = "nginx:1.27-alpine";
 
@@ -231,6 +236,17 @@ public class ClusterEgressRelay(IKubernetesClientFactory k8s, ILogger<ClusterEgr
                   annotations:
                     entkube.io/config-hash: "{{configHash}}"
                 spec:
+                  # The relay needs no API access of its own — it only forwards TCP.
+                  automountServiceAccountToken: false
+                  # Satisfies the restricted Pod Security Standards, which clusters
+                  # commonly enforce via Kyverno. Without the seccomp profile in
+                  # particular, admission rejects the pod outright.
+                  securityContext:
+                    seccompProfile:
+                      type: RuntimeDefault
+                    runAsNonRoot: true
+                    runAsUser: 101
+                    runAsGroup: 101
                   containers:
                     - name: nginx
                       image: {{Image}}
@@ -252,6 +268,9 @@ public class ClusterEgressRelay(IKubernetesClientFactory k8s, ILogger<ClusterEgr
                       securityContext:
                         allowPrivilegeEscalation: false
                         readOnlyRootFilesystem: true
+                        runAsNonRoot: true
+                        seccompProfile:
+                          type: RuntimeDefault
                         capabilities:
                           drop: ["ALL"]
                   volumes:
