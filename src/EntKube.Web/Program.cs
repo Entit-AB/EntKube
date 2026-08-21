@@ -413,6 +413,10 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.Cost.CostRateService>();
         builder.Services.AddSingleton<EntKube.Web.Services.Cost.CostScanCache>();
         builder.Services.AddHostedService<EntKube.Web.Services.Cost.CostScanService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Rollouts.RolloutService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Rollouts.IRolloutStarter>(
+            sp => sp.GetRequiredService<EntKube.Web.Services.Rollouts.RolloutService>());
+        builder.Services.AddHostedService<EntKube.Web.Services.Rollouts.RolloutWatcherService>();
         builder.Services.AddScoped<OperationsAdvisorService>();
         builder.Services.AddScoped<CustomerNotificationService>();
 

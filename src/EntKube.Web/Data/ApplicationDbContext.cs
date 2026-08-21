@@ -25,6 +25,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<EgressAgent> EgressAgents => Set<EgressAgent>();
     public DbSet<ApiToken> ApiTokens => Set<ApiToken>();
     public DbSet<ClusterCostRate> ClusterCostRates => Set<ClusterCostRate>();
+    public DbSet<RolloutPolicy> RolloutPolicies => Set<RolloutPolicy>();
+    public DbSet<DeploymentRollout> DeploymentRollouts => Set<DeploymentRollout>();
     public DbSet<SecretVault> SecretVaults => Set<SecretVault>();
     public DbSet<VaultSecret> VaultSecrets => Set<VaultSecret>();
     public DbSet<VaultSecretVersion> VaultSecretVersions => Set<VaultSecretVersion>();
@@ -192,6 +194,38 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(r => r.Cluster)
                   .WithMany()
                   .HasForeignKey(r => r.ClusterId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // RolloutPolicy — one per deployment; the unique index is what stops two policies
+        // disagreeing about whether a release should be rolled back.
+
+        builder.Entity<RolloutPolicy>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => p.DeploymentId).IsUnique();
+            entity.Property(p => p.TelemetryServiceName).HasMaxLength(200);
+            entity.Property(p => p.UpdatedBy).HasMaxLength(256);
+            entity.HasOne(p => p.Deployment)
+                  .WithMany()
+                  .HasForeignKey(p => p.DeploymentId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // DeploymentRollout — the watch history. Indexed on (DeploymentId, StartedAt) for
+        // the per-deployment history view, and on Status so the background watcher can find
+        // open rollouts without scanning the whole table.
+
+        builder.Entity<DeploymentRollout>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => new { r.DeploymentId, r.StartedAt });
+            entity.HasIndex(r => r.Status);
+            entity.Property(r => r.TriggeredBy).HasMaxLength(256);
+            entity.Property(r => r.Verdict).HasMaxLength(1000);
+            entity.HasOne(r => r.Deployment)
+                  .WithMany()
+                  .HasForeignKey(r => r.DeploymentId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
 

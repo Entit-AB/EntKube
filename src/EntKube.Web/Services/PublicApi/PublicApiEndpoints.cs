@@ -429,6 +429,35 @@ public static class PublicApiEndpoints
             });
         }).RequireApiScope(ApiScopes.OpsRead);
 
+        api.MapGet("/rollouts", async (
+            HttpContext ctx, IDbContextFactory<ApplicationDbContext> dbFactory, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+            await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+            var rollouts = await db.DeploymentRollouts
+                .AsNoTracking()
+                .Where(r => r.Deployment.App.Customer.TenantId == tenantId)
+                .OrderByDescending(r => r.StartedAt)
+                .Take(100)
+                .Select(r => new
+                {
+                    id = r.Id,
+                    app = r.Deployment.App.Name,
+                    deployment = r.Deployment.Name,
+                    environment = r.Deployment.Environment.Name,
+                    cluster = r.Deployment.Cluster.Name,
+                    status = r.Status.ToString(),
+                    startedAt = r.StartedAt,
+                    finishedAt = r.FinishedAt,
+                    verdict = r.Verdict,
+                    triggeredBy = r.TriggeredBy,
+                })
+                .ToListAsync(ct);
+
+            return Results.Ok(rollouts);
+        }).RequireApiScope(ApiScopes.OpsRead);
+
         api.MapPost("/advisor/findings/{findingId}/acknowledge", async (
             string findingId, HttpContext ctx, AdvisorStateService state, CancellationToken ct) =>
         {

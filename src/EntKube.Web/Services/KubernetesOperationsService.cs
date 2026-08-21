@@ -101,6 +101,7 @@ public class KubernetesOperationsService(
     AuditService auditService,
     KyvernoPolicyService kyvernoPolicyService,
     IClusterChangeGate gate,
+    EntKube.Web.Services.Rollouts.IRolloutStarter rollouts,
     ILogger<KubernetesOperationsService> logger)
 {
     /// <summary>
@@ -1060,6 +1061,21 @@ public class KubernetesOperationsService(
                 {
                     logger.LogWarning(ex, "Prune after apply failed for deployment {DeploymentId}", deploymentId);
                     output += $"\n\nWarning: pruning of removed resources failed: {ex.Message}";
+                }
+
+                // Open a rollout watch when the deployment has one configured. Deliberately
+                // fire-and-observe: the verdict arrives minutes later from the background
+                // watcher, because blocking this call — and therefore any CI job driving it —
+                // for a ten-minute analysis window would make the feature unusable in exactly
+                // the pipelines it exists to protect. A failure to open the watch must never
+                // fail an apply that already succeeded.
+                try
+                {
+                    await rollouts.OpenAsync(deploymentId, performedBy, DateTime.UtcNow, ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Could not open rollout watch for deployment {DeploymentId}", deploymentId);
                 }
             }
             else

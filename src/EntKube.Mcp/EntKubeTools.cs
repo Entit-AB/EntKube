@@ -185,6 +185,17 @@ public static class EntKubeTools
 
         new McpTool
         {
+            Name = "entkube_rollouts",
+            Description = "Recent release watches and their verdicts — whether each release was "
+                        + "promoted, alerted on, or rolled back automatically, and why. A verdict "
+                        + "of 'Inconclusive' means nothing could be measured, which is not the "
+                        + "same as the release being healthy.",
+            InputSchema = NoArgs(),
+            Handler = (api, _, ct) => api.GetAsync("/api/v1/rollouts", ct),
+        },
+
+        new McpTool
+        {
             Name = "entkube_acknowledge_finding",
             Description = "Acknowledge an Operations Advisor finding, marking it as being handled. "
                         + "Does not change any cluster.",
