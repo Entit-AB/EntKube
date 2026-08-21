@@ -11,7 +11,7 @@ Status legend: ☐ not started · ◐ in progress · ☑ shipped
 | 3 | Cost & chargeback | 3 | ☑ |
 | 5 | Progressive delivery + auto-rollback | 3 | ◐ |
 | 7 | OIDC/SSO + SCIM for the portal | 4 | ◐ |
-| 8 | Velero cluster DR | 4 | ☐ |
+| 8 | Velero cluster DR | 4 | ☑ |
 
 ## Why this order
 
@@ -362,8 +362,48 @@ provisioning and deprovisioning without requiring a login — which matters when
 must be revoked in minutes rather than at next sign-in. It is a substantial surface
 (`/Users`, `/Groups`, filtering, PATCH semantics) and is not started.
 
-### 8. Velero cluster DR  ☐
+### 8. Velero cluster DR  ☑
 
-Platform state, CNPG and Mongo are backed up; customer PVs and namespaces are not.
-Add Velero as a catalog component, schedule cluster backups, and add a DR-readiness
-report plus restore drills feeding `AdvisorCategory.DataProtection`.
+Platform state, CNPG and Mongo were backed up; customer PVs and namespaces were not.
+
+**The judgement the feature is built on: a backup that EXISTS is not a backup that
+WORKS.** Velero records a `PartiallyFailed` backup with a completion timestamp, so
+anything that asks only "did it finish" treats a backup that silently skipped
+resources as a success — and that gets discovered during a restore, at the worst
+possible moment. Only a clean, error-free `Completed` backup counts as restorable,
+in the readiness rules, the UI, and the API.
+
+**Velero's own CRs are the source of truth.** EntKube keeps no parallel record of
+what has been backed up: a second copy would drift the moment a backup expired or
+someone ran `velero backup create` by hand, and a DR feature that lies about what is
+restorable is worse than none. This also means no new entity and no migration.
+
+**Readiness gaps** (→ `AdvisorCategory.DataProtection`): no usable backup (critical),
+stale backup past 36 h (critical), unreachable storage location (critical), no
+schedule, paused schedule, a schedule that skips volume data, and backups that have
+never been restore-tested.
+
+Two of those are easy to get wrong and are pinned by tests:
+- A schedule with `snapshotVolumes: false` captures Kubernetes objects but not volume
+  contents, so a restore returns *empty* volumes — which looks like success until
+  someone opens the application. Velero defaults the field to true, so an **absent**
+  field must not read as "volumes are not captured", or every correct schedule raises
+  a false alarm.
+- "Untested" is suppressed when there is no usable backup to test. Reporting both is
+  noise; only one of them is actionable.
+
+A cluster without Velero produces no gaps at all — it is outside the feature's scope
+rather than failing it, and flagging every such cluster would drown the real gaps.
+
+**Shipped**: Velero catalog component (chart 12.1.0 / Velero 1.18.1, verified against
+the live chart repo; AWS plugin since it serves every S3-compatible store, node agent
+on so volume *data* is captured, path-style addressing for MinIO), `VeleroService`
+(read CRs, create/delete schedules, one-off backups), `DrReadiness` (pure),
+`DrScanCache` + hourly `DrScanService`, advisor findings, `DisasterRecoveryTab`,
+`/api/v1/disaster-recovery`, an `entkube_disaster_recovery` MCP tool, 28 unit tests.
+
+**Deliberately not built**: triggering restores from EntKube. Reading restore history
+as evidence of testing is safe; *performing* a restore overwrites live cluster state
+and is the one operation where a UI mis-click is unrecoverable. It belongs behind a
+deliberate, typed-confirmation flow rather than a button added at the end of a batch
+of features.

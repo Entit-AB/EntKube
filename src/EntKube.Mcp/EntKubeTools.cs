@@ -196,6 +196,17 @@ public static class EntKubeTools
 
         new McpTool
         {
+            Name = "entkube_disaster_recovery",
+            Description = "Per-cluster backup and restore posture, and any gaps in it. Note that "
+                        + "'restorable' counts only clean backups: Velero records a partially-failed "
+                        + "backup as completed, but it has skipped resources and cannot be relied on. "
+                        + "Returns 503 if no check has run yet.",
+            InputSchema = NoArgs(),
+            Handler = (api, _, ct) => api.GetAsync("/api/v1/disaster-recovery", ct),
+        },
+
+        new McpTool
+        {
             Name = "entkube_acknowledge_finding",
             Description = "Acknowledge an Operations Advisor finding, marking it as being handled. "
                         + "Does not change any cluster.",

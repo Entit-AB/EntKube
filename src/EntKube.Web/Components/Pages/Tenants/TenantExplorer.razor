@@ -334,6 +334,8 @@ else
         [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon") ]),
         new("Networking", "bi-signpost-split",
         [ new("ingress", "Routes & Ingress", "bi-signpost-split"), new("networking", "VPN mesh", "bi-hdd-network") ]),
+        new("Disaster recovery", "bi-shield-check",
+        [ new("disaster-recovery", "Backups & restore", "bi-shield-check") ]),
         new("Reliability", "bi-check2-square",
         [ new("sla", "SLA", "bi-check2-square"), new("maintenance", "Maintenance", "bi-tools"), new("secret-expiry", "Secret expiry", "bi-clock-history") ]),
         new("Lifecycle", "bi-arrow-up-circle",
@@ -728,6 +730,11 @@ else
                 builder.OpenComponent<SecretExpiryTab>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);
                 builder.AddComponentParameter(2, "OnNavigateTab", EventCallback.Factory.Create<string>(this, NavigateToSection));
+                builder.CloseComponent();
+                break;
+            case "disaster-recovery":
+                builder.OpenComponent<DisasterRecoveryTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
                 builder.CloseComponent();
                 break;
             case "rollouts":
