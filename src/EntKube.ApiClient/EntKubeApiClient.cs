@@ -1,7 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text.Json.Nodes;
 
-namespace EntKube.Mcp;
+namespace EntKube.ApiClient;
 
 /// <summary>The outcome of an API call, kept as a result rather than an exception so tool
 /// handlers can hand a readable failure back to the model instead of crashing the server.</summary>
@@ -13,9 +13,13 @@ public sealed record ApiResult(bool Success, string Body, int StatusCode)
 /// <summary>
 /// Thin REST client for EntKube's public API.
 ///
-/// Talks to the same <c>/api/v1</c> surface as any other client and carries an ordinary
-/// scoped API token — the MCP server has no privileged path into EntKube, so whatever
-/// the token cannot do, the model cannot do either.
+/// Shared by every first-party client (the MCP server, the CLI) so the mapping from
+/// HTTP status to operator-facing advice stays in one place. Two copies would drift,
+/// and the advice for a 403 or a 503 is exactly the kind of thing worth saying the
+/// same way everywhere.
+///
+/// Carries an ordinary scoped API token and talks to the same <c>/api/v1</c> surface
+/// as any other client — no first-party client has a privileged path into EntKube.
 /// </summary>
 public sealed class EntKubeApiClient : IDisposable
 {

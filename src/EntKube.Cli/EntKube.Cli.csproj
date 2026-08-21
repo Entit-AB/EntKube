@@ -5,13 +5,9 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <RootNamespace>EntKube.Mcp</RootNamespace>
-    <AssemblyName>entkube-mcp</AssemblyName>
+    <RootNamespace>EntKube.Cli</RootNamespace>
+    <AssemblyName>entkube</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
-
-    <!-- Like the egress agent, this ships as a single self-contained binary so a
-         user can point an MCP client at one file with no runtime to install.
-         The RuntimeIdentifier is set at publish time, not here. -->
   </PropertyGroup>
 
   <ItemGroup>

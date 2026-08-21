@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 
+using EntKube.ApiClient;
 namespace EntKube.Mcp;
 
 /// <summary>One MCP tool: its schema, whether it mutates, and how to run it.</summary>

@@ -4,7 +4,9 @@
     <Project Path="src/EntKube.Agents.Protocol/EntKube.Agents.Protocol.csproj" />
     <Project Path="src/EntKube.Agent/EntKube.Agent.csproj" />
     <Project Path="src/EntKube.Web/EntKube.Web.csproj" />
+    <Project Path="src/EntKube.ApiClient/EntKube.ApiClient.csproj" />
     <Project Path="src/EntKube.Mcp/EntKube.Mcp.csproj" />
+    <Project Path="src/EntKube.Cli/EntKube.Cli.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/EntKube.Web.Tests/EntKube.Web.Tests.csproj" />

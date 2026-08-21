@@ -213,8 +213,21 @@ binary exposing the tenant to any MCP client over stdio. See `docs/mcp-server.md
   API surfaced as a readable tool error, and a malformed input line answered with a
   parse error without killing the session.
 
-**Outstanding**: outbound webhooks, the CLI, and the Terraform provider. All sit on
-the token model that now exists; none is blocked on further server work.
+**Shipped: the CLI.** `src/EntKube.Cli` → an `entkube` binary over the same API.
+See `docs/cli.md`.
+
+- The API client is **extracted** into `EntKube.ApiClient`, shared with the MCP
+  server, so the HTTP-status→advice mapping lives in one place. Two copies would
+  drift, and the wording for a 403 or a 503 is exactly what should be identical
+  everywhere.
+- Exit codes are chosen for CI: 0 success, 1 request failed, 2 bad usage, 3 rows
+  returned with `--fail-on-results`. That last one is the pipeline gate —
+  `entkube drift --fail-on-results` fails a build on drift without parsing output.
+- The sweep-backed commands return 503 when no sweep has run, and the CLI exits 1
+  rather than 0, so a pipeline cannot mistake an unmeasured fleet for a clean one.
+- Tables by default (a person is reading), `--json` for `jq`.
+
+**Outstanding**: outbound webhooks and the Terraform provider.
 
 ## Phase 3 — Prove and control value
 
