@@ -1,0 +1,268 @@
+@page "/admin/sso"
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.EntityFrameworkCore
+@using EntKube.Web.Data
+@using EntKube.Web.Services.Sso
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = "Admin")]
+
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject OidcOptions Oidc
+@inject AuthenticationStateProvider AuthState
+
+<PageTitle>Single sign-on</PageTitle>
+
+<div class="d-flex align-items-center justify-content-between mb-4">
+    <div>
+        <h1 class="mb-0"><i class="bi bi-person-badge me-2 text-primary"></i>Single sign-on</h1>
+        <p class="text-muted small mb-0 mt-1">
+            Map identity-provider groups onto tenant access.
+        </p>
+    </div>
+</div>
+
+<div class="card shadow-sm mb-4">
+    <div class="card-header bg-white py-2">
+        <strong><i class="bi bi-plug me-2 text-primary"></i>Provider</strong>
+    </div>
+    <div class="card-body pt-3">
+        @if (!Oidc.Enabled)
+        {
+            <p class="text-muted small mb-0">
+                SSO is disabled. Set <code>Oidc:Enabled</code>, <code>Oidc:Authority</code> and
+                <code>Oidc:ClientId</code> in configuration and restart to enable it. Provider
+                settings are configuration rather than database rows on purpose: a misconfigured
+                provider must not be editable by whoever is already logged in.
+            </p>
+        }
+        else if (!Oidc.IsUsable)
+        {
+            <div class="alert alert-warning mb-0">
+                <i class="bi bi-exclamation-triangle me-1"></i>
+                SSO is enabled but incomplete — <code>Authority</code> and <code>ClientId</code> are both
+                required. No SSO button is shown on the login page until they are set.
+            </div>
+        }
+        else
+        {
+            <dl class="row mb-0 small">
+                <dt class="col-sm-3 text-muted">Authority</dt>
+                <dd class="col-sm-9"><code>@Oidc.Authority</code></dd>
+                <dt class="col-sm-3 text-muted">Client ID</dt>
+                <dd class="col-sm-9"><code>@Oidc.ClientId</code></dd>
+                <dt class="col-sm-3 text-muted">Groups claim</dt>
+                <dd class="col-sm-9"><code>@Oidc.GroupsClaim</code></dd>
+                <dt class="col-sm-3 text-muted">Extra scopes</dt>
+                <dd class="col-sm-9">@(Oidc.Scopes.Length > 0 ? string.Join(", ", Oidc.Scopes) : "—")</dd>
+                <dt class="col-sm-3 text-muted">Unmapped users</dt>
+                <dd class="col-sm-9">
+                    @(Oidc.AllowUsersWithoutMappedGroups
+                        ? "Signed in with no tenant access"
+                        : "Refused at login")
+                </dd>
+            </dl>
+        }
+    </div>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <strong><i class="bi bi-diagram-3 me-2 text-primary"></i>Group mappings</strong>
+    </div>
+    <div class="card-body pt-3">
+        <div class="alert alert-light border small">
+            Access from these mappings is <strong>recomputed on every SSO login</strong>. Removing
+            someone from a group in your directory removes their EntKube access the next time they
+            sign in — nobody has to remember to do it here as well.
+            <br />
+            Memberships granted by hand, in tenants no mapping mentions, are never touched.
+        </div>
+
+        <div class="row g-2 align-items-end mb-3">
+            <div class="col-md-4">
+                <label class="form-label small mb-1">Provider group</label>
+                <input class="form-control form-control-sm font-monospace" @bind="newGroup"
+                       placeholder="group id or name, exactly as the IdP emits it" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small mb-1">Tenant</label>
+                <select class="form-select form-select-sm" @bind="newTenantId" @bind:after="OnTenantChanged">
+                    <option value="">Choose…</option>
+                    @foreach (Tenant tenant in tenants)
+                    {
+                        <option value="@tenant.Id">@tenant.Name</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small mb-1">Role</label>
+                <select class="form-select form-select-sm" @bind="newRoleId">
+                    <option value="">Choose…</option>
+                    @foreach (TenantRole role in RolesForSelectedTenant)
+                    {
+                        <option value="@role.Id">@role.Name</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-sm btn-primary w-100" @onclick="AddAsync"
+                        disabled="@(string.IsNullOrWhiteSpace(newGroup) || newTenantId is null || newRoleId is null)">
+                    <i class="bi bi-plus-lg me-1"></i>Add
+                </button>
+            </div>
+        </div>
+
+        @if (message is not null)
+        {
+            <div class="alert py-2 small @(messageOk ? "alert-success" : "alert-danger")">@message</div>
+        }
+
+        @if (mappings.Count == 0)
+        {
+            <p class="text-muted small mb-0">
+                No mappings yet. Until at least one exists, SSO logins grant no tenant access.
+            </p>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead>
+                        <tr class="text-muted small">
+                            <th>Provider group</th>
+                            <th>Tenant</th>
+                            <th>Role</th>
+                            <th>Added</th>
+                            <th class="text-end"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (MappingRow row in mappings)
+                        {
+                            <tr>
+                                <td><code class="small">@row.ExternalGroup</code></td>
+                                <td class="small">@row.TenantName</td>
+                                <td class="small">@row.RoleName</td>
+                                <td class="small text-muted">
+                                    @row.CreatedAt.ToString("yyyy-MM-dd")
+                                    @if (row.CreatedBy is not null)
+                                    {
+                                        <div>by @row.CreatedBy</div>
+                                    }
+                                </td>
+                                <td class="text-end">
+                                    <button class="btn btn-sm btn-outline-danger" @onclick="() => RemoveAsync(row.Id)">
+                                        Remove
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    private sealed record MappingRow(
+        Guid Id, string ExternalGroup, string TenantName, string RoleName, DateTime CreatedAt, string? CreatedBy);
+
+    private List<MappingRow> mappings = [];
+    private List<Tenant> tenants = [];
+    private List<TenantRole> roles = [];
+
+    private string newGroup = "";
+    private Guid? newTenantId;
+    private Guid? newRoleId;
+    private string? message;
+    private bool messageOk;
+
+    private IEnumerable<TenantRole> RolesForSelectedTenant =>
+        newTenantId is Guid id ? roles.Where(r => r.TenantId == id) : [];
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    /// <summary>Clears the role when the tenant changes — a role belongs to exactly one tenant.</summary>
+    private void OnTenantChanged() => newRoleId = null;
+
+    private async Task ReloadAsync()
+    {
+        await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+
+        tenants = await db.Tenants.AsNoTracking().OrderBy(t => t.Name).ToListAsync();
+        roles = await db.TenantRoles.AsNoTracking().OrderBy(r => r.Name).ToListAsync();
+
+        mappings = await db.ExternalGroupMappings
+            .AsNoTracking()
+            .OrderBy(m => m.ExternalGroup)
+            .Select(m => new MappingRow(
+                m.Id, m.ExternalGroup, m.Tenant.Name, m.Role.Name, m.CreatedAt, m.CreatedBy))
+            .ToListAsync();
+    }
+
+    private async Task AddAsync()
+    {
+        message = null;
+        try
+        {
+            await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+
+            // The role must belong to the chosen tenant, or the membership would carry a role
+            // from somewhere else entirely.
+            bool roleBelongs = await db.TenantRoles
+                .AnyAsync(r => r.Id == newRoleId && r.TenantId == newTenantId);
+
+            if (!roleBelongs)
+            {
+                messageOk = false;
+                message = "That role does not belong to the selected tenant.";
+                return;
+            }
+
+            db.ExternalGroupMappings.Add(new ExternalGroupMapping
+            {
+                Id = Guid.NewGuid(),
+                ExternalGroup = newGroup.Trim(),
+                TenantId = newTenantId!.Value,
+                RoleId = newRoleId!.Value,
+                CreatedBy = (await AuthState.GetAuthenticationStateAsync()).User.Identity?.Name,
+            });
+
+            await db.SaveChangesAsync();
+
+            newGroup = "";
+            newTenantId = null;
+            newRoleId = null;
+            messageOk = true;
+            message = "Mapping added.";
+
+            await ReloadAsync();
+        }
+        catch (DbUpdateException)
+        {
+            messageOk = false;
+            message = "That group is already mapped to this tenant.";
+        }
+        catch (Exception ex)
+        {
+            messageOk = false;
+            message = ex.Message;
+        }
+    }
+
+    private async Task RemoveAsync(Guid id)
+    {
+        await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+
+        ExternalGroupMapping? mapping = await db.ExternalGroupMappings.FirstOrDefaultAsync(m => m.Id == id);
+        if (mapping is not null)
+        {
+            db.ExternalGroupMappings.Remove(mapping);
+            await db.SaveChangesAsync();
+        }
+
+        await ReloadAsync();
+    }
+}

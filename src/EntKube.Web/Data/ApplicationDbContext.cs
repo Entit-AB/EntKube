@@ -25,6 +25,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<EgressAgent> EgressAgents => Set<EgressAgent>();
     public DbSet<ApiToken> ApiTokens => Set<ApiToken>();
     public DbSet<ClusterCostRate> ClusterCostRates => Set<ClusterCostRate>();
+    public DbSet<ExternalGroupMapping> ExternalGroupMappings => Set<ExternalGroupMapping>();
     public DbSet<RolloutPolicy> RolloutPolicies => Set<RolloutPolicy>();
     public DbSet<DeploymentRollout> DeploymentRollouts => Set<DeploymentRollout>();
     public DbSet<SecretVault> SecretVaults => Set<SecretVault>();
@@ -227,6 +228,28 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                   .WithMany()
                   .HasForeignKey(r => r.DeploymentId)
                   .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ExternalGroupMapping — a group may grant access to several tenants, but only one
+        // role per tenant: two roles for the same group in the same tenant would make the
+        // resulting access depend on evaluation order.
+
+        builder.Entity<ExternalGroupMapping>(entity =>
+        {
+            entity.HasKey(m => m.Id);
+            entity.HasIndex(m => new { m.ExternalGroup, m.TenantId }).IsUnique();
+            entity.Property(m => m.ExternalGroup).HasMaxLength(400).IsRequired();
+            entity.Property(m => m.CreatedBy).HasMaxLength(256);
+            entity.HasOne(m => m.Tenant)
+                  .WithMany()
+                  .HasForeignKey(m => m.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(m => m.Role)
+                  .WithMany()
+                  .HasForeignKey(m => m.RoleId)
+                  // Restrict, not Cascade: deleting a role that a group mapping depends on
+                  // must be a deliberate act, not a silent revocation of everyone's access.
+                  .OnDelete(DeleteBehavior.Restrict);
         });
 
         // TenantRole — each role name must be unique within its tenant.
