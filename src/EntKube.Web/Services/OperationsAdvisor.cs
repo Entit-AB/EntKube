@@ -142,6 +142,7 @@ public class OperationsAdvisorService(
     ErrorBudgetService errorBudget,
     AdvisorStateService stateService,
     EntKube.Web.Services.Upgrades.ComponentUpgradeService componentUpgrades,
+    EntKube.Web.Services.Upgrades.DriftScanCache driftCache,
     ILogger<OperationsAdvisorService> logger)
 {
     /// <summary>Overdue findings older than this, still unacknowledged, are escalated.</summary>
@@ -160,6 +161,7 @@ public class OperationsAdvisorService(
         findings.AddRange(await BuildCapacityFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildBlueprintFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildUpgradeFindingsAsync(tenantId, now, ct));
+        findings.AddRange(BuildDriftFindings(tenantId, now));
 
         var merged = await MergeStateAsync(tenantId, findings, now, ct);
 
@@ -1085,6 +1087,85 @@ public class OperationsAdvisorService(
                     Source = "upgrade",
                 });
             }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Turns the last drift sweep into findings.
+    ///
+    /// Reads the cache and never triggers a sweep: a sweep forks a server-side dry-run
+    /// per managed deployment, and the advisor report is built on every page render.
+    /// A tenant with no completed sweep yet simply contributes nothing, rather than
+    /// making the whole feed wait on kubectl.
+    /// </summary>
+    private List<OperationsFinding> BuildDriftFindings(Guid tenantId, DateTime now)
+    {
+        var result = new List<OperationsFinding>();
+
+        DriftReport? report = driftCache.Get(tenantId);
+        if (report is null)
+        {
+            return result;
+        }
+
+        foreach (DriftResult drifted in report.Results.Where(r => r.State == DriftState.Drifted))
+        {
+            result.Add(new OperationsFinding
+            {
+                Id = $"drift:{drifted.DeploymentId}",
+                Category = AdvisorCategory.Maintenance,
+                Severity = AdvisorSeverity.Warning,
+                Horizon = AdvisorHorizon.ThisWeek,
+                Title = $"“{drifted.AppName} / {drifted.DeploymentName}” has drifted from its manifest",
+                Detail = $"{drifted.ChangedLines} changed line{(drifted.ChangedLines == 1 ? "" : "s")} between "
+                    + $"the desired manifest and live state in {drifted.Namespace}. "
+                    + "Someone changed this outside EntKube, and the next sync will overwrite it.",
+                ScopeLabel = drifted.EnvironmentName is null
+                    ? $"Cluster: {drifted.ClusterName}"
+                    : $"{drifted.EnvironmentName} · {drifted.ClusterName}",
+                TimingText = $"detected {DueText(report.GeneratedAt, now)}",
+                Remediation = "Review the diff, then re-apply to converge — or fold the change into the manifest.",
+                LinkSection = "drift",
+                ClusterId = drifted.ClusterId,
+                CustomerId = drifted.CustomerId,
+                CustomerName = drifted.CustomerName,
+                Source = "drift",
+            });
+        }
+
+        // Removed APIs are grouped per cluster: they share one deadline (that cluster's next
+        // control-plane upgrade), so they are one decision, not one per object.
+        foreach (IGrouping<Guid, DriftResult> cluster in report.Results
+            .Where(r => r.DeprecatedApis.Count > 0)
+            .GroupBy(r => r.ClusterId))
+        {
+            List<DeprecatedApiUsage> usages = [.. cluster.SelectMany(r => r.DeprecatedApis)];
+            string clusterName = cluster.First().ClusterName;
+            string earliest = usages
+                .Select(u => u.RemovedInMinor)
+                .OrderBy(v => SemVer.Parse(v))
+                .First();
+
+            result.Add(new OperationsFinding
+            {
+                Id = $"deprecated-api:{cluster.Key}",
+                Category = AdvisorCategory.Maintenance,
+                Severity = AdvisorSeverity.Warning,
+                Horizon = AdvisorHorizon.Later,
+                Title = $"{usages.Count} manifest object{(usages.Count == 1 ? " uses" : "s use")} "
+                    + $"a removed Kubernetes API on “{clusterName}”",
+                Detail = string.Join(", ", usages
+                    .Select(u => $"{u.Kind} {u.ApiVersion} → {u.ReplacedBy}")
+                    .Distinct()
+                    .Take(4)) + $". Earliest removal: Kubernetes {earliest}.",
+                ScopeLabel = $"Cluster: {clusterName}",
+                Remediation = "Update the manifests to the replacement API versions before upgrading the control plane.",
+                LinkSection = "drift",
+                ClusterId = cluster.Key,
+                Source = "drift",
+            });
         }
 
         return result;

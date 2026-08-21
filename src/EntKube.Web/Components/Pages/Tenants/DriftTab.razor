@@ -1,0 +1,204 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Upgrades
+@inject DriftDetectionService DriftService
+@inject DriftScanCache DriftCache
+
+@* ═══════════════════════════════════════════════════════════════════
+   Configuration drift — managed manifests vs live cluster state.
+
+   Shows the last background sweep by default; a rescan is explicit because
+   each one costs a server-side dry-run per managed deployment.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3 mt-4">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span><i class="bi bi-shuffle me-2 text-primary"></i><strong>Configuration drift</strong></span>
+        <div class="d-flex align-items-center gap-2">
+            @if (report is not null)
+            {
+                <span class="text-muted small">Swept @report.GeneratedAt.ToString("yyyy-MM-dd HH:mm") UTC</span>
+            }
+            <button class="btn btn-sm btn-outline-secondary" @onclick="RescanAsync" disabled="@scanning">
+                @if (scanning)
+                {
+                    <span class="spinner-border spinner-border-sm me-1"></span>
+                    <span>Scanning…</span>
+                }
+                else
+                {
+                    <i class="bi bi-arrow-clockwise me-1"></i>
+                    <span>Rescan now</span>
+                }
+            </button>
+        </div>
+    </div>
+    <div class="card-body pt-3">
+        <p class="text-muted small mb-3">
+            Compares each managed deployment's manifests against live cluster state with a server-side
+            dry-run — the same comparison shown before an apply. Drift means someone changed the cluster
+            outside EntKube, and the next sync will overwrite it. Helm-based deployments are excluded:
+            Helm owns their reconciliation.
+        </p>
+
+        @if (scanError is not null)
+        {
+            <div class="alert alert-danger">Scan failed: @scanError</div>
+        }
+
+        @if (report is null)
+        {
+            <div class="alert alert-light border mb-0">
+                <i class="bi bi-info-circle me-1"></i>
+                No sweep has completed yet. The background scan runs every two hours, or you can
+                <a href="#" @onclick:preventDefault @onclick="RescanAsync">scan now</a>.
+            </div>
+        }
+        else if (report.Results.Count == 0)
+        {
+            <p class="text-muted small mb-0">
+                No managed manifest deployments in this tenant. Drift tracking covers Manual, YAML and
+                Git-YAML deployments that EntKube manages.
+            </p>
+        }
+        else
+        {
+            <div class="row g-2 mb-3">
+                @SummaryCard("Drifted", report.DriftedCount, "text-warning", "bi-shuffle")
+                @SummaryCard("In sync", report.InSyncCount, "text-success", "bi-check2-circle")
+                @SummaryCard("Unknown", report.UnknownCount, "text-muted", "bi-question-circle")
+                @SummaryCard("Removed APIs", report.AllDeprecatedApis.Count(), "text-danger", "bi-exclamation-octagon")
+            </div>
+
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead>
+                        <tr class="text-muted small">
+                            <th style="width:2rem"></th>
+                            <th>Deployment</th>
+                            <th>Scope</th>
+                            <th>Namespace</th>
+                            <th>State</th>
+                            <th>Changes</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (DriftResult r in report.Results)
+                        {
+                            <tr>
+                                <td>
+                                    @if (r.State == DriftState.Drifted && r.DiffText is not null)
+                                    {
+                                        <button class="btn btn-sm btn-link p-0" @onclick="() => Toggle(r.DeploymentId)"
+                                                title="Show the diff">
+                                            <i class="bi @(expanded.Contains(r.DeploymentId) ? "bi-chevron-down" : "bi-chevron-right")"></i>
+                                        </button>
+                                    }
+                                </td>
+                                <td>
+                                    <div class="fw-medium">@r.AppName / @r.DeploymentName</div>
+                                    @if (r.DeprecatedApis.Count > 0)
+                                    {
+                                        <span class="badge bg-danger-subtle text-danger border border-danger-subtle mt-1"
+                                              title="@string.Join(", ", r.DeprecatedApis.Select(u => $"{u.Kind} {u.ApiVersion} → {u.ReplacedBy} (removed in {u.RemovedInMinor})"))">
+                                            @r.DeprecatedApis.Count removed API@(r.DeprecatedApis.Count == 1 ? "" : "s")
+                                        </span>
+                                    }
+                                </td>
+                                <td class="small text-muted">
+                                    @(r.EnvironmentName ?? "—") · @r.ClusterName
+                                    @if (r.CustomerName is not null)
+                                    {
+                                        <div>@r.CustomerName</div>
+                                    }
+                                </td>
+                                <td class="small"><code>@r.Namespace</code></td>
+                                <td>
+                                    <span class="badge @StateClass(r.State)">@StateText(r.State)</span>
+                                    @if (r.Note is not null)
+                                    {
+                                        <i class="bi bi-info-circle text-muted ms-1 small" title="@r.Note"></i>
+                                    }
+                                </td>
+                                <td class="small text-muted">
+                                    @(r.State == DriftState.Drifted ? $"{r.ChangedLines} line{(r.ChangedLines == 1 ? "" : "s")}" : "—")
+                                </td>
+                            </tr>
+
+                            @if (expanded.Contains(r.DeploymentId) && r.DiffText is not null)
+                            {
+                                <tr>
+                                    <td colspan="6" class="bg-light">
+                                        <pre class="small mb-0" style="max-height:24rem;overflow:auto"><code>@r.DiffText</code></pre>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private DriftReport? report;
+    private bool scanning;
+    private string? scanError;
+    private readonly HashSet<Guid> expanded = [];
+
+    protected override void OnInitialized() => report = DriftCache.Get(TenantId);
+
+    private void Toggle(Guid deploymentId)
+    {
+        if (!expanded.Add(deploymentId))
+        {
+            expanded.Remove(deploymentId);
+        }
+    }
+
+    private async Task RescanAsync()
+    {
+        scanning = true;
+        scanError = null;
+        try
+        {
+            report = await DriftService.GetTenantDriftAsync(TenantId, DateTime.UtcNow);
+            // Publish the fresh sweep so the advisor feed reflects it too, rather than
+            // continuing to report findings from a sweep the operator just superseded.
+            DriftCache.Set(TenantId, report);
+        }
+        catch (Exception ex)
+        {
+            scanError = ex.Message;
+        }
+        finally
+        {
+            scanning = false;
+        }
+    }
+
+    private static RenderFragment SummaryCard(string label, int value, string textClass, string icon) =>
+        @<div class="col-6 col-md-3">
+            <div class="border rounded p-2 h-100">
+                <div class="text-muted small"><i class="bi @icon me-1"></i>@label</div>
+                <div class="fs-4 fw-semibold @textClass">@value</div>
+            </div>
+        </div>;
+
+    private static string StateText(DriftState state) => state switch
+    {
+        DriftState.Drifted => "Drifted",
+        DriftState.InSync => "In sync",
+        _ => "Unknown",
+    };
+
+    private static string StateClass(DriftState state) => state switch
+    {
+        DriftState.Drifted => "bg-warning text-dark",
+        DriftState.InSync => "bg-success",
+        _ => "bg-secondary",
+    };
+}

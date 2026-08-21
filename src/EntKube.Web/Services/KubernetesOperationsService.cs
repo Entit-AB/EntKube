@@ -1010,17 +1010,9 @@ public class KubernetesOperationsService(
 
         // Prepend a Namespace manifest so the namespace is created automatically
         // if it doesn't exist yet — mirrors Helm's --create-namespace behaviour.
-        // Strip any leading "---" document marker from individual manifests — some
-        // Git-managed files start with "---" and the split preserves it, which would
-        // produce a double "---\n---" separator in the combined output.
-        string nsManifest = $"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {deployment.Namespace}";
-        string combined = nsManifest + "\n---\n" + string.Join("\n---\n", manifests.Select(m =>
-        {
-            string content = m.YamlContent.TrimStart();
-            return content.StartsWith("---", StringComparison.Ordinal)
-                ? content["---".Length..].TrimStart('\n', '\r')
-                : content;
-        }));
+        // Shared with drift detection so the two can never render different bytes.
+        string combined = EntKube.Web.Services.Upgrades.DeploymentManifestComposer.Combine(
+            deployment.Namespace, manifests);
 
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-manifest-{Guid.NewGuid()}.yaml");

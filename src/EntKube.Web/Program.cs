@@ -400,6 +400,11 @@ public class Program
         // entries, and a per-scope client would refetch a multi-megabyte index per component.
         builder.Services.AddSingleton<EntKube.Web.Services.Upgrades.HelmRepoIndexClient>();
         builder.Services.AddScoped<EntKube.Web.Services.Upgrades.ComponentUpgradeService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Upgrades.DriftDetectionService>();
+        // Singleton cache + background sweep: the advisor reads the cache and never forks a
+        // server-side dry-run per deployment while rendering a page.
+        builder.Services.AddSingleton<EntKube.Web.Services.Upgrades.DriftScanCache>();
+        builder.Services.AddHostedService<EntKube.Web.Services.Upgrades.DriftScanService>();
         builder.Services.AddScoped<OperationsAdvisorService>();
         builder.Services.AddScoped<CustomerNotificationService>();
 
