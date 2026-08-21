@@ -67,15 +67,26 @@ port 443.
 
 ## Install
 
-Publish the binary:
+Build every platform at once:
 
 ```bash
-dotnet publish src/EntKube.Agent -c Release -r linux-x64 \
-  --self-contained true -p:PublishSingleFile=true
+scripts/build-agent.sh                    # all platforms, Debug + Release
+scripts/build-agent.sh Release            # one configuration
+scripts/build-agent.sh Release osx-arm64  # one target
 ```
 
-That produces a single `entkube-agent` executable with no runtime to install —
-which matters, since these networks often cannot pull a container image either.
+Output lands in `artifacts/agent/<configuration>/<rid>/`, covering
+`osx-arm64` (Apple Silicon), `osx-x64` (Intel Mac), `linux-x64` and `win-x64`.
+
+Each is a single `entkube-agent` executable with no runtime to install — which
+matters, since these networks often cannot pull a container image either.
+
+On macOS a binary you built locally runs as-is. One copied from another machine
+picks up the quarantine attribute and needs clearing first:
+
+```bash
+xattr -d com.apple.quarantine ./entkube-agent
+```
 
 Copy it to a host in the permitted network along with an `agent.json`:
 
