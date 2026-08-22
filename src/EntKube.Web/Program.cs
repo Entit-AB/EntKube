@@ -381,6 +381,7 @@ public class Program
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
         builder.Services.AddSingleton<IngestTokenService>();
         builder.Services.AddScoped<EntKube.Web.Services.PublicApi.ApiTokenService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Scim.ScimUserService>();
         builder.Services.AddSingleton<IngestRateLimiter>();
         // Real User Monitoring: resolves per-site public keys for the public browser ingest endpoint.
         builder.Services.AddSingleton<RumSiteService>();
@@ -867,6 +868,7 @@ public class Program
         // traffic. Token-authenticated inside the handler, not by the cookie scheme.
         app.MapAgentEndpoint();
         EntKube.Web.Services.PublicApi.PublicApiEndpoints.MapPublicApi(app);
+        EntKube.Web.Services.Scim.ScimEndpoints.MapScim(app);
 
         app.Run();
     }

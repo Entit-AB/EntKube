@@ -401,11 +401,25 @@ people out of their own platform. Pinned by three separate tests.
 entity + migrations (all three providers), OIDC scheme registration, sync hooked into
 the external-login callback, `AdminSso` page, `docs/sso.md`, 16 unit tests.
 
-**Outstanding: SCIM.** Users are provisioned just-in-time at first SSO login and
-reconciled on every login, which covers the common case. SCIM adds directory-*pushed*
-provisioning and deprovisioning without requiring a login — which matters when access
-must be revoked in minutes rather than at next sign-in. It is a substantial surface
-(`/Users`, `/Groups`, filtering, PATCH semantics) and is not started.
+**SCIM shipped.** `/scim/v2` user provisioning behind a dedicated `scim:provision`
+scope, so the token handed to a directory connector cannot also read clusters.
+
+- **Deactivation, not deletion** — `DELETE` and `active:false` disable rather than
+  remove, keeping memberships, audit trail and identity intact, and stamp the security
+  stamp so an existing session dies rather than running to cookie expiry.
+- **An unsupported filter is a 400, never ignored** — silently dropping it turns "find
+  this user" into "here is every user", and the connector then concludes something
+  false about who exists.
+- Handles the shapes directories actually send: Entra's `"False"` as a *string*, PATCH
+  with no `path` (fields inside `value`), and `startIndex` being 1-based.
+- `/Groups` deliberately not implemented — tenant access already derives from OIDC
+  group claims, and a second disagreeing source of membership is how people end up
+  with access nobody can explain.
+
+Verified end to end against a running instance: 401 unauthenticated, 403 for a token
+without the scope, 409 on duplicate, filter match, 400 with the SCIM error envelope on
+an unsupported filter, PATCH deprovision persisting to an Identity lockout in the
+database, reactivation, and DELETE leaving the user present but inactive.
 
 ### 8. Velero cluster DR  ☑
 
