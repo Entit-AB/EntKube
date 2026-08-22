@@ -247,8 +247,19 @@ Residual risk, stated in `docs/webhooks.md`: DNS rebinding between validation an
 request still gets through. Closing it needs the connection pinned to the validated
 address via a `SocketsHttpHandler` connect callback.
 
-**Outstanding**: the Terraform provider, and broadening webhook events beyond alerts
-to the newer signals (advisor findings, rollbacks, drift).
+**Rollout outcomes now notify.** The rollout policy offered an "Alert" failure action
+that did nothing but write a log line, while sitting in the UI next to "Roll back"
+implying somebody got told — a defect in #5 as originally shipped, since an option
+that promises a notification and delivers none is worse than not offering one.
+Outcomes now dispatch through the tenant's notification channels (which, after the
+hardening above, are SSRF-guarded and signable): failed rollback and automatic
+rollback as critical, failed analysis as warning, unverifiable release as info.
+Promoted and superseded stay silent — a channel firing on every successful deploy is
+muted within a week, and the rollback notification is muted along with it.
+
+**Outstanding**: the Terraform provider, and webhook events for the remaining new
+signals (drift detected, DR gap opened) — advisor findings already reach channels
+through the daily digest.
 
 ## Phase 3 — Prove and control value
 

@@ -242,3 +242,73 @@ public class RolloutAnalysisTests
         judgement.Summary.Should().Be("All 2 checked signal(s) within threshold.");
     }
 }
+
+/// <summary>
+/// Tests for which rollout outcomes reach a human.
+///
+/// This exists because the policy's "Alert" failure action originally did nothing but
+/// write a log line, while sitting in the UI next to "Roll back" implying somebody
+/// gets told. An option that promises a notification and delivers none is worse than
+/// not offering it.
+/// </summary>
+public class RolloutNotificationTests
+{
+    [Fact]
+    public void A_failed_rollback_is_critical()
+    {
+        // The bad release is still live and the automatic remedy did not work.
+        RolloutWatcherService.NotificationSeverityFor(DeploymentRolloutStatus.RollbackFailed)
+            .Should().Be("critical");
+    }
+
+    [Fact]
+    public void An_automatic_rollback_is_critical_even_though_it_succeeded()
+    {
+        // Production was reverted without a human deciding to. The outcome is the safe
+        // one, but nobody should discover it from a dashboard days later.
+        RolloutWatcherService.NotificationSeverityFor(DeploymentRolloutStatus.RolledBack)
+            .Should().Be("critical");
+    }
+
+    [Fact]
+    public void A_failed_analysis_with_no_rollback_configured_warns()
+    {
+        // This is the case the "Alert" action exists for.
+        RolloutWatcherService.NotificationSeverityFor(DeploymentRolloutStatus.Alerted)
+            .Should().Be("warning");
+    }
+
+    [Fact]
+    public void An_inconclusive_release_is_reported_quietly()
+    {
+        RolloutWatcherService.NotificationSeverityFor(DeploymentRolloutStatus.Inconclusive)
+            .Should().Be("info");
+    }
+
+    [Theory]
+    [InlineData(DeploymentRolloutStatus.Promoted)]
+    [InlineData(DeploymentRolloutStatus.Superseded)]
+    [InlineData(DeploymentRolloutStatus.Watching)]
+    public void Uneventful_outcomes_stay_silent(DeploymentRolloutStatus outcome)
+    {
+        // A channel that fires on every successful deploy is muted within a week — and
+        // the rollback notification is muted along with it.
+        RolloutWatcherService.NotificationSeverityFor(outcome).Should().BeNull();
+    }
+
+    [Fact]
+    public void Every_outcome_the_policy_can_produce_has_a_deliberate_decision()
+    {
+        // A new terminal status must not silently default to "stay quiet".
+        foreach (DeploymentRolloutStatus outcome in Enum.GetValues<DeploymentRolloutStatus>())
+        {
+            bool shouldNotify = outcome is DeploymentRolloutStatus.RolledBack
+                or DeploymentRolloutStatus.RollbackFailed
+                or DeploymentRolloutStatus.Alerted
+                or DeploymentRolloutStatus.Inconclusive;
+
+            (RolloutWatcherService.NotificationSeverityFor(outcome) is not null)
+                .Should().Be(shouldNotify, $"outcome {outcome} should have a considered notification decision");
+        }
+    }
+}

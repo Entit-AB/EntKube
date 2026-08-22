@@ -77,6 +77,7 @@ public class RolloutWatcherService(
         using IServiceScope scope = scopeFactory.CreateScope();
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
         var rollouts = scope.ServiceProvider.GetRequiredService<RolloutService>();
+        var notifications = scope.ServiceProvider.GetRequiredService<NotificationService>();
 
         List<Guid> due;
         await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
@@ -91,7 +92,7 @@ public class RolloutWatcherService(
         {
             try
             {
-                await DecideAsync(rolloutId, now, dbFactory, rollouts, ct);
+                await DecideAsync(rolloutId, now, dbFactory, rollouts, notifications, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -106,7 +107,8 @@ public class RolloutWatcherService(
 
     private async Task DecideAsync(
         Guid rolloutId, DateTime now,
-        IDbContextFactory<ApplicationDbContext> dbFactory, RolloutService rollouts, CancellationToken ct)
+        IDbContextFactory<ApplicationDbContext> dbFactory, RolloutService rollouts,
+        NotificationService notifications, CancellationToken ct)
     {
         AppDeployment? deployment;
         RolloutPolicy? policy;
@@ -175,12 +177,16 @@ public class RolloutWatcherService(
 
             (bool ok, string output) = await rollouts.RollbackAsync(deployment, deployment.Cluster.Kubeconfig, ct);
 
-            await rollouts.CloseAsync(
-                rolloutId,
-                ok ? DeploymentRolloutStatus.RolledBack : DeploymentRolloutStatus.RollbackFailed,
-                ok ? $"{verdict} — rolled back automatically. {output}"
-                   : $"{verdict} — ROLLBACK FAILED: {output}",
-                signals, now, ct);
+            DeploymentRolloutStatus rollbackStatus = ok
+                ? DeploymentRolloutStatus.RolledBack
+                : DeploymentRolloutStatus.RollbackFailed;
+
+            string rollbackVerdict = ok
+                ? $"{verdict} — rolled back automatically. {output}"
+                : $"{verdict} — ROLLBACK FAILED: {output}";
+
+            await rollouts.CloseAsync(rolloutId, rollbackStatus, rollbackVerdict, signals, now, ct);
+            await NotifyAsync(notifications, dbFactory, deployment, rollbackStatus, rollbackVerdict, ct);
             return;
         }
 
@@ -192,5 +198,90 @@ public class RolloutWatcherService(
         }
 
         await rollouts.CloseAsync(rolloutId, outcome, verdict, signals, now, ct);
+        await NotifyAsync(notifications, dbFactory, deployment, outcome, verdict, ct);
+    }
+
+    /// <summary>
+    /// Which rollout outcomes are worth telling someone about, and how loudly.
+    /// Null means stay quiet.
+    ///
+    /// Exposed and pure so the choice is testable — getting it wrong in either
+    /// direction is costly: too quiet and an automatic rollback goes unnoticed, too
+    /// loud and the channel is muted, which silences the rollback notification too.
+    /// </summary>
+    public static string? NotificationSeverityFor(DeploymentRolloutStatus outcome) => outcome switch
+    {
+        // The rollback itself failed: the bad release is still live AND the automatic
+        // remedy did not work, so this needs a person now.
+        DeploymentRolloutStatus.RollbackFailed => "critical",
+        // Production was reverted without a human deciding to. Even though the outcome is
+        // the safe one, nobody should discover it by reading a dashboard days later.
+        DeploymentRolloutStatus.RolledBack => "critical",
+        DeploymentRolloutStatus.Alerted => "warning",
+        DeploymentRolloutStatus.Inconclusive => "info",
+        // Promoted and Superseded stay silent. A channel that fires on every successful
+        // deploy gets muted within a week, and the rollback notification goes with it.
+        _ => null,
+    };
+
+    /// <summary>
+    /// Tells someone what happened to a release.
+    ///
+    /// This is what makes the policy's "Alert" failure action mean anything: without it
+    /// the setting sits in the UI next to "Roll back" implying somebody gets told, and
+    /// all it does is write a log line nobody is watching at 3am. The same applies to an
+    /// automatic rollback — production was just changed without a human, which is
+    /// precisely the thing a human needs to hear about.
+    ///
+    /// A promoted or superseded release notifies nothing: a channel that fires on every
+    /// successful deploy is muted within a week, and then the rollback notification is
+    /// muted along with it.
+    /// </summary>
+    private async Task NotifyAsync(
+        NotificationService notifications, IDbContextFactory<ApplicationDbContext> dbFactory,
+        AppDeployment deployment, DeploymentRolloutStatus outcome, string verdict, CancellationToken ct)
+    {
+        string? severity = NotificationSeverityFor(outcome);
+
+        if (severity is null)
+        {
+            return;
+        }
+
+        try
+        {
+            Guid tenantId;
+            await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+            {
+                tenantId = await db.Apps
+                    .Where(a => a.Id == deployment.AppId)
+                    .Select(a => a.Customer.TenantId)
+                    .FirstAsync(ct);
+            }
+
+            string headline = outcome switch
+            {
+                DeploymentRolloutStatus.RollbackFailed => "Automatic rollback FAILED",
+                DeploymentRolloutStatus.RolledBack => "Release rolled back automatically",
+                DeploymentRolloutStatus.Alerted => "Release failed its analysis",
+                _ => "Release could not be verified",
+            };
+
+            await notifications.DispatchDigestAsync(
+                tenantId,
+                $"{headline} — {deployment.Name}",
+                $"Deployment: {deployment.Name}\nNamespace: {deployment.Namespace}\n\n{verdict}",
+                severity, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // The verdict is already recorded on the rollout, so a failed notification
+            // loses the alert but never the fact of what happened.
+            logger.LogWarning(ex, "Could not notify on rollout outcome for deployment {DeploymentId}", deployment.Id);
+        }
     }
 }
