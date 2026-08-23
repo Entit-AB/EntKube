@@ -566,6 +566,15 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<Guid>("AppRouteId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("CanaryServiceName")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("CanaryServicePort")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("CanaryWeight")
+                        .HasColumnType("INTEGER");
+
                     b.Property<DateTime?>("ClusterAppliedAt")
                         .HasColumnType("TEXT");
 

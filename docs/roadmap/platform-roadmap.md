@@ -9,7 +9,7 @@ Status legend: ☐ not started · ◐ in progress · ☑ shipped
 | 4 | Supply-chain security (CVE + signing) | 2 | ☑ |
 | 2 | Public API, tokens, CLI, MCP server | 2 | ◐ |
 | 3 | Cost & chargeback | 3 | ☑ |
-| 5 | Progressive delivery + auto-rollback | 3 | ◐ |
+| 5 | Progressive delivery + auto-rollback | 3 | ☑ |
 | 7 | OIDC/SSO + SCIM for the portal | 4 | ◐ |
 | 8 | Velero cluster DR | 4 | ☑ |
 
@@ -368,13 +368,37 @@ production workload is something an operator opts into, never inherits.
 `RolloutWatcherService`, `RolloutsTab`, `/api/v1/rollouts`, an `entkube_rollouts` MCP
 tool, and 20 unit tests on the judgement rules.
 
-**Outstanding: the *progressive* half.** Weighted canary traffic-splitting — stepping
-an HTTPRoute's `backendRefs` weights toward a canary Service and promoting on success —
-is not built. It needs a canary workload to exist, which means either synthesising
-renamed manifests or having the operator declare a canary service; that is a
-substantial feature in its own right and was not worth half-building. What ships here
-is the analysis and rollback engine, which is the part that needed the control plane
-and the differentiated part versus Flagger.
+**Weighted traffic splitting now ships too**, completing the progressive half — with
+one deliberate boundary.
+
+A deployment route can name a **canary Service** and a **traffic share**, and the
+generated HTTPRoute emits weighted `backendRefs` across the stable and canary
+backends. Combined with the analysis engine above, that is a working canary: shift
+10%, read the verdict, shift more or drop back to zero.
+
+**EntKube does not synthesise the canary workload.** Doing so means rewriting
+someone's manifests under a new name, and getting that subtly wrong produces a canary
+that is not actually the thing being tested — a worse failure than not having the
+feature. The operator declares what the canary is; EntKube owns the traffic split,
+which is the part that needs a control plane.
+
+**Advancing is a human action, not a timer.** The engine already tells you whether a
+release is healthy; automating the step *and* the judgement, on a code path that has
+never run against a real cluster, is not something to ship unverified. The stepping
+loop is the natural next addition once this has been exercised live.
+
+Safety properties, each pinned by a test:
+- A route with **no canary generates byte-identical YAML** to before this existed.
+  Otherwise every deployment in the fleet would have reported as drifted on upgrade.
+- A canary service with **0% weight emits no canary backend** — staging a canary must
+  not move traffic.
+- A **weight with no service** sends everything to stable; half-configured fails safe.
+- Naming the **stable service as the canary is rejected** — it would emit two identical
+  backends and split traffic between a workload and itself, which is valid YAML that
+  quietly means nothing.
+- Clearing the service **clears the weight**, so no orphaned "10% is going somewhere".
+- Changing either **clears `ClusterAppliedAt`**, so the UI cannot show a weight as live
+  before the HTTPRoute has actually reached the cluster.
 
 ## Phase 4 — Enterprise edges
 

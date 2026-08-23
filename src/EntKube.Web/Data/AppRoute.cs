@@ -90,6 +90,28 @@ public class AppDeploymentRoute
     /// </summary>
     public int? RequestTimeoutSeconds { get; set; }
 
+    /// <summary>
+    /// A second Kubernetes Service to send a share of traffic to — the canary side of a
+    /// weighted release. Null means all traffic goes to <see cref="ServiceName"/>.
+    ///
+    /// EntKube does not create this Service or the workload behind it. Synthesising a
+    /// canary workload means rewriting someone's manifests under a new name, and getting
+    /// that subtly wrong produces a canary that is not actually the thing being tested.
+    /// The operator declares what the canary is; EntKube owns the traffic split, which is
+    /// the part that needs a control plane.
+    /// </summary>
+    public string? CanaryServiceName { get; set; }
+
+    /// <summary>
+    /// Percentage of traffic sent to <see cref="CanaryServiceName"/>, 0–100. Zero (the
+    /// default) sends everything to the stable service and emits a single backend, so a
+    /// route with no canary is byte-identical to what it was before this field existed.
+    /// </summary>
+    public int CanaryWeight { get; set; }
+
+    /// <summary>Port on the canary service. Defaults to the stable service's port when unset.</summary>
+    public int? CanaryServicePort { get; set; }
+
     /// <summary>Gateway resource name resolved from the cluster's installed ingress controller.</summary>
     public string? GatewayName { get; set; }
 

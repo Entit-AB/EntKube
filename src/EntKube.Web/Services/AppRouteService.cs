@@ -253,6 +253,50 @@ public class AppRouteService(
         await db.SaveChangesAsync(ct);
     }
 
+    /// <summary>
+    /// Sets the canary service and traffic share for a route.
+    ///
+    /// Clears ClusterAppliedAt so the route shows as needing re-apply, exactly like a
+    /// timeout change: the weight only takes effect once the HTTPRoute reaches the
+    /// cluster, and a UI that showed the new number as live before then would be
+    /// claiming traffic had moved when it had not.
+    /// </summary>
+    public async Task UpdateDeploymentRouteCanaryAsync(
+        Guid deploymentRouteId, string? canaryServiceName, int canaryWeight,
+        int? canaryServicePort = null, CancellationToken ct = default)
+    {
+        if (canaryWeight is < 0 or > 100)
+        {
+            throw new InvalidOperationException("Canary weight must be between 0 and 100.");
+        }
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        AppDeploymentRoute dr = await db.AppDeploymentRoutes
+            .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct)
+            ?? throw new InvalidOperationException("Deployment route not found.");
+
+        string? service = string.IsNullOrWhiteSpace(canaryServiceName) ? null : canaryServiceName.Trim();
+
+        // Naming the stable service as the canary would emit two identical backends and
+        // split traffic between a workload and itself — valid YAML that quietly means
+        // nothing, which is worse than an error.
+        if (service is not null && string.Equals(service, dr.ServiceName, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The canary service must differ from the stable service.");
+        }
+
+        // Dropping the service also drops the weight: leaving a weight behind with no
+        // destination is a half-configured state that reads as "10% is going somewhere".
+        dr.CanaryServiceName = service;
+        dr.CanaryWeight = service is null ? 0 : canaryWeight;
+        dr.CanaryServicePort = service is null ? null : canaryServicePort;
+        dr.ClusterAppliedAt = null;
+
+        await db.SaveChangesAsync(ct);
+    }
+
     private static int? ValidateTimeout(int? requestTimeoutSeconds)
         => requestTimeoutSeconds is < 0
             ? throw new InvalidOperationException("Request timeout cannot be negative. Use 0 for no timeout.")
@@ -382,16 +426,12 @@ public class AppRouteService(
                     rules.AppendLine($"              replacePrefixMatch: {dr.RewritePath}");
                 }
                 rules.AppendLine($"      backendRefs:");
-                rules.AppendLine($"        - name: {dr.ServiceName}");
-                rules.AppendLine($"          namespace: {drNs}");
-                rules.AppendLine($"          port: {dr.ServicePort}");
+                rules.Append(RenderBackendRefs(dr, drNs, "        "));
             }
             else
             {
                 rules.AppendLine($"    - backendRefs:");
-                rules.AppendLine($"        - name: {dr.ServiceName}");
-                rules.AppendLine($"          namespace: {drNs}");
-                rules.AppendLine($"          port: {dr.ServicePort}");
+                rules.Append(RenderBackendRefs(dr, drNs, "        "));
             }
 
             // Each deployment route carries its own timeout, so a streaming path can opt out
@@ -444,6 +484,45 @@ public class AppRouteService(
     // Kept for backward compatibility (e.g. manifest preview for a single route).
     public static string GenerateManifestYaml(AppDeploymentRoute dr)
         => GenerateManifestYaml(dr.AppRoute, [dr]);
+
+    /// <summary>
+    /// Renders the backendRefs for one rule, splitting traffic when a canary is configured.
+    ///
+    /// A route without a canary emits exactly one backend and no weight field, so it is
+    /// byte-identical to what was generated before weighted routing existed — an unrelated
+    /// route must not start producing a different manifest, or every deployment would show
+    /// as drifted the first time this shipped.
+    ///
+    /// Gateway API treats weights as relative shares, not percentages, so "10 and 90" and
+    /// "1 and 9" behave identically. Emitting them as percentages that sum to 100 is purely
+    /// so an operator reading the manifest sees the number they typed.
+    /// </summary>
+    public static string RenderBackendRefs(AppDeploymentRoute dr, string ns, string indent)
+    {
+        var backends = new System.Text.StringBuilder();
+
+        int weight = Math.Clamp(dr.CanaryWeight, 0, 100);
+        bool hasCanary = !string.IsNullOrWhiteSpace(dr.CanaryServiceName) && weight > 0;
+
+        if (!hasCanary)
+        {
+            backends.AppendLine($"{indent}- name: {dr.ServiceName}");
+            backends.AppendLine($"{indent}  namespace: {ns}");
+            backends.AppendLine($"{indent}  port: {dr.ServicePort}");
+            return backends.ToString();
+        }
+
+        backends.AppendLine($"{indent}- name: {dr.ServiceName}");
+        backends.AppendLine($"{indent}  namespace: {ns}");
+        backends.AppendLine($"{indent}  port: {dr.ServicePort}");
+        backends.AppendLine($"{indent}  weight: {100 - weight}");
+        backends.AppendLine($"{indent}- name: {dr.CanaryServiceName}");
+        backends.AppendLine($"{indent}  namespace: {ns}");
+        backends.AppendLine($"{indent}  port: {dr.CanaryServicePort ?? dr.ServicePort}");
+        backends.AppendLine($"{indent}  weight: {weight}");
+
+        return backends.ToString();
+    }
 
     public static string GenerateHttpRouteYaml(AppDeploymentRoute dr)
         => GenerateHttpRouteYaml(dr.AppRoute, [dr]);

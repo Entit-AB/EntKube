@@ -571,6 +571,15 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<Guid>("AppRouteId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("CanaryServiceName")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("CanaryServicePort")
+                        .HasColumnType("int");
+
+                    b.Property<int>("CanaryWeight")
+                        .HasColumnType("int");
+
                     b.Property<DateTime?>("ClusterAppliedAt")
                         .HasColumnType("datetime2");
 
