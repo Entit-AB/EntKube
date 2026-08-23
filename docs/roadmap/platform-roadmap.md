@@ -134,9 +134,13 @@ purpose is to discard somebody else's change. Cancelling at the dialog is report
 a decision ("nothing was changed"), not an error. A **Re-check** action re-measures one
 deployment without re-walking the fleet, and the result replaces just that row in the
 shared cache — so a converged deployment stops being reported as drifted immediately
-rather than at the next two-hourly sweep. The UI also says plainly that if the change
-was deliberate it belongs in the manifests, since overwriting only loses it again on
-the next sync.
+rather than at the next two-hourly sweep. **Adopt** is the other answer, for when
+the out-of-band change was the right one: it pulls live state back into the stored
+manifests and leaves the cluster alone. See `docs/drift-adoption.md` — the sanitiser is
+the whole feature (a live object carries status, identity, history and cluster-bound
+allocations that make a stored manifest unapplicable elsewhere), Secrets are refused
+outright rather than having their data copied into YAML, and adoption is per resource
+so nothing un-adoptable is dropped from the set and then pruned off the cluster.
 
 **Subprocess hardening found by testing against a real kubectl** (v1.36.2):
 - kubectl *prompts on stdin* when a kubeconfig's user has no usable credentials.

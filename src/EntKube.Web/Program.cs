@@ -475,6 +475,7 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.Rollouts.IRolloutStarter>(
             sp => sp.GetRequiredService<EntKube.Web.Services.Rollouts.RolloutService>());
         builder.Services.AddHostedService<EntKube.Web.Services.Rollouts.RolloutWatcherService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Adoption.DriftAdoptionService>();
         builder.Services.AddScoped<EntKube.Web.Services.Dr.VeleroService>();
         builder.Services.AddSingleton<EntKube.Web.Services.Dr.DrScanCache>();
         builder.Services.AddHostedService<EntKube.Web.Services.Dr.DrScanService>();

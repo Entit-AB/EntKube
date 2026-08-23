@@ -1,10 +1,12 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
+@using EntKube.Web.Services.Adoption
 @using EntKube.Web.Services.Upgrades
 @using Microsoft.AspNetCore.Components.Authorization
 @inject DriftDetectionService DriftService
 @inject DriftScanCache DriftCache
 @inject KubernetesOperationsService K8sOps
+@inject DriftAdoptionService Adoption
 @inject AuthenticationStateProvider AuthState
 
 @* ═══════════════════════════════════════════════════════════════════
@@ -164,6 +166,16 @@
                                             }
                                             Overwrite
                                         </button>
+                                        <button class="btn btn-sm btn-outline-primary py-0 ms-1"
+                                                title="Keep the cluster as it is and pull the change back into the stored manifests, so the next sync stops reverting it. You review each resource first."
+                                                disabled="@(busyDeploymentId is not null)"
+                                                @onclick="() => OpenAdoptionAsync(r)">
+                                            @if (busyDeploymentId == r.DeploymentId && busyAction == "adopt")
+                                            {
+                                                <span class="spinner-border spinner-border-sm me-1"></span>
+                                            }
+                                            Adopt
+                                        </button>
                                     }
                                 </td>
                             </tr>
@@ -184,6 +196,130 @@
     </div>
 </div>
 
+@if (proposal is not null && adoptionRow is not null)
+{
+    <div class="card shadow-sm mb-3 border-primary">
+        <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+            <span>
+                <i class="bi bi-box-arrow-in-down me-2 text-primary"></i>
+                <strong>Adopt live state — @adoptionRow.AppName / @adoptionRow.DeploymentName</strong>
+            </span>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="CloseAdoption">Close</button>
+        </div>
+        <div class="card-body pt-3">
+            <p class="text-muted small mb-3">
+                This changes the <strong>stored manifests</strong> to match what is running. The cluster is
+                not touched. Use it when the out-of-band change was the right one and should stop being
+                reverted on every sync.
+            </p>
+
+            @if (proposal.Error is not null)
+            {
+                <div class="alert alert-danger mb-0">@proposal.Error</div>
+            }
+            else
+            {
+                @if (proposal.ChangedCount == 0)
+                {
+                    <div class="alert alert-light border">
+                        Nothing to adopt — every stored manifest already matches the cluster. The drift may
+                        be in a resource EntKube does not manage, or it may have been converged already.
+                    </div>
+                }
+
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead>
+                            <tr class="text-muted small">
+                                <th style="width:2.5rem"></th>
+                                <th>Resource</th>
+                                <th>Status</th>
+                                <th>Notes</th>
+                                <th style="width:2.5rem"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (AdoptionEntry entry in proposal.Entries)
+                            {
+                                <tr>
+                                    <td>
+                                        @if (entry.IsSelectable)
+                                        {
+                                            <input class="form-check-input" type="checkbox"
+                                                   checked="@selectedManifests.Contains(entry.ManifestId)"
+                                                   @onchange="e => ToggleEntry(entry, (bool)e.Value!)" />
+                                        }
+                                    </td>
+                                    <td class="small"><code>@entry.Kind/@entry.Name</code></td>
+                                    <td><span class="badge @AdoptionClass(entry.Status)">@AdoptionText(entry.Status)</span></td>
+                                    <td class="small text-muted">
+                                        @foreach (string note in entry.Notes)
+                                        {
+                                            <div>@note</div>
+                                        }
+                                    </td>
+                                    <td>
+                                        @if (entry.ProposedYaml is not null)
+                                        {
+                                            <button class="btn btn-sm btn-link p-0"
+                                                    title="Show what would be stored"
+                                                    @onclick="() => ToggleProposed(entry.ManifestId)">
+                                                <i class="bi @(expandedProposals.Contains(entry.ManifestId) ? "bi-chevron-down" : "bi-chevron-right")"></i>
+                                            </button>
+                                        }
+                                    </td>
+                                </tr>
+
+                                @if (expandedProposals.Contains(entry.ManifestId) && entry.ProposedYaml is not null)
+                                {
+                                    <tr>
+                                        <td colspan="5" class="bg-light">
+                                            <div class="row g-2">
+                                                <div class="col-md-6">
+                                                    <div class="small text-muted mb-1">Stored now</div>
+                                                    <pre class="small mb-0" style="max-height:20rem;overflow:auto"><code>@entry.CurrentYaml</code></pre>
+                                                </div>
+                                                <div class="col-md-6">
+                                                    <div class="small text-muted mb-1">Would be stored</div>
+                                                    <pre class="small mb-0" style="max-height:20rem;overflow:auto"><code>@entry.ProposedYaml</code></pre>
+                                                </div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                            }
+                        </tbody>
+                    </table>
+                </div>
+
+                @if (proposal.RefusedCount > 0)
+                {
+                    <div class="alert alert-warning py-2 small mt-3 mb-0">
+                        <i class="bi bi-exclamation-triangle me-1"></i>
+                        @proposal.RefusedCount resource(s) cannot be adopted and are left untouched — their
+                        stored manifests stay exactly as they are, so nothing is lost and nothing is pruned.
+                    </div>
+                }
+
+                <div class="d-flex align-items-center gap-2 mt-3">
+                    <button class="btn btn-sm btn-primary"
+                            disabled="@(selectedManifests.Count == 0 || adopting)"
+                            @onclick="ConfirmAdoptionAsync">
+                        @if (adopting)
+                        {
+                            <span class="spinner-border spinner-border-sm me-1"></span>
+                        }
+                        Replace @selectedManifests.Count manifest(s)
+                    </button>
+                    <span class="text-muted small">
+                        There is no manifest history to undo this with — check the comparison first.
+                    </span>
+                </div>
+            }
+        </div>
+    </div>
+}
+
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
@@ -201,6 +337,120 @@
             expanded.Remove(deploymentId);
         }
     }
+
+    private AdoptionProposal? proposal;
+    private DriftResult? adoptionRow;
+    private readonly HashSet<Guid> selectedManifests = [];
+    private readonly HashSet<Guid> expandedProposals = [];
+    private bool adopting;
+
+    /// <summary>
+    /// Builds the proposal and shows it. Nothing is written here — this reads live state
+    /// and compares, so an operator can decide with the two versions side by side.
+    /// </summary>
+    private async Task OpenAdoptionAsync(DriftResult row)
+    {
+        busyDeploymentId = row.DeploymentId;
+        busyAction = "adopt";
+        actionMessage = null;
+        selectedManifests.Clear();
+        expandedProposals.Clear();
+
+        try
+        {
+            proposal = await Adoption.BuildProposalAsync(TenantId, row.DeploymentId);
+            adoptionRow = row;
+
+            // Changed entries start selected — they are the reason the operator opened this.
+            // Everything else is not selectable at all, so nothing can be adopted by accident.
+            foreach (AdoptionEntry entry in proposal.Entries.Where(e => e.IsSelectable))
+            {
+                selectedManifests.Add(entry.ManifestId);
+            }
+        }
+        catch (Exception ex)
+        {
+            actionOk = false;
+            actionMessage = ex.Message;
+        }
+        finally
+        {
+            busyDeploymentId = null;
+            busyAction = null;
+        }
+    }
+
+    private void CloseAdoption()
+    {
+        proposal = null;
+        adoptionRow = null;
+        selectedManifests.Clear();
+        expandedProposals.Clear();
+    }
+
+    private void ToggleEntry(AdoptionEntry entry, bool selected)
+    {
+        if (selected) selectedManifests.Add(entry.ManifestId);
+        else selectedManifests.Remove(entry.ManifestId);
+    }
+
+    private void ToggleProposed(Guid manifestId)
+    {
+        if (!expandedProposals.Add(manifestId)) expandedProposals.Remove(manifestId);
+    }
+
+    private async Task ConfirmAdoptionAsync()
+    {
+        if (proposal is null || adoptionRow is null) return;
+
+        adopting = true;
+        try
+        {
+            AuthenticationState auth = await AuthState.GetAuthenticationStateAsync();
+
+            (int adopted, string message) = await Adoption.AdoptAsync(
+                TenantId, proposal.DeploymentId, [.. selectedManifests], auth.User.Identity?.Name);
+
+            actionOk = adopted > 0;
+            actionMessage = message;
+
+            if (adopted > 0)
+            {
+                // The manifests now match the cluster, so the row should say so. Re-checking
+                // proves it rather than assuming it — if something else drifted meanwhile,
+                // the operator sees that instead of a false all-clear.
+                await RefreshRowAsync(proposal.DeploymentId);
+                CloseAdoption();
+            }
+        }
+        catch (Exception ex)
+        {
+            actionOk = false;
+            actionMessage = ex.Message;
+        }
+        finally
+        {
+            adopting = false;
+        }
+    }
+
+    private static string AdoptionText(AdoptionStatus status) => status switch
+    {
+        AdoptionStatus.Changed => "Differs",
+        AdoptionStatus.Refused => "Cannot adopt",
+        AdoptionStatus.MissingFromCluster => "Not on cluster",
+        AdoptionStatus.Unreadable => "Unreadable",
+        _ => "Matches",
+    };
+
+    private static string AdoptionClass(AdoptionStatus status) => status switch
+    {
+        AdoptionStatus.Changed => "bg-warning text-dark",
+        AdoptionStatus.Refused => "bg-danger",
+        AdoptionStatus.MissingFromCluster => "bg-secondary",
+        AdoptionStatus.Unreadable => "bg-secondary",
+        _ => "bg-success",
+    };
 
     /// <summary>Deployment currently being acted on, so a second click cannot race the first.</summary>
     private Guid? busyDeploymentId;
