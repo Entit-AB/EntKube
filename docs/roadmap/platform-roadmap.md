@@ -496,6 +496,17 @@ Two of those are easy to get wrong and are pinned by tests:
 A cluster without Velero produces no gaps at all — it is outside the feature's scope
 rather than failing it, and flagging every such cluster would drown the real gaps.
 
+**Storage is chosen, not retyped.** The component takes a `StorageLink` from the
+tenant's registered storage — bucket, endpoint and region are written into Helm values
+from it, and the credentials come from the vault. Nothing about the bucket is entered
+by hand. Two copies of a credential can disagree, and a rotated key would otherwise
+have to be chased through every component that copied it; going through the storage
+link means it has one home and re-applying picks up a rotation. Velero reads an INI
+profile rather than separate values, so the pair is composed into one vault-backed
+secret injected through a hidden catalog field — the same rails Loki, Mimir, Tempo and
+Harbor already use. Wired into both install paths (UI and blueprint registrar), and the
+picker repopulates when an installed component is edited.
+
 **Shipped**: Velero catalog component (chart 12.1.0 / Velero 1.18.1, verified against
 the live chart repo; AWS plugin since it serves every S3-compatible store, node agent
 on so volume *data* is captured, path-style addressing for MinIO), `VeleroService`

@@ -14,6 +14,7 @@
 @inject LokiService LokiService
 @inject MimirService MimirService
 @inject TempoService TempoService
+@inject EntKube.Web.Services.Dr.VeleroService VeleroService
 @inject StorageService StorageService
 @inject HeadscaleService HeadscaleService
 
@@ -2027,6 +2028,7 @@ else if (section == "components")
             await SaveMimirConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
 
             await SaveTempoConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
+            await SaveVeleroConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
 
 
             showRegisterForm = false;
@@ -2170,6 +2172,15 @@ else if (section == "components")
                     editFormFieldValues["admin-username"] = harborConfig.AdminUsername;
                 }
 
+                // Repopulate the Velero storage picker from the component's stored config,
+                // so editing an installed component does not show an empty dropdown for
+                // something that is already pointed at a bucket.
+                if (catalogMatch?.Key == "velero"
+                    && EntKube.Web.Services.Dr.VeleroService.TryReadConfig(comp.Configuration)?.StorageLinkId is Guid veleroLinkId)
+                {
+                    editFormFieldValues["storage-link"] = veleroLinkId.ToString();
+                }
+
                 // Load Loki storage link ID from the component's Configuration JSON.
                 if (catalogMatch?.Key == "loki")
                 {
@@ -2289,6 +2300,7 @@ else if (section == "components")
             await SaveMimirConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
 
             await SaveTempoConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
+            await SaveVeleroConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
 
             await LoadComponents();
         }
@@ -3258,6 +3270,26 @@ else if (section == "components")
     /// component has a StorageLink or CnpgDatabase form field (i.e. it is Harbor). Also
     /// creates an HTTPRoute for the configured hostname if one was provided.
     /// </summary>
+    /// <summary>
+    /// Points Velero at the selected storage link: bucket, endpoint and region into Helm
+    /// values, credentials into the vault. Nothing about the bucket is typed by hand, so a
+    /// rotated key is picked up by re-applying rather than by hunting through Helm values.
+    /// </summary>
+    private async Task SaveVeleroConfigIfNeeded(
+        Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
+    {
+        if (catalogEntry?.Key != "velero") return;
+
+        if (!fieldValues.TryGetValue("storage-link", out string? slIdStr)
+            || !Guid.TryParse(slIdStr, out Guid storageLinkId)
+            || storageLinkId == Guid.Empty)
+        {
+            return;
+        }
+
+        await VeleroService.WriteStorageHelmValuesAsync(TenantId, componentId, storageLinkId);
+    }
+
     private async Task SaveLokiConfigIfNeeded(
         Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
     {

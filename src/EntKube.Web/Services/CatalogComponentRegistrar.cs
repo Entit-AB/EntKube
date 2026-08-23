@@ -26,6 +26,7 @@ public class CatalogComponentRegistrar(
     LokiService lokiService,
     MimirService mimirService,
     TempoService tempoService,
+    EntKube.Web.Services.Dr.VeleroService veleroService,
     ExternalRouteService routeService)
 {
     /// <summary>
@@ -94,6 +95,7 @@ public class CatalogComponentRegistrar(
         await SaveLokiConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveMimirConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveTempoConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
+        await SaveVeleroConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
 
         return component;
     }
@@ -332,6 +334,21 @@ public class CatalogComponentRegistrar(
         if (TryGetStorageLink(fieldValues, out Guid storageLinkId))
         {
             await tempoService.WriteStorageHelmValuesAsync(tenantId, componentId, storageLinkId);
+        }
+    }
+
+    /// <summary>
+    /// Points Velero at the selected storage link. Bucket, endpoint, region and credentials
+    /// all come from there, so a blueprint that installs Velero needs only the link id —
+    /// the same single source the UI install path uses.
+    /// </summary>
+    private async Task SaveVeleroConfigIfNeededAsync(
+        Guid tenantId, Guid componentId, IReadOnlyDictionary<string, string> fieldValues, CatalogEntry catalogEntry)
+    {
+        if (catalogEntry.Key != "velero") return;
+        if (TryGetStorageLink(fieldValues, out Guid storageLinkId))
+        {
+            await veleroService.WriteStorageHelmValuesAsync(tenantId, componentId, storageLinkId);
         }
     }
 

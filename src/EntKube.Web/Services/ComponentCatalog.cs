@@ -1740,34 +1740,30 @@ public static class ComponentCatalog
             [
                 new ComponentFormField
                 {
-                    Key = "bucket", Label = "Bucket",
-                    YamlPath = "configuration.backupStorageLocation[0].bucket", Type = FormFieldType.Text,
-                    HelpText = "S3 bucket that will hold the backups. It must already exist — Velero does not create it."
+                    Key = "storage-link", Label = "Backup Storage",
+                    YamlPath = "velero:storage-link-id", Type = FormFieldType.StorageLink,
+                    HelpText = "S3-compatible bucket that will hold the backups, chosen from this tenant's "
+                             + "registered storage. Endpoint, region, bucket and credentials all come from "
+                             + "the storage link — nothing is retyped here, so a rotated key is picked up by "
+                             + "re-applying rather than by editing Helm values."
                 },
                 new ComponentFormField
                 {
-                    Key = "s3-url", Label = "S3 Endpoint",
-                    YamlPath = "configuration.backupStorageLocation[0].config.s3Url", Type = FormFieldType.Text,
-                    HelpText = "S3-compatible endpoint, e.g. https://s3.eu-north-1.amazonaws.com or an in-cluster MinIO URL."
+                    Key = "deploy-node-agent", Label = "Back up volume data",
+                    YamlPath = "deployNodeAgent", Type = FormFieldType.Toggle,
+                    DefaultValue = "true",
+                    HelpText = "Runs the node agent so backups capture persistent volume CONTENTS, not just "
+                             + "the PVC objects. With this off a restore returns empty volumes, which looks "
+                             + "like success until someone opens the application."
                 },
+                // Velero reads its cloud credentials from a single INI file rather than from
+                // separate values, so this is one secret holding the whole block. Written by
+                // VeleroService from the selected storage link; never entered by hand.
                 new ComponentFormField
                 {
-                    Key = "region", Label = "Region",
-                    YamlPath = "configuration.backupStorageLocation[0].config.region", Type = FormFieldType.Text,
-                    DefaultValue = "us-east-1",
-                    HelpText = "Region string. MinIO and most S3-compatible stores accept us-east-1."
-                },
-                new ComponentFormField
-                {
-                    Key = "access-key", Label = "Access Key",
-                    YamlPath = "credentials.secretContents.cloud", Type = FormFieldType.Text,
-                    HelpText = "Access key for the bucket."
-                },
-                new ComponentFormField
-                {
-                    Key = "secret-key", Label = "Secret Key",
-                    YamlPath = "credentials.secretContents.cloudSecret", Type = FormFieldType.Password,
-                    HelpText = "Secret key for the bucket. Stored in the EntKube vault, never in plain Helm values."
+                    Key = "velero-s3-credentials", Label = "S3 Credentials",
+                    YamlPath = "credentials.secretContents.cloud", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "velero-s3-credentials", Hidden = true
                 },
             ],
             DefaultValues = """
@@ -1786,10 +1782,11 @@ public static class ComponentCatalog
                     - name: default
                       provider: aws
                       default: true
-                      bucket: CHANGE_ME
+                      # bucket, region and s3Url are written from the selected storage link.
+                      bucket: ""
                       config:
                         region: us-east-1
-                        s3Url: CHANGE_ME
+                        s3Url: ""
                         # Path-style addressing: MinIO and most S3-compatible stores do not
                         # serve virtual-hosted-style bucket URLs.
                         s3ForcePathStyle: "true"

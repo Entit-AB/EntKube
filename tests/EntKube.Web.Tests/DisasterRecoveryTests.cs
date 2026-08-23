@@ -1,3 +1,5 @@
+using EntKube.Web.Data;
+using EntKube.Web.Services;
 using EntKube.Web.Services.Dr;
 using FluentAssertions;
 using YamlDotNet.Serialization;
@@ -347,5 +349,144 @@ public class DisasterRecoveryTests
         // second is the only actionable one.
         DrReadiness.Evaluate(Status(schedules: [Schedule()]), Now)
             .Should().NotContain(g => g.Key.StartsWith("dr-untested:"));
+    }
+}
+
+/// <summary>
+/// Tests for pointing Velero at a registered storage link rather than at hand-typed
+/// bucket details. The mapping is what decides whether a component installs cleanly
+/// and then fails every backup, so each key is checked rather than eyeballed.
+/// </summary>
+public class VeleroStorageIntegrationTests
+{
+    private static StorageLink Link(
+        StorageProvider provider = StorageProvider.MinIO,
+        string? bucket = "entkube-backups",
+        string? endpoint = "https://minio.example.com:9000",
+        string? region = "eu-north-1") => new()
+    {
+        Id = Guid.NewGuid(),
+        TenantId = Guid.NewGuid(),
+        EnvironmentId = Guid.NewGuid(),
+        Name = "Production backups",
+        Provider = provider,
+        BucketName = bucket,
+        Endpoint = endpoint,
+        Region = region,
+    };
+
+    [Fact]
+    public void Maps_the_link_onto_veleros_backup_storage_location()
+    {
+        Dictionary<string, string> values = VeleroService.BuildStorageValues(Link());
+
+        values["configuration.backupStorageLocation.0.bucket"].Should().Be("entkube-backups");
+        values["configuration.backupStorageLocation.0.config.region"].Should().Be("eu-north-1");
+        values["configuration.backupStorageLocation.0.config.s3Url"].Should().Be("https://minio.example.com:9000");
+        values["configuration.backupStorageLocation.0.provider"].Should().Be("aws");
+    }
+
+    [Fact]
+    public void Uses_the_aws_plugin_even_for_non_aws_stores()
+    {
+        // The AWS plugin serves every S3-compatible backend; naming the provider after the
+        // store would leave Velero looking for a plugin that is not installed.
+        VeleroService.BuildStorageValues(Link(StorageProvider.MinIO))
+            ["configuration.backupStorageLocation.0.provider"].Should().Be("aws");
+    }
+
+    [Fact]
+    public void Forces_path_style_addressing_for_s3_compatible_stores()
+    {
+        // MinIO and Ceph RGW do not serve virtual-hosted-style bucket URLs; getting this
+        // backwards produces DNS failures against a bucket-prefixed hostname.
+        VeleroService.BuildStorageValues(Link(StorageProvider.MinIO))
+            ["configuration.backupStorageLocation.0.config.s3ForcePathStyle"].Should().Be("true");
+    }
+
+    [Fact]
+    public void Leaves_path_style_off_for_real_aws()
+    {
+        VeleroService.BuildStorageValues(Link(StorageProvider.AwsS3))
+            ["configuration.backupStorageLocation.0.config.s3ForcePathStyle"].Should().Be("false");
+    }
+
+    [Fact]
+    public void A_link_without_a_region_gets_the_conventional_default()
+    {
+        // Most S3-compatible stores accept us-east-1 but reject an empty region outright.
+        VeleroService.BuildStorageValues(Link(region: null))
+            ["configuration.backupStorageLocation.0.config.region"].Should().Be("us-east-1");
+    }
+
+    [Fact]
+    public void A_link_without_an_endpoint_writes_no_s3url()
+    {
+        // Real AWS needs no endpoint, and writing an empty one makes the plugin dial "".
+        VeleroService.BuildStorageValues(Link(StorageProvider.AwsS3, endpoint: null))
+            .Should().NotContainKey("configuration.backupStorageLocation.0.config.s3Url");
+    }
+
+    // ── Credentials ──
+
+    [Fact]
+    public void Builds_the_ini_profile_the_aws_plugin_reads()
+    {
+        // The plugin reads an INI file, not environment variables, so the whole block is
+        // one secret rather than two values.
+        string credentials = VeleroService.BuildCredentialsFile("AKIAEXAMPLE", "s3cr3t");
+
+        credentials.Should().StartWith("[default]\n");
+        credentials.Should().Contain("aws_access_key_id=AKIAEXAMPLE");
+        credentials.Should().Contain("aws_secret_access_key=s3cr3t");
+        credentials.Should().EndWith("\n");
+    }
+
+    [Fact]
+    public void The_catalog_entry_takes_a_storage_link_rather_than_typed_bucket_details()
+    {
+        CatalogEntry velero = ComponentCatalog.Entries.Single(e => e.Key == "velero");
+
+        velero.FormFields.Should().Contain(f => f.Type == FormFieldType.StorageLink);
+
+        // Endpoint, bucket, region and keys must not be re-enterable: two copies of a
+        // credential can disagree, and a rotated key would then have to be chased through
+        // every component that copied it.
+        string[] retypedFields = ["bucket", "s3-url", "region", "access-key", "secret-key"];
+        velero.FormFields.Select(f => f.Key).Should().NotIntersectWith(retypedFields);
+    }
+
+    [Fact]
+    public void The_credentials_field_is_hidden_and_vault_backed()
+    {
+        ComponentFormField credentials = ComponentCatalog.Entries
+            .Single(e => e.Key == "velero").FormFields
+            .Single(f => f.Key == "velero-s3-credentials");
+
+        credentials.Hidden.Should().BeTrue();
+        credentials.StoreAsSecret.Should().BeTrue();
+        credentials.YamlPath.Should().Be("credentials.secretContents.cloud");
+    }
+
+    [Fact]
+    public void Stored_config_round_trips_so_the_picker_can_be_repopulated()
+    {
+        Guid linkId = Guid.NewGuid();
+        string json = System.Text.Json.JsonSerializer.Serialize(
+            new VeleroService.VeleroConfig { StorageLinkId = linkId });
+
+        VeleroService.TryReadConfig(json)!.StorageLinkId.Should().Be(linkId);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("{not json")]
+    [InlineData("{\"somethingElse\":1}")]
+    public void Unreadable_stored_config_does_not_throw(string? json)
+    {
+        // Components configured before this existed carry other JSON, or none.
+        Action act = () => VeleroService.TryReadConfig(json);
+        act.Should().NotThrow();
     }
 }
