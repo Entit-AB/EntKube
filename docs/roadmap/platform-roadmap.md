@@ -331,6 +331,24 @@ per-core-hour rate to zero), `CostAllocation` (pure, no DB or Prometheus),
 and above — cost is commercial information), `/api/v1/cost`, an `entkube_cost` MCP
 tool, and 20 unit tests on the allocation arithmetic.
 
+**Matches how OpenStack providers actually bill.** Cleura and similar clouds charge per
+vCPU-hour, per GB RAM-hour and per GB storage — which the rate model already matched —
+plus a monthly charge per load balancer and per public IPv4. Those two are now modelled
+and, crucially, **attributed rather than spread**: every `Service` of type LoadBalancer
+provisions one cloud load balancer, so a namespace that creates three causes three real
+charges, and burying them in shared overhead would bill everyone else for them. Counted
+from the API server rather than a metric, since they are objects billed by the month and
+a scrape interval would only approximate them. A load balancer still awaiting an address
+is counted but its IP is not — billing for an address that does not exist would be wrong.
+
+**No provider's price list is shipped.** Cleura's figures are rendered client-side and
+are not fetchable, but that is not the reason: published prices change, and a stale rate
+baked into the product would quietly produce a wrong invoice. The units and currency are
+the operator's to enter from their contract, and the UI says so, including that most
+published cloud prices exclude VAT. Egress, object storage and DNS zones are named as
+*not* modelled — egress cannot be attributed to a namespace without network accounting
+EntKube does not collect, so it is left out rather than guessed at.
+
 **Deliberately not built**: historical billing. This is a *run rate* — what current
 reservations project to — not a ledger of what was consumed last month. Invoicing
 from history needs a cost rollup table and a retention policy; the run rate is the

@@ -424,6 +424,8 @@ public static class PublicApiEndpoints
                     cpuCores = n.CpuCores,
                     memoryGiB = n.MemoryGiB,
                     storageGiB = n.StorageGiB,
+                    loadBalancers = n.LoadBalancers,
+                    publicIps = n.PublicIps,
                     monthlyCost = n.TotalMonthlyCost,
                     unattributed = n.IsUnattributed,
                 }),
@@ -540,6 +542,8 @@ public static class PublicApiEndpoints
                     ClusterMonthlyOverhead = input.ClusterMonthlyOverhead,
                     Currency = input.Currency ?? "USD",
                     ChargeOnRequests = input.ChargeOnRequests ?? true,
+                    LoadBalancerMonthlyCost = input.LoadBalancerMonthlyCost ?? 0m,
+                    PublicIpMonthlyCost = input.PublicIpMonthlyCost ?? 0m,
                 },
                 updatedBy: $"api-token:{principal.TokenName}", ct);
 
@@ -574,6 +578,8 @@ public static class PublicApiEndpoints
         cpuCoreHourCost = rate.CpuCoreHourCost,
         memoryGiBHourCost = rate.MemoryGiBHourCost,
         storageGiBMonthCost = rate.StorageGiBMonthCost,
+        loadBalancerMonthlyCost = rate.LoadBalancerMonthlyCost,
+        publicIpMonthlyCost = rate.PublicIpMonthlyCost,
         clusterMonthlyOverhead = rate.ClusterMonthlyOverhead,
         currency = rate.Currency,
         chargeOnRequests = rate.ChargeOnRequests,
@@ -593,5 +599,9 @@ public static class PublicApiEndpoints
         decimal StorageGiBMonthCost,
         decimal ClusterMonthlyOverhead,
         string? Currency,
-        bool? ChargeOnRequests);
+        bool? ChargeOnRequests,
+        // Per-month network charges. Nullable so an existing client that does not send
+        // them leaves the stored values alone rather than silently zeroing a rate.
+        decimal? LoadBalancerMonthlyCost = null,
+        decimal? PublicIpMonthlyCost = null);
 }

@@ -54,6 +54,7 @@ public sealed record CostReport
 public class CostReportService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     PrometheusService prometheus,
+    IKubernetesClientFactory k8s,
     ILogger<CostReportService> logger)
 {
     /// <summary>
@@ -188,7 +189,13 @@ public class CostReportService(
         // a half-empty volume still denies its full size to everyone else.
         Dictionary<string, double> storage = await SumByNamespaceAsync(clusterId, StorageQuery, ct);
 
-        HashSet<string> namespaces = [.. cpu.Keys, .. memory.Keys, .. storage.Keys];
+        // Load balancers and public IPs come from the API server rather than Prometheus:
+        // they are objects, not a metric, and counting them is exact where a metric would
+        // be a scrape-interval approximation of something billed by the month.
+        Dictionary<string, (int LoadBalancers, int PublicIps)> network =
+            await CountLoadBalancersAsync(clusterId, ct);
+
+        HashSet<string> namespaces = [.. cpu.Keys, .. memory.Keys, .. storage.Keys, .. network.Keys];
 
         return [.. namespaces.Select(ns => new NamespaceConsumption
         {
@@ -196,7 +203,119 @@ public class CostReportService(
             CpuCores = cpu.GetValueOrDefault(ns),
             MemoryGiB = CostAllocation.BytesToGiB(memory.GetValueOrDefault(ns)),
             StorageGiB = CostAllocation.BytesToGiB(storage.GetValueOrDefault(ns)),
+            LoadBalancers = network.GetValueOrDefault(ns).LoadBalancers,
+            PublicIps = network.GetValueOrDefault(ns).PublicIps,
         })];
+    }
+
+    /// <summary>
+    /// Counts LoadBalancer Services and the public addresses they hold, per namespace.
+    ///
+    /// Every Service of type LoadBalancer provisions a cloud load balancer that is billed
+    /// per month, and normally one public IPv4 with it. Those are charges a specific
+    /// namespace caused, so they are attributed to it rather than buried in shared
+    /// overhead — a team that provisions three of them should see three of them.
+    ///
+    /// A failure here yields no counts rather than throwing: the compute and storage
+    /// figures are still worth reporting, and a cost report that vanishes because one
+    /// API call failed is less useful than one that is missing a line.
+    /// </summary>
+    private async Task<Dictionary<string, (int LoadBalancers, int PublicIps)>> CountLoadBalancersAsync(
+        Guid clusterId, CancellationToken ct)
+    {
+        Dictionary<string, (int, int)> counts = [];
+
+        string? kubeconfig;
+        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        {
+            kubeconfig = await db.KubernetesClusters
+                .Where(c => c.Id == clusterId)
+                .Select(c => c.Kubeconfig)
+                .FirstOrDefaultAsync(ct);
+        }
+
+        if (string.IsNullOrWhiteSpace(kubeconfig))
+        {
+            return counts;
+        }
+
+        try
+        {
+            string json = await k8s.GetJsonAllNamespacesAsync("services", kubeconfig, "", ct);
+            return ParseLoadBalancerServices(json);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not count load balancers on cluster {ClusterId}", clusterId);
+            return counts;
+        }
+    }
+
+    /// <summary>
+    /// Parses a Service list into per-namespace load balancer and public IP counts.
+    /// Public and static so the counting rules can be checked without a cluster.
+    /// </summary>
+    public static Dictionary<string, (int LoadBalancers, int PublicIps)> ParseLoadBalancerServices(string? json)
+    {
+        Dictionary<string, (int LoadBalancers, int PublicIps)> counts = new(StringComparer.Ordinal);
+
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return counts;
+        }
+
+        try
+        {
+            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("items", out System.Text.Json.JsonElement items)
+                || items.ValueKind != System.Text.Json.JsonValueKind.Array)
+            {
+                return counts;
+            }
+
+            foreach (System.Text.Json.JsonElement item in items.EnumerateArray())
+            {
+                if (!item.TryGetProperty("spec", out System.Text.Json.JsonElement spec)
+                    || !spec.TryGetProperty("type", out System.Text.Json.JsonElement type)
+                    || type.GetString() != "LoadBalancer")
+                {
+                    continue;
+                }
+
+                string ns = item.TryGetProperty("metadata", out System.Text.Json.JsonElement meta)
+                    && meta.TryGetProperty("namespace", out System.Text.Json.JsonElement nsEl)
+                    ? nsEl.GetString() ?? ""
+                    : "";
+
+                if (ns.Length == 0)
+                {
+                    continue;
+                }
+
+                // Count only addresses the cloud actually assigned. A Service still
+                // pending an address is provisioning a load balancer but does not yet
+                // hold an IP, and billing for one that does not exist would be wrong.
+                int ips = 0;
+                if (item.TryGetProperty("status", out System.Text.Json.JsonElement status)
+                    && status.TryGetProperty("loadBalancer", out System.Text.Json.JsonElement lb)
+                    && lb.TryGetProperty("ingress", out System.Text.Json.JsonElement ingress)
+                    && ingress.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    ips = ingress.EnumerateArray()
+                        .Count(i => i.TryGetProperty("ip", out System.Text.Json.JsonElement ip)
+                                 && !string.IsNullOrWhiteSpace(ip.GetString()));
+                }
+
+                (int existingLbs, int existingIps) = counts.GetValueOrDefault(ns);
+                counts[ns] = (existingLbs + 1, existingIps + ips);
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return counts;
+        }
+
+        return counts;
     }
 
     private async Task<Dictionary<string, double>> SumByNamespaceAsync(

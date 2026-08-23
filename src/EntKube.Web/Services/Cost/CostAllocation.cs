@@ -14,6 +14,12 @@ public sealed record NamespaceConsumption
     /// <summary>Provisioned persistent storage in GiB. Always charged on provisioned size —
     /// a half-empty volume still denies its full capacity to everyone else.</summary>
     public double StorageGiB { get; init; }
+
+    /// <summary>Services of type LoadBalancer in this namespace. Each provisions one cloud load balancer.</summary>
+    public int LoadBalancers { get; init; }
+
+    /// <summary>Public IPv4 addresses held by those load balancers.</summary>
+    public int PublicIps { get; init; }
 }
 
 /// <summary>What one namespace costs, split by resource so an operator can see what drives it.</summary>
@@ -31,16 +37,26 @@ public sealed record NamespaceCost
     public double CpuCores { get; init; }
     public double MemoryGiB { get; init; }
     public double StorageGiB { get; init; }
+    public int LoadBalancers { get; init; }
+    public int PublicIps { get; init; }
 
     public decimal CpuMonthlyCost { get; init; }
     public decimal MemoryMonthlyCost { get; init; }
     public decimal StorageMonthlyCost { get; init; }
 
+    /// <summary>
+    /// Load balancers and public IPs this namespace caused. Directly attributed rather
+    /// than spread: a namespace that provisions three LoadBalancer Services causes three
+    /// real charges, and burying them in shared overhead would bill everyone else for it.
+    /// </summary>
+    public decimal NetworkMonthlyCost { get; init; }
+
     /// <summary>This namespace's share of the cluster's fixed monthly overhead.</summary>
     public decimal OverheadMonthlyCost { get; init; }
 
     public decimal TotalMonthlyCost =>
-        CpuMonthlyCost + MemoryMonthlyCost + StorageMonthlyCost + OverheadMonthlyCost;
+        CpuMonthlyCost + MemoryMonthlyCost + StorageMonthlyCost
+        + NetworkMonthlyCost + OverheadMonthlyCost;
 
     /// <summary>Run-rate per hour, derived from the monthly figure by the same 730-hour month.</summary>
     public decimal HourlyCost => TotalMonthlyCost / CostAllocation.HoursPerMonth;
@@ -90,14 +106,20 @@ public static class CostAllocation
             return [];
         }
 
-        List<(NamespaceConsumption Consumption, decimal Cpu, decimal Memory, decimal Storage)> priced = [];
+        List<(NamespaceConsumption Consumption, decimal Cpu, decimal Memory, decimal Storage, decimal Network)> priced = [];
 
         foreach (NamespaceConsumption ns in consumption)
         {
             decimal cpu = (decimal)ns.CpuCores * rate.CpuCoreHourCost * HoursPerMonth;
             decimal memory = (decimal)ns.MemoryGiB * rate.MemoryGiBHourCost * HoursPerMonth;
             decimal storage = (decimal)ns.StorageGiB * rate.StorageGiBMonthCost;
-            priced.Add((ns, cpu, memory, storage));
+
+            // Already monthly: clouds bill a load balancer and an IP by the month, not by
+            // the resource-hour, so these must not be multiplied by HoursPerMonth.
+            decimal network = ns.LoadBalancers * rate.LoadBalancerMonthlyCost
+                            + ns.PublicIps * rate.PublicIpMonthlyCost;
+
+            priced.Add((ns, cpu, memory, storage, network));
         }
 
         decimal totalCompute = priced.Sum(p => p.Cpu + p.Memory);
@@ -105,7 +127,7 @@ public static class CostAllocation
 
         for (int i = 0; i < priced.Count; i++)
         {
-            (NamespaceConsumption ns, decimal cpu, decimal memory, decimal storage) = priced[i];
+            (NamespaceConsumption ns, decimal cpu, decimal memory, decimal storage, decimal network) = priced[i];
 
             decimal overhead = rate.ClusterMonthlyOverhead == 0m
                 ? 0m
@@ -128,9 +150,12 @@ public static class CostAllocation
                 CpuCores = ns.CpuCores,
                 MemoryGiB = ns.MemoryGiB,
                 StorageGiB = ns.StorageGiB,
+                LoadBalancers = ns.LoadBalancers,
+                PublicIps = ns.PublicIps,
                 CpuMonthlyCost = Round(cpu),
                 MemoryMonthlyCost = Round(memory),
                 StorageMonthlyCost = Round(storage),
+                NetworkMonthlyCost = Round(network),
                 OverheadMonthlyCost = Round(overhead),
             });
         }

@@ -19,13 +19,15 @@ type costRateResource struct{ client *Client }
 func NewCostRateResource() resource.Resource { return &costRateResource{} }
 
 type costRateModel struct {
-	ClusterID              types.String  `tfsdk:"cluster_id"`
-	CPUCoreHourCost        types.Float64 `tfsdk:"cpu_core_hour_cost"`
-	MemoryGiBHourCost      types.Float64 `tfsdk:"memory_gib_hour_cost"`
-	StorageGiBMonthCost    types.Float64 `tfsdk:"storage_gib_month_cost"`
-	ClusterMonthlyOverhead types.Float64 `tfsdk:"cluster_monthly_overhead"`
-	Currency               types.String  `tfsdk:"currency"`
-	ChargeOnRequests       types.Bool    `tfsdk:"charge_on_requests"`
+	ClusterID               types.String  `tfsdk:"cluster_id"`
+	CPUCoreHourCost         types.Float64 `tfsdk:"cpu_core_hour_cost"`
+	MemoryGiBHourCost       types.Float64 `tfsdk:"memory_gib_hour_cost"`
+	StorageGiBMonthCost     types.Float64 `tfsdk:"storage_gib_month_cost"`
+	ClusterMonthlyOverhead  types.Float64 `tfsdk:"cluster_monthly_overhead"`
+	LoadBalancerMonthlyCost types.Float64 `tfsdk:"load_balancer_monthly_cost"`
+	PublicIpMonthlyCost     types.Float64 `tfsdk:"public_ip_monthly_cost"`
+	Currency                types.String  `tfsdk:"currency"`
+	ChargeOnRequests        types.Bool    `tfsdk:"charge_on_requests"`
 }
 
 func (r *costRateResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -63,6 +65,18 @@ func (r *costRateResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Computed:            true,
 				MarkdownDescription: "Fixed monthly cost for the cluster itself, spread across consumers in proportion to compute.",
 			},
+			"load_balancer_monthly_cost": schema.Float64Attribute{
+				Optional: true,
+				Computed: true,
+				MarkdownDescription: "Cost of one cloud load balancer per month. Every Service of type " +
+					"LoadBalancer provisions one, and the charge is attributed to the namespace that " +
+					"created it rather than shared.",
+			},
+			"public_ip_monthly_cost": schema.Float64Attribute{
+				Optional:            true,
+				Computed:            true,
+				MarkdownDescription: "Cost of one public IPv4 address per month.",
+			},
 			"currency": schema.StringAttribute{
 				Optional:            true,
 				Computed:            true,
@@ -90,12 +104,14 @@ func (r *costRateResource) Configure(_ context.Context, req resource.ConfigureRe
 
 func (r *costRateResource) apply(ctx context.Context, plan costRateModel) (*CostRate, error) {
 	return r.client.PutCostRate(ctx, plan.ClusterID.ValueString(), CostRate{
-		CPUCoreHourCost:        plan.CPUCoreHourCost.ValueFloat64(),
-		MemoryGiBHourCost:      plan.MemoryGiBHourCost.ValueFloat64(),
-		StorageGiBMonthCost:    plan.StorageGiBMonthCost.ValueFloat64(),
-		ClusterMonthlyOverhead: plan.ClusterMonthlyOverhead.ValueFloat64(),
-		Currency:               plan.Currency.ValueString(),
-		ChargeOnRequests:       plan.ChargeOnRequests.ValueBool(),
+		CPUCoreHourCost:         plan.CPUCoreHourCost.ValueFloat64(),
+		MemoryGiBHourCost:       plan.MemoryGiBHourCost.ValueFloat64(),
+		StorageGiBMonthCost:     plan.StorageGiBMonthCost.ValueFloat64(),
+		ClusterMonthlyOverhead:  plan.ClusterMonthlyOverhead.ValueFloat64(),
+		LoadBalancerMonthlyCost: plan.LoadBalancerMonthlyCost.ValueFloat64(),
+		PublicIpMonthlyCost:     plan.PublicIpMonthlyCost.ValueFloat64(),
+		Currency:                plan.Currency.ValueString(),
+		ChargeOnRequests:        plan.ChargeOnRequests.ValueBool(),
 	})
 }
 
@@ -104,13 +120,15 @@ func (r *costRateResource) apply(ctx context.Context, plan costRateModel) (*Cost
 // EntKube clamped or normalised a value, Terraform should show that as drift.
 func toModel(clusterID string, rate *CostRate) costRateModel {
 	return costRateModel{
-		ClusterID:              types.StringValue(clusterID),
-		CPUCoreHourCost:        types.Float64Value(rate.CPUCoreHourCost),
-		MemoryGiBHourCost:      types.Float64Value(rate.MemoryGiBHourCost),
-		StorageGiBMonthCost:    types.Float64Value(rate.StorageGiBMonthCost),
-		ClusterMonthlyOverhead: types.Float64Value(rate.ClusterMonthlyOverhead),
-		Currency:               types.StringValue(rate.Currency),
-		ChargeOnRequests:       types.BoolValue(rate.ChargeOnRequests),
+		ClusterID:               types.StringValue(clusterID),
+		CPUCoreHourCost:         types.Float64Value(rate.CPUCoreHourCost),
+		MemoryGiBHourCost:       types.Float64Value(rate.MemoryGiBHourCost),
+		StorageGiBMonthCost:     types.Float64Value(rate.StorageGiBMonthCost),
+		ClusterMonthlyOverhead:  types.Float64Value(rate.ClusterMonthlyOverhead),
+		LoadBalancerMonthlyCost: types.Float64Value(rate.LoadBalancerMonthlyCost),
+		PublicIpMonthlyCost:     types.Float64Value(rate.PublicIpMonthlyCost),
+		Currency:                types.StringValue(rate.Currency),
+		ChargeOnRequests:        types.BoolValue(rate.ChargeOnRequests),
 	}
 }
 

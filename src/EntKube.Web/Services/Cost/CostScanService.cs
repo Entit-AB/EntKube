@@ -144,6 +144,8 @@ public class CostRateService(IDbContextFactory<ApplicationDbContext> dbFactory)
         rate.MemoryGiBHourCost = Math.Max(0m, values.MemoryGiBHourCost);
         rate.StorageGiBMonthCost = Math.Max(0m, values.StorageGiBMonthCost);
         rate.ClusterMonthlyOverhead = Math.Max(0m, values.ClusterMonthlyOverhead);
+        rate.LoadBalancerMonthlyCost = Math.Max(0m, values.LoadBalancerMonthlyCost);
+        rate.PublicIpMonthlyCost = Math.Max(0m, values.PublicIpMonthlyCost);
         rate.Currency = string.IsNullOrWhiteSpace(values.Currency) ? "USD" : values.Currency.Trim().ToUpperInvariant();
         rate.ChargeOnRequests = values.ChargeOnRequests;
         rate.UpdatedAt = DateTime.UtcNow;

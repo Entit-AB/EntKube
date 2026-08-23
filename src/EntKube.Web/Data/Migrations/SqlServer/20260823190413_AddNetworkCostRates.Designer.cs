@@ -12,8 +12,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.SqlServer
 {
     [DbContext(typeof(SqlServerApplicationDbContext))]
-    [Migration("20260823065617_AddCanaryRouting")]
-    partial class AddCanaryRouting
+    [Migration("20260823190413_AddNetworkCostRates")]
+    partial class AddNetworkCostRates
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -1673,9 +1673,17 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(3)
                         .HasColumnType("nvarchar(3)");
 
+                    b.Property<decimal>("LoadBalancerMonthlyCost")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
                     b.Property<decimal>("MemoryGiBHourCost")
                         .HasPrecision(18, 6)
                         .HasColumnType("decimal(18,6)");
+
+                    b.Property<decimal>("PublicIpMonthlyCost")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
 
                     b.Property<decimal>("StorageGiBMonthCost")
                         .HasPrecision(18, 6)

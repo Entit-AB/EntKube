@@ -83,13 +83,15 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 
 // CostRate is one cluster's price sheet.
 type CostRate struct {
-	ClusterID              string  `json:"clusterId"`
-	CPUCoreHourCost        float64 `json:"cpuCoreHourCost"`
-	MemoryGiBHourCost      float64 `json:"memoryGiBHourCost"`
-	StorageGiBMonthCost    float64 `json:"storageGiBMonthCost"`
-	ClusterMonthlyOverhead float64 `json:"clusterMonthlyOverhead"`
-	Currency               string  `json:"currency"`
-	ChargeOnRequests       bool    `json:"chargeOnRequests"`
+	ClusterID               string  `json:"clusterId"`
+	CPUCoreHourCost         float64 `json:"cpuCoreHourCost"`
+	MemoryGiBHourCost       float64 `json:"memoryGiBHourCost"`
+	StorageGiBMonthCost     float64 `json:"storageGiBMonthCost"`
+	ClusterMonthlyOverhead  float64 `json:"clusterMonthlyOverhead"`
+	LoadBalancerMonthlyCost float64 `json:"loadBalancerMonthlyCost"`
+	PublicIpMonthlyCost     float64 `json:"publicIpMonthlyCost"`
+	Currency                string  `json:"currency"`
+	ChargeOnRequests        bool    `json:"chargeOnRequests"`
 }
 
 func (c *Client) GetCostRate(ctx context.Context, clusterID string) (*CostRate, error) {
