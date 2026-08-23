@@ -49,6 +49,39 @@ public static class DrReadiness
     /// </summary>
     public static readonly TimeSpan RestoreDrillInterval = TimeSpan.FromDays(180);
 
+    /// <summary>
+    /// Appends Velero's own reason for a failure, and the advice for the one that is
+    /// almost always the cause on a fresh install.
+    ///
+    /// Reporting only the phase leaves an operator to go to the CLI to find out why. The
+    /// most common cause is a volume that can be backed up by neither route — no
+    /// VolumeSnapshotLocation and no file-system backup — which produces a PartiallyFailed
+    /// backup with nothing restorable, and is a one-line configuration fix.
+    /// </summary>
+    private static string DescribeFailure(VeleroBackup backup)
+    {
+        List<string> parts = [];
+
+        if (!string.IsNullOrWhiteSpace(backup.FailureReason))
+        {
+            parts.Add($"Velero reported: {backup.FailureReason}");
+        }
+
+        if (backup.ValidationErrors.Count > 0)
+        {
+            parts.Add($"Validation: {string.Join("; ", backup.ValidationErrors.Take(3))}");
+        }
+
+        if (backup.Errors > 0 && backup.Phase == VeleroPhase.PartiallyFailed)
+        {
+            parts.Add($"{backup.Errors} item(s) failed. If those are volumes, check that "
+                    + "configuration.defaultVolumesToFsBackup is true — with snapshots disabled "
+                    + "and file-system backup off, a volume can be captured by neither route.");
+        }
+
+        return parts.Count == 0 ? "" : " " + string.Join(" ", parts);
+    }
+
     public static IReadOnlyList<DrGap> Evaluate(ClusterDrStatus status, DateTime now)
     {
         List<DrGap> gaps = [];
@@ -74,7 +107,8 @@ public static class DrReadiness
                 Detail = status.LastAttemptedBackup is null
                     ? "Velero is installed but has never completed a backup."
                     : $"The most recent backup finished as {status.LastAttemptedBackup.Phase}. "
-                      + "A partially-failed backup has skipped resources and cannot be relied on to restore.",
+                      + "A partially-failed backup has skipped resources and cannot be relied on to restore."
+                      + DescribeFailure(status.LastAttemptedBackup),
                 Severity = DrSeverity.Critical,
                 Remediation = status.Schedules.Count == 0
                     ? "Create a backup schedule, then verify the first backup completes cleanly."

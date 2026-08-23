@@ -252,6 +252,8 @@ public class VeleroService(
                 Warnings = Int(status, "warnings"),
                 IncludedNamespaces = StrArray(spec, "includedNamespaces"),
                 StorageLocation = Str(spec, "storageLocation"),
+                FailureReason = Str(status, "failureReason"),
+                ValidationErrors = StrArray(status, "validationErrors"),
             };
         });
 

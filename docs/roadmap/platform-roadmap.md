@@ -548,6 +548,14 @@ on so volume *data* is captured, path-style addressing for MinIO), `VeleroServic
 `DrScanCache` + hourly `DrScanService`, advisor findings, `DisasterRecoveryTab`,
 `/api/v1/disaster-recovery`, an `entkube_disaster_recovery` MCP tool, 28 unit tests.
 
+**Field bug, fixed**: every backup came back `PartiallyFailed` with nothing restorable.
+The catalog set `deployNodeAgent: true` and `snapshotsEnabled: false` but left
+`configuration.defaultVolumesToFsBackup` at the chart's default of `false` — so a volume
+could be captured by **neither** route, and Velero errored on every PVC. The readiness
+report also only stated the phase, sending the operator to the CLI to find out why; it
+now surfaces Velero's own `failureReason` and validation errors, and names this exact
+cause when a partially-failed backup has item errors.
+
 **Deliberately not built**: triggering restores from EntKube. Reading restore history
 as evidence of testing is safe; *performing* a restore overwrites live cluster state
 and is the one operation where a UI mis-click is unrecoverable. It belongs behind a

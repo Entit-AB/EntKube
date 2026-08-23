@@ -490,3 +490,111 @@ public class VeleroStorageIntegrationTests
         act.Should().NotThrow();
     }
 }
+
+/// <summary>
+/// Tests prompted by a real failure: a Velero component installed cleanly, every backup
+/// came back PartiallyFailed, and the readiness report said only that — leaving the
+/// operator to go to the CLI to find out why.
+/// </summary>
+public class VeleroFailureReportingTests
+{
+    private static readonly DateTime Now = new(2026, 8, 23, 12, 0, 0, DateTimeKind.Utc);
+
+    private static ClusterDrStatus StatusWith(VeleroBackup backup) => new()
+    {
+        ClusterId = Guid.NewGuid(),
+        ClusterName = "prod",
+        IsVeleroInstalled = true,
+        Backups = [backup],
+        Schedules = [new VeleroSchedule { Name = "daily", Cron = "0 2 * * *" }],
+    };
+
+    [Fact]
+    public void Veleros_own_failure_reason_reaches_the_operator()
+    {
+        ClusterDrStatus status = StatusWith(new VeleroBackup
+        {
+            Name = "b", Phase = VeleroPhase.PartiallyFailed,
+            StartedAt = Now.AddMinutes(-10), CompletedAt = Now.AddMinutes(-5),
+            Errors = 4, FailureReason = "found a backup with status Failed during migration",
+        });
+
+        DrGap gap = DrReadiness.Evaluate(status, Now).Single(g => g.Key.StartsWith("dr-no-backup:"));
+
+        gap.Detail.Should().Contain("found a backup with status Failed during migration");
+    }
+
+    [Fact]
+    public void Validation_errors_reach_the_operator()
+    {
+        ClusterDrStatus status = StatusWith(new VeleroBackup
+        {
+            Name = "b", Phase = VeleroPhase.Failed, StartedAt = Now.AddMinutes(-10),
+            ValidationErrors = ["backup storage location \"default\" is unavailable"],
+        });
+
+        DrReadiness.Evaluate(status, Now).Single(g => g.Key.StartsWith("dr-no-backup:"))
+            .Detail.Should().Contain("is unavailable");
+    }
+
+    [Fact]
+    public void A_partially_failed_backup_with_item_errors_points_at_the_usual_cause()
+    {
+        // The common one on a fresh install: snapshots disabled AND file-system backup off,
+        // so a volume can be captured by neither route.
+        ClusterDrStatus status = StatusWith(new VeleroBackup
+        {
+            Name = "b", Phase = VeleroPhase.PartiallyFailed,
+            StartedAt = Now.AddMinutes(-10), CompletedAt = Now.AddMinutes(-5), Errors = 7,
+        });
+
+        DrReadiness.Evaluate(status, Now).Single(g => g.Key.StartsWith("dr-no-backup:"))
+            .Detail.Should().Contain("defaultVolumesToFsBackup");
+    }
+
+    [Fact]
+    public void A_clean_backup_carries_no_failure_noise()
+    {
+        ClusterDrStatus status = StatusWith(new VeleroBackup
+        {
+            Name = "b", Phase = VeleroPhase.Completed,
+            StartedAt = Now.AddMinutes(-10), CompletedAt = Now.AddMinutes(-5),
+        });
+
+        DrReadiness.Evaluate(status, Now).Should().NotContain(g => g.Key.StartsWith("dr-no-backup:"));
+    }
+
+    [Fact]
+    public void The_failure_reason_is_parsed_off_the_backup_resource()
+    {
+        const string json = """
+        { "items": [ {
+            "metadata": { "name": "daily-1" },
+            "spec": {},
+            "status": {
+              "phase": "PartiallyFailed", "errors": 3,
+              "failureReason": "unable to write backup",
+              "validationErrors": [ "storage location unavailable" ]
+            } } ] }
+        """;
+
+        VeleroBackup backup = VeleroService.ParseBackups(json).Single();
+
+        backup.FailureReason.Should().Be("unable to write backup");
+        backup.ValidationErrors.Should().ContainSingle().Which.Should().Contain("unavailable");
+        backup.IsUsable.Should().BeFalse();
+    }
+
+    [Fact]
+    public void The_catalog_enables_file_system_backup_for_volumes()
+    {
+        // The bug this class exists for: deployNodeAgent true and snapshotsEnabled false,
+        // but defaultVolumesToFsBackup left at the chart's default of false. A volume was
+        // then backed up by neither route and every backup ended PartiallyFailed.
+        CatalogEntry velero = ComponentCatalog.Entries.Single(e => e.Key == "velero");
+
+        velero.DefaultValues.Should().NotBeNull();
+        velero.DefaultValues!.Should().Contain("defaultVolumesToFsBackup: true");
+        velero.DefaultValues.Should().Contain("deployNodeAgent: true");
+    }
+}

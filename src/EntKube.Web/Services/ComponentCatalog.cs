@@ -1772,7 +1772,7 @@ public static class ComponentCatalog
                 # default even when the backend is not AWS.
                 initContainers:
                   - name: velero-plugin-for-aws
-                    image: velero/velero-plugin-for-aws:v1.13.0
+                    image: velero/velero-plugin-for-aws:v1.13.1
                     volumeMounts:
                       - mountPath: /target
                         name: plugins
@@ -1791,11 +1791,23 @@ public static class ComponentCatalog
                         # serve virtual-hosted-style bucket URLs.
                         s3ForcePathStyle: "true"
 
+                  # Back every volume up through the node agent, without needing a
+                  # backup.velero.io/backup-volumes annotation on each pod.
+                  #
+                  # This is REQUIRED alongside snapshotsEnabled: false. With snapshots off
+                  # there is no VolumeSnapshotLocation, so if file-system backup is also off
+                  # (the chart's default) a volume can be backed up by neither route —
+                  # Velero errors on every PVC and the backup ends PartiallyFailed with
+                  # nothing restorable.
+                  defaultVolumesToFsBackup: true
+
                 # File-system backup captures volume DATA, not just the PVC objects. Without
                 # it a restore brings back empty volumes, which looks like success right up
                 # until someone opens the application.
                 deployNodeAgent: true
 
+                # No VolumeSnapshotLocation: this configuration backs volumes up through the
+                # node agent to the same S3 bucket, rather than through cloud disk snapshots.
                 snapshotsEnabled: false
 
                 credentials:
