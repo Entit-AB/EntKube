@@ -496,6 +496,67 @@ public static class PublicApiEndpoints
             }));
         }).RequireApiScope(ApiScopes.OpsRead);
 
+        // ── Configuration (infrastructure-as-code) ──
+        //
+        // Full CRUD, unlike the rest of this API, because these are the resources a
+        // Terraform provider has to be able to create, read back for drift detection,
+        // update in place and destroy. A read-only surface cannot be managed declaratively.
+
+        api.MapGet("/cost-rates", async (
+            HttpContext ctx, CostRateService rates, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+            List<ClusterCostRate> all = await rates.ListAsync(tenantId, ct);
+
+            return Results.Ok(all.Select(ToCostRateDto));
+        }).RequireApiScope(ApiScopes.ConfigRead);
+
+        api.MapGet("/cost-rates/{clusterId:guid}", async (
+            Guid clusterId, HttpContext ctx, CostRateService rates, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+            ClusterCostRate? rate = (await rates.ListAsync(tenantId, ct))
+                .FirstOrDefault(r => r.ClusterId == clusterId);
+
+            // 404 rather than an empty object: a provider reading back a resource that no
+            // longer exists must be able to tell, so it can plan a re-create instead of
+            // reporting a zero-priced cluster as configured.
+            return rate is null ? Results.NotFound() : Results.Ok(ToCostRateDto(rate));
+        }).RequireApiScope(ApiScopes.ConfigRead);
+
+        api.MapPut("/cost-rates/{clusterId:guid}", async (
+            Guid clusterId, CostRateInput input, HttpContext ctx,
+            CostRateService rates, CancellationToken ct) =>
+        {
+            ApiTokenPrincipal principal = ctx.GetApiPrincipal()!;
+
+            ClusterCostRate? saved = await rates.SaveAsync(
+                principal.TenantId, clusterId,
+                new ClusterCostRate
+                {
+                    CpuCoreHourCost = input.CpuCoreHourCost,
+                    MemoryGiBHourCost = input.MemoryGiBHourCost,
+                    StorageGiBMonthCost = input.StorageGiBMonthCost,
+                    ClusterMonthlyOverhead = input.ClusterMonthlyOverhead,
+                    Currency = input.Currency ?? "USD",
+                    ChargeOnRequests = input.ChargeOnRequests ?? true,
+                },
+                updatedBy: $"api-token:{principal.TokenName}", ct);
+
+            // SaveAsync returns null when the cluster is not this tenant's, so a crafted
+            // cluster id cannot price another tenant's cluster.
+            return saved is null ? Results.NotFound() : Results.Ok(ToCostRateDto(saved));
+        }).RequireApiScope(ApiScopes.ConfigWrite);
+
+        api.MapDelete("/cost-rates/{clusterId:guid}", async (
+            Guid clusterId, HttpContext ctx, CostRateService rates, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+            bool deleted = await rates.DeleteAsync(tenantId, clusterId, ct);
+
+            return deleted ? Results.NoContent() : Results.NotFound();
+        }).RequireApiScope(ApiScopes.ConfigWrite);
+
         api.MapPost("/advisor/findings/{findingId}/acknowledge", async (
             string findingId, HttpContext ctx, AdvisorStateService state, CancellationToken ct) =>
         {
@@ -505,4 +566,32 @@ public static class PublicApiEndpoints
             return Results.Ok(new { ok = true });
         }).RequireApiScope(ApiScopes.OpsWrite);
     }
+
+    /// <summary>Shape a price sheet is returned in. A DTO so the entity can move without breaking clients.</summary>
+    private static object ToCostRateDto(ClusterCostRate rate) => new
+    {
+        clusterId = rate.ClusterId,
+        cpuCoreHourCost = rate.CpuCoreHourCost,
+        memoryGiBHourCost = rate.MemoryGiBHourCost,
+        storageGiBMonthCost = rate.StorageGiBMonthCost,
+        clusterMonthlyOverhead = rate.ClusterMonthlyOverhead,
+        currency = rate.Currency,
+        chargeOnRequests = rate.ChargeOnRequests,
+        updatedAt = rate.UpdatedAt,
+        updatedBy = rate.UpdatedBy,
+    };
+
+    /// <summary>
+    /// Request body for a price sheet. Currency and ChargeOnRequests are nullable so an
+    /// omitted field takes the documented default rather than silently becoming empty or
+    /// false — a client that does not send ChargeOnRequests means "leave it as designed",
+    /// not "bill on usage".
+    /// </summary>
+    public sealed record CostRateInput(
+        decimal CpuCoreHourCost,
+        decimal MemoryGiBHourCost,
+        decimal StorageGiBMonthCost,
+        decimal ClusterMonthlyOverhead,
+        string? Currency,
+        bool? ChargeOnRequests);
 }

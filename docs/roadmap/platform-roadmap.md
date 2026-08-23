@@ -7,7 +7,7 @@ Status legend: ☐ not started · ◐ in progress · ☑ shipped
 | 1 | Fleet upgrade & lifecycle planner | 1 | ☑ |
 | 6 | Drift detection for managed components | 1 | ☑ |
 | 4 | Supply-chain security (CVE + signing) | 2 | ☑ |
-| 2 | Public API, tokens, CLI, MCP server | 2 | ◐ |
+| 2 | Public API, tokens, CLI, MCP server | 2 | ☑ |
 | 3 | Cost & chargeback | 3 | ☑ |
 | 5 | Progressive delivery + auto-rollback | 3 | ☑ |
 | 7 | OIDC/SSO + SCIM for the portal | 4 | ◐ |
