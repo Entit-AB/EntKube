@@ -126,6 +126,18 @@ sweep), advisor findings (`Source = "drift"`), `DriftTab` under Ops → Lifecycl
 - The advisor reads the cache and never triggers a sweep, so a page render never
   forks a dry-run per deployment.
 
+**Acting on drift, not just seeing it.** Each drifted row offers **Overwrite** —
+re-applying the stored manifests through the *ordinary* apply path, so the cluster
+change gate shows a server-side dry-run diff and waits for acknowledgment. That
+matters more here than anywhere else in the product: it is the one button whose whole
+purpose is to discard somebody else's change. Cancelling at the dialog is reported as
+a decision ("nothing was changed"), not an error. A **Re-check** action re-measures one
+deployment without re-walking the fleet, and the result replaces just that row in the
+shared cache — so a converged deployment stops being reported as drifted immediately
+rather than at the next two-hourly sweep. The UI also says plainly that if the change
+was deliberate it belongs in the manifests, since overwriting only loses it again on
+the next sync.
+
 **Subprocess hardening found by testing against a real kubectl** (v1.36.2):
 - kubectl *prompts on stdin* when a kubeconfig's user has no usable credentials.
   With inherited stdin that prompt never gets EOF in a server process and the diff

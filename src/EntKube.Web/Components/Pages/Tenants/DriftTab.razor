@@ -1,8 +1,11 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Upgrades
+@using Microsoft.AspNetCore.Components.Authorization
 @inject DriftDetectionService DriftService
 @inject DriftScanCache DriftCache
+@inject KubernetesOperationsService K8sOps
+@inject AuthenticationStateProvider AuthState
 
 @* ═══════════════════════════════════════════════════════════════════
    Configuration drift — managed manifests vs live cluster state.
@@ -40,10 +43,21 @@
             outside EntKube, and the next sync will overwrite it. Helm-based deployments are excluded:
             Helm owns their reconciliation.
         </p>
+        <p class="text-muted small mb-3">
+            <strong>Overwrite</strong> re-applies the stored manifests, discarding whatever was changed
+            out of band — you will see the diff and confirm before anything is written. If the change was
+            deliberate, fold it into the deployment's manifests instead; overwriting it here means it will
+            be lost again on the next sync.
+        </p>
 
         @if (scanError is not null)
         {
             <div class="alert alert-danger">Scan failed: @scanError</div>
+        }
+
+        @if (actionMessage is not null)
+        {
+            <div class="alert py-2 small @(actionOk ? "alert-success" : "alert-danger")">@actionMessage</div>
         }
 
         @if (report is null)
@@ -80,6 +94,7 @@
                             <th>Namespace</th>
                             <th>State</th>
                             <th>Changes</th>
+                            <th class="text-end">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -123,12 +138,40 @@
                                 <td class="small text-muted">
                                     @(r.State == DriftState.Drifted ? $"{r.ChangedLines} line{(r.ChangedLines == 1 ? "" : "s")}" : "—")
                                 </td>
+                                <td class="text-end" style="white-space: nowrap;">
+                                    <button class="btn btn-sm btn-outline-secondary py-0 me-1"
+                                            title="Re-run the comparison for this deployment only"
+                                            disabled="@(busyDeploymentId is not null)"
+                                            @onclick="() => RecheckAsync(r)">
+                                        @if (busyDeploymentId == r.DeploymentId && busyAction == "recheck")
+                                        {
+                                            <span class="spinner-border spinner-border-sm"></span>
+                                        }
+                                        else
+                                        {
+                                            <i class="bi bi-arrow-repeat"></i>
+                                        }
+                                    </button>
+                                    @if (r.State == DriftState.Drifted)
+                                    {
+                                        <button class="btn btn-sm btn-warning py-0"
+                                                title="Re-apply the stored manifests, overwriting the out-of-band changes. You will see the diff and confirm before anything is written."
+                                                disabled="@(busyDeploymentId is not null)"
+                                                @onclick="() => ConvergeAsync(r)">
+                                            @if (busyDeploymentId == r.DeploymentId && busyAction == "converge")
+                                            {
+                                                <span class="spinner-border spinner-border-sm me-1"></span>
+                                            }
+                                            Overwrite
+                                        </button>
+                                    }
+                                </td>
                             </tr>
 
                             @if (expanded.Contains(r.DeploymentId) && r.DiffText is not null)
                             {
                                 <tr>
-                                    <td colspan="6" class="bg-light">
+                                    <td colspan="7" class="bg-light">
                                         <pre class="small mb-0" style="max-height:24rem;overflow:auto"><code>@r.DiffText</code></pre>
                                     </td>
                                 </tr>
@@ -157,6 +200,107 @@
         {
             expanded.Remove(deploymentId);
         }
+    }
+
+    /// <summary>Deployment currently being acted on, so a second click cannot race the first.</summary>
+    private Guid? busyDeploymentId;
+    private string? busyAction;
+    private string? actionMessage;
+    private bool actionOk;
+
+    /// <summary>
+    /// Re-applies the stored manifests, overwriting the out-of-band change.
+    ///
+    /// Goes through the ordinary apply path rather than a drift-specific one, so the
+    /// cluster change gate shows the operator a server-side dry-run diff and waits for
+    /// acknowledgment. That matters more here than anywhere else in the product: this is
+    /// the one button whose entire purpose is to discard somebody else's change.
+    /// </summary>
+    private async Task ConvergeAsync(DriftResult row)
+    {
+        busyDeploymentId = row.DeploymentId;
+        busyAction = "converge";
+        actionMessage = null;
+
+        try
+        {
+            AuthenticationState auth = await AuthState.GetAuthenticationStateAsync();
+
+            KubernetesOperationResult<string> result = await K8sOps.ApplyYamlDeploymentAsync(
+                row.DeploymentId, performedBy: auth.User.Identity?.Name);
+
+            actionOk = result.IsSuccess;
+            actionMessage = result.IsSuccess
+                ? $"Re-applied “{row.AppName} / {row.DeploymentName}”. Re-checking…"
+                : $"Could not re-apply “{row.DeploymentName}”: {result.Error}";
+
+            // Only re-check when the apply succeeded. Re-checking after a failure would
+            // report the same drift again and read as if the button had done nothing.
+            if (result.IsSuccess)
+            {
+                await RefreshRowAsync(row.DeploymentId);
+                actionMessage = $"Re-applied “{row.AppName} / {row.DeploymentName}”.";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The operator cancelled at the acknowledgment dialog. That is a decision, not
+            // a failure, so say so plainly rather than showing an error.
+            actionOk = true;
+            actionMessage = "Cancelled — nothing was changed on the cluster.";
+        }
+        catch (Exception ex)
+        {
+            actionOk = false;
+            actionMessage = ex.Message;
+        }
+        finally
+        {
+            busyDeploymentId = null;
+            busyAction = null;
+        }
+    }
+
+    /// <summary>Re-runs the comparison for one deployment, without re-walking the fleet.</summary>
+    private async Task RecheckAsync(DriftResult row)
+    {
+        busyDeploymentId = row.DeploymentId;
+        busyAction = "recheck";
+        actionMessage = null;
+
+        try
+        {
+            await RefreshRowAsync(row.DeploymentId);
+        }
+        catch (Exception ex)
+        {
+            actionOk = false;
+            actionMessage = ex.Message;
+        }
+        finally
+        {
+            busyDeploymentId = null;
+            busyAction = null;
+        }
+    }
+
+    /// <summary>
+    /// Re-measures one deployment and updates just its row, in the view and in the shared
+    /// cache the advisor reads — so a converged deployment stops being reported as drifted
+    /// straight away rather than at the next two-hourly sweep.
+    /// </summary>
+    private async Task RefreshRowAsync(Guid deploymentId)
+    {
+        DriftResult? updated = await DriftService.GetDeploymentDriftAsync(
+            TenantId, deploymentId, DateTime.UtcNow);
+
+        if (updated is null)
+        {
+            return;
+        }
+
+        DriftCache.Replace(TenantId, updated);
+        report = DriftCache.Get(TenantId);
     }
 
     private async Task RescanAsync()
