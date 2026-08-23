@@ -24,6 +24,24 @@ almost verbatim. Doing them in any other order means building that spine twice.
 Features 2, 3, 5, 7 and 8 are independent of that spine and of each other, so they
 are sequenced by value rather than dependency.
 
+## Verification status
+
+Unit tests: **1135**, all passing. A clean checkout builds, and the app now starts
+from a plain `dotnet ef database update` (neither was true at the start — see
+`docs/migrations-defect.md`).
+
+**Verified against a running instance** via `scripts/smoke-api.sh`: authentication,
+every read endpoint, the 503 contract on all four sweep-backed endpoints, per-scope
+enforcement (403 for a token missing `fleet:read` or `apps:write`), the CLI including
+its non-zero exit on an unswept fleet, and the MCP server including its read-only
+refusal of a write tool the token *was* otherwise permitted to call. The upgrade
+planner was confirmed end to end against the live Traefik chart repository.
+
+**Not verified against Kubernetes.** Every path that talks to a cluster — drift's
+`kubectl diff`, Velero backup/restore state, the rollback in `RolloutService`, Helm
+component installs — has only ever run in unit tests. The rollback path is the one to
+exercise first: it changes production and pages someone.
+
 ## Shared foundations (build once, used by many)
 
 | Foundation | Introduced by | Reused by |
