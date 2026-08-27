@@ -7,9 +7,9 @@
 # the places it is useful.
 #
 # Usage:
-#   scripts/build-mcp.sh                 # all platforms, Debug + Release
-#   scripts/build-mcp.sh Release         # one configuration
-#   scripts/build-mcp.sh Release osx-arm64
+#   scripts/build-cli.sh                 # all platforms, Debug + Release
+#   scripts/build-cli.sh Release         # one configuration
+#   scripts/build-cli.sh Release osx-arm64
 #
 # Output: artifacts/cli/<configuration>/<rid>/entkube[.exe]
 

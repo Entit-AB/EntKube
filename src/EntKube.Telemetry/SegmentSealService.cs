@@ -1,10 +1,11 @@
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// Background driver for one signal's segment engine (logs / spans / rum). Telemetry is tenant-scoped, so
 /// on each tick it iterates every live per-tenant manager in the signal's registry: sealing a tenant's
 /// active index into an immutable object-storage segment when it has grown past the size or age threshold,
-/// and (on a slower cadence) dropping that tenant's segments past the retention window. Single-replica by
+/// and (on a slower cadence) dropping that tenant's segments past the retention window and evicting
+/// local copies that have aged out of the warm tier. Single-replica by
 /// deployment, so no leader election is needed. A final seal on shutdown flushes whatever each tenant has
 /// buffered so it isn't lost on restart.
 /// </summary>
@@ -32,7 +33,12 @@ public sealed class SegmentSealService(
                         if (manager.ActiveDocCount >= options.RollMaxDocs || manager.ActiveAge >= options.RollMaxAge)
                             await manager.RollAndSealAsync(stoppingToken);
                         if (runRetention)
+                        {
                             await manager.DropExpiredAsync(stoppingToken);
+                            // Then age/size the warm tier down. Runs after retention so segments dropped
+                            // outright are already gone and aren't measured as warm-tier pressure.
+                            await manager.TrimWarmTierAsync(stoppingToken);
+                        }
                     }
                     if (runRetention) lastRetention = DateTime.UtcNow;
                 }

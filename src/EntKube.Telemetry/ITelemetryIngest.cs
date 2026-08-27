@@ -1,6 +1,6 @@
 using EntKube.Web.Services;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// The telemetry ingest contract the OTLP/RUM endpoints write through, implemented by the Lucene/S3

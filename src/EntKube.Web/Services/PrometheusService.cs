@@ -43,15 +43,6 @@ public class PrometheusTimeSeries
 }
 
 /// <summary>
-/// A single data point in a time series — a timestamp/value pair.
-/// </summary>
-public class TimeSeriesDataPoint
-{
-    public DateTime Timestamp { get; set; }
-    public double Value { get; set; }
-}
-
-/// <summary>
 /// Summary of cluster health metrics retrieved from Prometheus.
 /// </summary>
 public class ClusterHealthSummary
@@ -435,6 +426,8 @@ public class CnpgDatabaseSize
 /// </summary>
 public class PrometheusService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    KubernetesProxyClientPool clientPool,
+    EntKube.Web.Services.Telemetry.PromQueryCache queryCache,
     ILogger<PrometheusService> logger)
 {
     // ──────── Public API ────────
@@ -519,7 +512,12 @@ public class PrometheusService(
         int  step  = Math.Max(15, (int)(duration.TotalSeconds / 100));
         string encodedQuery = Q(query);
 
-        return await WithServiceAsync<List<PrometheusTimeSeries>>(
+        // Keyed on the query and window, not on `end` — that moves every second, which would make every
+        // call a distinct key and cache nothing. Within the cache's few seconds, a chart whose window
+        // slid by that much is indistinguishable from a fresh one.
+        return await queryCache.GetOrFetchAsync(
+            EntKube.Web.Services.Telemetry.PromQueryCache.Key(clusterId, "range", query, (long)duration.TotalSeconds),
+            async () => await WithServiceAsync<List<PrometheusTimeSeries>>(
             info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             async (http, baseUrl, token) =>
             {
@@ -527,7 +525,7 @@ public class PrometheusService(
                     $"{baseUrl}/api/v1/query_range?query={encodedQuery}&start={start}&end={end}&step={step}", token);
                 return ParseRangeQueryResult(json);
             },
-            $"range query for {clusterId}", ct);
+            $"range query for {clusterId}", ct));
     }
 
     /// <summary>
@@ -548,10 +546,12 @@ public class PrometheusService(
         if (!string.IsNullOrEmpty(matchSelector))
             path += $"&match[]={Q(matchSelector)}";
 
-        return await WithServiceAsync<List<string>>(
-            info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
-            async (http, baseUrl, token) => ParseStringArray(await http.GetStringAsync($"{baseUrl}{path}", token)),
-            $"label values {label} for {clusterId}", ct);
+        return await queryCache.GetOrFetchAsync(
+            EntKube.Web.Services.Telemetry.PromQueryCache.Key(clusterId, "labels", label, matchSelector, (long)lookback.TotalSeconds),
+            async () => await WithServiceAsync<List<string>>(
+                info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+                async (http, baseUrl, token) => ParseStringArray(await http.GetStringAsync($"{baseUrl}{path}", token)),
+                $"label values {label} for {clusterId}", ct));
     }
 
     private static List<string> ParseStringArray(string json)
@@ -935,7 +935,7 @@ public class PrometheusService(
 
         try
         {
-            using Kubernetes k8s = CreateK8sClient(info.Kubeconfig);
+            Kubernetes k8s = CreateK8sClient(info.Kubeconfig);
 
             JsonNode? podMonitor = await FindCnpgPodMonitorAsync(k8s, cnpgNamespace, cnpgClusterName, ct);
             JsonNode? prometheus = await FindPrometheusResourceAsync(k8s, ct);
@@ -1459,7 +1459,7 @@ public class PrometheusService(
 
         try
         {
-            using Kubernetes k8s = CreateK8sClient(info.Kubeconfig);
+            Kubernetes k8s = CreateK8sClient(info.Kubeconfig);
 
             JsonArray monitors = await ListCustomObjectsAsync(
                 k8s, "monitoring.coreos.com", "v1", workloadNamespace, "servicemonitors", ct);
@@ -2030,7 +2030,7 @@ public class PrometheusService(
     {
         try
         {
-            using Kubernetes k8s = CreateK8sClient(kubeconfig);
+            Kubernetes k8s = CreateK8sClient(kubeconfig);
 
             V1EndpointAddress? addr = await FindEndpointAddressAsync(k8s, ns, svcName, svcPort, ct);
             if (addr?.TargetRef is null)
@@ -2243,12 +2243,12 @@ public class PrometheusService(
         return results;
     }
 
-    private static Kubernetes CreateK8sClient(string kubeconfig)
-    {
-        using MemoryStream stream = new(Encoding.UTF8.GetBytes(kubeconfig));
-        KubernetesClientConfiguration config = KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
-        return new Kubernetes(config);
-    }
+    /// <summary>
+    /// Returns the shared client for this cluster. Deliberately NOT disposed by callers: it is pooled per
+    /// kubeconfig so a dashboard's dozen PromQL queries reuse one warm TLS connection to the API server
+    /// instead of handshaking once per panel. See <see cref="KubernetesProxyClientPool"/>.
+    /// </summary>
+    private Kubernetes CreateK8sClient(string kubeconfig) => clientPool.Get(kubeconfig);
 
     private static string Q(string promQuery) => Uri.EscapeDataString(promQuery);
 

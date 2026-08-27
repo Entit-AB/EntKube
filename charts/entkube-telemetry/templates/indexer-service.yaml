@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "entkube-telemetry.indexerName" . }}
+  labels:
+    {{- include "entkube-telemetry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: indexer
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app.kubernetes.io/name: {{ include "entkube-telemetry.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: indexer
+  ports:
+    # OTLP/HTTP ingest and the query API share one port — both are plain HTTP on the same Kestrel.
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP

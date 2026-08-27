@@ -4,6 +4,19 @@ using Microsoft.EntityFrameworkCore;
 namespace EntKube.Web.Services;
 
 /// <summary>
+/// How one run of the component apply flow should behave. The default is a first
+/// install; an upgrade differs only in accepting an already-Installed release.
+/// </summary>
+public sealed record ComponentApplyOptions
+{
+    /// <summary>True for an in-place upgrade of a release that is already installed.</summary>
+    public bool IsUpgrade { get; init; }
+
+    /// <summary>Skip Helm's --wait so the call returns as soon as the manifests are applied.</summary>
+    public bool NoWait { get; init; }
+}
+
+/// <summary>
 /// Encapsulates the full "install a component" sequence — the state-machine
 /// transitions plus all the component-specific hooks (Keycloak DB prep, Harbor
 /// credential refresh, Headscale/wg-easy route + gateway handling) that must run
@@ -30,9 +43,25 @@ public class ComponentInstallOrchestrator(
     /// the Components tab so a bootstrap step behaves exactly like a manual install.
     /// </summary>
     public async Task<HelmExecutionResult> InstallAsync(
-        Guid tenantId, Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default) =>
+        await ApplyAsync(tenantId, componentId, new ComponentApplyOptions(), ct);
+
+    /// <summary>
+    /// The same flow as <see cref="InstallAsync"/>, parameterised for the cases that are
+    /// not a first install: an in-place upgrade of a release that is already Installed,
+    /// and a run that should not block on Helm's --wait.
+    /// </summary>
+    public async Task<HelmExecutionResult> ApplyAsync(
+        Guid tenantId, Guid componentId, ComponentApplyOptions options, CancellationToken ct = default)
     {
-        await lifecycleService.PrepareInstallAsync(componentId, ct);
+        if (options.IsUpgrade)
+        {
+            await lifecycleService.PrepareUpgradeAsync(componentId, ct);
+        }
+        else
+        {
+            await lifecycleService.PrepareInstallAsync(componentId, ct);
+        }
 
         // Refresh Keycloak DB config into HelmValues from the stored config (if any).
         await keycloakService.RefreshDatabaseHelmValuesIfConfiguredAsync(tenantId, componentId);
@@ -51,6 +80,7 @@ public class ComponentInstallOrchestrator(
         await openLdapService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId);
 
         HelmCommand command = await lifecycleService.GetInstallCommandAsync(componentId, ct);
+        command.NoWait = options.NoWait;
 
         // Pre-sync component secrets so they exist in K8s before the pod starts.
         // Components like Keycloak reference secrets via extraEnvFrom at pod startup,

@@ -1,8 +1,7 @@
 using EntKube.Web.Data;
 using EntKube.Web.Services;
-using Microsoft.EntityFrameworkCore;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// The logs manager: a <see cref="SegmentManagerBase"/> for the <c>logs</c> signal — the WARN-and-above
@@ -13,7 +12,7 @@ namespace EntKube.Web.Services.Telemetry;
 /// </summary>
 public class LogSegmentManager(
     Guid tenantId,
-    IDbContextFactory<ApplicationDbContext> catalog,
+    ISegmentCatalog catalog,
     ISegmentBlobStore blobs,
     SegmentEngineOptions options,
     ILogger<LogSegmentManager> logger)
@@ -40,7 +39,7 @@ public class LogSegmentManager(
 /// </summary>
 public sealed class VerboseLogSegmentManager(
     Guid tenantId,
-    IDbContextFactory<ApplicationDbContext> catalog,
+    ISegmentCatalog catalog,
     ISegmentBlobStore blobs,
     SegmentEngineOptions options,
     ILogger<LogSegmentManager> logger)

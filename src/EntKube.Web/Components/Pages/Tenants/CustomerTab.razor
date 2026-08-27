@@ -262,6 +262,14 @@ else
                 <input type="text" class="form-control border-start-0" placeholder="New customer name (e.g. Contoso Ltd)"
                        @bind="newName" @bind:event="oninput"
                        @onkeydown="@(async (e) => { if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(newName)) await Create(); })" />
+                @* A customer belongs to the environment it is created in — not to all of them. *@
+                <select class="form-select flex-grow-0 w-auto" @bind="newEnvironmentId">
+                    <option value="">No environment</option>
+                    @foreach (Data.Environment env in environments ?? [])
+                    {
+                        <option value="@env.Id">@env.Name</option>
+                    }
+                </select>
                 <button class="btn btn-primary" @onclick="Create" disabled="@string.IsNullOrWhiteSpace(newName)">
                     <i class="bi bi-plus-lg me-1"></i>Add
                 </button>
@@ -309,6 +317,20 @@ else
                                     <span class="fw-semibold">@customer.Name</span>
                                     <br />
                                     <small class="text-muted">@(appCounts.GetValueOrDefault(customer.Id, 0)) app(s) · Created @customer.CreatedAt.ToString("MMM d, yyyy")</small>
+                                    @{ List<string> custEnvs = envNamesByCustomer.GetValueOrDefault(customer.Id, []); }
+                                    @if (custEnvs.Count > 0)
+                                    {
+                                        <div class="mt-1">
+                                            @foreach (string envName in custEnvs)
+                                            {
+                                                <span class="badge bg-body-secondary text-body-secondary border me-1">@envName</span>
+                                            }
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="mt-1"><span class="badge bg-warning-subtle text-warning-emphasis border">No environment</span></div>
+                                    }
                                 </div>
                             </div>
                             <div class="d-flex align-items-center gap-1">
@@ -333,7 +355,10 @@ else
     // --- Level 1: Customer list ---
     private List<Customer>? customers;
     private Dictionary<Guid, int> appCounts = new();
+    private List<Data.Environment>? environments;
+    private Dictionary<Guid, List<string>> envNamesByCustomer = new();
     private string newName = "";
+    private Guid? newEnvironmentId;
     private string? errorMessage;
     private Guid? confirmDeleteId;
 
@@ -374,6 +399,8 @@ else
     private async Task LoadCustomers()
     {
         customers = await TenantService.GetCustomersAsync(TenantId);
+        environments = await TenantService.GetEnvironmentsAsync(TenantId);
+        newEnvironmentId ??= environments.FirstOrDefault()?.Id;
 
         // Pre-load app counts for the list view.
         appCounts = new Dictionary<Guid, int>();
@@ -383,6 +410,20 @@ else
             List<Data.App> customerApps = await TenantService.GetAppsAsync(customer.Id);
             appCounts[customer.Id] = customerApps.Count;
         }
+
+        // Which environments each customer belongs to, for the badges in the list.
+        Dictionary<Guid, string> envNames = environments.ToDictionary(e => e.Id, e => e.Name);
+        envNamesByCustomer = new Dictionary<Guid, List<string>>();
+
+        foreach (CustomerEnvironment link in await TenantService.GetCustomerEnvironmentsAsync(TenantId))
+        {
+            if (!envNames.TryGetValue(link.EnvironmentId, out string? envName)) continue;
+            if (!envNamesByCustomer.TryGetValue(link.CustomerId, out List<string>? names))
+                envNamesByCustomer[link.CustomerId] = names = [];
+            names.Add(envName);
+        }
+
+        foreach (List<string> names in envNamesByCustomer.Values) names.Sort(StringComparer.OrdinalIgnoreCase);
     }
 
     private async Task Create()
@@ -391,7 +432,7 @@ else
 
         try
         {
-            await TenantService.CreateCustomerAsync(TenantId, newName.Trim());
+            await TenantService.CreateCustomerAsync(TenantId, newName.Trim(), newEnvironmentId);
             newName = "";
             await LoadCustomers();
         }

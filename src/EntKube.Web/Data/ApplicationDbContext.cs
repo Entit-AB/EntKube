@@ -21,6 +21,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<Customer> Customers => Set<Customer>();
     public DbSet<App> Apps => Set<App>();
     public DbSet<AppEnvironment> AppEnvironments => Set<AppEnvironment>();
+    public DbSet<CustomerEnvironment> CustomerEnvironments => Set<CustomerEnvironment>();
     public DbSet<KubernetesCluster> KubernetesClusters => Set<KubernetesCluster>();
     public DbSet<EgressAgent> EgressAgents => Set<EgressAgent>();
     public DbSet<ApiToken> ApiTokens => Set<ApiToken>();
@@ -122,6 +123,10 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<BlueprintRolloutTarget> BlueprintRolloutTargets => Set<BlueprintRolloutTarget>();
     public DbSet<BlueprintVariable> BlueprintVariables => Set<BlueprintVariable>();
     public DbSet<BlueprintVariableValue> BlueprintVariableValues => Set<BlueprintVariableValue>();
+    public DbSet<MeshMtlsPolicy> MeshMtlsPolicies => Set<MeshMtlsPolicy>();
+    public DbSet<OutboundMtlsCredential> OutboundMtlsCredentials => Set<OutboundMtlsCredential>();
+    public DbSet<ClientCaBundle> ClientCaBundles => Set<ClientCaBundle>();
+    public DbSet<ClientCaCertificate> ClientCaCertificates => Set<ClientCaCertificate>();
     public DbSet<CaTrustBundle> CaTrustBundles => Set<CaTrustBundle>();
     public DbSet<CaTrustBundleSource> CaTrustBundleSources => Set<CaTrustBundleSource>();
     public DbSet<CertificateDistribution> CertificateDistributions => Set<CertificateDistribution>();
@@ -386,6 +391,26 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(ae => ae.Environment)
                 .WithMany(e => e.AppEnvironments)
                 .HasForeignKey(ae => ae.EnvironmentId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // CustomerEnvironment — many-to-many join between Customer and Environment.
+        // Composite key prevents duplicate memberships. Environment is Restrict for the
+        // same reason AppEnvironment is: two cascade paths from Tenant would otherwise
+        // meet here and SQL Server rejects that.
+
+        builder.Entity<CustomerEnvironment>(entity =>
+        {
+            entity.HasKey(ce => new { ce.CustomerId, ce.EnvironmentId });
+
+            entity.HasOne(ce => ce.Customer)
+                .WithMany(c => c.CustomerEnvironments)
+                .HasForeignKey(ce => ce.CustomerId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(ce => ce.Environment)
+                .WithMany(e => e.CustomerEnvironments)
+                .HasForeignKey(ce => ce.EnvironmentId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
@@ -1928,6 +1953,70 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(r => r.App)
                 .WithMany(a => a.Routes)
                 .HasForeignKey(r => r.AppId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict, not Cascade: deleting a trust anchor that routes still authenticate
+            // against would silently drop those routes' only client check. The delete is
+            // blocked until the routes are moved off it or stop requiring a certificate.
+            entity.HasOne(r => r.ClientCaBundle)
+                .WithMany(b => b.Routes)
+                .HasForeignKey(r => r.ClientCaBundleId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // MeshMtlsPolicy — service-to-service mTLS posture per cluster namespace.
+
+        builder.Entity<MeshMtlsPolicy>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.Property(p => p.Namespace).HasMaxLength(63).IsRequired();
+            entity.Property(p => p.Mode).HasConversion<string>().HasMaxLength(20);
+
+            // One posture per namespace: two rows would render two namespace-wide
+            // PeerAuthentications and leave which one wins up to Istio.
+            entity.HasIndex(p => new { p.ClusterId, p.Namespace }).IsUnique();
+        });
+
+        // OutboundMtlsCredential — client certificates a customer app presents to partner APIs.
+
+        builder.Entity<OutboundMtlsCredential>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.Name).HasMaxLength(200).IsRequired();
+            entity.Property(c => c.Host).HasMaxLength(253).IsRequired();
+            entity.Property(c => c.Mode).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.Port).HasDefaultValue(443);
+
+            // The name becomes the Secret/ServiceEntry/DestinationRule name in the app's
+            // namespace, so it has to be unique within the app.
+            entity.HasIndex(c => new { c.AppId, c.Name }).IsUnique();
+        });
+
+        // ClientCaBundle — CA trust anchors for inbound client-certificate authentication.
+        // Public CA material only; no encryption, same as CaTrustBundleSource.
+
+        builder.Entity<ClientCaBundle>(entity =>
+        {
+            entity.HasKey(b => b.Id);
+            entity.Property(b => b.Name).HasMaxLength(200).IsRequired();
+            entity.Property(b => b.Description).HasMaxLength(1000);
+            entity.Property(b => b.ListenerPort).HasDefaultValue(Services.MtlsService.DefaultListenerPort);
+
+            // One name per tenant — the name is how an operator picks a trust anchor on a route.
+            entity.HasIndex(b => new { b.TenantId, b.Name }).IsUnique();
+        });
+
+        builder.Entity<ClientCaCertificate>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.Name).HasMaxLength(200).IsRequired();
+            entity.Property(c => c.Pem).IsRequired();
+            entity.Property(c => c.Subject).HasMaxLength(500);
+            entity.Property(c => c.Fingerprint).HasMaxLength(100);
+
+            entity.HasOne(c => c.Bundle)
+                .WithMany(b => b.Certificates)
+                .HasForeignKey(c => c.BundleId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

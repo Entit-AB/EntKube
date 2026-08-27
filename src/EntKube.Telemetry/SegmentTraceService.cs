@@ -5,9 +5,8 @@ using Lucene.Net.Documents;
 using Lucene.Net.Index;
 using Lucene.Net.Search;
 using Lucene.Net.Util;
-using Microsoft.EntityFrameworkCore;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// Lucene/S3 segment-engine implementation of <see cref="ITraceQueryService"/> — the drop-in replacement
@@ -20,10 +19,15 @@ namespace EntKube.Web.Services.Telemetry;
 public sealed class SegmentTraceService(
     SegmentManagerRegistry<SpanSegmentManager> spans,
     SegmentManagerRegistry<TraceSummarySegmentManager> traceSummaries,
-    IDbContextFactory<ApplicationDbContext> dbFactory,
-    ClusterTenantResolver tenants,
-    ILogger<SegmentTraceService> logger) : ITraceQueryService
+    ISegmentCatalog catalog,
+    IClusterTenantResolver tenants,
+    ILogger<SegmentTraceService> logger,
+    SegmentScope scope = SegmentScope.All) : ITraceQueryService
 {
+    /// <summary>Which index tier this instance reads — see <see cref="SegmentScope"/>. The querier runs one
+    /// at <see cref="SegmentScope.Sealed"/>; the indexer exposes one at <see cref="SegmentScope.Hot"/>.</summary>
+    public SegmentScope Scope => scope;
+
     // Safety cap on how many spans an aggregation will materialize from one window. Well above a normal
     // trace-search window; if exceeded we log and truncate rather than risk unbounded memory.
     private const int MaxSpansPerQuery = 200_000;
@@ -33,8 +37,9 @@ public sealed class SegmentTraceService(
     {
         Guid? tenantId = await tenants.ResolveAsync(clusterId, ct);
         if (tenantId is null) return false;
-        Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, null, null);
-        return await spans.For(tenantId.Value).QueryAsync(null, null, s => s.Search(scope, 1).TotalHits > 0, ct);
+        // Named "filter", not "scope": SegmentScope now means which index TIER to read.
+        Query filter = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, null, null);
+        return await spans.For(tenantId.Value).QueryAsync(Scope, null, null, s => s.Search(filter, 1).TotalHits > 0, ct);
     }
 
     // The distinct-service scan touches every span in the window, so it's the page's most expensive
@@ -66,7 +71,7 @@ public sealed class SegmentTraceService(
         {
             Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, from, null, namespaces, podPattern);
             var sink = new HashSet<string>(StringComparer.Ordinal);
-            await spans.For(tenantId.Value).QueryAsync(from, null,
+            await spans.For(tenantId.Value).QueryAsync(Scope, from, null,
                 s => { s.Search(scope, new DistinctCollector(SpanSegmentSchema.Service, sink)); return 0; }, ct);
             List<string> result = sink.Where(v => v.Length > 0).OrderBy(v => v, StringComparer.Ordinal).ToList();
             ServiceListCache[cacheKey] = (DateTime.UtcNow, result);
@@ -106,7 +111,7 @@ public sealed class SegmentTraceService(
         try
         {
             Query scope = TraceSummarySchema.BuildWindowScope(tenantId, clusterId, from, to, namespaces);
-            List<TraceSummaryPartial> partials = await traceSummaries.For(tenantId).QueryAsync(from, to, s =>
+            List<TraceSummaryPartial> partials = await traceSummaries.For(tenantId).QueryAsync(Scope, from, to, s =>
             {
                 TopDocs hits = s.Search(scope, MaxPartialsPerQuery);
                 if (hits.TotalHits > MaxPartialsPerQuery)
@@ -192,11 +197,7 @@ public sealed class SegmentTraceService(
         if (CutoffCache.TryGetValue(tenantId, out (DateTime Cutoff, DateTime At) c) && DateTime.UtcNow - c.At < CutoffTtl)
             return c.Cutoff;
 
-        DateTime? sealedMin;
-        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
-            sealedMin = await db.TelemetrySegments
-                .Where(seg => seg.TenantId == tenantId && seg.Signal == "traces")
-                .MinAsync(seg => (DateTime?)seg.MinTs, ct);
+        DateTime? sealedMin = await catalog.GetMinTsAsync(tenantId, "traces", ct);
 
         DateTime? activeMin = traceSummaries.For(tenantId).ActiveMinTs;
         DateTime cutoff = (sealedMin, activeMin) switch
@@ -431,7 +432,7 @@ public sealed class SegmentTraceService(
         Query svcScope = SpanSegmentSchema.BuildScopeQuery(tenantId, clusterId, from, to, namespaces, podPattern, service);
         var sort = new Sort(new SortField(SpanSegmentSchema.Ts, SortFieldType.INT64, reverse: true)); // newest first
         int fetch = Math.Max(2000, limit * 100);
-        return await mgr.QueryAsync(from, to, s =>
+        return await mgr.QueryAsync(Scope, from, to, s =>
         {
             TopDocs hits = s.Search(svcScope, fetch, sort);
             var ids = new List<string>(limit);
@@ -477,7 +478,7 @@ public sealed class SegmentTraceService(
     private async Task<List<SpanRow>> LoadRowsAsync(
         SpanSegmentManager segments, Query q, DateTime? from, DateTime? to, CancellationToken ct, ISet<string>? fields = null)
     {
-        return await segments.QueryAsync(from, to, s =>
+        return await segments.QueryAsync(Scope, from, to, s =>
         {
             TopDocs hits = s.Search(q, MaxSpansPerQuery);
             if (hits.TotalHits > MaxSpansPerQuery)

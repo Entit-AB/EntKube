@@ -210,6 +210,9 @@ else
         </div>
     </div>
 
+    @* Inbound direction: the CAs incoming clients are authenticated against. *@
+    <ClientCaTrustPanel TenantId="TenantId" />
+
     <p class="text-muted small">
         <i class="bi bi-info-circle me-1"></i>
         Need to push a serving/TLS certificate (with or without its key) to apps or all namespaces?

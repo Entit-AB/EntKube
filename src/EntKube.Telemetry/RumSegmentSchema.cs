@@ -5,7 +5,7 @@ using Lucene.Net.Documents;
 using Lucene.Net.Index;
 using Lucene.Net.Search;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// The Lucene document schema for Real User Monitoring. RUM's three sub-signals (page views, JS errors,

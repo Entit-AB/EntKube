@@ -2,7 +2,7 @@ using EntKube.Web.Services;
 using Lucene.Net.Documents;
 using Lucene.Net.Search;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// Lucene/S3 segment-engine implementation of <see cref="IRumQueryService"/> — the drop-in replacement for

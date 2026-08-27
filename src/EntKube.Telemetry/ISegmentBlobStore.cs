@@ -1,4 +1,4 @@
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// Object storage for sealed telemetry segment archives — the durable tier of the Lucene/S3 engine.

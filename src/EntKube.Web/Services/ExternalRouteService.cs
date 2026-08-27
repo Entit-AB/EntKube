@@ -86,15 +86,38 @@ public class ExternalRouteService(
 
         // Check for duplicate hostname on this cluster.
 
+        string normalizedHostname = request.Hostname.Trim().ToLowerInvariant();
+
         List<Guid> clusterComponentIds = component.Cluster.Components.Select(c => c.Id).ToList();
         bool duplicateHostname = await db.ExternalRoutes
             .AnyAsync(r => clusterComponentIds.Contains(r.ComponentId)
-                && r.Hostname == request.Hostname.Trim().ToLowerInvariant(), ct);
+                && r.Hostname == normalizedHostname, ct);
 
         if (duplicateHostname)
         {
             throw new InvalidOperationException(
                 $"Hostname '{request.Hostname}' is already in use on this cluster.");
+        }
+
+        // An AppRoute for the same hostname is not a second route — it is the same route. Both
+        // sides render an object named ToListenerName(hostname) + "-route", and an AppRoute
+        // renders one rule per path while this can only say "the whole host goes to one service".
+        // Saving it would mean the next apply of any component on the cluster replaces the app's
+        // per-path rules with a single backend, and every path that backend does not serve starts
+        // answering 404. Refusing here is the last point where that is still cheap to prevent.
+
+        bool servedByAppRoute = await db.AppRoutes
+            .AnyAsync(r => r.IsEnabled
+                && r.Hostname.ToLower() == normalizedHostname
+                && r.DeploymentRoutes.Any(dr =>
+                    dr.IsEnabled && dr.AppDeployment.ClusterId == component.Cluster.Id), ct);
+
+        if (servedByAppRoute)
+        {
+            throw new InvalidOperationException(
+                $"Hostname '{request.Hostname}' is already served by an application route on this "
+                + "cluster. Add the path to that application route instead — an external route "
+                + "here would replace its per-path rules with a single backend.");
         }
 
         // Resolve gateway details from the cluster's ingress controller if not provided.
@@ -108,7 +131,7 @@ public class ExternalRouteService(
         {
             Id = Guid.NewGuid(),
             ComponentId = componentId,
-            Hostname = request.Hostname.Trim().ToLowerInvariant(),
+            Hostname = normalizedHostname,
             ServiceName = request.ServiceName ?? component.ReleaseName ?? component.Name,
             ServicePort = request.ServicePort,
             PathPrefix = string.IsNullOrWhiteSpace(request.PathPrefix) ? "/" : request.PathPrefix.Trim(),
@@ -141,6 +164,59 @@ public class ExternalRouteService(
             .Where(r => r.ComponentId == componentId)
             .OrderBy(r => r.Hostname)
             .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Of a component's external routes, the hostnames an enabled AppRoute on the same cluster
+    /// already serves.
+    ///
+    /// These routes are the ones the apply step refuses to send to the cluster, because doing so
+    /// would replace the app's per-path rules with a single backend. Refusing is the right
+    /// behaviour, but on its own it is invisible: the operator sees a route they configured,
+    /// sitting in the list, apparently fine, and no explanation for why the cluster does not
+    /// reflect it. This is what lets the UI say so, and offer to remove it.
+    ///
+    /// Creating such a route is blocked now, so the only ones left are those saved before that
+    /// check existed.
+    /// </summary>
+    public async Task<IReadOnlySet<string>> ShadowedHostnamesAsync(
+        Guid componentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        // The cluster this component belongs to — an AppRoute only shadows a route on the same
+        // cluster, since that is where the two would collide.
+        Guid? clusterId = await db.ClusterComponents
+            .Where(c => c.Id == componentId)
+            .Select(c => (Guid?)c.ClusterId)
+            .FirstOrDefaultAsync(ct);
+
+        if (clusterId is null)
+        {
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        List<string> routeHostnames = await db.ExternalRoutes
+            .Where(r => r.ComponentId == componentId && r.TlsMode != TlsMode.Passthrough)
+            .Select(r => r.Hostname)
+            .ToListAsync(ct);
+
+        if (routeHostnames.Count == 0)
+        {
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        // Same set of AppRoutes the apply step consults, so the UI and the cluster agree on which
+        // routes are being held back.
+        List<string> appRouteHostnames = await db.AppRoutes
+            .Where(r => r.IsEnabled && r.DeploymentRoutes.Any(dr =>
+                dr.IsEnabled && dr.AppDeployment.ClusterId == clusterId))
+            .Select(r => r.Hostname)
+            .ToListAsync(ct);
+
+        HashSet<string> owned = appRouteHostnames.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        return routeHostnames.Where(owned.Contains).ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -253,6 +329,7 @@ public class ExternalRouteService(
             rule.AppendLine($"          port: {route.ServicePort}");
         }
 
+        rule.Append(RenderHstsFilter("      "));
         rule.Append(RenderTimeouts(route.RequestTimeoutSeconds, "      "));
 
         return
@@ -262,14 +339,101 @@ public class ExternalRouteService(
             $"  name: {routeName}\n" +
             $"  namespace: {ns}\n" +
             $"spec:\n" +
-            $"  parentRefs:\n" +
-            $"    - name: {route.GatewayName}\n" +
-            $"      namespace: {route.GatewayNamespace}\n" +
+            RenderParentRefs(route.GatewayName, route.GatewayNamespace, [ToListenerName(route.Hostname)]) +
             $"  hostnames:\n" +
             $"    - {route.Hostname}\n" +
             $"  rules:\n" +
             rule.ToString().TrimEnd() + "\n";
     }
+
+    /// <summary>
+    /// Name of the Gateway's port-80 listener. Two things attach here and nothing else: the
+    /// redirect to HTTPS, and cert-manager's HTTP-01 challenge solvers.
+    /// </summary>
+    public const string HttpListenerName = "http-redirect";
+
+    /// <summary>
+    /// Label a namespace must carry before its HTTPRoutes may attach to a TLS listener.
+    /// </summary>
+    public const string RouteNamespaceLabel = "entkube.io/routes";
+
+    /// <summary>Value of <see cref="RouteNamespaceLabel"/> on a namespace allowed to attach.</summary>
+    public const string RouteNamespaceLabelValue = "allowed";
+
+    /// <summary>
+    /// The <c>allowedRoutes</c> block for every TLS-terminating listener.
+    ///
+    /// <c>from: All</c> would let any namespace on the cluster attach an HTTPRoute to any
+    /// hostname the Gateway serves — a route claiming <c>login.example.com</c> with a more
+    /// specific path than the real one takes that path's traffic, and the only trace is a
+    /// route object in a namespace nobody was watching. A namespace label is a weak boundary
+    /// (whoever can label namespaces can cross it), but it moves the act from "create a route"
+    /// to "hold cluster-scoped permissions", which is a different set of people.
+    ///
+    /// Namespaces are labelled as part of applying the Gateway, so this cannot detach a route
+    /// EntKube knows about — see KubernetesOperationsService.LabelRouteNamespacesAsync.
+    /// </summary>
+    public const string RouteNamespaceSelector =
+        "      allowedRoutes:\n" +
+        "        namespaces:\n" +
+        "          from: Selector\n" +
+        "          selector:\n" +
+        "            matchLabels:\n" +
+        $"              {RouteNamespaceLabel}: {RouteNamespaceLabelValue}";
+
+    /// <summary>
+    /// Renders an HTTPRoute's <c>parentRefs</c>, pinned to named Gateway listeners.
+    ///
+    /// The pinning is the point. A parentRef without <c>sectionName</c> attaches to EVERY listener
+    /// whose hostname matches — including the port-80 <c>http-redirect</c> listener, which matches
+    /// everything because it has no hostname of its own. Both the app's route and
+    /// <c>http-to-https-redirect</c> then sit on port 80, and Gateway API's precedence rules hand
+    /// the request to the more specific hostname: the app's. The redirect never fires and the site
+    /// is served in cleartext over HTTP, which is the opposite of what shipping a redirect listener
+    /// was meant to achieve. Naming the HTTPS listener keeps port 80 to the redirect alone.
+    /// </summary>
+    public static string RenderParentRefs(
+        string? gatewayName, string? gatewayNamespace, IEnumerable<string> sectionNames)
+    {
+        System.Text.StringBuilder refs = new("  parentRefs:\n");
+
+        foreach (string section in sectionNames)
+        {
+            refs.Append(
+                $"    - name: {gatewayName}\n" +
+                $"      namespace: {gatewayNamespace}\n" +
+                $"      sectionName: {section}\n");
+        }
+
+        return refs.ToString();
+    }
+
+    /// <summary>
+    /// HSTS response header for routes served over a TLS-terminating listener. A year, with
+    /// subdomains, and no <c>preload</c> — preload is a one-way door (removal takes months and a
+    /// browser release) and is not ours to walk through on an operator's behalf.
+    ///
+    /// Safe to attach unconditionally now that routes no longer answer on port 80: the header only
+    /// ever reaches a client that already completed a TLS handshake.
+    /// </summary>
+    public const string HstsHeaderValue = "max-age=31536000; includeSubDomains";
+
+    /// <summary>
+    /// Renders the <c>ResponseHeaderModifier</c> filter carrying <see cref="HstsHeaderValue"/>,
+    /// as a rule-level <c>filters:</c> block. Callers that already emit filters for the same rule
+    /// must use <see cref="HstsFilterEntry"/> and merge instead — a second <c>filters:</c> key in
+    /// one rule is invalid YAML.
+    /// </summary>
+    public static string RenderHstsFilter(string indent) =>
+        $"{indent}filters:\n" + HstsFilterEntry(indent + "  ");
+
+    /// <summary>The HSTS filter as a single list entry, for merging into an existing filter list.</summary>
+    public static string HstsFilterEntry(string indent) =>
+        $"{indent}- type: ResponseHeaderModifier\n" +
+        $"{indent}  responseHeaderModifier:\n" +
+        $"{indent}    set:\n" +
+        $"{indent}      - name: Strict-Transport-Security\n" +
+        $"{indent}        value: \"{HstsHeaderValue}\"\n";
 
     /// <summary>
     /// True when a Service port serves TLS, judged the way Istio itself judges it: the
@@ -321,9 +485,14 @@ public class ExternalRouteService(
     /// True for call sites that already emit a service-wide DISABLE rule today and must keep
     /// doing so; false for call sites adding a rule only because a TLS port needs one.
     /// </param>
+    /// <param name="serviceWideTlsMode">
+    /// The service-wide <c>trafficPolicy.tls.mode</c>. Defaults to DISABLE, the plaintext hop that
+    /// lets a sidecar-less backend serve traffic. A namespace under STRICT mesh mTLS passes
+    /// ISTIO_MUTUAL instead — see <see cref="MeshMtlsService.BackendTlsMode"/>.
+    /// </param>
     public static string GenerateBackendDestinationRuleYaml(
         string serviceName, string serviceNamespace, string gatewayNamespace,
-        IEnumerable<KubeServicePort> ports, bool alwaysEmit)
+        IEnumerable<KubeServicePort> ports, bool alwaysEmit, string serviceWideTlsMode = "DISABLE")
     {
         List<KubeServicePort> tlsPorts = ports.Where(IsTlsBackendPort).ToList();
 
@@ -346,7 +515,7 @@ public class ExternalRouteService(
             $"  host: {serviceName}.{serviceNamespace}.svc.cluster.local\n" +
             $"  trafficPolicy:\n" +
             $"    tls:\n" +
-            $"      mode: DISABLE\n");
+            $"      mode: {serviceWideTlsMode}\n");
 
         if (tlsPorts.Count > 0)
         {
@@ -533,6 +702,12 @@ public class ExternalRouteService(
     ///   2. An HTTP→HTTPS redirect HTTPRoute
     ///   3. A ReferenceGrant in certNamespace
     ///   4. One Certificate per ClusterIssuer-mode hostname (in certNamespace)
+    ///   5. One ConfigMap per mTLS listener port, holding that port's client-CA trust store
+    ///
+    /// Routes requiring a client certificate get an extra listener on their trust anchor's port
+    /// (see <see cref="MtlsService"/>) — client-certificate validation is per-port, so it cannot
+    /// ride on the shared 443 listener without imposing certificates on every other hostname.
+    /// Those routes must have <c>ClientCaBundle</c> loaded.
     /// </summary>
     public static string GenerateGatewayYaml(
         string gatewayName,
@@ -549,6 +724,10 @@ public class ExternalRouteService(
                 .Where(r => r.IsEnabled)
                 .Select(r => (r.Hostname, r.TlsMode, r.ClusterIssuerName)));
 
+        // Routes requiring a client certificate are published on their anchor's port. Hostnames
+        // marked mTLS-only additionally drop off 443, so the app is unreachable without a cert.
+        MtlsService.MtlsClusterPlan mtlsPlan = MtlsService.BuildPlan(appRoutes ?? [], gatewayNamespace);
+
         var grouped = allHostnames
             .GroupBy(r => r.Hostname)
             .Select(g => (
@@ -564,7 +743,13 @@ public class ExternalRouteService(
         // certificateRefs include namespace so the Gateway can cross-reference Secrets
         // in certNamespace. Istio honours cross-namespace refs when a ReferenceGrant exists.
         // Passthrough-mode hostnames use TLS/Passthrough listeners (no cert at gateway level).
-        IEnumerable<string> httpsListeners = grouped.Select(g =>
+        // mTLS-only hostnames are skipped here and rendered as an mTLS listener below. They stay in
+        // `grouped` so their cert-manager Certificate is still generated — the mTLS listener
+        // terminates TLS with that same secret, so dropping it would leave the listener referencing
+        // a Secret nothing creates.
+        IEnumerable<string> httpsListeners = grouped
+            .Where(g => !mtlsPlan.MtlsOnlyHosts.Contains(g.Hostname))
+            .Select(g =>
             g.IsPassthrough
                 ? $"    - name: {g.ListenerName}\n" +
                   $"      hostname: {g.Hostname}\n" +
@@ -572,9 +757,7 @@ public class ExternalRouteService(
                   $"      protocol: TLS\n" +
                   $"      tls:\n" +
                   $"        mode: Passthrough\n" +
-                  $"      allowedRoutes:\n" +
-                  $"        namespaces:\n" +
-                  $"          from: All"
+                  RouteNamespaceSelector
                 : $"    - name: {g.ListenerName}\n" +
                   $"      hostname: {g.Hostname}\n" +
                   $"      port: 443\n" +
@@ -584,21 +767,38 @@ public class ExternalRouteService(
                   $"        certificateRefs:\n" +
                   $"          - name: {g.CertSecretName}\n" +
                   $"            namespace: {certNamespace}\n" +
-                  $"      allowedRoutes:\n" +
-                  $"        namespaces:\n" +
-                  $"          from: All");
+                  RouteNamespaceSelector);
 
-        // HTTP listener allows routes from All namespaces so cert-manager can attach
-        // its ACME HTTP-01 challenge HTTPRoute (created in the cert-manager namespace).
+        // Port 80 stays open to all namespaces: cert-manager creates its ACME HTTP-01 solver
+        // routes in its own namespace, which nothing here labels, and a challenge that cannot
+        // attach is a certificate that cannot renew. The listener carries no hostname and only
+        // ever redirects, so the exposure it grants is the right to be redirected to HTTPS.
         const string httpListener =
-            "    - name: http-redirect\n" +
+            $"    - name: {HttpListenerName}\n" +
             "      port: 80\n" +
             "      protocol: HTTP\n" +
             "      allowedRoutes:\n" +
             "        namespaces:\n" +
             "          from: All";
 
-        string allListeners = string.Join("\n", httpsListeners.Append(httpListener));
+        // One HTTPS listener per mTLS hostname on its anchor's port. TLS termination is identical
+        // to the 443 listener (same server certificate) — the client-certificate requirement comes
+        // from the Gateway's spec.tls.frontend.perPort entry for this port, not from here.
+        IEnumerable<string> mtlsListeners = mtlsPlan.HostPorts
+            .OrderBy(h => h.Key, StringComparer.Ordinal)
+            .Select(h =>
+                $"    - name: {MtlsService.MtlsListenerName(h.Key, h.Value)}\n" +
+                $"      hostname: {h.Key}\n" +
+                $"      port: {h.Value}\n" +
+                $"      protocol: HTTPS\n" +
+                $"      tls:\n" +
+                $"        mode: Terminate\n" +
+                $"        certificateRefs:\n" +
+                $"          - name: {ToCertSecretName(h.Key)}\n" +
+                $"            namespace: {certNamespace}\n" +
+                RouteNamespaceSelector);
+
+        string allListeners = string.Join("\n", httpsListeners.Concat(mtlsListeners).Append(httpListener));
 
         // Istio needs an explicit address binding to avoid creating a second LoadBalancer service.
         // Traefik manages its own service — omitting addresses lets Traefik handle it.
@@ -619,6 +819,7 @@ public class ExternalRouteService(
             $"spec:\n" +
             $"  gatewayClassName: {gatewayClass}\n" +
             addressesYaml +
+            MtlsService.BuildGatewayTlsBlock(mtlsPlan.BundlesByPort.Keys) +
             $"  listeners:\n" +
             allListeners;
 
@@ -632,7 +833,7 @@ public class ExternalRouteService(
             $"  parentRefs:\n" +
             $"    - name: {gatewayName}\n" +
             $"      namespace: {gatewayNamespace}\n" +
-            $"      sectionName: http-redirect\n" +
+            $"      sectionName: {HttpListenerName}\n" +
             $"  rules:\n" +
             $"    - filters:\n" +
             $"        - type: RequestRedirect\n" +
@@ -657,7 +858,7 @@ public class ExternalRouteService(
             $"    - group: \"\"\n" +
             $"      kind: Secret";
 
-        List<string> parts = [gatewayYaml, httpRedirectRoute, referenceGrant];
+        List<string> parts = [gatewayYaml, httpRedirectRoute, referenceGrant, .. mtlsPlan.CaConfigMaps];
 
         foreach (var g in grouped.Where(g => g.IsCertIssuer && !string.IsNullOrWhiteSpace(g.ClusterIssuerName)))
         {

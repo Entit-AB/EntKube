@@ -58,7 +58,7 @@ public class ComponentLifecycleServiceTests : IDisposable
         byte[] testRootKey = Convert.FromBase64String("dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
         VaultEncryptionService encryption = new(testRootKey);
         vaultService = new VaultService(dbFactory, encryption);
-        sut = new ComponentLifecycleService(dbFactory, vaultService, TestServices.BuildKeycloak(dbFactory, vaultService));
+        sut = TestServices.BuildLifecycle(dbFactory, vaultService);
     }
 
     public void Dispose()
@@ -487,10 +487,45 @@ public class ComponentLifecycleServiceTests : IDisposable
 
         HelmCommand command = await sut.GetInstallCommandAsync(component.Id);
 
-        // Assert — no secret injection means original YAML is preserved.
+        // Assert — no secret injection. The operator's own values survive untouched; the document
+        // is no longer byte-identical because catalog defaults this component never had are filled
+        // in on the way to Helm (see ComponentLifecycleService.FillMissingCatalogDefaults), but
+        // nothing the operator set is rewritten and no credential appears.
 
-        command.ValuesYaml.Should().Be("grafana:\n  enabled: true\n");
+        command.ValuesYaml.Should().Contain("grafana:\n  enabled: true");
+        command.ValuesYaml.Should().NotContain("adminPassword");
         command.HasValues.Should().BeTrue();
+    }
+
+    // ──────── ManifestUrl components track the catalog's URL ────────
+
+    [Fact]
+    public async Task GetInstallCommandAsync_ManifestUrl_AppliesTheCatalogUrlNotTheRegisteredOne()
+    {
+        // For a ManifestUrl component the URL *is* the version — these are release assets pinned
+        // to a tag. Applying the stored one means the component reinstalls whatever version it was
+        // registered at, for ever, while reporting success: "upgrade the CRDs" quietly reapplies
+        // the old CRDs. There is no version field to bump instead; Helm components have
+        // HelmChartVersion, this path has nothing.
+        ComponentRegistration registration = new()
+        {
+            Name = "gateway-api-crds",
+            ComponentType = "ManifestUrl",
+            Namespace = "gateway-system",
+            // The URL this component would have been registered with a few releases ago.
+            HelmRepoUrl = "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/experimental-install.yaml",
+            HelmChartName = "",
+            ReleaseName = "gateway-api-crds"
+        };
+
+        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, registration);
+
+        HelmCommand command = await sut.GetInstallCommandAsync(component.Id);
+
+        string catalogUrl = ComponentCatalog.Entries.Single(e => e.Key == "gateway-api-crds").HelmRepoUrl;
+
+        command.ManifestUrl.Should().Be(catalogUrl);
+        command.ManifestUrl.Should().NotContain("v1.2.1");
     }
 
     // ──────── UpdateConfigurationAsync — Helm identity fields ────────

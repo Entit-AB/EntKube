@@ -20,6 +20,7 @@ public sealed class SegmentTraceSummaryEngineTests : IDisposable
     private readonly SqliteConnection _connection;
     private readonly ApplicationDbContext _context;
     private readonly TestDbContextFactory _factory;
+    private readonly ISegmentCatalog _catalog;
     private readonly ClusterTenantResolver _resolver;
     private readonly Guid _tenantId = Guid.NewGuid();
     private readonly Guid _clusterId = Guid.NewGuid();
@@ -52,6 +53,7 @@ public sealed class SegmentTraceSummaryEngineTests : IDisposable
         _context.SaveChanges();
 
         _factory = new TestDbContextFactory(_connection);
+        _catalog = new EfSegmentCatalog(_factory);
         _resolver = new ClusterTenantResolver(_factory);
     }
 
@@ -74,15 +76,15 @@ public sealed class SegmentTraceSummaryEngineTests : IDisposable
         var spanStore = new LocalSegmentBlobStore(Path.Combine(spanPath, "blobs"));
         var traceStore = new LocalSegmentBlobStore(Path.Combine(tracePath, "blobs"));
 
-        _spanReg = reg(tid => new SpanSegmentManager(tid, _factory, spanStore, spanOpts, NullLogger<SpanSegmentManager>.Instance));
-        _traceReg = reg(tid => new TraceSummarySegmentManager(tid, _factory, traceStore, traceOpts, NullLogger<TraceSummarySegmentManager>.Instance));
+        _spanReg = reg(tid => new SpanSegmentManager(tid, _catalog, spanStore, spanOpts, NullLogger<SpanSegmentManager>.Instance));
+        _traceReg = reg(tid => new TraceSummarySegmentManager(tid, _catalog, traceStore, traceOpts, NullLogger<TraceSummarySegmentManager>.Instance));
 
         TraceSummarySegmentManager mgr = _traceReg.For(_tenantId);
         // Warmup partial a day before the window → cutoff older than From → the list routes to the index.
         mgr.WriteFromSpanBatch(_tenantId, _clusterId,
             [Span(_t0.AddDays(-1), "warmup", "w", null, "warmup", "warmup-svc", 2, 1, 0)]);
 
-        var svc = new SegmentTraceService(_spanReg, _traceReg, _factory, _resolver, NullLogger<SegmentTraceService>.Instance);
+        var svc = new SegmentTraceService(_spanReg, _traceReg, _catalog, _resolver, NullLogger<SegmentTraceService>.Instance);
         return (mgr, svc);
     }
 

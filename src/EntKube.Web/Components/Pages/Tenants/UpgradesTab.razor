@@ -3,16 +3,25 @@
 @using EntKube.Web.Services.Upgrades
 @using Microsoft.EntityFrameworkCore
 @inject ComponentUpgradeService UpgradeService
+@inject ComponentUpgradeRunner UpgradeRunner
+@inject ReleaseVolumeGuard VolumeGuard
 @inject NodeManagementService NodeService
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 
 @* ═══════════════════════════════════════════════════════════════════
    Fleet upgrade planner — "what is out of date across this tenant?"
 
-   Read-only by design. Chart currency comes from the repositories' own
-   index.yaml (no cluster access, cached for an hour), while the Kubernetes
-   support check reads kubelet versions live and is therefore loaded on
-   demand rather than on first render.
+   Chart currency comes from the repositories' own index.yaml (no cluster
+   access, cached for an hour), while the Kubernetes support check reads
+   kubelet versions live and is therefore loaded on demand rather than on
+   first render.
+
+   Each finding is actionable here: the Upgrade button pins the component to
+   the published version and runs the same apply the cluster page does, via
+   ComponentUpgradeRunner. Before it starts, ReleaseVolumeGuard reports any
+   workload that cannot be replaced in place — on a cluster with no
+   ReadWriteMany storage those have to be scaled to zero first, which is
+   downtime, so the dialog names them and asks.
    ═══════════════════════════════════════════════════════════════════ *@
 
 <div class="card shadow-sm mb-3 mt-4">
@@ -144,10 +153,19 @@
                                     <td class="small text-muted">
                                         @(c.LatestReleasedAt?.ToString("yyyy-MM-dd") ?? "—")
                                     </td>
-                                    <td class="text-end">
-                                        <a class="btn btn-sm btn-outline-primary"
+                                    <td class="text-end text-nowrap">
+                                        @if (c.IsActionable && c.LatestVersion is not null)
+                                        {
+                                            <button class="btn btn-sm btn-primary me-1"
+                                                    @onclick="() => BeginUpgrade(c)"
+                                                    disabled="@(running is not null)"
+                                                    title="@($"Upgrade {c.DisplayName} to {c.LatestVersion} on {c.ClusterName}")">
+                                                <i class="bi bi-arrow-up-circle me-1"></i>Upgrade
+                                            </button>
+                                        }
+                                        <a class="btn btn-sm btn-outline-secondary"
                                            href="@ClusterLink(c.ClusterId)"
-                                           title="Open this cluster to review and upgrade the component">
+                                           title="Open this cluster to review the component's configuration">
                                             Open
                                         </a>
                                     </td>
@@ -235,6 +253,142 @@
     </div>
 </div>
 
+@* ── Upgrade dialog: preflight, then run ──
+   The preflight is the acknowledgment for the whole operation. It names every workload
+   that will be taken to zero replicas, because on a cluster with no ReadWriteMany storage
+   that is the only way an upgrade can complete — and it is real downtime. *@
+@if (target is not null)
+{
+    <div class="modal fade show d-block" tabindex="-1" style="background: rgba(0,0,0,0.4);">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header py-2">
+                    <h6 class="modal-title mb-0">
+                        <i class="bi bi-arrow-up-circle me-2 text-primary"></i>
+                        Upgrade @target.DisplayName on @target.ClusterName
+                    </h6>
+                    <button type="button" class="btn-close" @onclick="CloseDialog" disabled="@(running is not null)"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="d-flex align-items-center gap-2 mb-3">
+                        <code>@(target.InstalledVersion ?? "—")</code>
+                        <i class="bi bi-arrow-right text-muted"></i>
+                        <code class="fw-semibold">@target.LatestVersion</code>
+                        <span class="badge @StatusClass(target) ms-1">@StatusText(target)</span>
+                    </div>
+
+                    @if (outcome is null)
+                    {
+                        @if (preflighting)
+                        {
+                            <div class="d-flex align-items-center gap-2 text-muted small">
+                                <span class="spinner-border spinner-border-sm"></span>
+                                Checking whether this release can be rolled in place…
+                            </div>
+                        }
+                        else if (preflight is null)
+                        {
+                            <p class="text-muted small mb-0">Preparing…</p>
+                        }
+                        else
+                        {
+                            @if (preflight.Error is not null)
+                            {
+                                <div class="alert alert-warning py-2 small">
+                                    The volume check could not run: @preflight.Error<br />
+                                    The upgrade can still be started, but it may stall if a workload cannot
+                                    release its volume.
+                                </div>
+                            }
+
+                            @if (preflight.RequiresScaleDown)
+                            {
+                                <div class="alert alert-warning py-2 mb-2">
+                                    <div class="fw-semibold mb-1">
+                                        <i class="bi bi-exclamation-triangle me-1"></i>This upgrade needs downtime
+                                    </div>
+                                    <p class="small mb-2">
+                                        @DescribeBlocked() cannot be replaced in place: the volume@(preflight.Blocked.Sum(b => b.Claims.Count) == 1 ? "" : "s") below
+                                        can only be mounted by one node at a time, so a rolling update would leave the new
+                                        pod waiting on a volume the old pod still holds. EntKube scales the workload to zero,
+                                        waits for the volume to detach, upgrades, then scales it back up —
+                                        @preflight.ReplicasAffected replica(s) are offline in between.
+                                    </p>
+                                    <ul class="small mb-0 ps-3">
+                                        @foreach (BlockedWorkload w in preflight.Blocked)
+                                        {
+                                            <li>
+                                                <code>Deployment/@w.Name</code>
+                                                <span class="text-muted">
+                                                    — @w.Replicas replica(s), holds @string.Join(", ", w.Claims)
+                                                </span>
+                                            </li>
+                                        }
+                                    </ul>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="alert alert-success py-2 small mb-2">
+                                    <i class="bi bi-check-circle me-1"></i>
+                                    No workload in this release is blocked by an exclusive volume — Helm can roll it
+                                    in place with no planned downtime.
+                                </div>
+                            }
+
+                            @foreach (string warning in preflight.Warnings)
+                            {
+                                <div class="small text-muted"><i class="bi bi-info-circle me-1"></i>@warning</div>
+                            }
+                        }
+                    }
+                    else
+                    {
+                        <div class="alert @(outcome.Success ? "alert-success" : "alert-danger") py-2 small">
+                            @(outcome.Success
+                                ? $"{target.DisplayName} is now on {outcome.AppliedVersion}."
+                                : outcome.Error ?? "The upgrade failed.")
+                        </div>
+                    }
+
+                    @if (running is not null && outcome is null)
+                    {
+                        <div class="d-flex align-items-center gap-2 text-muted small mt-2">
+                            <span class="spinner-border spinner-border-sm"></span>
+                            Upgrading — this runs Helm with --wait and can take several minutes.
+                        </div>
+                    }
+
+                    @if (!string.IsNullOrWhiteSpace(outcome?.Output))
+                    {
+                        <pre class="bg-dark text-light rounded p-2 small mt-3 mb-0"
+                             style="max-height: 22rem; overflow: auto; white-space: pre-wrap;">@outcome!.Output</pre>
+                    }
+                </div>
+                <div class="modal-footer py-2">
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="CloseDialog" disabled="@(running is not null)">
+                        @(outcome is null ? "Cancel" : "Close")
+                    </button>
+                    @if (outcome is null)
+                    {
+                        <button class="btn btn-sm @(preflight?.RequiresScaleDown == true ? "btn-warning" : "btn-primary")"
+                                @onclick="RunUpgradeAsync"
+                                disabled="@(preflighting || running is not null)">
+                            @if (running is not null)
+                            {
+                                <span class="spinner-border spinner-border-sm me-1"></span>
+                            }
+                            @(preflight?.RequiresScaleDown == true
+                                ? $"Upgrade with downtime"
+                                : $"Upgrade to {target.LatestVersion}")
+                        </button>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
@@ -248,6 +402,13 @@
     private string clusterFilter = "";
     private string statusFilter = "actionable";
     private string search = "";
+
+    // ── Upgrade dialog state ──
+    private ComponentUpgrade? target;
+    private VolumePreflight? preflight;
+    private bool preflighting;
+    private Guid? running;
+    private ComponentUpgradeOutcome? outcome;
 
     private sealed record ClusterVersionRow(
         string ClusterName, string? ReportedVersion, KubernetesVersionStatus Status, string? Error);
@@ -366,6 +527,75 @@
             k8sLoading = false;
         }
     }
+
+    /// <summary>
+    /// Opens the upgrade dialog and inspects the release while the operator reads it, so the
+    /// downtime warning is on screen before anything is confirmed.
+    /// </summary>
+    private async Task BeginUpgrade(ComponentUpgrade component)
+    {
+        target = component;
+        preflight = null;
+        outcome = null;
+        preflighting = true;
+        StateHasChanged();
+
+        try
+        {
+            preflight = await VolumeGuard.InspectAsync(component.ComponentId);
+        }
+        catch (Exception ex)
+        {
+            preflight = VolumePreflight.Failure(ex.Message);
+        }
+        finally
+        {
+            preflighting = false;
+        }
+    }
+
+    private async Task RunUpgradeAsync()
+    {
+        if (target is null) return;
+
+        running = target.ComponentId;
+        StateHasChanged();
+
+        try
+        {
+            outcome = await UpgradeRunner.UpgradeAsync(new ComponentUpgradeRequest
+            {
+                TenantId = TenantId,
+                ComponentId = target.ComponentId,
+                TargetChartVersion = target.LatestVersion,
+                // The dialog listed every workload that goes offline; confirming it is the consent.
+                AllowScaleDown = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            outcome = ComponentUpgradeOutcome.Refused(ex.Message);
+        }
+        finally
+        {
+            running = null;
+        }
+
+        // The report is derived from the recorded chart version, so it is stale the moment
+        // an upgrade lands.
+        await ReloadAsync();
+    }
+
+    private void CloseDialog()
+    {
+        target = null;
+        preflight = null;
+        outcome = null;
+    }
+
+    private string DescribeBlocked() => preflight?.Blocked.Count == 1
+        ? $"Deployment/{preflight.Blocked[0].Name}"
+        : $"{preflight?.Blocked.Count ?? 0} workloads in this release";
 
     private string ClusterLink(Guid clusterId) =>
         TenantSlug is null ? "#" : $"/tenants/{TenantSlug}?cluster={clusterId}";

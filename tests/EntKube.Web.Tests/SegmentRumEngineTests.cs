@@ -19,6 +19,7 @@ public sealed class SegmentRumEngineTests : IDisposable
     private readonly SqliteConnection _connection;
     private readonly ApplicationDbContext _context;
     private readonly TestDbContextFactory _factory;
+    private readonly ISegmentCatalog _catalog;
     private readonly Guid _tenantId = Guid.NewGuid();
     private readonly Guid _siteId = Guid.NewGuid();
     private readonly List<SegmentManagerRegistry<RumSegmentManager>> _registries = [];
@@ -34,6 +35,7 @@ public sealed class SegmentRumEngineTests : IDisposable
             new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(_connection).Options);
         _context.Database.EnsureCreated();
         _factory = new TestDbContextFactory(_connection);
+        _catalog = new EfSegmentCatalog(_factory);
     }
 
     private RumSegmentManager NewManager()
@@ -45,7 +47,7 @@ public sealed class SegmentRumEngineTests : IDisposable
         var store = new LocalSegmentBlobStore(blobsDir);
         var options = new SegmentEngineOptions { DataPath = dataPath };
         _registry = new SegmentManagerRegistry<RumSegmentManager>(tid =>
-            new RumSegmentManager(tid, _factory, store, options, NullLogger<RumSegmentManager>.Instance));
+            new RumSegmentManager(tid, _catalog, store, options, NullLogger<RumSegmentManager>.Instance));
         _registries.Add(_registry);
         return _registry.For(_tenantId);
     }

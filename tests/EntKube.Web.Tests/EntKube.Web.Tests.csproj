@@ -8,6 +8,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Mirrors EntKube.Web: the segment engine now lives in EntKube.Telemetry. -->
+    <Using Include="EntKube.Telemetry" />
+    <Using Include="EntKube.TelemetryNode" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <PackageReference Include="FluentAssertions" Version="8.10.0" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.1" />
@@ -25,6 +31,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\EntKube.Web\EntKube.Web.csproj" />
+    <ProjectReference Include="..\..\src\EntKube.TelemetryNode\EntKube.TelemetryNode.csproj" />
     <ProjectReference Include="..\..\src\EntKube.Agent\EntKube.Agent.csproj" />
     <ProjectReference Include="..\..\src\EntKube.Mcp\EntKube.Mcp.csproj" />
     <ProjectReference Include="..\..\src\EntKube.Cli\EntKube.Cli.csproj" />

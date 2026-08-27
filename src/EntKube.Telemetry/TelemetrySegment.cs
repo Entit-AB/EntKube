@@ -1,3 +1,7 @@
+// This type lives in the EntKube.Telemetry assembly (ISegmentCatalog is defined in terms of it) but
+// deliberately keeps the EntKube.Web.Data namespace: EF Core's model snapshots identify entities by
+// full type name, so renaming it would make the next scaffolded migration read as "entity dropped,
+// new entity added" across all three providers. See docs/telemetry-in-cluster.md §5.1.
 namespace EntKube.Web.Data;
 
 /// <summary>

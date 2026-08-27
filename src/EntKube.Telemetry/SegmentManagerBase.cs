@@ -4,11 +4,10 @@ using Lucene.Net.Analysis;
 using Lucene.Net.Documents;
 using Lucene.Net.Index;
 using Lucene.Net.Search;
-using Microsoft.EntityFrameworkCore;
 using FSDirectory = Lucene.Net.Store.FSDirectory;
 using LuceneDirectory = Lucene.Net.Store.Directory;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>Tunables for the telemetry segment engine, read from the <c>Telemetry</c> config section.</summary>
 public sealed class SegmentEngineOptions
@@ -60,6 +59,28 @@ public sealed class SegmentEngineOptions
     /// Clamped to at most <see cref="RetentionDays"/>. Default 14.</summary>
     public int VerboseLogRetentionDays { get; init; } = 14;
 
+    /// <summary>
+    /// How long a sealed segment stays on local disk after sealing — the WARM tier. Within this window a
+    /// query reads the segment straight off the PersistentVolume; past it the local copy is evicted and the
+    /// segment is served COLD, downloaded from object storage on demand and re-cached.
+    ///
+    /// Nothing is lost by evicting: the archive is durable in object storage for the full
+    /// <see cref="RetentionDays"/> and the catalog row is untouched, so the segment stays queryable — just
+    /// slower. Before this existed the local copy was only ever removed when retention deleted the segment
+    /// outright, so "cache" silently grew to the entire retention window and could fill the volume.
+    ///
+    /// Default 3 days, which covers the overwhelming majority of queries. Clamped to at most
+    /// <see cref="RetentionDays"/>. Set 0 to keep nothing locally (always cold), or a value at
+    /// RetentionDays to restore the old keep-everything behaviour.</summary>
+    public int WarmRetentionDays { get; init; } = 3;
+
+    /// <summary>
+    /// Hard ceiling on the bytes of unpacked segments held on local disk per (tenant, signal), enforced by
+    /// evicting least-recently-used segments first. This is the backstop that keeps the volume from filling
+    /// when a burst seals far more data than <see cref="WarmRetentionDays"/> anticipated — age decides what
+    /// is worth keeping, size decides how much fits. Default 8 GiB. Set 0 for no size cap (age only).</summary>
+    public long WarmMaxBytes { get; init; } = 8L * 1024 * 1024 * 1024;
+
     /// <summary>Max number of sealed-segment readers kept open in memory per (tenant, signal). Least-
     /// recently-used readers beyond this are closed (they reopen on demand). Bounds file handles /
     /// heap so a long-running app with 90-day retention doesn't accumulate a reader per segment.
@@ -93,7 +114,7 @@ public abstract class SegmentManagerBase : IDisposable
     /// <summary>The catalog signal name for this manager: "logs" or "spans".</summary>
     protected abstract string Signal { get; }
 
-    private readonly IDbContextFactory<ApplicationDbContext> _catalog;
+    private readonly ISegmentCatalog _catalog;
     private readonly ISegmentBlobStore _blobs;
     private readonly SegmentCache _cache;
     private readonly SegmentEngineOptions _options;
@@ -117,6 +138,7 @@ public abstract class SegmentManagerBase : IDisposable
     private readonly ConcurrentDictionary<Guid, Lazy<Task<DirectoryReader>>> _readerCache = new();
     private readonly ConcurrentDictionary<Guid, long> _readerLastUsed = new();  // seg id → monotonic tick (LRU order)
     private long _accessClock;
+    private int _warmTierRehydrated;   // 0/1 — see EnsureWarmTierRehydratedAsync
 
     /// <summary>The tenant this manager serves — telemetry is tenant-scoped, one manager per (tenant, signal).</summary>
     protected Guid TenantId { get; }
@@ -131,7 +153,7 @@ public abstract class SegmentManagerBase : IDisposable
 
     protected SegmentManagerBase(
         Guid tenantId,
-        IDbContextFactory<ApplicationDbContext> catalog,
+        ISegmentCatalog catalog,
         ISegmentBlobStore blobs,
         SegmentEngineOptions options,
         ILogger logger,
@@ -178,13 +200,33 @@ public abstract class SegmentManagerBase : IDisposable
     /// sealed segments overlapping [<paramref name="from"/>, <paramref name="to"/>] (null bounds = all
     /// segments). Sealed readers are opened per query and closed on return.
     /// </summary>
-    public async Task<T> QueryAsync<T>(DateTime? from, DateTime? to, Func<IndexSearcher, T> read, CancellationToken ct = default)
+    public Task<T> QueryAsync<T>(DateTime? from, DateTime? to, Func<IndexSearcher, T> read, CancellationToken ct = default)
+        => QueryAsync(SegmentScope.All, from, to, read, ct);
+
+    /// <summary>
+    /// As <see cref="QueryAsync{T}(DateTime?,DateTime?,Func{IndexSearcher,T},CancellationToken)"/>, but
+    /// restricted to one tier of the index.
+    ///
+    /// The scope exists so the read path can be split across two pods. The hot active index lives only on
+    /// the indexer that is writing it, while sealed segments are in object storage and readable by anyone;
+    /// so a querier searches <see cref="SegmentScope.Sealed"/> locally and asks the indexer for
+    /// <see cref="SegmentScope.Hot"/>, and the two result sets are merged. Everything above this method —
+    /// log search, histograms, label discovery, traces, RUM — inherits the split without knowing about it.
+    /// </summary>
+    public async Task<T> QueryAsync<T>(
+        SegmentScope scope, DateTime? from, DateTime? to, Func<IndexSearcher, T> read, CancellationToken ct = default)
     {
-        List<TelemetrySegment> segments = await SegmentsOverlappingAsync(from, to, ct);
+        IReadOnlyList<TelemetrySegment> segments = scope == SegmentScope.Hot
+            ? []
+            : await SegmentsOverlappingAsync(from, to, ct);
 
         ActiveSegmentIndex active = _active;
-        active.Refresh();
-        IndexSearcher activeSearcher = active.Acquire();
+        IndexSearcher? activeSearcher = null;
+        if (scope != SegmentScope.Sealed)
+        {
+            active.Refresh();
+            activeSearcher = active.Acquire();
+        }
 
         // Cached, immutable sealed-segment readers — reused across queries (opened once). Each is
         // IncRef'd for the life of this query so retention eviction can't close it mid-search.
@@ -194,11 +236,11 @@ public abstract class SegmentManagerBase : IDisposable
             foreach (TelemetrySegment seg in segments)
                 sealedReaders.Add(await AcquireSegmentReaderAsync(seg, ct));
 
-            var readers = new IndexReader[1 + sealedReaders.Count];
-            readers[0] = activeSearcher.IndexReader;
-            for (int i = 0; i < sealedReaders.Count; i++) readers[i + 1] = sealedReaders[i];
+            var readers = new List<IndexReader>(1 + sealedReaders.Count);
+            if (activeSearcher is not null) readers.Add(activeSearcher.IndexReader);
+            readers.AddRange(sealedReaders);
 
-            using var multi = new MultiReader(readers, closeSubReaders: false);
+            using var multi = new MultiReader([.. readers], closeSubReaders: false);
             var searcher = new IndexSearcher(multi);
             // Offload the CPU-bound Lucene search + doc materialization off the caller's thread. On a
             // Blazor Server circuit this yields the synchronization context so the UI stays responsive
@@ -208,7 +250,7 @@ public abstract class SegmentManagerBase : IDisposable
         }
         finally
         {
-            active.Release(activeSearcher);                 // index 0 — owned by the SearcherManager
+            if (activeSearcher is not null) active.Release(activeSearcher);   // owned by the SearcherManager
             foreach (DirectoryReader r in sealedReaders) r.DecRef();  // release this query's hold; cached readers stay open
         }
     }
@@ -289,6 +331,13 @@ public abstract class SegmentManagerBase : IDisposable
         public void OnClose(IndexReader reader) => dir.Dispose();
     }
 
+    /// <summary>Deletes a segment's warm-tier files at the only moment it is safe to: when its reader has
+    /// truly closed, meaning no query is still reading them.</summary>
+    private sealed class CacheEvictor(SegmentCache cache, Guid segId) : IndexReader.IReaderClosedListener
+    {
+        public void OnClose(IndexReader reader) => cache.Remove(segId);
+    }
+
     /// <summary>
     /// Seals the current active index into an immutable segment (uploaded to object storage + cataloged)
     /// and swaps in a fresh empty active index. No-op (returns null) when the active index is empty.
@@ -336,14 +385,10 @@ public abstract class SegmentManagerBase : IDisposable
             SizeBytes = size,
             SealedAt = DateTime.UtcNow,
         };
-        await using (ApplicationDbContext db = await _catalog.CreateDbContextAsync(ct))
-        {
-            db.TelemetrySegments.Add(segment);
-            await db.SaveChangesAsync(ct);
-        }
+        await _catalog.AddAsync(segment, ct);
 
         // Keep the freshly-sealed files locally (as this segment's cache entry) — no download to query them.
-        _cache.Adopt(segId, sealingDir);
+        _cache.Adopt(segId, sealingDir, max);
         _logger.LogInformation(
             "Sealed {Signal} segment {SegId}: {Docs} docs, {Size} bytes, {Min:o}..{Max:o}", Signal, segId, docs, size, min, max);
         return segment;
@@ -353,44 +398,100 @@ public abstract class SegmentManagerBase : IDisposable
     public async Task<int> DropExpiredAsync(CancellationToken ct = default)
     {
         DateTime cutoff = DateTime.UtcNow.AddDays(-RetentionDays);
-        await using ApplicationDbContext db = await _catalog.CreateDbContextAsync(ct);
-        List<TelemetrySegment> expired = await db.TelemetrySegments
-            .Where(s => s.TenantId == TenantId && s.Signal == Signal && s.MaxTs < cutoff)
-            .ToListAsync(ct);
+        // The catalog removes its rows FIRST, so no new query can resolve these segments by the time we
+        // start freeing their storage below.
+        IReadOnlyList<TelemetrySegment> expired = await _catalog.RemoveExpiredAsync(TenantId, Signal, cutoff, ct);
         if (expired.Count == 0) return 0;
-
-        // Remove from the catalog FIRST so no new query resolves these segments, then free storage.
-        db.TelemetrySegments.RemoveRange(expired);
-        await db.SaveChangesAsync(ct);
 
         foreach (TelemetrySegment seg in expired)
         {
-            // Release the cache's reference — the reader (and its Directory) closes once any in-flight
-            // query that IncRef'd it finishes; the DirectoryCloser then disposes the FSDirectory.
-            _readerLastUsed.TryRemove(seg.Id, out _);
-            if (_readerCache.TryRemove(seg.Id, out Lazy<Task<DirectoryReader>>? lz) && lz.IsValueCreated)
-            {
-                try { (await lz.Value).DecRef(); }
-                catch { /* open never succeeded — nothing to release */ }
-            }
+            await ReleaseLocallyAsync(seg.Id);
             try { await _blobs.DeleteAsync(seg.ObjectKey, ct); }
             catch (Exception ex) { _logger.LogWarning(ex, "Failed to delete expired segment object {Key}", seg.ObjectKey); }
-            _cache.Remove(seg.Id);
         }
         _logger.LogInformation("Dropped {Count} expired {Signal} segment(s) older than {Cutoff:o}", expired.Count, Signal, cutoff);
         return expired.Count;
     }
 
+    /// <summary>
+    /// Evicts local copies of segments that have aged out of the warm window, or that push the tier past
+    /// its size ceiling. The segments stay in object storage and stay cataloged, so nothing becomes
+    /// unqueryable — a later query for one simply pays a download again. Returns how many were evicted.
+    /// </summary>
+    public async Task<int> TrimWarmTierAsync(CancellationToken ct = default)
+    {
+        await EnsureWarmTierRehydratedAsync(ct);
+
+        IReadOnlyList<Guid> victims = _cache.SelectEvictions(_options, DateTime.UtcNow);
+        if (victims.Count == 0) return 0;
+
+        foreach (Guid id in victims)
+        {
+            ct.ThrowIfCancellationRequested();
+            await ReleaseLocallyAsync(id);
+        }
+        _logger.LogInformation(
+            "Warm tier for {Signal}: evicted {Count} segment(s) to local storage; {Bytes} bytes over {Resident} segment(s) remain.",
+            Signal, victims.Count, _cache.LocalBytes, _cache.LocalCount);
+        return victims.Count;
+    }
+
+    /// <summary>
+    /// Teaches the warm tier, once per process, what the volume already holds. A restart otherwise starts
+    /// believing the tier is empty, so neither bound applies to anything left behind — and a segment that
+    /// has already aged out is exactly the one no query will touch again, so it would never be measured
+    /// and never be reclaimed. Segments on disk with no catalog row are orphans (dropped while we were
+    /// down) and the age rule collects them on this same pass.
+    /// </summary>
+    private async Task EnsureWarmTierRehydratedAsync(CancellationToken ct)
+    {
+        if (Interlocked.Exchange(ref _warmTierRehydrated, 1) == 1) return;
+        try
+        {
+            IReadOnlyList<TelemetrySegment> all = await _catalog.ListOverlappingAsync(TenantId, Signal, null, null, ct);
+            _cache.Rehydrate(all.ToDictionary(seg => seg.Id, seg => seg.MaxTs));
+        }
+        catch (Exception ex)
+        {
+            // Leave it unrehydrated rather than half-rehydrated: a partial view would under-count the tier
+            // and could evict the wrong segments. The next pass retries.
+            Interlocked.Exchange(ref _warmTierRehydrated, 0);
+            _logger.LogWarning(ex, "Could not rehydrate the {Signal} warm tier; retrying next cycle.", Signal);
+        }
+    }
+
+    /// <summary>
+    /// Drops a segment's local footprint: first the cached reader, then the files.
+    ///
+    /// The order matters and the delete is deliberately deferred. DecRef only releases the CACHE's
+    /// reference — a query already searching this segment holds its own — so the reader closes when the
+    /// last in-flight query finishes, and only then does the closed-listener delete the directory. Deleting
+    /// the files while a reader still had them open would fault that query (and on Windows, fail outright).
+    /// </summary>
+    private async Task ReleaseLocallyAsync(Guid segId)
+    {
+        _readerLastUsed.TryRemove(segId, out _);
+
+        if (_readerCache.TryRemove(segId, out Lazy<Task<DirectoryReader>>? lz) && lz.IsValueCreated)
+        {
+            try
+            {
+                DirectoryReader reader = await lz.Value;
+                // Fires once the refcount reaches zero — after every in-flight query has let go.
+                reader.AddReaderClosedListener(new CacheEvictor(_cache, segId));
+                reader.DecRef();
+                return;
+            }
+            catch { /* the open never succeeded — nothing holds the files, fall through and delete now */ }
+        }
+
+        _cache.Remove(segId);
+    }
+
     // Catalog lookup: sealed segments for this signal whose [MinTs,MaxTs] overlaps the requested window.
     // Null bounds widen to all segments (label/trace lookups). Mirrors "MaxTs >= from AND MinTs < to".
-    private async Task<List<TelemetrySegment>> SegmentsOverlappingAsync(DateTime? from, DateTime? to, CancellationToken ct)
-    {
-        await using ApplicationDbContext db = await _catalog.CreateDbContextAsync(ct);
-        IQueryable<TelemetrySegment> q = db.TelemetrySegments.Where(s => s.TenantId == TenantId && s.Signal == Signal);
-        if (from is DateTime f) q = q.Where(s => s.MaxTs >= f);
-        if (to is DateTime t) q = q.Where(s => s.MinTs < t);
-        return await q.OrderBy(s => s.MinTs).ToListAsync(ct);
-    }
+    private Task<IReadOnlyList<TelemetrySegment>> SegmentsOverlappingAsync(DateTime? from, DateTime? to, CancellationToken ct)
+        => _catalog.ListOverlappingAsync(TenantId, Signal, from, to, ct);
 
     public void Dispose()
     {

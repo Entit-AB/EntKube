@@ -81,9 +81,9 @@ public sealed record UpgradeReport
 /// version), <see cref="ComponentCatalog"/> (the version EntKube recommends), and
 /// each chart repository's index (what upstream actually publishes).
 ///
-/// Read-only and side-effect free — it never touches a cluster. Acting on a finding
-/// goes through the existing <c>ComponentLifecycleService</c> upgrade path behind the
-/// change gate, so there is exactly one route that mutates a cluster.
+/// Read-only and side-effect free — it never touches a cluster. Acting on a finding is
+/// <see cref="ComponentUpgradeRunner"/>'s job, which in turn goes through the ordinary
+/// component apply path, so there is exactly one route that mutates a cluster.
 /// </summary>
 public class ComponentUpgradeService(
     IDbContextFactory<ApplicationDbContext> dbFactory,

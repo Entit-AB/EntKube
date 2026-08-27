@@ -6,7 +6,7 @@ using Lucene.Net.Index;
 using Lucene.Net.Search;
 using Lucene.Net.Util;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// The Lucene document schema for the <c>spans</c> signal plus the queries the trace views need — the

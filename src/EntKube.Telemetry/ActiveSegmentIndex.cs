@@ -6,7 +6,7 @@ using Lucene.Net.Util;
 using FSDirectory = Lucene.Net.Store.FSDirectory;
 using LuceneDirectory = Lucene.Net.Store.Directory;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// The single writable Lucene index for one telemetry signal (logs or spans) — the "active segment".

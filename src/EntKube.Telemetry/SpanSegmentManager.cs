@@ -1,8 +1,7 @@
 using EntKube.Web.Data;
 using EntKube.Web.Services;
-using Microsoft.EntityFrameworkCore;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// The spans manager: a <see cref="SegmentManagerBase"/> for the <c>spans</c> signal. Adds only the typed
@@ -11,7 +10,7 @@ namespace EntKube.Web.Services.Telemetry;
 /// </summary>
 public sealed class SpanSegmentManager(
     Guid tenantId,
-    IDbContextFactory<ApplicationDbContext> catalog,
+    ISegmentCatalog catalog,
     ISegmentBlobStore blobs,
     SegmentEngineOptions options,
     ILogger<SpanSegmentManager> logger)

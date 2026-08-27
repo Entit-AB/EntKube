@@ -23,6 +23,7 @@ public class BackupBundle
     public List<GroupMembership> GroupMemberships { get; set; } = [];
     public List<Environment> Environments { get; set; } = [];
     public List<Customer> Customers { get; set; } = [];
+    public List<CustomerEnvironment> CustomerEnvironments { get; set; } = [];
     public List<CustomerAccess> CustomerAccesses { get; set; } = [];
     public List<App> Apps { get; set; } = [];
     public List<AppEnvironment> AppEnvironments { get; set; } = [];

@@ -22,5 +22,6 @@ public class Environment
     // Navigation
     public Tenant Tenant { get; set; } = null!;
     public ICollection<AppEnvironment> AppEnvironments { get; set; } = [];
+    public ICollection<CustomerEnvironment> CustomerEnvironments { get; set; } = [];
     public ICollection<KubernetesCluster> KubernetesClusters { get; set; } = [];
 }

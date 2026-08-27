@@ -1,5 +1,6 @@
 using EntKube.Web.Data;
 using EntKube.Web.Services;
+using EntKube.Web.Services.Telemetry;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -30,7 +31,11 @@ public class PrometheusServiceTests : IDisposable
         db = testDb.CreateContext();
         vaultService = testDb.CreateVaultService();
 
-        sut = new PrometheusService(testDb.Factory, NullLogger<PrometheusService>.Instance);
+        sut = new PrometheusService(
+            testDb.Factory,
+            new KubernetesProxyClientPool(NullLogger<KubernetesProxyClientPool>.Instance),
+            new PromQueryCache(),
+            NullLogger<PrometheusService>.Instance);
     }
 
     public void Dispose()

@@ -5,7 +5,7 @@ using Lucene.Net.Index;
 using Lucene.Net.Search;
 using Lucene.Net.Util;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// Lucene/S3 segment-engine implementation of <see cref="ILogBackend"/> — the drop-in replacement for
@@ -18,10 +18,19 @@ namespace EntKube.Web.Services.Telemetry;
 /// </summary>
 public sealed class SegmentLogService(
     LogTierRegistries tiers,
-    ClusterTenantResolver tenants,
-    ILogger<SegmentLogService> logger) : ILogBackend
+    IClusterTenantResolver tenants,
+    ILogger<SegmentLogService> logger,
+    SegmentScope scope = SegmentScope.All) : ILogBackend
 {
     public bool IsEnabled => true;
+
+    /// <summary>
+    /// Which tier this instance reads. <see cref="SegmentScope.All"/> everywhere a single process owns the
+    /// whole index — the management plane, and the in-cluster indexer. The querier runs one instance at
+    /// <see cref="SegmentScope.Sealed"/> for what it can read from object storage, and the indexer exposes
+    /// a second instance at <see cref="SegmentScope.Hot"/> on an internal route for the querier to merge in.
+    /// </summary>
+    public SegmentScope Scope => scope;
 
     private const int DefaultDiscoveryWindowMinutes = 60;
 
@@ -41,7 +50,7 @@ public sealed class SegmentLogService(
         DateTime from = DateTime.UtcNow.AddDays(-7);
         foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value))
         {
-            bool any = await segments.QueryAsync(from, null,
+            bool any = await segments.QueryAsync(scope, from, null,
                 s => s.Search(ScopeQuery(tenantId.Value, clusterId), 1).TotalHits > 0, ct);
             if (any) return true;
         }
@@ -77,7 +86,7 @@ public sealed class SegmentLogService(
             foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value, filter.MinLevel))
             {
                 Query q = LogSegmentSchema.BuildQuery(tenantId.Value, clusterId, filter, from, to, segments.Analyzer);
-                all.AddRange(await segments.QueryAsync(
+                all.AddRange(await segments.QueryAsync(scope,
                     from, to, s => MapStreams(s, s.Search(q, limit, sort)), ct));
             }
             return KubernetesOperationResult<List<LokiLogStream>>.Success(MergeStreams(all, limit));
@@ -102,7 +111,7 @@ public sealed class SegmentLogService(
             var sort = new Sort(new SortField(LogSegmentSchema.Ts, SortFieldType.INT64, reverse: true));
             // A trace's lines can be any severity, so search both tiers; a trace can span any time (all segments).
             foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value))
-                all.AddRange(await segments.QueryAsync(
+                all.AddRange(await segments.QueryAsync(scope,
                     null, null, s => MapStreams(s, s.Search(q, limit, sort)), ct));
             return KubernetesOperationResult<List<LokiLogStream>>.Success(MergeStreams(all, limit));
         }
@@ -133,7 +142,7 @@ public sealed class SegmentLogService(
             foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value, filter.MinLevel))
             {
                 Query q = LogSegmentSchema.BuildQuery(tenantId.Value, clusterId, filter, from, to, segments.Analyzer);
-                await segments.QueryAsync(from, to, s => { s.Search(q, collector); return 0; }, ct);
+                await segments.QueryAsync(scope, from, to, s => { s.Search(q, collector); return 0; }, ct);
             }
 
             List<LogHistogramBucket> result = collector.Buckets
@@ -168,7 +177,7 @@ public sealed class SegmentLogService(
             foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value, minLevel))
             {
                 Query q = LogSegmentSchema.BuildQuery(tenantId.Value, clusterId, filter, from, to, segments.Analyzer);
-                total += await segments.QueryAsync(from, to, s =>
+                total += await segments.QueryAsync(scope, from, to, s =>
                 {
                     var counter = new TotalHitCountCollector();
                     s.Search(q, counter);
@@ -202,13 +211,15 @@ public sealed class SegmentLogService(
 
         try
         {
-            var scope = new BooleanQuery
+            // Named "filter", not "scope": SegmentScope now means which index TIER to read, and having a
+            // Lucene query by the same name one line from a QueryAsync(Scope, …) call is a trap.
+            var filter = new BooleanQuery
             {
                 { new TermQuery(new Term(LogSegmentSchema.TenantId, tenantId.Value.ToString("N"))), Occur.MUST },
                 { new TermQuery(new Term(LogSegmentSchema.ClusterId, clusterId.ToString("N"))), Occur.MUST },
             };
             if (field != LogSegmentSchema.Namespace && !string.IsNullOrEmpty(namespaceName))
-                scope.Add(new TermQuery(new Term(LogSegmentSchema.Namespace, namespaceName)), Occur.MUST);
+                filter.Add(new TermQuery(new Term(LogSegmentSchema.Namespace, namespaceName)), Occur.MUST);
 
             // Scan only the requested window (default 1h) instead of ALL segments — with 90-day
             // retention, unbounded discovery opened a reader per segment and visited every doc. A label may
@@ -216,7 +227,7 @@ public sealed class SegmentLogService(
             DateTime from = DateTime.UtcNow.AddMinutes(-windowMinutes);
             var sink = new HashSet<string>(StringComparer.Ordinal);
             foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value))
-                await segments.QueryAsync(from, null, s => { s.Search(scope, new DistinctCollector(field, sink)); return 0; }, ct);
+                await segments.QueryAsync(Scope, from, null, s => { s.Search(filter, new DistinctCollector(field, sink)); return 0; }, ct);
 
             List<string> values = sink.Where(v => v.Length > 0).OrderBy(v => v, StringComparer.Ordinal).ToList();
             LabelCache[cacheKey] = (DateTime.UtcNow, values);

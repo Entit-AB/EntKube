@@ -1,0 +1,203 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject MeshMtlsService MeshMtls
+@inject DeploymentService DeploymentService
+@inject KubernetesOperationsService K8sOps
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   MeshMtlsPanel — service-to-service mTLS posture for this app's namespace.
+
+   The rest of this tab decides *who* may call the app. This decides whether
+   those calls have to prove who they are: STRICT makes every caller present a
+   mesh identity, so plaintext from an unmeshed pod is refused outright.
+
+   Because that is exactly what breaks a sidecar-less workload, the switch is
+   gated on a live readiness check rather than applied on trust.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3">
+    <div class="card-header bg-white py-2 d-flex align-items-center">
+        <i class="bi bi-shield-lock me-2 text-primary"></i>
+        <strong>Service-to-service mTLS</strong>
+        <span class="text-muted small ms-2">Whether callers inside the cluster must present a mesh identity.</span>
+    </div>
+    <div class="card-body pt-2">
+
+        @if (loading)
+        {
+            <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+        }
+        else if (targets.Count == 0)
+        {
+            <p class="text-muted small mb-0">
+                This environment has no deployment yet, so there is no namespace to secure.
+            </p>
+        }
+        else
+        {
+            @foreach (NamespaceTarget target in targets)
+            {
+                <div class="border rounded p-2 mb-2">
+                    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                        <div>
+                            <code>@target.Namespace</code>
+                            <span class="text-muted small ms-1">on @target.ClusterName</span>
+                            @if (target.Mode == MeshMtlsMode.Strict)
+                            {
+                                <span class="badge bg-success bg-opacity-75 ms-2">STRICT — mTLS only</span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-secondary bg-opacity-75 ms-2">PERMISSIVE — mTLS or plaintext</span>
+                            }
+                            @if (target.AppliedAt is { } applied)
+                            {
+                                <span class="text-muted small ms-2">applied @applied.ToString("yyyy-MM-dd HH:mm")</span>
+                            }
+                        </div>
+                        <div class="d-flex gap-1">
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => CheckReadiness(target)" disabled="@busy">
+                                <i class="bi bi-search me-1"></i>Check readiness
+                            </button>
+                            @if (target.Mode == MeshMtlsMode.Strict)
+                            {
+                                <button class="btn btn-sm btn-outline-warning"
+                                        @onclick="() => SetMode(target, MeshMtlsMode.Permissive)" disabled="@busy">
+                                    Relax to permissive
+                                </button>
+                            }
+                            else
+                            {
+                                <button class="btn btn-sm btn-outline-primary"
+                                        @onclick="() => SetMode(target, MeshMtlsMode.Strict)" disabled="@busy">
+                                    <i class="bi bi-shield-lock me-1"></i>Require mTLS
+                                </button>
+                            }
+                        </div>
+                    </div>
+
+                    @if (readiness.TryGetValue(target.Key, out MeshReadiness? r))
+                    {
+                        @if (r.IsReady)
+                        {
+                            <div class="alert alert-success py-1 small mt-2 mb-0">
+                                <i class="bi bi-check-circle me-1"></i>
+                                All @r.TotalPods pod(s) are in the mesh@(r.IsAmbient ? " (ambient mode)" : "") —
+                                STRICT can be applied safely.
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="alert alert-warning py-1 small mt-2 mb-0">
+                                <i class="bi bi-exclamation-triangle me-1"></i>
+                                <strong>@r.PodsOutsideMesh.Count of @r.TotalPods pod(s) have no sidecar.</strong>
+                                STRICT would refuse their traffic:
+                                <code>@string.Join(", ", r.PodsOutsideMesh.Take(6))</code>@(r.PodsOutsideMesh.Count > 6 ? ", …" : "")
+                                <div class="mt-1">
+                                    Label the namespace <code>istio-injection=enabled</code> (or
+                                    <code>istio.io/dataplane-mode=ambient</code>) and restart these workloads first.
+                                </div>
+                            </div>
+                        }
+                    }
+                </div>
+            }
+
+            <p class="small text-muted mb-0">
+                STRICT rejects any caller without a mesh identity — that is the point, and also the risk.
+                The ingress gateway is switched to mesh identity at the same time, so published routes keep
+                working; anything else calling the app in plaintext will stop.
+            </p>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid AppId { get; set; }
+    [Parameter, EditorRequired] public Guid EnvironmentId { get; set; }
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private bool busy;
+    private List<NamespaceTarget> targets = [];
+    private readonly Dictionary<string, MeshReadiness> readiness = [];
+
+    /// <summary>One namespace on one cluster — the unit a PeerAuthentication applies to.</summary>
+    private sealed record NamespaceTarget(Guid ClusterId, string ClusterName, string Namespace)
+    {
+        public MeshMtlsMode Mode { get; set; }
+        public DateTime? AppliedAt { get; set; }
+        public string Key => $"{ClusterId}/{Namespace}";
+    }
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        try
+        {
+            List<AppDeployment> deployments = await DeploymentService.GetDeploymentsAsync(AppId);
+            List<MeshMtlsPolicy> policies = await MeshMtls.GetPoliciesAsync(TenantId);
+
+            // A single environment can span clusters, and two deployments can share a namespace —
+            // the posture belongs to the namespace, so collapse to distinct cluster+namespace.
+            targets = deployments
+                .Where(d => d.EnvironmentId == EnvironmentId && !string.IsNullOrWhiteSpace(d.Namespace))
+                .GroupBy(d => (d.ClusterId, d.Namespace))
+                .Select(g =>
+                {
+                    AppDeployment first = g.First();
+                    MeshMtlsPolicy? policy = policies.FirstOrDefault(p =>
+                        p.ClusterId == first.ClusterId && p.Namespace == first.Namespace);
+
+                    return new NamespaceTarget(first.ClusterId, first.Cluster?.Name ?? "cluster", first.Namespace)
+                    {
+                        Mode = policy?.Mode ?? MeshMtlsMode.Permissive,
+                        AppliedAt = policy?.AppliedAt
+                    };
+                })
+                .ToList();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { loading = false; }
+    }
+
+    private async Task CheckReadiness(NamespaceTarget target)
+    {
+        busy = true;
+        try
+        {
+            KubernetesOperationResult<MeshReadiness> result =
+                await K8sOps.GetMeshReadinessAsync(target.ClusterId, target.Namespace);
+
+            if (result.IsSuccess && result.Data is { } r) readiness[target.Key] = r;
+            else Toasts.Error(result.Error ?? "Could not read the namespace.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task SetMode(NamespaceTarget target, MeshMtlsMode mode)
+    {
+        busy = true;
+        try
+        {
+            await MeshMtls.SetModeAsync(TenantId, target.ClusterId, target.Namespace, mode);
+
+            // Applying does the readiness check itself and refuses STRICT if the namespace isn't
+            // ready — the stored posture is then ahead of the cluster, which the applied-at stamp
+            // shows. Surface the refusal instead of reporting a change that did not land.
+            KubernetesOperationResult<string> result = await K8sOps.ApplyMeshMtlsAsync(target.ClusterId, target.Namespace);
+
+            if (result.IsSuccess) Toasts.Success(result.Data ?? "Applied.");
+            else Toasts.Error(result.Error ?? "Apply failed.");
+
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+}

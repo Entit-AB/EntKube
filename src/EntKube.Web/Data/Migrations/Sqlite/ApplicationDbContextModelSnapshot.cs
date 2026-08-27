@@ -871,6 +871,12 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<Guid>("AppId")
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid?>("ClientCaBundleId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("ClientCertificateOnly")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("ClusterIssuerName")
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
@@ -891,6 +897,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("INTEGER")
                         .HasDefaultValue(true);
 
+                    b.Property<bool>("RequireClientCertificate")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("TlsCertificate")
                         .HasColumnType("TEXT");
 
@@ -905,6 +914,8 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasKey("Id");
 
                     b.HasIndex("AppId");
+
+                    b.HasIndex("ClientCaBundleId");
 
                     b.ToTable("AppRoutes");
                 });
@@ -1543,6 +1554,82 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("CertificateDistributions");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ClientCaBundle", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(1000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ListenerPort")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(8443);
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("ClientCaBundles");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ClientCaCertificate", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("BundleId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("ExpiresAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Fingerprint")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Pem")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Subject")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BundleId");
+
+                    b.ToTable("ClientCaCertificates");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2038,6 +2125,24 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("CustomerId");
 
                     b.ToTable("CustomerAccesses");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CustomerEnvironment", b =>
+                {
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("EnvironmentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("LinkedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("CustomerId", "EnvironmentId");
+
+                    b.HasIndex("EnvironmentId");
+
+                    b.ToTable("CustomerEnvironments");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CustomerGitCredential", b =>
@@ -3640,6 +3745,45 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("MaintenanceWindows");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.MeshMtlsPolicy", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("AppliedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(63)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterId", "Namespace")
+                        .IsUnique();
+
+                    b.ToTable("MeshMtlsPolicies");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.MessagingBinding", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4415,6 +4559,64 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("TenantId");
 
                     b.ToTable("OpenStackConnections");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OutboundMtlsCredential", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("AppliedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("EnvironmentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Port")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(443);
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("VaultSecretId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WorkloadSelectorJson")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("OutboundMtlsCredentials");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQBackup", b =>
@@ -6176,7 +6378,14 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("EntKube.Web.Data.ClientCaBundle", "ClientCaBundle")
+                        .WithMany("Routes")
+                        .HasForeignKey("ClientCaBundleId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.Navigation("App");
+
+                    b.Navigation("ClientCaBundle");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppServicePort", b =>
@@ -6313,6 +6522,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("AppDeployment");
 
                     b.Navigation("RedisCluster");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ClientCaCertificate", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ClientCaBundle", "Bundle")
+                        .WithMany("Certificates")
+                        .HasForeignKey("BundleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Bundle");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
@@ -6461,6 +6681,25 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Customer");
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CustomerEnvironment", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany("CustomerEnvironments")
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Environment", "Environment")
+                        .WithMany("CustomerEnvironments")
+                        .HasForeignKey("EnvironmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Environment");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CustomerGitCredential", b =>
@@ -7985,6 +8224,13 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Sources");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ClientCaBundle", b =>
+                {
+                    b.Navigation("Certificates");
+
+                    b.Navigation("Routes");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
                 {
                     b.Navigation("Steps");
@@ -8017,6 +8263,8 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                 {
                     b.Navigation("Apps");
 
+                    b.Navigation("CustomerEnvironments");
+
                     b.Navigation("GitCredentials");
 
                     b.Navigation("GitRepoPolicies");
@@ -8030,6 +8278,8 @@ namespace EntKube.Web.Data.Migrations.Sqlite
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>
                 {
                     b.Navigation("AppEnvironments");
+
+                    b.Navigation("CustomerEnvironments");
 
                     b.Navigation("KubernetesClusters");
                 });

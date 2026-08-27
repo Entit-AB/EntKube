@@ -828,6 +828,20 @@ public class DeploymentImportService(
                     EnvironmentId = request.EnvironmentId,
                     Namespace = preview.PrimaryNamespace
                 });
+
+                // Importing into an environment makes the app's customer a member of it,
+                // otherwise the imported app has no home in the tenant tree.
+                bool member = await db.CustomerEnvironments
+                    .AnyAsync(ce => ce.CustomerId == app.CustomerId && ce.EnvironmentId == request.EnvironmentId, ct);
+
+                if (!member)
+                {
+                    db.CustomerEnvironments.Add(new CustomerEnvironment
+                    {
+                        CustomerId = app.CustomerId,
+                        EnvironmentId = request.EnvironmentId
+                    });
+                }
             }
             else
             {

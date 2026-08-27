@@ -1,0 +1,283 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject MtlsService Mtls
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   ClientCaTrustPanel — trust anchors for inbound mutual TLS.
+
+   These are the CAs that *incoming clients* are authenticated against, the
+   mirror image of the trust bundles above: those tell our workloads whom to
+   trust when they dial out, these tell the gateway whom to let in.
+
+   EntKube never issues client certificates — the customer supplies the CA
+   (or names one from their existing PKI) and we validate against it.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-4">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <div>
+            <i class="bi bi-person-badge me-2 text-primary"></i><strong>Client CA trust anchors (inbound mTLS)</strong>
+            <span class="text-muted small ms-2">CAs that incoming client certificates are validated against.</span>
+        </div>
+        <button class="btn btn-sm btn-outline-primary" @onclick="() => showAdd = !showAdd" disabled="@busy">
+            <i class="bi bi-plus-circle me-1"></i>New anchor
+        </button>
+    </div>
+    <div class="card-body pt-2">
+
+        <p class="small text-muted">
+            Attach an anchor to a route on the app's <strong>External access</strong> panel to require a client
+            certificate. Because Istio validates client certificates <em>per listener port</em>, the route is
+            published on the anchor's port <strong>in addition to</strong> 443 — putting a CA on 443 would demand a
+            certificate from every other hostname sharing the gateway.
+        </p>
+
+        @if (showAdd)
+        {
+            <div class="border rounded p-3 mb-3 bg-light-subtle">
+                <div class="row g-2">
+                    <div class="col-md-5">
+                        <label class="form-label small">Name</label>
+                        <input class="form-control form-control-sm" placeholder="Acme Corp Client CA" @bind="naName" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small">Listener port</label>
+                        <input type="number" class="form-control form-control-sm" @bind="naPort" />
+                        <div class="form-text small text-muted">
+                            Give an anchor its own port to keep its clients isolated from other anchors'.
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small">Description <span class="text-muted">(optional)</span></label>
+                        <input class="form-control form-control-sm" @bind="naDescription" />
+                    </div>
+                </div>
+                <div class="d-flex gap-1 mt-2">
+                    <button class="btn btn-sm btn-primary" @onclick="AddAnchor"
+                            disabled="@(string.IsNullOrWhiteSpace(naName) || busy)">Save</button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAdd = false">Cancel</button>
+                </div>
+            </div>
+        }
+
+        @if (loading)
+        {
+            <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+        }
+        else if (anchors.Count == 0)
+        {
+            <p class="text-muted small mb-0">
+                No trust anchors yet. Add one, upload the customer's CA certificate, then require it on a route.
+            </p>
+        }
+        else
+        {
+            @foreach (ClientCaBundle anchor in anchors)
+            {
+                <div class="border rounded p-2 mb-2">
+                    <div class="d-flex align-items-center justify-content-between">
+                        <div>
+                            <strong>@anchor.Name</strong>
+                            <span class="badge bg-secondary-subtle text-secondary-emphasis ms-2">
+                                port @anchor.ListenerPort
+                            </span>
+                            @if (sharedPorts.Contains(anchor.ListenerPort))
+                            {
+                                <span class="badge bg-warning-subtle text-warning-emphasis ms-1"
+                                      title="Another anchor uses this port. Their CAs are merged into one trust store, so a certificate from either is accepted on every hostname on the port.">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>shared port
+                                </span>
+                            }
+                            @if (anchor.Certificates.Count == 0)
+                            {
+                                <span class="badge bg-danger-subtle text-danger-emphasis ms-1">no CA uploaded</span>
+                            }
+                            @if (!string.IsNullOrWhiteSpace(anchor.Description))
+                            {
+                                <div class="small text-muted">@anchor.Description</div>
+                            }
+                        </div>
+                        <div class="d-flex gap-1">
+                            <button class="btn btn-sm btn-outline-primary"
+                                    @onclick="() => ToggleUpload(anchor.Id)" disabled="@busy">
+                                <i class="bi bi-upload me-1"></i>Add CA
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger"
+                                    @onclick="() => DeleteAnchor(anchor.Id)" disabled="@busy">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    @if (anchor.Certificates.Count > 0)
+                    {
+                        <table class="table table-sm mb-0 mt-2 small">
+                            <thead>
+                                <tr class="text-muted">
+                                    <th>CA</th><th>Subject</th><th>Expires</th><th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (ClientCaCertificate cert in anchor.Certificates)
+                                {
+                                    <tr>
+                                        <td>@cert.Name</td>
+                                        <td class="font-monospace text-truncate" style="max-width: 320px;">@cert.Subject</td>
+                                        <td>
+                                            @if (cert.ExpiresAt is { } exp)
+                                            {
+                                                <span class="@(exp <= DateTime.UtcNow ? "text-danger fw-semibold" : exp <= DateTime.UtcNow.AddDays(30) ? "text-warning" : "")">
+                                                    @exp.ToString("yyyy-MM-dd")
+                                                </span>
+                                            }
+                                            else { <span class="text-muted">—</span> }
+                                        </td>
+                                        <td class="text-end">
+                                            <button class="btn btn-sm btn-link text-danger p-0"
+                                                    @onclick="() => RemoveCertificate(cert.Id)" disabled="@busy">remove</button>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+
+                    @if (uploadFor == anchor.Id)
+                    {
+                        <div class="border-top mt-2 pt-2">
+                            <div class="row g-2">
+                                <div class="col-md-4">
+                                    <label class="form-label small">CA label</label>
+                                    <input class="form-control form-control-sm" placeholder="Acme Root CA 2026"
+                                           @bind="ncName" />
+                                </div>
+                                <div class="col-12">
+                                    <label class="form-label small">CA certificate (PEM)</label>
+                                    <textarea class="form-control form-control-sm font-monospace" rows="4"
+                                              placeholder="-----BEGIN CERTIFICATE-----" @bind="ncPem" />
+                                    <div class="form-text small text-muted">
+                                        The CA that <em>signs</em> your customer's client certificates — not a client
+                                        certificate itself. Paste a chain to trust a root and its intermediate.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="d-flex gap-1 mt-2">
+                                <button class="btn btn-sm btn-primary" @onclick="() => AddCertificate(anchor.Id)"
+                                        disabled="@(string.IsNullOrWhiteSpace(ncName) || string.IsNullOrWhiteSpace(ncPem) || busy)">
+                                    Upload
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => uploadFor = null">Cancel</button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private bool busy;
+    private List<ClientCaBundle> anchors = [];
+    private HashSet<int> sharedPorts = [];
+
+    // New-anchor form
+    private bool showAdd;
+    private string naName = "";
+    private string naDescription = "";
+    private int naPort = MtlsService.DefaultListenerPort;
+
+    // CA upload form
+    private Guid? uploadFor;
+    private string ncName = "";
+    private string ncPem = "";
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        try
+        {
+            anchors = await Mtls.GetBundlesAsync(TenantId);
+
+            // A port carrying more than one anchor merges their CAs into a single trust store —
+            // worth flagging in the list, not just at apply time.
+            sharedPorts = anchors
+                .GroupBy(a => a.ListenerPort)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Key)
+                .ToHashSet();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { loading = false; }
+    }
+
+    private void ToggleUpload(Guid anchorId)
+    {
+        uploadFor = uploadFor == anchorId ? null : anchorId;
+        ncName = "";
+        ncPem = "";
+    }
+
+    private async Task AddAnchor()
+    {
+        busy = true;
+        try
+        {
+            await Mtls.CreateBundleAsync(TenantId, naName, naDescription, naPort);
+            Toasts.Success("Trust anchor created.");
+            naName = "";
+            naDescription = "";
+            naPort = MtlsService.DefaultListenerPort;
+            showAdd = false;
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task AddCertificate(Guid anchorId)
+    {
+        busy = true;
+        try
+        {
+            await Mtls.AddCertificateAsync(anchorId, ncName, ncPem);
+            Toasts.Success("CA certificate added.");
+            uploadFor = null;
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task RemoveCertificate(Guid certificateId)
+    {
+        busy = true;
+        try
+        {
+            await Mtls.RemoveCertificateAsync(certificateId);
+            Toasts.Success("CA certificate removed.");
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task DeleteAnchor(Guid anchorId)
+    {
+        busy = true;
+        try
+        {
+            await Mtls.DeleteBundleAsync(anchorId);
+            Toasts.Success("Trust anchor removed.");
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+}

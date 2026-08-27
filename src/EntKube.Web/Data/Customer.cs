@@ -20,6 +20,7 @@ public class Customer
     // Navigation
     public Tenant Tenant { get; set; } = null!;
     public ICollection<App> Apps { get; set; } = [];
+    public ICollection<CustomerEnvironment> CustomerEnvironments { get; set; } = [];
     public ICollection<CustomerGitRepoPolicy> GitRepoPolicies { get; set; } = [];
     public ICollection<CustomerGitCredential> GitCredentials { get; set; } = [];
 }

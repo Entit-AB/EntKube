@@ -1,0 +1,21 @@
+{{- if .Values.querier.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "entkube-telemetry.querierName" . }}
+  labels:
+    {{- include "entkube-telemetry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: querier
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app.kubernetes.io/name: {{ include "entkube-telemetry.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: querier
+  ports:
+    # Query API only; the querier has no ingest routes.
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

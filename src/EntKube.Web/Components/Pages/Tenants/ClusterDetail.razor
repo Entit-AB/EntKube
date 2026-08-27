@@ -5,6 +5,8 @@
 @inject VaultService VaultService
 @inject ComponentLifecycleService LifecycleService
 @inject ComponentInstallOrchestrator InstallOrchestrator
+@inject EntKube.Web.Services.Upgrades.ComponentUpgradeRunner UpgradeRunner
+@inject EntKube.Web.Services.Upgrades.ReleaseVolumeGuard VolumeGuard
 @inject ExternalRouteService RouteService
 @inject ComponentScanService ScanService
 @inject BlueprintFromClusterService BlueprintFromClusterService
@@ -17,6 +19,9 @@
 @inject EntKube.Web.Services.Dr.VeleroService VeleroService
 @inject StorageService StorageService
 @inject HeadscaleService HeadscaleService
+@inject IngestTokenService IngestTokens
+@inject EntKubeTelemetryService EntKubeTelemetry
+@inject Microsoft.Extensions.Configuration.IConfiguration Config
 
 @* ═══════════════════════════════════════════════════════════════════
    Cluster Detail — a full-page view for a single cluster.
@@ -972,6 +977,37 @@ else if (section == "components")
                             </div>
                         }
 
+                        @* ── Confirm an upgrade that has to take the workload offline ──
+                           The release holds a volume only one node can mount, so a rolling
+                           update would stall on Multi-Attach. Say what goes down before doing it. *@
+                        @if (pendingUpgrade?.ComponentId == comp.Id && pendingUpgradePreflight is not null)
+                        {
+                            <div class="px-3 py-2 bg-warning bg-opacity-10 border-top">
+                                <div class="d-flex align-items-start gap-2 mb-2">
+                                    <i class="bi bi-exclamation-triangle text-warning mt-1"></i>
+                                    <small>
+                                        <strong>This apply needs downtime.</strong>
+                                        @(pendingUpgradePreflight.Blocked.Count == 1 ? "This workload holds" : "These workloads hold")
+                                        a volume no second pod can mount, so it is scaled to zero, upgraded, then scaled
+                                        back up — @pendingUpgradePreflight.ReplicasAffected replica(s) offline in between.
+                                        <ul class="mb-0 mt-1 ps-3">
+                                            @foreach (EntKube.Web.Services.Upgrades.BlockedWorkload w in pendingUpgradePreflight.Blocked)
+                                            {
+                                                <li><code>Deployment/@w.Name</code> — @w.Replicas replica(s), holds @string.Join(", ", w.Claims)</li>
+                                            }
+                                        </ul>
+                                    </small>
+                                </div>
+                                <div class="d-flex gap-1 justify-content-end">
+                                    <button class="btn btn-sm btn-warning"
+                                            @onclick="() => RunUpgradeAsync(pendingUpgrade!.Value.ComponentId, pendingUpgrade!.Value.NoWait)">
+                                        <i class="bi bi-arrow-up-circle me-1"></i>Apply with downtime
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="CancelPendingUpgrade">Cancel</button>
+                                </div>
+                            </div>
+                        }
+
                         @* ── Operation output ── *@
                         @if (operationOutput is not null && operationComponentId == comp.Id)
                         {
@@ -1471,11 +1507,23 @@ else if (section == "components")
                                                     <tbody>
                                                         @foreach (ExternalRoute route in componentRoutes)
                                                         {
-                                                            <tr>
+                                                            bool isShadowed = shadowedRouteHostnames.Contains(route.Hostname);
+                                                            <tr class="@(isShadowed ? "table-warning" : null)">
                                                                 <td>
                                                                     <a href="https://@route.Hostname" target="_blank" class="text-decoration-none">
                                                                         <i class="bi bi-box-arrow-up-right me-1"></i>@route.Hostname
                                                                     </a>
+                                                                    @if (isShadowed)
+                                                                    {
+                                                                        <div class="small text-warning-emphasis mt-1">
+                                                                            <i class="bi bi-exclamation-triangle me-1"></i>
+                                                                            <strong>Not applied.</strong>
+                                                                            An application route already serves this hostname with its own
+                                                                            per-path rules. Applying this route would replace them all with
+                                                                            <code>@route.ServiceName</code>, so it is held back. Remove it
+                                                                            here, and add the path to the application route instead.
+                                                                        </div>
+                                                                    }
                                                                 </td>
                                                                 <td><code>@route.ServiceName:@route.ServicePort</code></td>
                                                                 <td>
@@ -1622,6 +1670,10 @@ else if (section == "components")
     private Guid? confirmDeleteComponentId;
     private Guid? selectedComponentId;
     private string compDetailTab = "config";
+    /// <summary>An apply that is waiting for the operator to accept the downtime it needs.</summary>
+    private (Guid ComponentId, bool NoWait)? pendingUpgrade;
+    private EntKube.Web.Services.Upgrades.VolumePreflight? pendingUpgradePreflight;
+
     private Guid? operationInProgress;
     private string? operationOutput;
     private Guid? operationComponentId;
@@ -1680,6 +1732,11 @@ else if (section == "components")
     // External Routes
     private List<ExternalRoute>? componentRoutes;
     private Dictionary<Guid, RouteUptimeSummary> routeUptimes = new();
+
+    // Hostnames an application route already serves. Routes on these hostnames are deliberately
+    // not applied to the cluster, so the list has to say so rather than show them as normal.
+    private IReadOnlySet<string> shadowedRouteHostnames =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private string routeHostname = "";
     private string routeServiceName = "";
     private int routeServicePort = 80;
@@ -1965,6 +2022,15 @@ else if (section == "components")
             }
         }
 
+        // The telemetry collector's ingest URL + token are ours to issue, not the operator's to look up.
+        // Pre-fill them so the fields arrive complete — left blank they render as REPLACE_WITH_*
+        // placeholders in the collector config, which installs and runs fine while dropping every batch.
+        // When the cluster already runs its own telemetry indexer, point the collector at that instead of
+        // back across the WAN — keeping the logs in the cluster is the whole reason it is there.
+        string? inClusterIngest = await EntKubeTelemetry.GetInClusterIngestUrlAsync(Cluster.Id);
+        EntKube.Web.Services.Telemetry.TelemetryIngestDefaults.ApplyTo(
+            entry, regFormFieldValues, Cluster.Id, TenantId, IngestTokens, Config, inClusterIngest);
+
         // Load available CNPG databases and ClusterIssuers if this component type needs them.
 
         keycloakDatabases = entry.FormFields.Any(f => f.Type == FormFieldType.CnpgDatabase)
@@ -2029,6 +2095,9 @@ else if (section == "components")
 
             await SaveTempoConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
             await SaveVeleroConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
+
+            // Configure the in-cluster telemetry components: identity, tokens, and the segment bucket.
+            await SaveEntKubeTelemetryConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
 
 
             showRegisterForm = false;
@@ -2336,112 +2405,84 @@ else if (section == "components")
         }
     }
 
+    /// <summary>
+    /// Applies a component's current configuration to the cluster — the same
+    /// `helm upgrade --install` whether it is a version bump or a values change.
+    ///
+    /// Routed through <see cref="EntKube.Web.Services.Upgrades.ComponentUpgradeRunner"/> so
+    /// this shares the fleet upgrade page's handling of releases that cannot be rolled in
+    /// place. A component holding a ReadWriteOnce volume has to be taken to zero replicas
+    /// first, which is downtime, so it stops here for confirmation instead of silently
+    /// dropping the workload.
+    /// </summary>
     private async Task UpgradeComponent(Guid componentId, bool noWait = false)
     {
         componentError = null;
+
+        EntKube.Web.Services.Upgrades.VolumePreflight preflight;
+        try
+        {
+            preflight = await VolumeGuard.InspectAsync(componentId);
+        }
+        catch (Exception ex)
+        {
+            preflight = EntKube.Web.Services.Upgrades.VolumePreflight.Failure(ex.Message);
+        }
+
+        if (preflight.RequiresScaleDown)
+        {
+            pendingUpgrade = (componentId, noWait);
+            pendingUpgradePreflight = preflight;
+            return;
+        }
+
+        await RunUpgradeAsync(componentId, noWait);
+    }
+
+    /// <summary>Runs the upgrade for real, with downtime already accepted where it is needed.</summary>
+    private void CancelPendingUpgrade()
+    {
+        pendingUpgrade = null;
+        pendingUpgradePreflight = null;
+    }
+
+    private async Task RunUpgradeAsync(Guid componentId, bool noWait)
+    {
+        componentError = null;
         operationInProgress = componentId;
+        pendingUpgrade = null;
+        pendingUpgradePreflight = null;
         StateHasChanged();
 
         try
         {
-            // For upgrade, we use the same install command (upgrade --install is idempotent).
-            // But first reset status to allow the operation.
-
+            // Helm builds its command from the component's stored chart version, so an
+            // "Upgrade" click would otherwise re-run `--version <current>` — a no-op that
+            // leaves the Upgrade badge in place. Pin to the catalog version first when the
+            // catalog has moved ahead; a plain "Apply" passes null and keeps its version.
             ClusterComponent comp = components!.First(c => c.Id == componentId);
-
-            // The helm command is built from the component's *stored* chart version, so an
-            // "Upgrade" click would otherwise re-run `helm upgrade --version <current>` — a
-            // no-op that leaves the Upgrade badge in place. Pin the component to the catalog
-            // version first so helm actually pulls the newer chart.
-
             CatalogEntry? upgradeCatalog = ResolveCatalog(comp);
-            if (HasCatalogUpdate(comp, upgradeCatalog))
-            {
-                await LifecycleService.UpdateConfigurationAsync(
-                    componentId, helmValues: null, chartVersion: upgradeCatalog!.HelmChartVersion);
-                comp.HelmChartVersion = upgradeCatalog.HelmChartVersion;
-            }
+            string? targetVersion = HasCatalogUpdate(comp, upgradeCatalog)
+                ? upgradeCatalog!.HelmChartVersion
+                : null;
 
-            comp.Status = ComponentStatus.Installing;
-            await LifecycleService.MarkInstallResultAsync(componentId, false, "Upgrading...");
-
-            await LifecycleService.PrepareInstallAsync(componentId);
-
-            // Refresh Keycloak DB config into HelmValues from the stored config (if any).
-            await KeycloakService.RefreshDatabaseHelmValuesIfConfiguredAsync(TenantId, componentId);
-            // Grant all schema privileges to the database owner so Liquibase can run on install.
-            await KeycloakService.GrantDatabaseOwnerPermissionsIfConfiguredAsync(TenantId, componentId);
-            // Release any stuck Liquibase lock so migrations can proceed on startup.
-            await KeycloakService.ReleaseLiquibaseLockIfConfiguredAsync(TenantId, componentId);
-            // Update realm frontendUrl to match the configured admin URL (fixes restored-database URL mismatch).
-            await KeycloakService.FixRealmUrlsIfConfiguredAsync(TenantId, componentId);
-            // Refresh Harbor CNPG + S3 credentials in Helm values before install/upgrade.
-            await HarborService.RefreshHelmValuesIfConfiguredAsync(TenantId, componentId);
-
-            HelmCommand command = await LifecycleService.GetInstallCommandAsync(componentId);
-            command.NoWait = noWait;
-
-            // Pre-sync component secrets so they exist in K8s before the pod starts.
-            HelmExecutionResult preSyncResult = await LifecycleService.SyncComponentSecretsAsync(componentId);
-
-            HelmExecutionResult result = await LifecycleService.ExecuteHelmAsync(componentId, command);
-
-            if (!string.IsNullOrWhiteSpace(preSyncResult.Output))
-            {
-                result = new HelmExecutionResult
+            EntKube.Web.Services.Upgrades.ComponentUpgradeOutcome outcome =
+                await UpgradeRunner.UpgradeAsync(new EntKube.Web.Services.Upgrades.ComponentUpgradeRequest
                 {
-                    Success = result.Success,
-                    ExitCode = result.ExitCode,
-                    Output = $"--- Pre-install Secret Sync ---\n{preSyncResult.Output}\n\n{result.Output}"
-                };
-            }
+                    TenantId = TenantId,
+                    ComponentId = componentId,
+                    TargetChartVersion = targetVersion,
+                    NoWait = noWait,
+                    AllowScaleDown = true,
+                });
 
-            if (result.Success)
-            {
-                HelmExecutionResult subchartResult = await LifecycleService.InstallSubchartsAsync(componentId);
-
-                if (!string.IsNullOrWhiteSpace(subchartResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success && subchartResult.Success,
-                        Output = result.Output + "\n" + subchartResult.Output
-                    };
-                }
-            }
-
-            await LifecycleService.MarkInstallResultAsync(componentId, result.Success, result.Success ? null : result.Output);
-
-            // After successful upgrade, sync secrets then apply external routes.
-
-            if (result.Success)
-            {
-                HelmExecutionResult syncResult = await LifecycleService.SyncComponentSecretsAsync(componentId);
-
-                if (!string.IsNullOrWhiteSpace(syncResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success,
-                        Output = result.Output + "\n\n--- Secret Sync ---\n" + syncResult.Output
-                    };
-                }
-
-                await HeadscaleService.EnsureExternalRouteAfterInstallAsync(componentId);
-
-                HelmExecutionResult routeResult = await LifecycleService.ApplyExternalRoutesAsync(componentId);
-                if (!string.IsNullOrWhiteSpace(routeResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success && routeResult.Success,
-                        Output = result.Output + "\n\n--- Route Apply ---\n" + routeResult.Output
-                    };
-                }
-            }
-
-            operationOutput = result.Output;
+            operationOutput = outcome.Output;
             operationComponentId = componentId;
+
+            if (!outcome.Success && string.IsNullOrWhiteSpace(outcome.Output))
+            {
+                componentError = outcome.Error;
+            }
         }
         catch (InvalidOperationException ex)
         {
@@ -3275,6 +3316,31 @@ else if (section == "components")
     /// values, credentials into the vault. Nothing about the bucket is typed by hand, so a
     /// rotated key is picked up by re-applying rather than by hunting through Helm values.
     /// </summary>
+    /// <summary>
+    /// Fills in what the telemetry node refuses to start without and an operator cannot reasonably supply:
+    /// the tenant and cluster it serves, and the two bearer tokens. Without this the chart renders no
+    /// further than its own guard — "node.tenantId is required" — which is the install failing early and
+    /// loudly rather than deploying a node that has no idea whose data it is holding.
+    ///
+    /// The bucket is separate and optional: a node with no object storage still runs, it just seals to its
+    /// own volume.
+    /// </summary>
+    private async Task SaveEntKubeTelemetryConfigIfNeeded(
+        Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
+    {
+        if (catalogEntry?.Key is not (EntKubeTelemetryService.IndexerKey or EntKubeTelemetryService.QuerierKey))
+            return;
+
+        await EntKubeTelemetry.ConfigureIdentityAsync(TenantId, componentId);
+
+        if (fieldValues.TryGetValue("storage-link", out string? slIdStr)
+            && Guid.TryParse(slIdStr, out Guid storageLinkId)
+            && storageLinkId != Guid.Empty)
+        {
+            await EntKubeTelemetry.WriteStorageHelmValuesAsync(TenantId, componentId, storageLinkId);
+        }
+    }
+
     private async Task SaveVeleroConfigIfNeeded(
         Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
     {
@@ -3483,6 +3549,7 @@ else if (section == "components")
         routeError = null;
         routeYamlPreview = null;
         componentRoutes = await RouteService.GetRoutesAsync(componentId);
+        shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(componentId);
         await LoadRouteUptimes();
     }
 
@@ -3527,6 +3594,7 @@ else if (section == "components")
             routeTlsKey = "";
 
             componentRoutes = await RouteService.GetRoutesAsync(componentId);
+            shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(componentId);
             await LifecycleService.ApplyExternalRoutesAsync(componentId);
         }
         catch (InvalidOperationException ex)
@@ -3558,6 +3626,7 @@ else if (section == "components")
         {
             await RouteService.UpdateRouteTimeoutAsync(route.Id, seconds);
             componentRoutes = await RouteService.GetRoutesAsync(componentId);
+            shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(componentId);
             await LifecycleService.ApplyExternalRoutesAsync(componentId);
         }
         catch (InvalidOperationException ex)
@@ -3570,6 +3639,7 @@ else if (section == "components")
     {
         await RouteService.DeleteRouteAsync(routeId);
         componentRoutes = await RouteService.GetRoutesAsync(componentId);
+        shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(componentId);
         routeYamlPreview = null;
     }
 

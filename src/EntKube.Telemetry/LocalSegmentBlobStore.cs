@@ -1,4 +1,4 @@
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// A filesystem-backed <see cref="ISegmentBlobStore"/> — segment archives are stored under a local root

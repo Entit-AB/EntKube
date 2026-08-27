@@ -1,6 +1,6 @@
 using EntKube.Web.Services;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// The native log query surface, implemented by the Lucene/S3 segment engine (<see cref="SegmentLogService"/>).

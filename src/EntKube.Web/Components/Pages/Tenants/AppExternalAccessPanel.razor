@@ -5,6 +5,7 @@
 @inject TenantService TenantService
 @inject ComponentLifecycleService ComponentLifecycleService
 @inject KubernetesOperationsService K8sOps
+@inject MtlsService Mtls
 @inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
@@ -105,6 +106,58 @@
                     </div>
                 }
             </div>
+            @* ── Client certificates (inbound mTLS) ── *@
+            <div class="border-top mt-3 pt-2">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="new-route-mtls"
+                           @bind="newRequireClientCert" />
+                    <label class="form-check-label small" for="new-route-mtls">
+                        <i class="bi bi-person-badge me-1"></i>Require a client certificate (mTLS)
+                    </label>
+                </div>
+
+                @if (newRequireClientCert)
+                {
+                    @if (clientCaAnchors.Count == 0)
+                    {
+                        <div class="alert alert-warning py-1 small mt-2 mb-0">
+                            No client CA trust anchors yet. Add one under a cluster's
+                            <strong>CA &amp; Trust</strong> tab first.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="row g-2 mt-1">
+                            <div class="col-md-6">
+                                <label class="form-label small">Trust anchor</label>
+                                <select class="form-select form-select-sm" @bind="newClientCaBundleId">
+                                    <option value="@Guid.Empty">— select —</option>
+                                    @foreach (ClientCaBundle a in clientCaAnchors)
+                                    {
+                                        <option value="@a.Id">@a.Name (port @a.ListenerPort)</option>
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-6 d-flex align-items-end">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="new-route-mtls-only"
+                                           @bind="newClientCertOnly" />
+                                    <label class="form-check-label small" for="new-route-mtls-only">
+                                        mTLS only — drop the plain 443 listener
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-text small text-muted mt-1">
+                            The hostname is published on the anchor's port as well as 443. Client-certificate
+                            validation applies to a whole port, so it can't ride on 443 without demanding a
+                            certificate from every other hostname on the gateway. Clients connect to
+                            <code>https://@(string.IsNullOrWhiteSpace(newHostname) ? "host" : newHostname):@(SelectedAnchorPort)</code>.
+                        </div>
+                    }
+                }
+            </div>
+
             <div class="d-flex gap-1 mt-2">
                 <button class="btn btn-sm btn-primary" @onclick="AddRoute"
                         disabled="@(string.IsNullOrWhiteSpace(newHostname) || addingRoute)">
@@ -161,6 +214,21 @@
                                 @route.Hostname
                             </a>
                             @TlsBadge(route)
+                            @if (route.RequireClientCertificate)
+                            {
+                                <span class="badge bg-primary bg-opacity-75 small ms-1"
+                                      title="@($"Client certificates validated against '{route.ClientCaBundle?.Name}'. Clients connect on port {route.ClientCaBundle?.ListenerPort ?? MtlsService.DefaultListenerPort}.")">
+                                    <i class="bi bi-person-badge me-1"></i>mTLS
+                                    @if (route.ClientCaBundle is { } anchor) { <text>· @anchor.ListenerPort</text> }
+                                </span>
+                                @if (route.ClientCertificateOnly)
+                                {
+                                    <span class="badge bg-secondary bg-opacity-75 small ms-1"
+                                          title="No plain 443 listener — this hostname is reachable only with a client certificate.">
+                                        mTLS only
+                                    </span>
+                                }
+                            }
                             @if (!route.IsEnabled)
                             {
                                 <span class="badge bg-secondary ms-1">Disabled</span>
@@ -553,6 +621,17 @@
     private string? addRouteError;
     private bool addingRoute;
 
+    // Inbound mTLS
+    private bool newRequireClientCert;
+    private Guid newClientCaBundleId;
+    private bool newClientCertOnly;
+    private List<ClientCaBundle> clientCaAnchors = [];
+
+    /// <summary>Port the selected anchor publishes on, for the "connect to host:port" hint.</summary>
+    private int SelectedAnchorPort =>
+        clientCaAnchors.FirstOrDefault(a => a.Id == newClientCaBundleId)?.ListenerPort
+        ?? MtlsService.DefaultListenerPort;
+
     // ClusterIssuer selector
     private Guid issuerClusterId;
     private bool loadingIssuers;
@@ -606,6 +685,7 @@
         {
             await LoadAsync();
             tenantClusters ??= await TenantService.GetClustersAsync(TenantId);
+            clientCaAnchors = await Mtls.GetBundlesAsync(TenantId);
         }
         catch (Exception ex)
         {
@@ -651,6 +731,9 @@
             addRouteError = null;
             issuerClusterId = Guid.Empty;
             availableIssuers = [];
+            newRequireClientCert = false;
+            newClientCaBundleId = Guid.Empty;
+            newClientCertOnly = false;
         }
     }
 
@@ -688,6 +771,9 @@
                 ClusterIssuerName = newTlsMode == TlsMode.ClusterIssuer ? newClusterIssuer : null,
                 TlsCertificate = newTlsMode == TlsMode.Manual ? newTlsCert : null,
                 TlsPrivateKey = newTlsMode == TlsMode.Manual ? newTlsKey : null,
+                RequireClientCertificate = newRequireClientCert,
+                ClientCaBundleId = newClientCaBundleId == Guid.Empty ? null : newClientCaBundleId,
+                ClientCertificateOnly = newClientCertOnly,
             });
             showAddRoute = false;
             await LoadAsync();
@@ -712,6 +798,11 @@
     {
         await AppRouteService.UpdateRouteAsync(route.Id, new AppRouteRequest
         {
+            // Carried through: this call site only flips an unrelated field, and omitting these
+            // would silently turn client-certificate authentication off.
+            RequireClientCertificate = route.RequireClientCertificate,
+            ClientCaBundleId = route.ClientCaBundleId,
+            ClientCertificateOnly = route.ClientCertificateOnly,
             Hostname = route.Hostname,
             TlsMode = route.TlsMode,
             ClusterIssuerName = route.ClusterIssuerName,

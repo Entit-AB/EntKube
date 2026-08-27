@@ -78,6 +78,17 @@ services:
       DatabaseProvider: Postgres
       ConnectionStrings__DefaultConnection: "Host=postgres;Port=5432;Database=entkube;Username=entkube;Password=${POSTGRES_PASSWORD:-changeme}"
 
+      # --- Container registry (for EntKube-published components installed into managed clusters) ---
+      # One credential, two consumers:
+      #   1. EntKube pulls the Helm chart  — helm runs in THIS container and logs in with these.
+      #   2. The managed cluster pulls the image — EntKube creates a dockerconfigjson Secret in the
+      #      release namespace from these, because the cluster's kubelet does the pull and EntKube's
+      #      own session does not reach it.
+      # The key is the registry host with dots replaced by underscores.
+      # Leave unset if the images are public — nothing is created and pulls happen anonymously.
+      Helm__Registries__entit_azurecr_io__Username: "${REGISTRY_USERNAME:-}"
+      Helm__Registries__entit_azurecr_io__Password: "${REGISTRY_PASSWORD:-}"
+
       # --- Telemetry (self-built Lucene/S3 segment engine — logs / traces / RUM) ---
       # Base URL clusters use to reach this server. The app appends /ingest/otlp to
       # build the collector's Ingest URL. Must be externally reachable from clusters.

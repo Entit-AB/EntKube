@@ -2,7 +2,7 @@ using System.Formats.Tar;
 using System.IO.Compression;
 using ZstdSharp;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// Packs and unpacks a sealed segment's Lucene index directory as a single object-storage archive. This is

@@ -1,0 +1,267 @@
+@using System.Text.Json
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject OutboundMtlsService OutboundMtls
+@inject VaultService Vault
+@inject KubernetesOperationsService K8sOps
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   OutboundMtlsPanel — client certificates this app presents to partner APIs.
+
+   The outbound mirror of inbound mTLS: instead of authenticating callers, the
+   app proves who it is to someone else's endpoint. The certificate comes from
+   the tenant vault, so expiry tracking and rotation are already handled there.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <div>
+            <i class="bi bi-box-arrow-up-right me-2 text-primary"></i>
+            <strong>Outbound mTLS (partner APIs)</strong>
+            <span class="text-muted small ms-2">Client certificates this app presents when calling out.</span>
+        </div>
+        <button class="btn btn-sm btn-outline-primary" @onclick="() => showAdd = !showAdd" disabled="@busy">
+            <i class="bi bi-plus-circle me-1"></i>Add credential
+        </button>
+    </div>
+    <div class="card-body pt-2">
+
+        @if (showAdd)
+        {
+            <div class="border rounded p-3 mb-3 bg-light-subtle">
+                <div class="row g-2">
+                    <div class="col-md-4">
+                        <label class="form-label small">Name</label>
+                        <input class="form-control form-control-sm" placeholder="partner-api" @bind="ncName" />
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label small">Partner hostname</label>
+                        <input class="form-control form-control-sm" placeholder="api.partner.com" @bind="ncHost" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small">Port</label>
+                        <input type="number" class="form-control form-control-sm" @bind="ncPort" />
+                    </div>
+
+                    <div class="col-md-6">
+                        <label class="form-label small">Client certificate (from vault)</label>
+                        <select class="form-select form-select-sm" @bind="ncVaultSecretId">
+                            <option value="@Guid.Empty">— select —</option>
+                            @foreach (TenantCertificateInfo cert in certificates.Where(c => c.HasPrivateKey))
+                            {
+                                <option value="@cert.Id">@cert.Name</option>
+                            }
+                        </select>
+                        @if (certificates.Any(c => !c.HasPrivateKey))
+                        {
+                            <div class="form-text small text-muted">
+                                Certificates without a private key are hidden — a client certificate is unusable
+                                without one.
+                            </div>
+                        }
+                    </div>
+
+                    <div class="col-md-6">
+                        <label class="form-label small">Who performs the handshake</label>
+                        <select class="form-select form-select-sm" @bind="ncMode">
+                            <option value="@OutboundMtlsMode.MeshOriginated">The mesh (app never sees the key)</option>
+                            <option value="@OutboundMtlsMode.SecretOnly">The app (mount the Secret)</option>
+                        </select>
+                    </div>
+
+                    @if (ncMode == OutboundMtlsMode.MeshOriginated)
+                    {
+                        <div class="col-12">
+                            <label class="form-label small">Workload labels</label>
+                            <input class="form-control form-control-sm font-monospace"
+                                   placeholder="app=billing,tier=web" @bind="ncSelector" />
+                            <div class="form-text small text-muted">
+                                Required: Istio ignores the credential on a rule without a workload selector. These
+                                labels are also the blast radius — every pod matching them can present this
+                                certificate.
+                            </div>
+                        </div>
+                        <div class="col-12">
+                            <div class="alert alert-info py-1 small mb-0">
+                                <i class="bi bi-info-circle me-1"></i>
+                                The app must call
+                                <code>http://@(string.IsNullOrWhiteSpace(ncHost) ? "host" : ncHost):@OutboundMtlsService.PlainPortFor(ncPort)</code>
+                                — <strong>plain HTTP</strong>. The sidecar performs the TLS handshake and attaches the
+                                client certificate; if the app opens its own TLS connection the sidecar cannot add
+                                anything to it.
+                            </div>
+                        </div>
+                    }
+                </div>
+                <div class="d-flex gap-1 mt-2">
+                    <button class="btn btn-sm btn-primary" @onclick="AddCredential" disabled="@busy">Save</button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showAdd = false">Cancel</button>
+                </div>
+            </div>
+        }
+
+        @if (loading)
+        {
+            <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+        }
+        else if (credentials.Count == 0)
+        {
+            <p class="text-muted small mb-0">
+                No partner credentials. Add one when an external API requires this app to present a
+                client certificate.
+            </p>
+        }
+        else
+        {
+            <table class="table table-sm align-middle mb-0">
+                <thead>
+                    <tr class="text-muted small">
+                        <th>Name</th><th>Partner</th><th>Handshake</th><th>App calls</th><th>Applied</th><th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (OutboundMtlsCredential c in credentials)
+                    {
+                        <tr>
+                            <td><strong>@c.Name</strong></td>
+                            <td class="font-monospace small">@c.Host:@c.Port</td>
+                            <td>
+                                @if (c.Mode == OutboundMtlsMode.MeshOriginated)
+                                {
+                                    <span class="badge bg-primary bg-opacity-75">mesh</span>
+                                }
+                                else
+                                {
+                                    <span class="badge bg-secondary bg-opacity-75">app mounts secret</span>
+                                }
+                            </td>
+                            <td class="font-monospace small">@OutboundMtlsService.CallHint(c)</td>
+                            <td class="small">
+                                @if (c.AppliedAt is { } applied)
+                                {
+                                    <span class="text-muted">@applied.ToString("yyyy-MM-dd HH:mm")</span>
+                                }
+                                else
+                                {
+                                    <span class="text-warning">not applied</span>
+                                }
+                            </td>
+                            <td class="text-end">
+                                <button class="btn btn-sm btn-outline-primary me-1"
+                                        @onclick="() => Apply(c)" disabled="@busy">Apply</button>
+                                <button class="btn btn-sm btn-outline-danger"
+                                        @onclick="() => Delete(c.Id)" disabled="@busy">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid AppId { get; set; }
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
+    private bool loading = true;
+    private bool busy;
+    private List<OutboundMtlsCredential> credentials = [];
+    private List<TenantCertificateInfo> certificates = [];
+
+    private bool showAdd;
+    private string ncName = "";
+    private string ncHost = "";
+    private int ncPort = 443;
+    private Guid ncVaultSecretId;
+    private OutboundMtlsMode ncMode = OutboundMtlsMode.MeshOriginated;
+    private string ncSelector = "";
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        try
+        {
+            credentials = await OutboundMtls.GetForAppAsync(AppId, EnvironmentId);
+            certificates = await Vault.GetTenantCertificatesAsync(TenantId);
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { loading = false; }
+    }
+
+    private async Task AddCredential()
+    {
+        busy = true;
+        try
+        {
+            await OutboundMtls.CreateAsync(new OutboundMtlsCredential
+            {
+                TenantId = TenantId,
+                AppId = AppId,
+                EnvironmentId = EnvironmentId,
+                Name = ncName,
+                Host = ncHost,
+                Port = ncPort,
+                VaultSecretId = ncVaultSecretId,
+                Mode = ncMode,
+                WorkloadSelectorJson = SelectorToJson(ncSelector)
+            });
+
+            Toasts.Success("Credential saved. Apply it to place the certificate on the cluster.");
+            showAdd = false;
+            ncName = ncHost = ncSelector = "";
+            ncPort = 443;
+            ncVaultSecretId = Guid.Empty;
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task Apply(OutboundMtlsCredential credential)
+    {
+        busy = true;
+        try
+        {
+            KubernetesOperationResult<string> result = await K8sOps.ApplyOutboundMtlsAsync(credential.Id);
+
+            if (result.IsSuccess) Toasts.Success(result.Data ?? "Applied.");
+            else Toasts.Error(result.Error ?? "Apply failed.");
+
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    private async Task Delete(Guid id)
+    {
+        busy = true;
+        try
+        {
+            await OutboundMtls.DeleteAsync(id);
+            Toasts.Success("Credential removed. The Secret stays on the cluster until you remove it there.");
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { busy = false; }
+    }
+
+    /// <summary>Turns "app=billing,tier=web" into the JSON label map the credential stores.</summary>
+    private static string? SelectorToJson(string input)
+    {
+        Dictionary<string, string> labels = input
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(pair => pair.Split('=', 2))
+            .Where(parts => parts.Length == 2 && parts[0].Trim().Length > 0)
+            .ToDictionary(parts => parts[0].Trim(), parts => parts[1].Trim());
+
+        return labels.Count > 0 ? JsonSerializer.Serialize(labels) : null;
+    }
+}

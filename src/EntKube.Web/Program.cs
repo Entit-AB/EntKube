@@ -298,6 +298,15 @@ public class Program
         builder.Services.AddScoped<KubernetesOperationsService>();
         builder.Services.AddScoped<NodeManagementService>();
         builder.Services.AddScoped<WorkloadService>();
+        // One long-lived Kubernetes client per cluster, shared by every service that reaches an in-cluster
+        // HTTP API through the API-server proxy (Prometheus, Loki, and the in-cluster telemetry querier).
+        // These used to build a client per call, so each query paid its own TLS handshake to the API
+        // server — a dozen per dashboard render. Singleton: the pool is shared across circuits.
+        builder.Services.AddSingleton<KubernetesProxyClientPool>();
+        // Short-lived PromQL cache with single-flight: a dashboard render asks the same question from
+        // several panels at once, and each one otherwise crosses the WAN on its own.
+        builder.Services.AddSingleton(new EntKube.Web.Services.Telemetry.PromQueryCache(
+            TimeSpan.FromSeconds(builder.Configuration.GetValue<int?>("Metrics:QueryCacheSeconds") ?? 10)));
         builder.Services.AddScoped<PrometheusService>();
         // Telemetry engine: the self-built Lucene/S3 segment engine is the sole backend for logs, traces,
         // and RUM. OTLP/RUM writes go through SegmentTelemetryStore (no per-request DB connection — the
@@ -317,10 +326,18 @@ public class Program
             TraceKeepMinDurationMs = builder.Configuration.GetValue<double?>("Telemetry:TraceKeepMinDurationMs") ?? 500,
             TieredLogRetention = builder.Configuration.GetValue<bool?>("Telemetry:TieredLogRetention") ?? true,
             VerboseLogRetentionDays = builder.Configuration.GetValue<int?>("Telemetry:VerboseLogRetentionDays") ?? 14,
+            // Warm tier: how much of the sealed history stays on local disk rather than being fetched
+            // back from object storage. See docs/telemetry-in-cluster.md §3.1.
+            WarmRetentionDays = builder.Configuration.GetValue<int?>("Telemetry:WarmRetentionDays") ?? 3,
+            WarmMaxBytes = builder.Configuration.GetValue<long?>("Telemetry:WarmMaxBytes") ?? 8L * 1024 * 1024 * 1024,
         };
         builder.Services.AddSingleton(segmentOptions);
         // Per-tenant setting for which StorageLink backs a tenant's telemetry (edited in the tenant's
         // telemetry settings UI) + the per-tenant blob-store factory that resolves it.
+        // The segment catalog — the engine's only tie to the management-plane database. Everything behind
+        // this interface is Lucene indexes, local files and object storage, which is what lets the same
+        // engine run inside a cluster with a SQLite catalog on its PV. See docs/telemetry-in-cluster.md.
+        builder.Services.AddSingleton<ISegmentCatalog, EfSegmentCatalog>();
         builder.Services.AddSingleton<TelemetryStorageSettingService>();
         builder.Services.AddSingleton<TenantBlobStoreFactory>();
         // Telemetry is TENANT-SCOPED: one segment manager per (tenant, signal), created lazily on first
@@ -328,14 +345,14 @@ public class Program
         // logs/traces/RUM ever share a segment or a bucket with another's. The registries hold them.
         builder.Services.AddSingleton(sp => new SegmentManagerRegistry<LogSegmentManager>(tenantId =>
             new LogSegmentManager(tenantId,
-                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<ISegmentCatalog>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<LogSegmentManager>>())));
         // Verbose (DEBUG/INFO) log tier — its own signal + short retention; the important (WARN+) tier is the
         // LogSegmentManager registry above. LogTierRegistries routes writes/queries between them.
         builder.Services.AddSingleton(sp => new SegmentManagerRegistry<VerboseLogSegmentManager>(tenantId =>
             new VerboseLogSegmentManager(tenantId,
-                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<ISegmentCatalog>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<LogSegmentManager>>())));
         builder.Services.AddSingleton(sp => new LogTierRegistries(
@@ -344,23 +361,32 @@ public class Program
             segmentOptions));
         builder.Services.AddSingleton(sp => new SegmentManagerRegistry<SpanSegmentManager>(tenantId =>
             new SpanSegmentManager(tenantId,
-                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<ISegmentCatalog>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<SpanSegmentManager>>())));
         builder.Services.AddSingleton(sp => new SegmentManagerRegistry<RumSegmentManager>(tenantId =>
             new RumSegmentManager(tenantId,
-                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<ISegmentCatalog>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<RumSegmentManager>>())));
         // Trace-summary index — pre-aggregated per-trace partials fed from span ingest for a fast trace list.
         builder.Services.AddSingleton(sp => new SegmentManagerRegistry<TraceSummarySegmentManager>(tenantId =>
             new TraceSummarySegmentManager(tenantId,
-                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<ISegmentCatalog>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<TraceSummarySegmentManager>>())));
         builder.Services.AddSingleton<ITelemetryIngest, SegmentTelemetryStore>();
-        builder.Services.AddScoped<ILogBackend, SegmentLogService>();
-        builder.Services.AddScoped<ITraceQueryService, SegmentTraceService>();
+        // Reads route per cluster: to the cluster's own in-cluster telemetry node when one is installed,
+        // otherwise to the management plane's local segment store. LogQueryService's existing native-vs-Loki
+        // decision sits above this and is unchanged — the viewers still see one ILogBackend.
+        // See docs/telemetry-in-cluster.md.
+        builder.Services.AddScoped<TelemetryNodeClient>();
+        builder.Services.AddScoped<SegmentLogService>();
+        builder.Services.AddScoped<SegmentTraceService>();
+        builder.Services.AddScoped<NodeLogBackend>();
+        builder.Services.AddScoped<NodeTraceService>();
+        builder.Services.AddScoped<ILogBackend, ClusterRoutedLogBackend>();
+        builder.Services.AddScoped<ITraceQueryService, ClusterRoutedTraceService>();
         builder.Services.AddScoped<IRumQueryService, SegmentRumService>();
         builder.Services.AddScoped<IMetricsQuery, PromMetricsService>();
         // One seal/retention loop per signal; each iterates that signal's live per-tenant managers.
@@ -380,12 +406,17 @@ public class Program
             sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
         builder.Services.AddSingleton<IngestTokenService>();
+        // Configures the in-cluster telemetry components from platform state (bucket, identity, tokens).
+        builder.Services.AddScoped<EntKubeTelemetryService>();
         builder.Services.AddScoped<EntKube.Web.Services.PublicApi.ApiTokenService>();
         builder.Services.AddScoped<EntKube.Web.Services.Scim.ScimUserService>();
         builder.Services.AddSingleton<IngestRateLimiter>();
         // Real User Monitoring: resolves per-site public keys for the public browser ingest endpoint.
         builder.Services.AddSingleton<RumSiteService>();
+        // The engine resolves cluster→tenant through IClusterTenantResolver; in the management plane that
+        // is the DB-backed ClusterTenantResolver (in-cluster it is FixedClusterTenantResolver).
         builder.Services.AddScoped<ClusterTenantResolver>();
+        builder.Services.AddScoped<IClusterTenantResolver>(sp => sp.GetRequiredService<ClusterTenantResolver>());
         // Native telemetry alerting: rules evaluated over logs/spans → incidents via the existing pipeline.
         builder.Services.AddScoped<TelemetryAlertRuleService>();
         builder.Services.AddScoped<DashboardService>();
@@ -445,6 +476,9 @@ public class Program
         builder.Services.AddScoped<KyvernoPolicyService>();
         builder.Services.AddScoped<KedaScalerService>();
         builder.Services.AddScoped<TrustBundleService>();
+        builder.Services.AddScoped<MtlsService>();
+        builder.Services.AddScoped<MeshMtlsService>();
+        builder.Services.AddScoped<OutboundMtlsService>();
         builder.Services.AddScoped<CertificateDistributionService>();
         builder.Services.Configure<CertificateDistributionReconcileOptions>(
             builder.Configuration.GetSection("CertificateDistribution"));
@@ -459,6 +493,8 @@ public class Program
         // entries, and a per-scope client would refetch a multi-megabyte index per component.
         builder.Services.AddSingleton<EntKube.Web.Services.Upgrades.HelmRepoIndexClient>();
         builder.Services.AddScoped<EntKube.Web.Services.Upgrades.ComponentUpgradeService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Upgrades.ReleaseVolumeGuard>();
+        builder.Services.AddScoped<EntKube.Web.Services.Upgrades.ComponentUpgradeRunner>();
         builder.Services.AddScoped<EntKube.Web.Services.Upgrades.DriftDetectionService>();
         // Singleton cache + background sweep: the advisor reads the cache and never forks a
         // server-side dry-run per deployment while rendering a page.

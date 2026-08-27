@@ -964,7 +964,15 @@ public class KyvernoPolicyService(
     {
         // The Kyverno JMESPath expression contains {{ }} which would conflict with C# raw string
         // interpolation, so we compose it via a local variable.
-        const string jmesPath = "{{ request.object.spec.volumes[].hostPath | length(@) }}";
+        //
+        // The `|| `[]`` is not decoration. A Pod with no volumes at all — cert-manager's ACME
+        // solver, a plain sidecar-less worker — projects `spec.volumes[].hostPath` to null, and
+        // length(null) is not a type error JMESPath tolerates: the rule fails to evaluate, and a
+        // rule that fails to evaluate under the default failurePolicy of Fail DENIES the pod.
+        // The policy that was meant to reject hostPath mounts instead rejects the pods that have
+        // no volumes whatsoever, which is every pod it should have waved through. Defaulting the
+        // projection to an empty list makes the nil case length 0, and 0 is not GreaterThan 0.
+        const string jmesPath = "{{ request.object.spec.volumes[].hostPath || `[]` | length(@) }}";
         return $"""
             apiVersion: kyverno.io/v1
             kind: Policy

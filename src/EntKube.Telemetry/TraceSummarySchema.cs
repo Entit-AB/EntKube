@@ -5,7 +5,7 @@ using Lucene.Net.Documents;
 using Lucene.Net.Index;
 using Lucene.Net.Search;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// Lucene schema for the <c>traces</c> signal — the trace-SUMMARY index. Each document is a <b>partial</b>

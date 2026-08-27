@@ -40,10 +40,36 @@ public class AppRoute
     /// </summary>
     public bool IsManaged { get; set; } = true;
 
+    /// <summary>
+    /// Require a client certificate to reach this hostname (inbound mTLS). The route is then served
+    /// on the trust anchor's <see cref="ClientCaBundle.ListenerPort"/> <em>in addition to</em> 443:
+    /// client-certificate validation is a per-port property of the Gateway, so demanding a cert on
+    /// 443 would demand one from every other customer sharing that gateway.
+    ///
+    /// Plain 443 keeps working for this hostname unless <see cref="ClientCertificateOnly"/> is set.
+    /// </summary>
+    public bool RequireClientCertificate { get; set; }
+
+    /// <summary>
+    /// The CA that signs the client certificates accepted for this hostname. Required when
+    /// <see cref="RequireClientCertificate"/> is true.
+    /// </summary>
+    public Guid? ClientCaBundleId { get; set; }
+
+    /// <summary>
+    /// When true the hostname's plain 443 listener is dropped, so the app is reachable
+    /// <em>only</em> over mTLS. Off by default: turning it on breaks any client that has not
+    /// migrated to the mTLS port, so it is a deliberate second step.
+    /// </summary>
+    public bool ClientCertificateOnly { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation
     public App App { get; set; } = null!;
+
+    /// <summary>The trust anchor for inbound mTLS, when <see cref="RequireClientCertificate"/> is set.</summary>
+    public ClientCaBundle? ClientCaBundle { get; set; }
     public ICollection<AppDeploymentRoute> DeploymentRoutes { get; set; } = [];
 }
 

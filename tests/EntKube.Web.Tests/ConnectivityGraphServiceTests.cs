@@ -15,9 +15,15 @@ namespace EntKube.Web.Tests;
 /// </summary>
 public class ConnectivityGraphServiceTests : IDisposable
 {
-    private readonly SqliteConnection connection;
+    private static readonly byte[] TestRootKey = Convert.FromBase64String(TestServices.TestRootKeyBase64);
+
+    /// <summary>An empty `kubectl get services -o json` payload — the cluster has no Services.</summary>
+    private const string NoLiveServices = """{"items":[]}""";
+
+    private readonly InterceptingTestDb testDb;
     private readonly ApplicationDbContext db;
-    private readonly TestDbContextFactory dbFactory;
+    private readonly IDbContextFactory<ApplicationDbContext> dbFactory;
+    private readonly Mock<IKubernetesClientFactory> k8s = new();
     private readonly ConnectivityGraphService sut;
 
     private readonly Guid appId = Guid.NewGuid();
@@ -27,16 +33,14 @@ public class ConnectivityGraphServiceTests : IDisposable
 
     public ConnectivityGraphServiceTests()
     {
-        connection = new SqliteConnection("DataSource=:memory:");
-        connection.Open();
+        // Mirrors production: the graph resolves cluster.Kubeconfig from the vault via the
+        // interceptor, which is what lets it verify routed Services against the live cluster.
+        testDb = new InterceptingTestDb(TestRootKey);
+        db = testDb.CreateContext();
+        dbFactory = testDb.Factory;
 
-        DbContextOptions<ApplicationDbContext> options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseSqlite(connection)
-            .Options;
-
-        db = new ApplicationDbContext(options);
-        dbFactory = new TestDbContextFactory(connection);
-        db.Database.EnsureCreated();
+        // By default the cluster answers "no Services" — tests that need one say so.
+        SetLiveServices(NoLiveServices);
 
         Tenant tenant = new() { Id = Guid.NewGuid(), Name = "ConnCo", Slug = "connco" };
         db.Tenants.Add(tenant);
@@ -53,9 +57,18 @@ public class ConnectivityGraphServiceTests : IDisposable
         db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "billing-api" });
         db.SaveChanges();
 
-        sut = new ConnectivityGraphService(
-            dbFactory, new Mock<IKubernetesClientFactory>().Object, NullLogger<ConnectivityGraphService>.Instance);
+        VaultService vault = testDb.CreateVaultService();
+        vault.InitializeVaultAsync(tenant.Id).GetAwaiter().GetResult();
+        testDb.SeedKubeconfigAsync(vault, tenant.Id, clusterId, TestKubeconfig.Valid).GetAwaiter().GetResult();
+
+        sut = new ConnectivityGraphService(dbFactory, k8s.Object, NullLogger<ConnectivityGraphService>.Instance);
     }
+
+    /// <summary>Makes `kubectl get services` return <paramref name="json"/> for any namespace.</summary>
+    private void SetLiveServices(string json) =>
+        k8s.Setup(f => f.GetJsonAsync("services", It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(json);
 
     private AppDeployment SeedDeployment(string ns = "billing")
     {
@@ -98,6 +111,22 @@ public class ConnectivityGraphServiceTests : IDisposable
                     port: {port}
                     targetPort: 8080{protoLine}
                 """
+        });
+        db.SaveChanges();
+    }
+
+    private void SeedRoute(Guid deploymentId, string serviceName, int servicePort, bool enabled = true)
+    {
+        AppRoute route = new() { Id = Guid.NewGuid(), AppId = appId, Hostname = $"{serviceName}.example.com" };
+        db.AppRoutes.Add(route);
+        db.AppDeploymentRoutes.Add(new AppDeploymentRoute
+        {
+            Id = Guid.NewGuid(),
+            AppRouteId = route.Id,
+            AppDeploymentId = deploymentId,
+            ServiceName = serviceName,
+            ServicePort = servicePort,
+            IsEnabled = enabled
         });
         db.SaveChanges();
     }
@@ -595,9 +624,78 @@ public class ConnectivityGraphServiceTests : IDisposable
         plan.Warnings.Should().Contain(w => w.Contains("no pod selector"));
     }
 
+    [Fact]
+    public async Task BuildGraph_RoutedServiceWithoutManifest_IsResolvedFromTheLiveCluster()
+    {
+        // A Helm/Manual/Git deployment: the Service exists in the cluster but no
+        // DeploymentManifest row declares it.
+        AppDeployment dep = SeedDeployment();
+        SeedRoute(dep.Id, "billing-svc", 80);
+        SetLiveServices("""
+            {
+              "items": [
+                {
+                  "metadata": { "name": "billing-svc", "namespace": "billing" },
+                  "spec": {
+                    "selector": { "app": "billing" },
+                    "ports": [
+                      { "name": "http", "port": 80, "targetPort": 8080, "protocol": "TCP" }
+                    ]
+                  }
+                }
+              ]
+            }
+            """);
+
+        ConnectivityGraph graph = await sut.BuildGraphAsync(appId, envId);
+
+        ServicePortNode p = graph.ExposedPorts.Should().ContainSingle().Subject;
+        p.ServiceName.Should().Be("billing-svc");
+        p.Port.Should().Be(80);
+        p.TargetPort.Should().Be(8080);
+        p.AppProtocol.Should().Be("http");
+        p.Selector.Should().Contain("app", "billing");
+        p.FromCluster.Should().BeTrue();
+        graph.LiveLookupFailed.Should().BeFalse();
+
+        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(graph, appId, envId);
+        findings.Should().NotContain(f => f.Category == "Broken dependency");
+    }
+
+    [Fact]
+    public async Task Analyze_ClusterUnreachable_DowngradesUnknownBackendToWarning()
+    {
+        AppDeployment dep = SeedDeployment();
+        SeedRoute(dep.Id, "billing-svc", 80);
+        k8s.Setup(f => f.GetJsonAsync("services", It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("dial tcp: i/o timeout"));
+
+        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(appId, envId);
+
+        findings.Should().Contain(f =>
+            f.Severity == FindingSeverity.Warning &&
+            f.Category == "Broken dependency" &&
+            f.Title.Contains("can't be verified"));
+        findings.Should().NotContain(f => f.Severity == FindingSeverity.Error);
+    }
+
+    [Fact]
+    public async Task BuildGraph_ServiceManifestPresent_DoesNotQueryTheCluster()
+    {
+        AppDeployment dep = SeedDeployment();
+        SeedServiceManifest(dep.Id, "billing-svc", 80);
+        SeedRoute(dep.Id, "billing-svc", 80);
+
+        await sut.BuildGraphAsync(appId, envId);
+
+        k8s.Verify(f => f.GetJsonAsync("services", It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
     public void Dispose()
     {
         db.Dispose();
-        connection.Dispose();
+        testDb.Dispose();
     }
 }

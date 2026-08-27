@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using BCrypt.Net;
 using EntKube.Web.Data;
+using EntKube.Web.Services.Telemetry;
 using k8s;
 using k8s.Models;
 using Microsoft.EntityFrameworkCore;
@@ -69,8 +70,21 @@ public class HelmCommand
 public class ComponentLifecycleService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
-    KeycloakService keycloakService)
+    KeycloakService keycloakService,
+    IngestTokenService ingestTokens,
+    EntKubeTelemetryService entKubeTelemetry,
+    IConfiguration configuration,
+    ILogger<ComponentLifecycleService> logger)
 {
+    /// <summary>
+    /// OCI registries this process has already logged helm in to. The login persists in helm's config for
+    /// the life of the container, so it is worth doing once rather than per install.
+    ///
+    /// Concurrent, not a plain HashSet: two components can install at the same moment, and a set mutated
+    /// from both would corrupt rather than merely duplicate work.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> LoggedInRegistries = new();
+
     /// <summary>
     /// Registers a new component on a cluster. The component starts in NotInstalled
     /// status — it's just a record of what should be deployed, not yet deployed.
@@ -202,7 +216,20 @@ public class ComponentLifecycleService(
     /// rather than failing mid-install.
     /// </summary>
     public async Task<ClusterComponent> PrepareInstallAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid componentId, CancellationToken ct = default) =>
+        await PrepareApplyAsync(componentId, allowInstalled: false, ct);
+
+    /// <summary>
+    /// Same gatekeeping as <see cref="PrepareInstallAsync"/> but for a release that is
+    /// already installed: an in-place `helm upgrade` is exactly the same command, so the
+    /// only difference is that Installed is an acceptable starting state.
+    /// </summary>
+    public async Task<ClusterComponent> PrepareUpgradeAsync(
+        Guid componentId, CancellationToken ct = default) =>
+        await PrepareApplyAsync(componentId, allowInstalled: true, ct);
+
+    private async Task<ClusterComponent> PrepareApplyAsync(
+        Guid componentId, bool allowInstalled, CancellationToken ct)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -213,7 +240,7 @@ public class ComponentLifecycleService(
         // Only NotInstalled or Failed components can be installed.
         // If it's already installed, the user should use upgrade instead.
 
-        if (component.Status == ComponentStatus.Installed)
+        if (component.Status == ComponentStatus.Installed && !allowInstalled)
         {
             throw new InvalidOperationException(
                 "Component is already installed. Use upgrade to reconfigure.");
@@ -617,11 +644,31 @@ public class ComponentLifecycleService(
 
         if (component.ComponentType == "ManifestUrl")
         {
+            // Follow the catalog's URL, not the one captured when this component was registered.
+            // For a ManifestUrl component the URL *is* the version — these are release assets
+            // pinned to a tag — so a stored URL means the component re-applies the version it was
+            // installed at, for ever, and "upgrade the CRDs" becomes a button that reinstalls the
+            // old ones and reports success. There is no version field to bump instead: for Helm
+            // components that job belongs to HelmChartVersion, and this path has no equivalent.
+            CatalogEntry? urlCatalog =
+                ComponentCatalog.ResolveForComponent(component.Name, component.HelmChartName);
+
+            string? catalogUrl = urlCatalog?.ComponentType == "ManifestUrl"
+                ? urlCatalog.HelmRepoUrl
+                : null;
+
+            if (!string.IsNullOrWhiteSpace(catalogUrl) && catalogUrl != component.HelmRepoUrl)
+            {
+                logger.LogInformation(
+                    "Component {Component} applies the catalog manifest {CatalogUrl} rather than its " +
+                    "registered {StoredUrl}", component.Name, catalogUrl, component.HelmRepoUrl);
+            }
+
             return new HelmCommand
             {
                 Operation = "kubectl-apply-url",
                 ReleaseName = component.ReleaseName ?? component.Name,
-                ManifestUrl = component.HelmRepoUrl
+                ManifestUrl = catalogUrl ?? component.HelmRepoUrl
             };
         }
 
@@ -631,6 +678,75 @@ public class ComponentLifecycleService(
         // we decrypt them and merge into the YAML so Helm gets the full picture.
 
         string? valuesYaml = await InjectSecretsIntoValuesAsync(component, ct);
+
+        // EntKube Telemetry Collector: the ingest URL and per-cluster token are control-plane values the
+        // cluster cannot derive, and the catalog ships them as REPLACE_WITH_* placeholders. A collector
+        // installed with those still starts, reports Ready and passes its health check while every export
+        // fails against a host that does not resolve — the Logs tab then stays empty with nothing looking
+        // broken. New registrations get them pre-filled; heal anything older here so one Apply fixes it.
+        CatalogEntry? valuesCatalog = ComponentCatalog.ResolveForComponent(component.Name, component.HelmChartName);
+
+        if (TelemetryIngestDefaults.IsCollector(valuesCatalog))
+        {
+            (string? healed, string? mintedToken) = TelemetryIngestDefaults.FillPlaceholders(
+                valuesYaml, component.ClusterId, component.Cluster.TenantId, ingestTokens, configuration);
+            valuesYaml = healed;
+
+            // The vault can hold the placeholder itself: InjectSecretsIntoValuesAsync recovers a missing
+            // secret from the stored values, so a placeholder install writes "REPLACE_WITH_INGEST_TOKEN"
+            // back as the token. Overwrite it, or the next install would re-inject the placeholder.
+            if (mintedToken is not null)
+            {
+                await vaultService.SetComponentSecretAsync(
+                    component.Cluster.TenantId, component.Id,
+                    TelemetryIngestDefaults.TokenSecretName(valuesCatalog!), mintedToken, ct);
+            }
+
+            // Once this cluster runs its own telemetry indexer, that is where the collector should ship —
+            // keeping the data in the cluster is the whole reason the indexer is there, and a collector
+            // still pointed at the management plane leaves the indexer empty. It cannot be decided when
+            // the collector is registered: the indexer DEPENDS on the collector, so it is always installed
+            // second. Deciding it here means re-applying the collector is what moves it.
+            string? inClusterIngest = await entKubeTelemetry.GetInClusterIngestUrlAsync(component.ClusterId, ct);
+            (string? repointed, bool didRepoint) =
+                TelemetryIngestDefaults.RepointToInCluster(valuesYaml, inClusterIngest, configuration);
+            valuesYaml = repointed;
+
+            if (didRepoint)
+            {
+                logger.LogInformation(
+                    "Repointed collector {Component} on cluster {ClusterId} at the in-cluster telemetry "
+                    + "indexer ({Url}); its logs and traces now stay in the cluster.",
+                    component.Name, component.ClusterId, inClusterIngest);
+            }
+        }
+
+        // In-cluster telemetry nodes: the tenant/cluster identity and both bearer tokens are control-plane
+        // values the cluster cannot derive. New registrations get them written up front; heal anything
+        // registered before that existed here, so one Apply fixes it rather than a delete and re-add.
+        // The chart refuses to render without an identity, so this is a loud failure — but still one an
+        // operator should not have to resolve by hand.
+        if (EntKubeTelemetryService.IsTelemetryNode(valuesCatalog))
+        {
+            valuesYaml = await entKubeTelemetry.FillMissingIdentityAsync(component, valuesYaml, ct);
+        }
+
+        // Components whose image EntKube publishes to a private registry need the CLUSTER to hold a
+        // credential — EntKube's own does not reach the kubelet. Created from configuration here, so the
+        // install works without an operator hand-building a Secret per cluster. An imagePullSecrets value
+        // they set themselves wins: naming an existing Secret is a legitimate choice.
+        if (valuesCatalog?.ImageRegistryHost is not null
+            && string.IsNullOrWhiteSpace(YamlFormMerger.ExtractValue(valuesYaml ?? "", "imagePullSecrets.0.name")))
+        {
+            string? pullSecret = await EnsureImagePullSecretAsync(
+                component, valuesCatalog, component.Cluster.Kubeconfig ?? "", ct);
+
+            if (pullSecret is not null)
+            {
+                valuesYaml = YamlFormMerger.MergeFormValues(valuesYaml ?? "",
+                    new Dictionary<string, string> { ["imagePullSecrets.0.name"] = pullSecret });
+            }
+        }
 
         // Istio gateways: when a wg-easy component is present on the cluster, expose the
         // WireGuard UDP port on the gateway's LoadBalancer so VPN traffic rides the
@@ -697,14 +813,21 @@ public class ComponentLifecycleService(
             valuesYaml = MergeYamlBlocks(valuesYaml, themeExtras);
         }
 
+        // Fill in top-level keys the catalog has grown since this component was registered.
+        // Catalog DefaultValues are read once, at registration; from then on the component carries
+        // its own copy, so a fix shipped in the catalog reaches new installs and nothing else.
+        // (Subcharts do not have this problem — they re-read SubchartDefaultValues every apply,
+        // which is why an istiod change lands while the same edit to a gateway does not.)
+        valuesYaml = FillMissingCatalogDefaults(valuesYaml, valuesCatalog?.DefaultValues);
+
         string releaseName = component.ReleaseName ?? component.Name;
         string chartRef = !string.IsNullOrWhiteSpace(component.HelmRepoUrl)
             ? $"{component.HelmRepoUrl}/{component.HelmChartName}"
             : component.HelmChartName ?? component.Name;
 
-        // Catalog-registered components keep their key as the component Name, so we can
-        // look the entry back up for an extended install timeout (heavy/DaemonSet charts).
-        string installTimeout = ComponentCatalog.ResolveForComponent(component.Name, component.HelmChartName)?.InstallTimeout ?? "10m0s";
+        // Catalog-registered components keep their key as the component Name, so the entry resolved
+        // above also carries an extended install timeout for heavy/DaemonSet charts.
+        string installTimeout = valuesCatalog?.InstallTimeout ?? "10m0s";
 
         return new HelmCommand
         {
@@ -718,6 +841,112 @@ public class ComponentLifecycleService(
             ValuesYaml = valuesYaml,
             Timeout = installTimeout
         };
+    }
+
+    /// <summary>
+    /// Adds top-level keys from the catalog's current defaults that the component's stored values
+    /// do not mention at all. A key the operator has set — to anything, including a value that
+    /// differs from the catalog — is left exactly as it is.
+    ///
+    /// This is deliberately top-level and deliberately additive. Merging deeply would let a
+    /// catalog edit reach inside a structure the operator owns: the gateway's stored
+    /// <c>service.ports</c> list is shorter than the catalog's, and growing it behind their back
+    /// would open a port on an internet-facing LoadBalancer that nobody asked for. Absent-means-
+    /// unconsidered is a defensible inference; present-but-different is a decision.
+    ///
+    /// Empty stored values are left empty rather than filled from the catalog wholesale. A
+    /// component installed with no values at all is one where every catalog key is "missing", and
+    /// pouring the entire default document into it on the next upgrade is not a fill-in, it is a
+    /// reinstall with different settings.
+    ///
+    /// Works on text rather than a parsed document because these values carry EntKube's own
+    /// <c>#{" "}subchart:name=true</c> markers in YAML comments, and a parse/serialise round trip
+    /// would drop them — silently disabling the subchart on the next apply.
+    /// </summary>
+    public static string? FillMissingCatalogDefaults(string? storedValues, string? catalogDefaults)
+    {
+        if (string.IsNullOrWhiteSpace(storedValues) || string.IsNullOrWhiteSpace(catalogDefaults))
+        {
+            return storedValues;
+        }
+
+        HashSet<string> present = new(TopLevelKeys(storedValues), StringComparer.Ordinal);
+        List<string> additions = [];
+
+        foreach ((string key, string block) in TopLevelBlocks(catalogDefaults))
+        {
+            if (!present.Contains(key))
+            {
+                additions.Add(block.TrimEnd());
+            }
+        }
+
+        return additions.Count == 0
+            ? storedValues
+            : MergeYamlBlocks(storedValues, string.Join("\n", additions) + "\n");
+    }
+
+    /// <summary>Top-level mapping keys in a values document (column-zero <c>key:</c> lines).</summary>
+    private static IEnumerable<string> TopLevelKeys(string yaml) =>
+        TopLevelBlocks(yaml).Select(b => b.Key);
+
+    /// <summary>
+    /// Splits a values document into its top-level keys and the text belonging to each — the
+    /// key's own line, everything indented under it, and any comment lines immediately above it,
+    /// which are almost always that key's explanation and are worth carrying across with it.
+    /// </summary>
+    private static List<(string Key, string Block)> TopLevelBlocks(string yaml)
+    {
+        string[] lines = yaml.Replace("\r\n", "\n").Split('\n');
+        List<(string Key, string Block)> blocks = [];
+
+        // Comment/blank lines seen since the last key, held back until we know whether a
+        // top-level key follows them (in which case they belong to it).
+        List<string> pending = [];
+        string? currentKey = null;
+        List<string> current = [];
+
+        void Flush()
+        {
+            if (currentKey is not null) blocks.Add((currentKey, string.Join("\n", current)));
+            currentKey = null;
+            current = [];
+        }
+
+        foreach (string line in lines)
+        {
+            string trimmed = line.TrimStart();
+
+            if (trimmed.Length == 0 || trimmed.StartsWith('#'))
+            {
+                // Inside a block, keep the comment with it; between blocks, hold it for the next.
+                if (currentKey is not null) current.Add(line);
+                else pending.Add(line);
+                continue;
+            }
+
+            bool isTopLevel = line.Length > 0 && !char.IsWhiteSpace(line[0]) && !trimmed.StartsWith('-');
+            int colon = isTopLevel ? line.IndexOf(':') : -1;
+
+            if (colon > 0)
+            {
+                Flush();
+                currentKey = line[..colon].Trim();
+                current = [.. pending, line];
+                pending = [];
+                continue;
+            }
+
+            if (currentKey is not null)
+            {
+                current.AddRange(pending);
+                pending = [];
+                current.Add(line);
+            }
+        }
+
+        Flush();
+        return blocks;
     }
 
     /// <summary>
@@ -1311,6 +1540,45 @@ public class ComponentLifecycleService(
     /// is a GitHub release manifest rather than a Helm chart.
     /// </summary>
     /// <summary>
+    /// HTTPRoutes a component used to create from its own manifest, before its hostname was
+    /// registered as an ExternalRoute. They are deleted on the next route apply: nothing else
+    /// removes them, and a leftover hand-written route keeps serving the hostname on whatever
+    /// listener it can still reach.
+    ///
+    /// Matched on component name rather than catalog key because that is what a ClusterComponent
+    /// carries — <see cref="ComponentCatalog.ToRegistration"/> sets Name to the catalog key.
+    /// </summary>
+    private static IEnumerable<string> LegacyManifestRouteNames(ClusterComponent component) =>
+        string.Equals(component.Name, "wg-easy", StringComparison.OrdinalIgnoreCase)
+            ? ["wg-easy-ui"]
+            : [];
+
+    /// <summary>
+    /// The hostnames an AppRoute already speaks for.
+    ///
+    /// Compared case-insensitively because DNS is: an operator who types <c>Flow.example.com</c>
+    /// into one form and <c>flow.example.com</c> into the other has described one hostname twice,
+    /// and both descriptions land on the same generated object name.
+    /// </summary>
+    public static IReadOnlySet<string> HostnamesOwnedByAppRoutes(IEnumerable<AppRoute> appRoutes) =>
+        appRoutes.Select(r => r.Hostname).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether applying this ExternalRoute's HTTPRoute would destroy an AppRoute's routing.
+    ///
+    /// It would, if they describe the same hostname. An AppRoute renders one rule per path — the
+    /// rewrites that put <c>/gateway</c> in front of one service and <c>/engine</c> in front of
+    /// another — while an ExternalRoute can only say "this whole host goes to this one service".
+    /// Both are named <c>ToListenerName(hostname) + "-route"</c>, so they are not two routes: they
+    /// are two descriptions of one object, and the one applied last is the one that survives.
+    ///
+    /// A passthrough ExternalRoute is exempt: it renders a TLSRoute, a different kind, which
+    /// shares the name but never overwrites an HTTPRoute.
+    /// </summary>
+    public static bool WouldOverwriteAppRoute(ExternalRoute route, IReadOnlySet<string> appRouteHostnames) =>
+        route.TlsMode != TlsMode.Passthrough && appRouteHostnames.Contains(route.Hostname);
+
+    /// <summary>
     /// Applies all ExternalRoute resources for a component to its cluster via kubectl.
     /// Generates an HTTPRoute + Certificate manifest for each route and applies them.
     /// Safe to call repeatedly — kubectl apply is idempotent.
@@ -1344,6 +1612,15 @@ public class ComponentLifecycleService(
                 if (!string.Equals(oldRouteName, newRouteName, StringComparison.Ordinal))
                     orphanedRoutes.Add((oldRouteName, comp.Namespace ?? "default"));
 
+                // wg-easy used to ship its own HTTPRoute inside the component manifest, under a
+                // name derived from neither the service nor the hostname. Applying the replacement
+                // route does not remove it, and while it survives it keeps the hostname answering
+                // on the port-80 listener in cleartext — the exact thing the replacement fixes.
+                foreach (string legacyName in LegacyManifestRouteNames(comp))
+                {
+                    orphanedRoutes.Add((legacyName, comp.Namespace ?? "default"));
+                }
+
                 FixRouteServiceName(r, comp);
             }
             allRoutes.AddRange(comp.ExternalRoutes);
@@ -1368,6 +1645,12 @@ public class ComponentLifecycleService(
         // Include enabled AppRoutes on this cluster so the Gateway HTTPS listener list is
         // complete — applying ExternalRoutes must not drop AppRoute listeners.
         List<AppRoute> appRoutes = await db.AppRoutes
+            .Include(r => r.ClientCaBundle!)
+                .ThenInclude(b => b.Certificates)
+            // The namespaces behind these routes have to be labelled before the Gateway lands,
+            // or the listeners' namespace selector detaches them.
+            .Include(r => r.DeploymentRoutes)
+                .ThenInclude(dr => dr.AppDeployment)
             .Where(r => r.IsEnabled && r.DeploymentRoutes.Any(dr =>
                 dr.IsEnabled && dr.AppDeployment.ClusterId == component.Cluster.Id))
             .ToListAsync(ct);
@@ -1379,11 +1662,45 @@ public class ComponentLifecycleService(
         string gatewayYaml = ExternalRouteService.GenerateGatewayYaml(
             gatewayName, gatewayNamespace, allRoutes, appRoutes, gatewayClass: gatewayClass);
 
-        // One route resource per entry — HTTPRoute for terminated TLS, TLSRoute for passthrough.
-        IEnumerable<string> httpRoutes = allRoutes.Select(r =>
-            r.TlsMode == TlsMode.Passthrough
-                ? ExternalRouteService.GenerateTlsRouteYaml(r)
-                : ExternalRouteService.GenerateHttpRouteYaml(r));
+        // A hostname can end up described twice: once as an AppRoute — one rule per path, with
+        // the rewrites that put /gateway in front of one service and /engine in front of another —
+        // and once as an ExternalRoute, which only knows how to say "this whole host goes to this
+        // one service". Both generators name the object ToListenerName(hostname) + "-route", so
+        // they are not two routes at all: they are two descriptions fighting over one object, and
+        // whichever applied last wins.
+        //
+        // That fight is not hypothetical here. This method re-applies every ExternalRoute on the
+        // cluster, so installing any unrelated component flattens such a hostname to a single
+        // catch-all backend, and every path that backend does not serve starts answering 404 —
+        // with nothing in the deploy that touched the app to explain it.
+        //
+        // The AppRoute is the fuller description and the post-deploy refresh re-applies it, so the
+        // AppRoute owns the hostname and the ExternalRoute's flattened version is the one we drop.
+        // Only its HTTPRoute is dropped: the hostname's Gateway listener is built from both lists
+        // above and is unaffected, and a passthrough ExternalRoute produces a TLSRoute, a
+        // different kind that never overwrites the AppRoute's HTTPRoute.
+        IReadOnlySet<string> appRouteHostnames = HostnamesOwnedByAppRoutes(appRoutes);
+
+        foreach (ExternalRoute skipped in allRoutes.Where(r => WouldOverwriteAppRoute(r, appRouteHostnames)))
+        {
+            // Worth saying out loud: the operator configured this ExternalRoute and it is
+            // silently not being applied, which is only obvious once you know an AppRoute
+            // already claims the hostname.
+            logger.LogWarning(
+                "Skipping HTTPRoute for ExternalRoute {Hostname}: an enabled AppRoute already "
+                + "serves that hostname, and applying this route would replace its per-path "
+                + "rules with a single backend.",
+                skipped.Hostname);
+        }
+
+        // One route resource per remaining entry — HTTPRoute for terminated TLS, TLSRoute for
+        // passthrough.
+        IEnumerable<string> httpRoutes = allRoutes
+            .Where(r => !WouldOverwriteAppRoute(r, appRouteHostnames))
+            .Select(r =>
+                r.TlsMode == TlsMode.Passthrough
+                    ? ExternalRouteService.GenerateTlsRouteYaml(r)
+                    : ExternalRouteService.GenerateHttpRouteYaml(r));
 
         List<string> documents = [gatewayYaml, .. httpRoutes];
 
@@ -1422,6 +1739,31 @@ public class ComponentLifecycleService(
                 }
             }
 
+            // Every namespace holding a route for this Gateway must carry the label its listeners
+            // select on, and must carry it BEFORE the Gateway arrives — the alternative is a
+            // window where the new listeners admit nothing and every hostname on the cluster 404s.
+            // Additive and idempotent, so re-running costs nothing.
+            HashSet<string> routeNamespaces = [
+                .. allRoutes
+                    .Select(r => r.Component?.Namespace)
+                    .Where(ns => !string.IsNullOrWhiteSpace(ns))
+                    .Select(ns => ns!),
+                .. appRoutes
+                    .SelectMany(r => r.DeploymentRoutes)
+                    .Where(dr => dr.IsEnabled && dr.AppDeployment?.ClusterId == component.Cluster.Id)
+                    .Select(dr => dr.AppDeployment?.Namespace)
+                    .Where(ns => !string.IsNullOrWhiteSpace(ns))
+                    .Select(ns => ns!),
+            ];
+
+            foreach (string routeNs in routeNamespaces)
+            {
+                await RunProcessAsync("kubectl",
+                    $"label namespace {routeNs} " +
+                    $"{ExternalRouteService.RouteNamespaceLabel}={ExternalRouteService.RouteNamespaceLabelValue} " +
+                    $"--overwrite --kubeconfig {tempKubeconfig}", ct);
+            }
+
             string combinedYaml = string.Join("\n---\n", documents);
             await File.WriteAllTextAsync(tempManifest, combinedYaml, ct);
 
@@ -1453,7 +1795,25 @@ public class ComponentLifecycleService(
             };
         }
 
-        string arguments = $"apply -f {command.ManifestUrl} --kubeconfig {kubeconfigPath}";
+        // Server-side apply, always. A client-side `kubectl apply` stores the entire submitted
+        // document in the kubectl.kubernetes.io/last-applied-configuration annotation, and an
+        // annotation may not exceed 262144 bytes. The Gateway API HTTPRoute CRD is larger than
+        // that on its own, so upgrading those CRDs client-side fails with:
+        //
+        //   The CustomResourceDefinition "httproutes.gateway.networking.k8s.io" is invalid:
+        //   metadata.annotations: Too long: may not be more than 262144 bytes
+        //
+        // Worse than failing: it fails PARTWAY. The smaller CRDs in the same bundle apply
+        // cleanly first, so the cluster is left with some resources at the new version and the
+        // rest at the old one, while the component reports an error nobody reads as "your CRDs
+        // are now mixed-version". Server-side apply writes no such annotation and has no
+        // equivalent ceiling.
+        //
+        // --force-conflicts takes ownership of fields last written by a client-side apply. Without
+        // it, the first server-side apply over a client-side-managed resource is rejected as a
+        // field-manager conflict — which is exactly the state every existing install is in.
+        string arguments =
+            $"apply --server-side --force-conflicts -f {command.ManifestUrl} --kubeconfig {kubeconfigPath}";
         return await RunProcessAsync("kubectl", arguments, ct);
     }
 
@@ -1526,8 +1886,25 @@ public class ComponentLifecycleService(
             }
 
             // If there's a repo URL, add the repo first and resolve the chart reference.
+            //
+            // OCI registries are the exception: they are NOT chart repositories and `helm repo add` on one
+            // fails with "not a valid chart repository or cannot be reached ... invalid reference". A chart
+            // in a registry is addressed directly as oci://<registry>/<path>/<chart> with --version, which
+            // is exactly the reference already built above — so for OCI there is nothing to add and nothing
+            // to rewrite, and doing either is what breaks the install.
+            bool isOciRepo = command.RepoUrl?.StartsWith("oci://", StringComparison.OrdinalIgnoreCase) == true;
 
-            if (!string.IsNullOrWhiteSpace(command.RepoUrl) && command.Operation != "uninstall")
+            if (isOciRepo && command.Operation != "uninstall")
+            {
+                // A private registry needs an authenticated helm session before the chart can be pulled.
+                // Anonymous pull works for public registries, so this is best-effort: an unconfigured
+                // registry is not an error here, it is simply one we have no credentials for. When the pull
+                // then fails on 401, the helm error says so plainly, which is more useful than refusing up
+                // front on a registry that might not have needed credentials at all.
+                await EnsureOciRegistryLoginAsync(command.RepoUrl!, ct);
+            }
+
+            if (!string.IsNullOrWhiteSpace(command.RepoUrl) && command.Operation != "uninstall" && !isOciRepo)
             {
                 string repoName = $"entkube-{command.ReleaseName}";
 
@@ -1552,6 +1929,7 @@ public class ComponentLifecycleService(
                 }
             }
             else if (string.IsNullOrWhiteSpace(command.RepoUrl)
+                     && !isOciRepo
                      && command.Operation != "uninstall"
                      && !string.IsNullOrWhiteSpace(command.ChartReference)
                      && !command.ChartReference.Contains('/')
@@ -1592,6 +1970,170 @@ public class ComponentLifecycleService(
             {
                 Directory.Delete(tempChartDir, recursive: true);
             }
+        }
+    }
+
+    /// <summary>
+    /// Logs helm into an OCI registry when credentials for that host are configured, so a chart in a
+    /// private registry can be pulled.
+    ///
+    /// Credentials come from the <c>Helm:Registries</c> configuration section, keyed by host:
+    /// <code>Helm__Registries__entit_azurecr_io__Username</code> (dots in the host become underscores,
+    /// because a configuration key cannot contain a colon-delimited segment with dots in every provider).
+    /// Nothing happens when the host is not configured — public registries need no login, and refusing to
+    /// proceed would break them.
+    ///
+    /// The login is written to helm's own config and persists for the life of the container, so repeating
+    /// it per install costs one cheap call and keeps the code stateless — which matters because the
+    /// management plane is a container that can be replaced at any time.
+    /// </summary>
+    private async Task EnsureOciRegistryLoginAsync(string repoUrl, CancellationToken ct)
+    {
+        string host;
+        try
+        {
+            host = new Uri(repoUrl).Host;
+        }
+        catch (UriFormatException)
+        {
+            return;   // malformed URL; the helm command itself will report it far more clearly
+        }
+
+        if (string.IsNullOrEmpty(host) || !LoggedInRegistries.TryAdd(host, 0)) return;
+
+        string keyed = host.Replace('.', '_');
+        string? username = configuration[$"Helm:Registries:{keyed}:Username"];
+        string? password = configuration[$"Helm:Registries:{keyed}:Password"];
+
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+        {
+            logger.LogDebug(
+                "No helm credentials configured for OCI registry {Host}; attempting an anonymous pull. "
+                + "Set Helm__Registries__{Keyed}__Username and __Password if it is private.", host, keyed);
+            return;
+        }
+
+        // Password on stdin, never in the argument list — process arguments are readable by any process
+        // on the host and routinely land in logs.
+        HelmExecutionResult result = await RunProcessAsync(
+            "helm", $"registry login {host} --username {username} --password-stdin", ct, stdin: password);
+
+        if (result.Success)
+        {
+            logger.LogInformation("Logged helm in to OCI registry {Host}.", host);
+        }
+        else
+        {
+            // Not fatal: the pull may still succeed anonymously, and if it does not, helm's own error is
+            // the one worth surfacing.
+            LoggedInRegistries.TryRemove(host, out _);   // let the next install retry the login
+            logger.LogWarning("helm registry login for {Host} failed: {Output}", host, result.Output);
+        }
+    }
+
+    /// <summary>
+    /// Name of the image-pull Secret EntKube creates and maintains in a release namespace.
+    /// Fixed rather than configurable: EntKube owns this Secret, and a name an operator could change is a
+    /// name that drifts out of step with the <c>imagePullSecrets</c> value written alongside it.
+    /// </summary>
+    public const string ManagedPullSecretName = "entkube-registry";
+
+    /// <summary>
+    /// Ensures the cluster can pull an EntKube-published image, by creating a <c>dockerconfigjson</c>
+    /// Secret in the release namespace from EntKube's own registry credentials.
+    ///
+    /// This is a different pull from the one EntKube makes for the chart. The <b>kubelet in the managed
+    /// cluster</b> fetches the image, so EntKube's registry session does not help it — the cluster needs
+    /// its own credential, and without one the chart installs cleanly and every pod then sits in
+    /// ImagePullBackOff. Requiring an operator to hand-build that Secret per cluster is exactly the kind of
+    /// step this platform exists to remove, so it is created from the same configuration that already
+    /// authenticates the chart pull.
+    ///
+    /// <para>Does nothing when no credentials are configured for the host. That is the correct behaviour
+    /// for a public registry — every third-party component in the catalog pulls anonymously — and it means
+    /// publishing these images publicly later needs no code change, only the credentials removed.</para>
+    ///
+    /// Returns the Secret's name when one was ensured, so the caller can reference it in the chart values.
+    /// </summary>
+    private async Task<string?> EnsureImagePullSecretAsync(
+        ClusterComponent component, CatalogEntry? catalog, string kubeconfig, CancellationToken ct)
+    {
+        string? host = catalog?.ImageRegistryHost;
+        if (string.IsNullOrWhiteSpace(host)) return null;
+
+        string keyed = host.Replace('.', '_');
+        string? username = configuration[$"Helm:Registries:{keyed}:Username"];
+        string? password = configuration[$"Helm:Registries:{keyed}:Password"];
+
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+        {
+            logger.LogDebug(
+                "No registry credentials configured for {Host}; assuming its images pull anonymously. "
+                + "Set Helm__Registries__{Keyed}__Username and __Password if they do not.", host, keyed);
+            return null;
+        }
+
+        string ns = component.Namespace ?? "default";
+
+        // The docker config the kubelet reads. "auth" is the base64 of user:password, which is what the
+        // Docker credential format expects — username/password alone are not enough for some registries.
+        string auth = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"));
+        string dockerConfig = JsonSerializer.Serialize(new
+        {
+            auths = new Dictionary<string, object>
+            {
+                [host] = new { username, password, auth },
+            },
+        });
+
+        string manifest = $"""
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: {ManagedPullSecretName}
+              namespace: {ns}
+              labels:
+                app.kubernetes.io/managed-by: entkube
+            type: kubernetes.io/dockerconfigjson
+            data:
+              .dockerconfigjson: {Convert.ToBase64String(Encoding.UTF8.GetBytes(dockerConfig))}
+            """;
+
+        string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-pull-{Guid.NewGuid()}.kubeconfig");
+        string manifestPath = Path.Combine(Path.GetTempPath(), $"entkube-pull-{Guid.NewGuid()}.yaml");
+        try
+        {
+            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+            // Written to a file rather than passed as --from-literal: process arguments are readable by
+            // any process on the host and routinely end up in logs.
+            await File.WriteAllTextAsync(manifestPath, manifest, ct);
+
+            // The Secret has to exist before Helm creates the pods that reference it, and the namespace
+            // before the Secret. Both are idempotent.
+            await RunProcessAsync("kubectl", $"create namespace {ns} --kubeconfig {kubeconfigPath}", ct);
+
+            HelmExecutionResult applied = await RunProcessAsync(
+                "kubectl", $"apply -f {manifestPath} --kubeconfig {kubeconfigPath}", ct);
+
+            if (!applied.Success)
+            {
+                // Not fatal: a pull secret may already exist by another name, or the registry may permit
+                // anonymous pulls after all. Helm's own failure is the more useful one to surface.
+                logger.LogWarning(
+                    "Could not create the image-pull Secret {Secret} in {Namespace}: {Output}",
+                    ManagedPullSecretName, ns, applied.Output);
+                return null;
+            }
+
+            logger.LogInformation(
+                "Ensured image-pull Secret {Secret} in {Namespace} for registry {Host}.",
+                ManagedPullSecretName, ns, host);
+            return ManagedPullSecretName;
+        }
+        finally
+        {
+            if (File.Exists(kubeconfigPath)) File.Delete(kubeconfigPath);
+            if (File.Exists(manifestPath)) File.Delete(manifestPath);
         }
     }
 
@@ -1934,8 +2476,11 @@ public class ComponentLifecycleService(
         }
     }
 
+    /// <param name="stdin">Written to the process's standard input and then closed. Used for secrets —
+    /// a password in <paramref name="arguments"/> is readable by any process on the host and lands in
+    /// logs, so anything sensitive comes through here instead.</param>
     private static async Task<HelmExecutionResult> RunProcessAsync(
-        string program, string arguments, CancellationToken ct)
+        string program, string arguments, CancellationToken ct, string? stdin = null)
     {
         ProcessStartInfo psi = new()
         {
@@ -1943,6 +2488,7 @@ public class ComponentLifecycleService(
             Arguments = arguments,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = stdin is not null,
             UseShellExecute = false,
             CreateNoWindow = true
         };
@@ -1953,6 +2499,12 @@ public class ComponentLifecycleService(
         try
         {
             process.Start();
+
+            if (stdin is not null)
+            {
+                await process.StandardInput.WriteAsync(stdin);
+                process.StandardInput.Close();
+            }
 
             Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
             Task<string> stderrTask = process.StandardError.ReadToEndAsync(ct);

@@ -20,6 +20,8 @@ public class ExternalRouteServiceTests : IDisposable
     private readonly ExternalRouteService sut;
     private readonly Guid clusterId = Guid.NewGuid();
     private readonly Guid componentId = Guid.NewGuid();
+    private readonly Guid tenantId = Guid.NewGuid();
+    private readonly Guid envId = Guid.NewGuid();
 
     public ExternalRouteServiceTests()
     {
@@ -36,8 +38,6 @@ public class ExternalRouteServiceTests : IDisposable
 
         // Seed a cluster with traefik installed and a monitoring component.
 
-        Guid tenantId = Guid.NewGuid();
-        Guid envId = Guid.NewGuid();
         Tenant tenant = new() { Id = tenantId, Name = "RouteTenant", Slug = "route" };
         Data.Environment env = new() { Id = envId, TenantId = tenantId, Name = "production" };
         KubernetesCluster cluster = new()
@@ -614,5 +614,180 @@ public class ExternalRouteServiceTests : IDisposable
 
         route.GatewayName.Should().Be("traefik-gateway");
         route.GatewayNamespace.Should().Be("traefik");
+    }
+
+    // ──────── Hostnames an application route already owns ────────
+
+    /// <summary>
+    /// Puts an enabled AppRoute on the seeded cluster claiming a hostname, with one enabled
+    /// deployment route behind it. That is the shape ApplyExternalRoutesAsync looks for when it
+    /// decides which ExternalRoutes it is willing to send to the cluster.
+    /// </summary>
+    private void SeedAppRouteFor(string hostname)
+    {
+        // An AppDeployment hangs off an App, which hangs off a Customer — the foreign keys are
+        // enforced here, so the whole chain has to exist before the route does.
+        Customer customer = new() { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Flow" };
+        App app = new() { Id = Guid.NewGuid(), CustomerId = customer.Id, Name = "flow" };
+
+        AppDeployment deployment = new()
+        {
+            Id = Guid.NewGuid(),
+            AppId = app.Id,
+            EnvironmentId = envId,
+            Name = "flow",
+            Namespace = "flow",
+            ClusterId = clusterId,
+        };
+
+        AppRoute appRoute = new()
+        {
+            Id = Guid.NewGuid(),
+            AppId = app.Id,
+            Hostname = hostname,
+            IsEnabled = true,
+        };
+
+        AppDeploymentRoute deploymentRoute = new()
+        {
+            Id = Guid.NewGuid(),
+            AppRouteId = appRoute.Id,
+            AppDeploymentId = deployment.Id,
+            PathPrefix = "/",
+            ServiceName = "flow-frontend-web",
+            ServicePort = 443,
+            IsEnabled = true,
+        };
+
+        db.Set<Customer>().Add(customer);
+        db.Set<App>().Add(app);
+        db.Set<AppDeployment>().Add(deployment);
+        db.Set<AppRoute>().Add(appRoute);
+        db.Set<AppDeploymentRoute>().Add(deploymentRoute);
+        db.SaveChanges();
+    }
+
+    /// <summary>
+    /// The outage this check exists to prevent. An application route already serves the hostname
+    /// with per-path rules; an external route on the same hostname renders an object of the same
+    /// name carrying a single backend, so saving one arms a trap that springs the next time any
+    /// component on the cluster is applied.
+    /// </summary>
+    [Fact]
+    public async Task AddRoute_OnAHostnameAnAppRouteServes_IsRejected()
+    {
+        SeedAppRouteFor("flow.sto2.entit.eu");
+
+        ExternalRouteRequest request = new()
+        {
+            Hostname = "flow.sto2.entit.eu",
+            ServiceName = "flow-definition-store",
+            ServicePort = 443,
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt-prod"
+        };
+
+        Func<Task> add = () => sut.AddRouteAsync(componentId, request);
+
+        await add.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*already served by an application route*");
+    }
+
+    /// <summary>
+    /// The operator may well have typed the hostname with different capitalisation in the two
+    /// forms. DNS does not distinguish them and neither does the generated object name, so the
+    /// check must not either.
+    /// </summary>
+    [Fact]
+    public async Task AddRoute_MatchesAppRouteHostnameRegardlessOfCase()
+    {
+        SeedAppRouteFor("flow.sto2.entit.eu");
+
+        ExternalRouteRequest request = new()
+        {
+            Hostname = "FLOW.STO2.ENTIT.EU",
+            ServiceName = "flow-definition-store",
+            ServicePort = 443,
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt-prod"
+        };
+
+        Func<Task> add = () => sut.AddRouteAsync(componentId, request);
+
+        await add.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*already served by an application route*");
+    }
+
+    /// <summary>
+    /// A hostname no application route claims is unaffected — this check narrows nothing else.
+    /// </summary>
+    [Fact]
+    public async Task AddRoute_OnAnUnclaimedHostname_StillSucceeds()
+    {
+        SeedAppRouteFor("flow.sto2.entit.eu");
+
+        ExternalRouteRequest request = new()
+        {
+            Hostname = "grafana.example.com",
+            ServicePort = 80,
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt-prod"
+        };
+
+        ExternalRoute route = await sut.AddRouteAsync(componentId, request);
+
+        route.Hostname.Should().Be("grafana.example.com");
+    }
+
+    /// <summary>
+    /// Routes saved before the check existed are still in the database, and the apply step now
+    /// silently holds them back. The UI needs to be able to name them, or the operator sees a
+    /// route that looks configured and a cluster that disagrees, with nothing connecting the two.
+    /// </summary>
+    [Fact]
+    public async Task ShadowedHostnames_NamesTheRoutesTheApplyStepHoldsBack()
+    {
+        // Saved first, while the hostname was still free — exactly how the real one got there.
+        await sut.AddRouteAsync(componentId, new ExternalRouteRequest
+        {
+            Hostname = "flow.sto2.entit.eu",
+            ServiceName = "flow-definition-store",
+            ServicePort = 443,
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt-prod"
+        });
+
+        await sut.AddRouteAsync(componentId, new ExternalRouteRequest
+        {
+            Hostname = "grafana.example.com",
+            ServicePort = 80,
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt-prod"
+        });
+
+        SeedAppRouteFor("flow.sto2.entit.eu");
+
+        IReadOnlySet<string> shadowed = await sut.ShadowedHostnamesAsync(componentId);
+
+        shadowed.Should().BeEquivalentTo(["flow.sto2.entit.eu"]);
+    }
+
+    /// <summary>
+    /// With no application routes anywhere, nothing is held back and nothing is flagged.
+    /// </summary>
+    [Fact]
+    public async Task ShadowedHostnames_IsEmptyWhenNoAppRouteCompetes()
+    {
+        await sut.AddRouteAsync(componentId, new ExternalRouteRequest
+        {
+            Hostname = "grafana.example.com",
+            ServicePort = 80,
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt-prod"
+        });
+
+        IReadOnlySet<string> shadowed = await sut.ShadowedHostnamesAsync(componentId);
+
+        shadowed.Should().BeEmpty();
     }
 }

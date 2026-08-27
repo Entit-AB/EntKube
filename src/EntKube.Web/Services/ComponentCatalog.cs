@@ -67,6 +67,16 @@ public class CatalogEntry
     /// </summary>
     public DetectionResource? DetectionResource { get; init; }
 
+    /// <summary>
+    /// Registry host serving this component's container image, when it is one EntKube publishes to a
+    /// private registry (e.g. <c>entit.azurecr.io</c>). Set it and EntKube creates the image-pull Secret in
+    /// the release namespace from its own configured credentials, so an operator never hand-builds one.
+    ///
+    /// Leave null for everything pulled from a public registry — which is every third-party component in
+    /// this catalog, and why none of them has ever needed a pull secret.
+    /// </summary>
+    public string? ImageRegistryHost { get; init; }
+
     /// <summary>Default release name for Helm.</summary>
     public string? DefaultReleaseName { get; init; }
 
@@ -164,11 +174,13 @@ public static class ComponentCatalog
         {
             Key = "gateway-api-crds",
             DisplayName = "Gateway API CRDs",
-            Description = "Installs the Kubernetes Gateway API CRDs (experimental channel): HTTPRoute, TCPRoute, TLSRoute, UDPRoute, GRPCRoute, Gateway, GatewayClass. Required by Traefik and Istio Gateway API support.",
+            Description = "Installs the Kubernetes Gateway API CRDs (experimental channel): HTTPRoute, TCPRoute, TLSRoute, UDPRoute, GRPCRoute, Gateway, GatewayClass. Required by Traefik and Istio Gateway API support. v1.5+ is required for inbound mTLS on customer routes — client-certificate validation (spec.tls.frontend) does not exist in the schema before it, and an older CRD prunes the field silently.",
             Icon = "bi-diagram-2",
             Category = "Ingress",
             ComponentType = "ManifestUrl",
-            HelmRepoUrl = "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/experimental-install.yaml",
+            // Experimental channel, not standard: TCPRoute and UDPRoute (used by L4 routes) are
+            // still experimental-only. v1.5 is the floor for client-certificate validation.
+            HelmRepoUrl = "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.0/experimental-install.yaml",
             HelmChartName = "",
             DefaultNamespace = "gateway-system",
             DefaultReleaseName = "gateway-api-crds",
@@ -323,6 +335,38 @@ public static class ComponentCatalog
 
                 service:
                   type: LoadBalancer
+                  # Repeats the chart's own defaults because setting `ports` replaces the whole
+                  # list — dropping status-port, 80 or 443 here would take the gateway offline.
+                  ports:
+                    - name: status-port
+                      port: 15021
+                      protocol: TCP
+                      targetPort: 15021
+                    - name: http2
+                      port: 80
+                      protocol: TCP
+                      targetPort: 80
+                    - name: https
+                      port: 443
+                      protocol: TCP
+                      targetPort: 443
+                    # Mutual TLS for customer apps. Client-certificate validation is a per-port
+                    # property of the Gateway, so routes requiring a client certificate are served
+                    # here instead of on 443 — where a CA would demand a certificate from every
+                    # co-hosted hostname. Costs no extra LoadBalancer: same Service, same IP.
+                    - name: https-mtls
+                      port: 8443
+                      protocol: TCP
+                      targetPort: 8443
+
+                # High availability. Every hostname on the cluster enters through this one
+                # Deployment, so a single replica makes an ordinary node drain a full external
+                # outage. The chart refuses to render the PodDisruptionBudget unless minReplicas
+                # is above 1, which is why the two settings arrive together.
+                autoscaling:
+                  minReplicas: 2
+                podDisruptionBudget:
+                  minAvailable: 1
 
                 # Resource allocation
                 resources:
@@ -386,7 +430,14 @@ public static class ComponentCatalog
                     # GCP: cloud.google.com/load-balancer-type: "Internal"
                     # AWS: service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
                     networking.istio.io/internal: "true"
-                
+
+                # High availability — same reasoning as the external gateway, applied to the
+                # mesh-internal path.
+                autoscaling:
+                  minReplicas: 2
+                podDisruptionBudget:
+                  minAvailable: 1
+
                 # Resource allocation
                 resources:
                   requests:
@@ -421,6 +472,21 @@ public static class ComponentCatalog
                             PILOT_ENABLE_GATEWAY_API: "true"
                             PILOT_ENABLE_GATEWAY_API_STATUS: "true"
                             PILOT_ENABLE_GATEWAY_API_DEPLOYMENT_CONTROLLER: "true"
+                            # TCPRoute and UDPRoute are alpha in Gateway API, and istiod ignores
+                            # them unless this is set — it accepts the Gateway, programs the
+                            # LoadBalancer, then attaches no listener and reports
+                            # "protocol TCP is supported, but only when
+                            # PILOT_ENABLE_ALPHA_GATEWAY_API=true is configured" on the listener.
+                            # EntKube emits both kinds (see ExternalRouteService's L4 gateway and
+                            # the wg-easy component), so leaving this off ships L4 gateways that
+                            # cost a public IP and route nothing.
+                            PILOT_ENABLE_ALPHA_GATEWAY_API: "true"
+
+                          # Two replicas so a node drain or an upgrade cannot take the whole
+                          # control plane with it. Config pushes stop when istiod does: existing
+                          # proxies keep their last-known config, but no route, listener or
+                          # certificate change reaches the data plane until it comes back.
+                          autoscaleMin: 2
 
                         # Resource allocation
                         resources:
@@ -1415,17 +1481,17 @@ public static class ComponentCatalog
                 },
                 new ComponentFormField
                 {
-                    Key = "ingest-endpoint", Label = "EntKube Ingest URL",
+                    Key = "ingest-endpoint", Label = "Telemetry Ingest URL",
                     YamlPath = "config.exporters.otlphttp/entkube.endpoint", Type = FormFieldType.Text,
                     DefaultValue = "", Placeholder = "https://entkube.example.com/ingest/otlp",
-                    HelpText = "EntKube's telemetry ingest base URL reachable from this cluster (ending in /ingest/otlp). The collector appends /v1/logs and /v1/traces."
+                    HelpText = "Where this collector ships logs and traces (ending in /ingest/otlp — the collector appends /v1/logs and /v1/traces). Two valid destinations: the EntKube Telemetry Indexer in THIS cluster, if one is installed, which keeps the data in the cluster; or EntKube's own public ingest URL. Filled in automatically — and repointed at the in-cluster indexer when you install one and re-apply this collector."
                 },
                 new ComponentFormField
                 {
                     Key = "ingest-token", Label = "Ingest Token",
                     YamlPath = "config.extensions.bearertokenauth.token", Type = FormFieldType.Password,
                     StoreAsSecret = true, SecretName = "otel-ingest-token",
-                    HelpText = "Per-cluster ingest token from the cluster's Telemetry Ingest panel. Sent as a Bearer token; stored encrypted in the vault and injected at install."
+                    HelpText = "Per-cluster token, sent as a Bearer token. Required by BOTH destinations — the in-cluster indexer validates the same token, so switching between them changes only the URL. Filled in automatically; stored encrypted in the vault and injected at install."
                 }
             ],
             // DaemonSet. The contrib image is required for the filelog receiver + k8sattributes
@@ -1672,6 +1738,62 @@ public static class ComponentCatalog
                     DefaultValue = "http://otel-collector.monitoring:4317",
                     Placeholder = "http://otel-collector.monitoring:4317",
                     HelpText = "OTLP gRPC endpoint of the EntKube Telemetry Collector (the collector's Service, pinned to name 'otel-collector'). Change only if the collector runs in another namespace. Metrics are sent to the same host:port."
+                },
+                // The OBI agent DaemonSet. The chart ships `resources: {}`, which makes the pod
+                // BestEffort: invisible to the scheduler and first to be killed under node memory
+                // pressure — on a tracing agent that means silently losing spans for a whole node.
+                new ComponentFormField
+                {
+                    Key = "cpu-request", Label = "CPU Request",
+                    YamlPath = "resources.requests.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "100m", Placeholder = "e.g. 100m, 200m"
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-request", Label = "Memory Request",
+                    YamlPath = "resources.requests.memory", Type = FormFieldType.Text,
+                    DefaultValue = "256Mi", Placeholder = "e.g. 256Mi, 512Mi"
+                },
+                new ComponentFormField
+                {
+                    Key = "cpu-limit", Label = "CPU Limit",
+                    YamlPath = "resources.limits.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "500m", Placeholder = "e.g. 500m, 1",
+                    HelpText = "eBPF probe overhead scales with request rate on the node. Required on clusters that enforce a LimitRange."
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-limit", Label = "Memory Limit",
+                    YamlPath = "resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "1Gi", Placeholder = "e.g. 1Gi, 2Gi",
+                    HelpText = "OBI holds per-process state for every workload it instruments, so memory tracks the number of processes on the node rather than traffic. Raise this on dense nodes — an OOMKill costs the node's tracing until the pod restarts."
+                },
+                // The Kubernetes metadata cache Deployment (k8sCache.replicas is 1 below), which
+                // holds cluster object metadata and so scales with cluster size, not node size.
+                new ComponentFormField
+                {
+                    Key = "cache-cpu-request", Label = "Metadata Cache CPU Request",
+                    YamlPath = "k8sCache.resources.requests.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "50m", Placeholder = "e.g. 50m, 100m"
+                },
+                new ComponentFormField
+                {
+                    Key = "cache-memory-request", Label = "Metadata Cache Memory Request",
+                    YamlPath = "k8sCache.resources.requests.memory", Type = FormFieldType.Text,
+                    DefaultValue = "128Mi", Placeholder = "e.g. 128Mi, 256Mi"
+                },
+                new ComponentFormField
+                {
+                    Key = "cache-cpu-limit", Label = "Metadata Cache CPU Limit",
+                    YamlPath = "k8sCache.resources.limits.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "200m", Placeholder = "e.g. 200m, 500m"
+                },
+                new ComponentFormField
+                {
+                    Key = "cache-memory-limit", Label = "Metadata Cache Memory Limit",
+                    YamlPath = "k8sCache.resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "512Mi", Placeholder = "e.g. 512Mi, 1Gi",
+                    HelpText = "Tracks the number of pods/services/nodes in the cluster. Raise on large clusters; the cache going OOM costs every span its Kubernetes attributes."
                 }
             ],
             // OBI config lives under the chart's config.data block. CRITICAL: the chart's
@@ -1681,10 +1803,31 @@ public static class ComponentCatalog
             // hostPort, so the chart default would silently ship spans into the void. The
             // chart already defaults securityContext.privileged=true, RBAC, and ServiceAccount.
             DefaultValues = """
+                # The chart defaults to `resources: {}` for both workloads, which leaves them
+                # BestEffort — unschedulable-aware and first to be evicted under node pressure.
+                # Both get explicit values instead; the form fields above edit these paths.
+                resources:
+                  requests:
+                    cpu: 100m
+                    memory: 256Mi
+                  limits:
+                    cpu: 500m
+                    # OBI keeps per-process state for everything it instruments, so this tracks
+                    # process count on the node, not traffic. Raise on dense nodes.
+                    memory: 1Gi
+
                 # Enable the in-cluster K8s metadata cache (decorates spans/metrics with
                 # namespace/pod/deployment). Chart default is 0 (disabled).
                 k8sCache:
                   replicas: 1
+                  # Scales with the number of objects in the CLUSTER, not with node size.
+                  resources:
+                    requests:
+                      cpu: 50m
+                      memory: 128Mi
+                    limits:
+                      cpu: 200m
+                      memory: 512Mi
 
                 config:
                   data:
@@ -1715,6 +1858,247 @@ public static class ComponentCatalog
                       endpoint: http://otel-collector.monitoring:4317
                       protocol: grpc
                 """
+        },
+
+        // ── EntKube telemetry (in-cluster) ──
+
+        new CatalogEntry
+        {
+            Key = "entkube-telemetry-indexer",
+            DisplayName = "EntKube Telemetry Indexer",
+            Description = "Indexes this cluster's logs and traces INSIDE the cluster instead of shipping them across the WAN to EntKube. Receives OTLP from the EntKube Telemetry Collector, writes a Lucene inverted index on a PersistentVolume (hot), keeps recently sealed segments on the same volume (warm), and seals them to S3-compatible object storage (cold). EntKube then makes one query request per user action instead of carrying every log line of every cluster into one process. Real full-text search on the message body plus term lookups on namespace/pod/container/severity/trace id — not Loki's label-only indexing, and with none of Elasticsearch's shard allocation or mapping management: a segment is an immutable file with a fixed schema. Single replica by design (the engine is single-writer); scale reads with the Query component.",
+            Icon = "bi-hdd-stack",
+            Category = "Monitoring",
+            HelmRepoUrl = "oci://entit.azurecr.io/helm",
+            HelmChartName = "entkube-telemetry",
+            HelmChartVersion = "0.1.0",
+            ImageRegistryHost = "entit.azurecr.io",
+            DefaultNamespace = "monitoring",
+            DefaultReleaseName = "entkube-telemetry",
+            Dependencies = ["otel-collector"],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "pv-size", Label = "Data Volume Size",
+                    YamlPath = "indexer.persistence.size", Type = FormFieldType.Text,
+                    DefaultValue = "20Gi", Placeholder = "e.g. 20Gi, 100Gi",
+                    HelpText = "Holds the active index plus the warm tier. Keep it comfortably above the warm-tier ceiling below, or eviction runs constantly."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-class", Label = "Storage Class",
+                    YamlPath = "indexer.persistence.storageClass", Type = FormFieldType.Text,
+                    Placeholder = "e.g. local-path, longhorn, gp3",
+                    HelpText = "Leave empty for the cluster default. Prefer SSD-backed storage — this volume is on the query path."
+                },
+                new ComponentFormField
+                {
+                    Key = "warm-retention-days", Label = "Warm tier (days on local disk)",
+                    YamlPath = "telemetry.warmRetentionDays", Type = FormFieldType.Number,
+                    DefaultValue = "3",
+                    HelpText = "How much sealed history stays on the volume, where queries read it without touching object storage. Past this it is served cold and re-cached on demand — nothing is lost, it is just slower."
+                },
+                new ComponentFormField
+                {
+                    Key = "warm-max-bytes", Label = "Warm tier size ceiling (bytes)",
+                    YamlPath = "telemetry.warmMaxBytes", Type = FormFieldType.Number,
+                    DefaultValue = "8589934592",
+                    HelpText = "Backstop for a burst that seals more than the day window anticipated: least-recently-used segments are evicted first. 0 disables the size bound. Default 8 GiB."
+                },
+                new ComponentFormField
+                {
+                    Key = "trace-sample-rate", Label = "Raw span sampling (%)",
+                    YamlPath = "telemetry.traceSampleRatePercent", Type = FormFieldType.Number,
+                    DefaultValue = "100",
+                    HelpText = "Keeps this fraction of ordinary traces' raw spans. Traces with any error, or any span slower than the keep threshold, are ALWAYS kept. 100 = no sampling. Lower it if eBPF tracing is producing more spans than you need waterfalls for."
+                },
+                new ComponentFormField
+                {
+                    Key = "image-pull-secret", Label = "Image Pull Secret",
+                    YamlPath = "imagePullSecrets.0.name", Type = FormFieldType.Text,
+                    Placeholder = "e.g. entkube-registry",
+                    HelpText = "Name of an existing image-pull Secret in this namespace, if the EntKube registry is private. The CLUSTER pulls this image, not EntKube, so EntKube's own registry credentials do not apply — create the Secret in the target namespace first (kubectl create secret docker-registry). Leave blank for a public registry."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-link", Label = "Segment Object Storage",
+                    YamlPath = "entkube-telemetry:storage-link-id", Type = FormFieldType.StorageLink,
+                    HelpText = "S3-compatible bucket for sealed log/trace segments. Strongly recommended: without one the node seals to its own volume, so sealed history dies with the volume and a separate query component cannot read it at all."
+                },
+                // Hidden — written by EntKubeTelemetryService and injected at install time.
+                new ComponentFormField
+                {
+                    Key = "telemetry-s3-access-key", Label = "S3 Access Key",
+                    YamlPath = "objectStorage.accessKey", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "telemetry-s3-access-key", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "telemetry-s3-secret-key", Label = "S3 Secret Key",
+                    YamlPath = "objectStorage.secretKey", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "telemetry-s3-secret-key", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "telemetry-ingest-token", Label = "Ingest Token",
+                    YamlPath = "node.ingestToken", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "telemetry-ingest-token", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "telemetry-query-token", Label = "Query Token",
+                    YamlPath = "node.queryToken", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "telemetry-query-token", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "retention-days", Label = "Retention (days)",
+                    YamlPath = "telemetry.retentionDays", Type = FormFieldType.Number,
+                    DefaultValue = "90",
+                    HelpText = "How long sealed segments are kept at all. WARN-and-above logs and trace summaries keep this full window."
+                },
+                new ComponentFormField
+                {
+                    Key = "verbose-retention-days", Label = "DEBUG/INFO log retention (days)",
+                    YamlPath = "telemetry.verboseLogRetentionDays", Type = FormFieldType.Number,
+                    DefaultValue = "14",
+                    HelpText = "Most log VOLUME is low-severity noise, so it ages out early while warnings and errors keep the full window. The single biggest lever on stored size."
+                },
+                new ComponentFormField
+                {
+                    Key = "raw-span-retention-days", Label = "Raw span retention (days)",
+                    YamlPath = "telemetry.rawSpanRetentionDays", Type = FormFieldType.Number,
+                    DefaultValue = "30",
+                    HelpText = "Deep waterfall detail, by far the largest signal. The per-trace summary index that powers the trace list keeps the full retention regardless, so you still see WHICH traces happened for the whole window."
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-limit", Label = "Memory Limit",
+                    YamlPath = "indexer.resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "2Gi", Placeholder = "e.g. 2Gi, 4Gi",
+                    HelpText = "Lucene memory-maps segments, so most of the working set is page cache rather than heap. Raise this for high ingest rates or very wide queries."
+                },
+            ],
+        },
+
+        new CatalogEntry
+        {
+            Key = "entkube-telemetry-query",
+            DisplayName = "EntKube Telemetry Query",
+            Description = "Scales out the telemetry READ path. Searches sealed segments straight from object storage and merges the indexer's not-yet-sealed events, so a heavy query never competes with ingest for the indexer's CPU. Optional: the indexer answers every query on its own, so add this only when query load warrants it or you want more read capacity than one pod. Requires the EntKube Telemetry Indexer on the same cluster — it borrows the segment list and the hot tier from it.",
+            Icon = "bi-search",
+            Category = "Monitoring",
+            HelmRepoUrl = "oci://entit.azurecr.io/helm",
+            HelmChartName = "entkube-telemetry",
+            HelmChartVersion = "0.1.0",
+            ImageRegistryHost = "entit.azurecr.io",
+            DefaultNamespace = "monitoring",
+            DefaultReleaseName = "entkube-telemetry-query",
+            Dependencies = ["entkube-telemetry-indexer"],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "querier-enabled", Label = "Enable query pods",
+                    YamlPath = "querier.enabled", Type = FormFieldType.Toggle,
+                    DefaultValue = "true", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "replicas", Label = "Replicas",
+                    YamlPath = "querier.replicas", Type = FormFieldType.Number,
+                    DefaultValue = "2",
+                    HelpText = "Each replica gets its own segment cache volume, so queries spread across them without sharing disk."
+                },
+                new ComponentFormField
+                {
+                    Key = "pv-size", Label = "Cache Volume Size (per replica)",
+                    YamlPath = "querier.persistence.size", Type = FormFieldType.Text,
+                    DefaultValue = "20Gi", Placeholder = "e.g. 20Gi, 100Gi",
+                    HelpText = "A read-through cache of cold segments. Keep it above the size ceiling below — the cache is bounded by that number, not by the volume, so a smaller volume fills before eviction starts."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-class", Label = "Storage Class",
+                    YamlPath = "querier.persistence.storageClass", Type = FormFieldType.Text,
+                    Placeholder = "e.g. local-path, longhorn, gp3",
+                    HelpText = "Leave empty for the cluster default."
+                },
+                new ComponentFormField
+                {
+                    Key = "warm-max-bytes", Label = "Cache size ceiling (bytes)",
+                    YamlPath = "telemetry.warmMaxBytes", Type = FormFieldType.Number,
+                    DefaultValue = "8589934592",
+                    HelpText = "Bounds the downloaded-segment cache, evicting least-recently-used first. Unlike the indexer, a querier does NOT age its cache by event time — a query over old logs would otherwise download those segments and discard them immediately, re-downloading on every repeat."
+                },
+                new ComponentFormField
+                {
+                    Key = "image-pull-secret", Label = "Image Pull Secret",
+                    YamlPath = "imagePullSecrets.0.name", Type = FormFieldType.Text,
+                    Placeholder = "e.g. entkube-registry",
+                    HelpText = "Name of an existing image-pull Secret in this namespace, if the EntKube registry is private. The CLUSTER pulls this image, not EntKube, so EntKube's own registry credentials do not apply — create the Secret in the target namespace first (kubectl create secret docker-registry). Leave blank for a public registry."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-link", Label = "Segment Object Storage",
+                    YamlPath = "entkube-telemetry:storage-link-id", Type = FormFieldType.StorageLink,
+                    HelpText = "S3-compatible bucket for sealed log/trace segments. Strongly recommended: without one the node seals to its own volume, so sealed history dies with the volume and a separate query component cannot read it at all."
+                },
+                // Hidden — written by EntKubeTelemetryService and injected at install time.
+                new ComponentFormField
+                {
+                    Key = "telemetry-s3-access-key", Label = "S3 Access Key",
+                    YamlPath = "objectStorage.accessKey", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "telemetry-s3-access-key", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "telemetry-s3-secret-key", Label = "S3 Secret Key",
+                    YamlPath = "objectStorage.secretKey", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "telemetry-s3-secret-key", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "telemetry-ingest-token", Label = "Ingest Token",
+                    YamlPath = "node.ingestToken", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "telemetry-ingest-token", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "telemetry-query-token", Label = "Query Token",
+                    YamlPath = "node.queryToken", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "telemetry-query-token", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "retention-days", Label = "Retention (days)",
+                    YamlPath = "telemetry.retentionDays", Type = FormFieldType.Number,
+                    DefaultValue = "90",
+                    HelpText = "How long sealed segments are kept at all. WARN-and-above logs and trace summaries keep this full window."
+                },
+                new ComponentFormField
+                {
+                    Key = "verbose-retention-days", Label = "DEBUG/INFO log retention (days)",
+                    YamlPath = "telemetry.verboseLogRetentionDays", Type = FormFieldType.Number,
+                    DefaultValue = "14",
+                    HelpText = "Most log VOLUME is low-severity noise, so it ages out early while warnings and errors keep the full window. The single biggest lever on stored size."
+                },
+                new ComponentFormField
+                {
+                    Key = "raw-span-retention-days", Label = "Raw span retention (days)",
+                    YamlPath = "telemetry.rawSpanRetentionDays", Type = FormFieldType.Number,
+                    DefaultValue = "30",
+                    HelpText = "Deep waterfall detail, by far the largest signal. The per-trace summary index that powers the trace list keeps the full retention regardless, so you still see WHICH traces happened for the whole window."
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-limit", Label = "Memory Limit",
+                    YamlPath = "querier.resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "2Gi", Placeholder = "e.g. 2Gi, 4Gi",
+                    HelpText = "Raise for wide queries over long windows, which materialize more rows."
+                },
+            ],
         },
 
         // ── Storage ──
@@ -3085,33 +3469,17 @@ public static class ComponentCatalog
                                         "@type": type.googleapis.com/envoy.extensions.filters.udp.udp_proxy.v3.Route
                                         cluster: wg_easy_udp_cluster
                                 idle_timeout: 120s
-                ---
-                # HTTPRoute: exposes the wg-easy web UI through the Istio external gateway.
-                # %%WG_HOST%% is substituted at apply-time with the Public Hostname / IP
-                # entered in the component's FormFields. Note: an HTTPRoute hostname must be
-                # a DNS name — if WG_HOST is a bare IP, edit this to a real hostname in the
-                # advanced YAML editor (WireGuard UDP itself works fine with an IP).
-                # Requires the Gateway to allow routes from outside its own namespace —
-                # standard Istio setup includes allowedRoutes.namespaces.from: All.
-                apiVersion: gateway.networking.k8s.io/v1
-                kind: HTTPRoute
-                metadata:
-                  name: wg-easy-ui
-                  namespace: wg-easy
-                spec:
-                  parentRefs:
-                    - name: %%WG_GATEWAY%%
-                      namespace: istio-system
-                  hostnames:
-                    - "%%WG_HOST%%"
-                  rules:
-                    - matches:
-                        - path:
-                            type: PathPrefix
-                            value: /
-                      backendRefs:
-                        - name: wg-easy-svc
-                          port: 51821
+
+                # The web UI is NOT exposed by a hand-written HTTPRoute here. It used to be, and
+                # that route could only ever serve plaintext: a route in the component manifest is
+                # invisible to the Gateway generator, so no HTTPS listener and no certificate were
+                # ever created for the hostname, and the route attached to the port-80 listener —
+                # the WireGuard admin UI, password field and all, over cleartext HTTP.
+                #
+                # The UI is registered as a normal ExternalRoute instead (see
+                # CatalogComponentRegistrar.SaveWgEasyConfigIfNeededAsync), which gets it the same
+                # HTTPS listener, cert-manager Certificate, HSTS header and listener pinning as
+                # every other exposed service.
                 """,
             FormFields =
             [

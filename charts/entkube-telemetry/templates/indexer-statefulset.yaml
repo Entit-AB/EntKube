@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "entkube-telemetry.indexerName" . }}
+  labels:
+    {{- include "entkube-telemetry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: indexer
+spec:
+  serviceName: {{ include "entkube-telemetry.indexerName" . }}
+  # Deliberately 1. The engine is single-writer by design — one IndexWriter per signal, no cross-node
+  # coordination — so a second indexer would corrupt the index and race the first over the same catalog
+  # and the same object keys. Scale the READ path with the querier instead.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "entkube-telemetry.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: indexer
+  template:
+    metadata:
+      labels:
+        {{- include "entkube-telemetry.labels" . | nindent 8 }}
+        app.kubernetes.io/component: indexer
+      annotations:
+        {{- with .Values.indexer.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "entkube-telemetry.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # The collector buffers and retries, so a slow, clean shutdown costs nothing and buys a final seal
+      # of whatever is still in the active index — otherwise up to an hour of unsealed events is re-read
+      # from disk on restart, or lost if the volume is replaced.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: indexer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: Node__Role
+              value: Indexer
+            - name: Node__IngestToken
+              valueFrom:
+                secretKeyRef: { name: {{ include "entkube-telemetry.secretName" . }}, key: Node__IngestToken }
+            # The indexer keeps the full warm window; the querier is the one configured differently.
+            - name: Telemetry__WarmRetentionDays
+              value: {{ .Values.telemetry.warmRetentionDays | quote }}
+            {{- include "entkube-telemetry.env" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          readinessProbe:
+            # Checks the data volume is writable, not just that the process is up: an indexer that cannot
+            # write its index would still accept OTLP and silently lose every batch.
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.indexer.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- include "entkube-telemetry.tmpVolumeMounts" . | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.indexer.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.indexer.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.indexer.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.indexer.persistence.storageClass }}
+        storageClassName: {{ .Values.indexer.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.indexer.persistence.size | quote }}

@@ -9,6 +9,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The segment engine moved to its own assembly (docs/telemetry-in-cluster.md). A global using
+         keeps every existing consumer compiling against the new namespace without a per-file edit. -->
+    <Using Include="EntKube.Telemetry" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="Data\app.db" CopyToOutputDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
@@ -31,6 +37,7 @@
     <PackageReference Include="StackExchange.Redis" Version="2.8.16" />
     <PackageReference Include="YamlDotNet" Version="17.1.0" />
     <PackageReference Include="ZstdSharp.Port" Version="0.8.1" />
+    <ProjectReference Include="..\EntKube.Telemetry\EntKube.Telemetry.csproj" />
     <ProjectReference Include="..\EntKube.Web.Client\EntKube.Web.Client.csproj" />
     <ProjectReference Include="..\EntKube.Agents.Protocol\EntKube.Agents.Protocol.csproj" />
     <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" Version="10.0.1" />

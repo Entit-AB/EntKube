@@ -1,6 +1,6 @@
 using EntKube.Web.Services;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// The Lucene/S3 segment-engine implementation of <see cref="ITelemetryIngest"/>. Each batch is routed to

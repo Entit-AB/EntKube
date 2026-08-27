@@ -1,0 +1,112 @@
+name: Release telemetry plane
+
+# The in-cluster telemetry image and its Helm chart, published together.
+#
+# Deliberately NOT on every push to main, unlike the management-plane image in deploy.yml. That image is
+# deployed by tag from CI, so "newest wins" is correct for it. This one is different: the chart's version
+# is *pinned* in ComponentCatalog.cs, so a release only means anything when that version changes — and
+# publishing on every commit would silently replace a version operators have already installed.
+#
+# So a release is a tag, or a deliberate manual run.
+
+on:
+  push:
+    tags:
+      - 'telemetry-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (default: the chart''s own version)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Build and verify without publishing'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: entit.azurecr.io
+
+jobs:
+  verify:
+    name: Verify chart and catalog agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # These tests check that every catalog form field targets a real chart value, and that the pinned
+      # chart version matches Chart.yaml. Both failures are silent at install time — a value quietly
+      # ignored, or an install that quietly uses the previous chart — so they are worth blocking a
+      # release on rather than discovering in a cluster.
+      - name: Catalog/chart consistency
+        run: >-
+          dotnet test tests/EntKube.Web.Tests/EntKube.Web.Tests.csproj
+          --filter "FullyQualifiedName~EntKubeTelemetryCatalog"
+          --nologo
+
+      - name: Lint chart
+        run: |
+          helm lint charts/entkube-telemetry \
+            --set node.tenantId=00000000-0000-0000-0000-000000000001 \
+            --set node.clusterId=00000000-0000-0000-0000-000000000002 \
+            --set node.ingestToken=lint --set node.queryToken=lint
+
+      # Rendering both roles catches template errors that lint does not — a bad reference inside a
+      # conditional block only fails when that block is actually rendered.
+      - name: Render both roles
+        run: |
+          helm template rel charts/entkube-telemetry \
+            --set node.tenantId=00000000-0000-0000-0000-000000000001 \
+            --set node.clusterId=00000000-0000-0000-0000-000000000002 \
+            --set node.ingestToken=lint --set node.queryToken=lint \
+            --set objectStorage.bucket=b --set objectStorage.accessKey=a --set objectStorage.secretKey=s \
+            --set querier.enabled=true > /dev/null
+
+  publish:
+    name: Build and publish
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ACR
+        if: ${{ !inputs.dry_run }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      # helm push to an OCI registry authenticates separately from docker, even against the same host.
+      - name: Log in to the chart registry
+        if: ${{ !inputs.dry_run }}
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD }}" \
+            | helm registry login ${{ env.REGISTRY }} \
+                --username "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
+
+      # One script builds, verifies and publishes, so CI and a laptop cannot drift apart in how a release
+      # is made. Everything CI does here can be reproduced by running the same command locally.
+      - name: Build and publish
+        run: |
+          ARGS=()
+          [[ -n "${{ inputs.version }}" ]] && ARGS+=(--version "${{ inputs.version }}")
+          [[ "${{ inputs.dry_run }}" != "true" ]] && ARGS+=(--push)
+          scripts/build-telemetry.sh "${ARGS[@]}"
+
+      - name: Upload chart package
+        uses: actions/upload-artifact@v4
+        with:
+          name: entkube-telemetry-chart
+          path: artifacts/telemetry/*.tgz
+          if-no-files-found: error

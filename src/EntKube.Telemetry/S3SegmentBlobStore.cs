@@ -2,7 +2,7 @@ using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// S3/MinIO-backed <see cref="ISegmentBlobStore"/> for sealed telemetry segments, built on the AWS SDK

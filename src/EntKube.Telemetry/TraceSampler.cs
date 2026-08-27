@@ -1,6 +1,6 @@
 using EntKube.Web.Services;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// Head-samples a batch of spans down to the raw spans worth keeping for waterfalls, WITHOUT thinning the

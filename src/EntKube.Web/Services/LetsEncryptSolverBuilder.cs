@@ -60,6 +60,11 @@ public static class LetsEncryptSolverBuilder
             paths[p + "name"] = gwName;
             paths[p + "namespace"] = gwNamespace;
             paths[p + "kind"] = "Gateway";
+            // An HTTP-01 challenge is answered on port 80 and nowhere else. Without a section name
+            // cert-manager's solver route also attaches to the hostname's live HTTPS listener,
+            // where it shadows /.well-known/acme-challenge/ on the running site — and keeps
+            // shadowing it for as long as the solver outlives its challenge.
+            paths[p + "sectionName"] = ExternalRouteService.HttpListenerName;
             idx++;
         }
 

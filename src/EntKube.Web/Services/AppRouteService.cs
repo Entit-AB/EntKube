@@ -18,6 +18,15 @@ public class AppRouteRequest
     /// in EntKube leave this true.
     /// </summary>
     public bool IsManaged { get; set; } = true;
+
+    /// <summary>Require a client certificate (inbound mTLS). Needs <see cref="ClientCaBundleId"/>.</summary>
+    public bool RequireClientCertificate { get; set; }
+
+    /// <summary>The trust anchor client certificates are validated against.</summary>
+    public Guid? ClientCaBundleId { get; set; }
+
+    /// <summary>Drop the plain 443 listener, leaving the hostname reachable over mTLS only.</summary>
+    public bool ClientCertificateOnly { get; set; }
 }
 
 public class AppDeploymentRouteRequest
@@ -50,6 +59,7 @@ public class AppRouteService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         return await db.AppRoutes
+            .Include(r => r.ClientCaBundle)
             .Include(r => r.DeploymentRoutes)
                 .ThenInclude(dr => dr.AppDeployment)
                     .ThenInclude(d => d.Environment)
@@ -64,6 +74,7 @@ public class AppRouteService(
 
         return await db.AppRoutes
             .Include(r => r.App)
+            .Include(r => r.ClientCaBundle)
             .Include(r => r.DeploymentRoutes)
                 .ThenInclude(dr => dr.AppDeployment)
                     .ThenInclude(d => d.Environment)
@@ -93,6 +104,8 @@ public class AppRouteService(
         if (duplicate)
             throw new InvalidOperationException($"Hostname '{hostname}' is already configured for this app.");
 
+        await ValidateClientCertificateAsync(db, appId, request, ct);
+
         AppRoute route = new()
         {
             Id = Guid.NewGuid(),
@@ -103,7 +116,10 @@ public class AppRouteService(
             TlsCertificate = request.TlsCertificate,
             TlsPrivateKey = request.TlsPrivateKey,
             IsEnabled = request.IsEnabled,
-            IsManaged = request.IsManaged
+            IsManaged = request.IsManaged,
+            RequireClientCertificate = request.RequireClientCertificate,
+            ClientCaBundleId = request.RequireClientCertificate ? request.ClientCaBundleId : null,
+            ClientCertificateOnly = request.RequireClientCertificate && request.ClientCertificateOnly
         };
 
         db.AppRoutes.Add(route);
@@ -131,14 +147,53 @@ public class AppRouteService(
         if (duplicate)
             throw new InvalidOperationException($"Hostname '{hostname}' is already configured for this app.");
 
+        await ValidateClientCertificateAsync(db, route.AppId, request, ct);
+
         route.Hostname = hostname;
         route.TlsMode = request.TlsMode;
         route.ClusterIssuerName = request.ClusterIssuerName?.Trim();
         route.TlsCertificate = request.TlsCertificate;
         route.TlsPrivateKey = request.TlsPrivateKey;
         route.IsEnabled = request.IsEnabled;
+        route.RequireClientCertificate = request.RequireClientCertificate;
+        route.ClientCaBundleId = request.RequireClientCertificate ? request.ClientCaBundleId : null;
+        route.ClientCertificateOnly = request.RequireClientCertificate && request.ClientCertificateOnly;
 
         await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Checks that a route asking for client certificates has a usable trust anchor, and that the
+    /// anchor belongs to the app's own tenant — pointing a route at another tenant's anchor would
+    /// publish it on that anchor's listener port and accept that tenant's client certificates.
+    /// </summary>
+    private static async Task ValidateClientCertificateAsync(
+        ApplicationDbContext db, Guid appId, AppRouteRequest request, CancellationToken ct)
+    {
+        if (!request.RequireClientCertificate) return;
+
+        if (request.ClientCaBundleId is not { } bundleId)
+            throw new InvalidOperationException(
+                "Pick the CA that signs your clients' certificates — mTLS can't be enabled without a trust anchor.");
+
+        Guid tenantId = await db.Apps
+            .Where(a => a.Id == appId)
+            .Select(a => a.Customer.TenantId)
+            .FirstOrDefaultAsync(ct);
+
+        ClientCaBundle? bundle = await db.ClientCaBundles
+            .Include(b => b.Certificates)
+            .FirstOrDefaultAsync(b => b.Id == bundleId, ct);
+
+        if (bundle is null || bundle.TenantId != tenantId)
+            throw new InvalidOperationException("Trust anchor not found for this tenant.");
+
+        // An anchor with no CA yields an empty trust store; Istio rejects the Gateway outright,
+        // which would take down every listener on it, not just this route's.
+        if (bundle.Certificates.Count == 0)
+            throw new InvalidOperationException(
+                $"Trust anchor '{bundle.Name}' has no CA certificate yet. Upload the customer's CA before " +
+                "requiring client certificates.");
     }
 
     public async Task DeleteRouteAsync(Guid routeId, CancellationToken ct = default)
@@ -324,6 +379,7 @@ public class AppRouteService(
 
         AppDeploymentRoute dr = await db.AppDeploymentRoutes
             .Include(r => r.AppRoute)
+                .ThenInclude(r => r.ClientCaBundle)
             .Include(r => r.AppDeployment)
             .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct)
             ?? throw new InvalidOperationException("Deployment route not found.");
@@ -410,27 +466,36 @@ public class AppRouteService(
         foreach (AppDeploymentRoute dr in deploymentRoutes)
         {
             string drNs = dr.AppDeployment?.Namespace ?? ns;
+            // One filters: block per rule, holding every filter that rule needs — a rewrite and
+            // HSTS both land here, and a second filters: key would be invalid YAML.
+            string filters = "";
+            if (dr.RewritePath is not null && dr.PathPrefix != "/")
+            {
+                filters +=
+                    $"        - type: URLRewrite\n" +
+                    $"          urlRewrite:\n" +
+                    $"            path:\n" +
+                    $"              type: ReplacePrefixMatch\n" +
+                    $"              replacePrefixMatch: {dr.RewritePath}\n";
+            }
+            filters += ExternalRouteService.HstsFilterEntry("        ");
+
             if (dr.PathPrefix != "/")
             {
                 rules.AppendLine($"    - matches:");
                 rules.AppendLine($"        - path:");
                 rules.AppendLine($"            type: PathPrefix");
                 rules.AppendLine($"            value: {dr.PathPrefix}");
-                if (dr.RewritePath is not null)
-                {
-                    rules.AppendLine($"      filters:");
-                    rules.AppendLine($"        - type: URLRewrite");
-                    rules.AppendLine($"          urlRewrite:");
-                    rules.AppendLine($"            path:");
-                    rules.AppendLine($"              type: ReplacePrefixMatch");
-                    rules.AppendLine($"              replacePrefixMatch: {dr.RewritePath}");
-                }
+                rules.AppendLine($"      filters:");
+                rules.Append(filters);
                 rules.AppendLine($"      backendRefs:");
                 rules.Append(RenderBackendRefs(dr, drNs, "        "));
             }
             else
             {
-                rules.AppendLine($"    - backendRefs:");
+                rules.AppendLine($"    - filters:");
+                rules.Append(filters);
+                rules.AppendLine($"      backendRefs:");
                 rules.Append(RenderBackendRefs(dr, drNs, "        "));
             }
 
@@ -446,13 +511,45 @@ public class AppRouteService(
             $"  name: {routeName}\n" +
             $"  namespace: {ns}\n" +
             $"spec:\n" +
-            $"  parentRefs:\n" +
-            $"    - name: {primary.GatewayName}\n" +
-            $"      namespace: {primary.GatewayNamespace}\n" +
+            ExternalRouteService.RenderParentRefs(
+                primary.GatewayName, primary.GatewayNamespace, ListenerSectionsFor(route)) +
             $"  hostnames:\n" +
             $"    - {route.Hostname}\n" +
             $"  rules:\n" +
             rules.ToString().TrimEnd();
+    }
+
+    /// <summary>
+    /// The Gateway listeners this route's HTTPRoute must attach to — the plain 443 listener, the
+    /// hostname's mTLS listener, or both, matching exactly what
+    /// <see cref="ExternalRouteService.GenerateGatewayYaml"/> puts on the Gateway for it.
+    ///
+    /// Attaching by name rather than letting the route match every listener is what keeps the
+    /// route off port 80 (see <see cref="ExternalRouteService.RenderParentRefs"/>), so this has to
+    /// enumerate the listeners rather than leave them implicit.
+    /// </summary>
+    public static IEnumerable<string> ListenerSectionsFor(AppRoute route)
+    {
+        // ClientCertificateOnly drops the hostname from 443 entirely; without it, 443 stays.
+        if (!(route.RequireClientCertificate && route.ClientCertificateOnly))
+        {
+            yield return ExternalRouteService.ToListenerName(route.Hostname);
+        }
+
+        if (!route.RequireClientCertificate)
+        {
+            yield break;
+        }
+
+        // Same contract as MtlsService.BuildPlan: an unloaded trust anchor cannot be told apart
+        // from "no mTLS configured", and guessing the port would pin the route to a listener the
+        // Gateway does not have — the route would attach nowhere and the hostname would go dark.
+        ClientCaBundle bundle = route.ClientCaBundle
+            ?? throw new InvalidOperationException(
+                $"Route '{route.Hostname}' requires a client certificate but its trust anchor was not " +
+                "loaded. Include AppRoute.ClientCaBundle before generating the HTTPRoute.");
+
+        yield return MtlsService.MtlsListenerName(route.Hostname, bundle.ListenerPort);
     }
 
     public static string GenerateCertificateYaml(AppRoute route, IReadOnlyList<AppDeploymentRoute> deploymentRoutes)

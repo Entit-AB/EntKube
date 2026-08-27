@@ -57,8 +57,7 @@ public class ComponentCatalogTests : IDisposable
         byte[] testRootKey = Convert.FromBase64String("dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
         VaultEncryptionService encryption = new(testRootKey);
         VaultService vaultService = new(dbFactory, encryption);
-        lifecycleService = new ComponentLifecycleService(
-            dbFactory, vaultService, TestServices.BuildKeycloak(dbFactory, vaultService));
+        lifecycleService = TestServices.BuildLifecycle(dbFactory, vaultService);
     }
 
     public void Dispose()
@@ -109,6 +108,46 @@ public class ComponentCatalogTests : IDisposable
 
         List<string> keys = ComponentCatalog.Entries.Select(e => e.Key).ToList();
         keys.Should().OnlyHaveUniqueItems();
+    }
+
+    [Fact]
+    public void OtelEbpf_ExposesResourceFieldsForBothWorkloads()
+    {
+        // The eBPF chart ships `resources: {}` for the agent DaemonSet AND for the k8sCache
+        // Deployment, so without these fields both run BestEffort with no way to bound them from
+        // the UI — which is how the agent ends up quietly pressing against a limit it never set.
+        CatalogEntry entry = ComponentCatalog.GetByKey("otel-ebpf")!;
+
+        string[] expected =
+        [
+            "resources.requests.cpu", "resources.requests.memory",
+            "resources.limits.cpu", "resources.limits.memory",
+            "k8sCache.resources.requests.cpu", "k8sCache.resources.requests.memory",
+            "k8sCache.resources.limits.cpu", "k8sCache.resources.limits.memory",
+        ];
+
+        entry.FormFields.Select(f => f.YamlPath).Should().Contain(expected);
+        entry.FormFields.Where(f => expected.Contains(f.YamlPath))
+            .Should().OnlyContain(f => !string.IsNullOrWhiteSpace(f.DefaultValue),
+                "a blank default would merge nothing and leave the workload BestEffort");
+    }
+
+    [Fact]
+    public void OtelEbpf_ResourceFieldsMergeOntoTheChartsResourcePaths()
+    {
+        // Guards the dotted paths against a chart rename: a wrong path merges silently into a key
+        // Helm ignores, so the values look edited while the pod keeps running unbounded.
+        CatalogEntry entry = ComponentCatalog.GetByKey("otel-ebpf")!;
+        Dictionary<string, string> values = entry.FormFields
+            .Where(f => f.DefaultValue is { Length: > 0 })
+            .ToDictionary(f => f.Key, f => f.DefaultValue!);
+
+        string merged = CatalogComponentRegistrar.MergeFormValues(entry, values, []);
+
+        YamlFormMerger.ExtractValue(merged, "resources.limits.memory").Should().Be("1Gi");
+        YamlFormMerger.ExtractValue(merged, "resources.requests.cpu").Should().Be("100m");
+        YamlFormMerger.ExtractValue(merged, "k8sCache.resources.limits.memory").Should().Be("512Mi");
+        YamlFormMerger.ExtractValue(merged, "k8sCache.resources.requests.cpu").Should().Be("50m");
     }
 
     // ──────── Lookup ────────

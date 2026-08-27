@@ -1,6 +1,6 @@
 using EntKube.Web.Services;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// Bundles the two per-tenant log segment registries — the important (<c>logs</c>, WARN+) tier and the

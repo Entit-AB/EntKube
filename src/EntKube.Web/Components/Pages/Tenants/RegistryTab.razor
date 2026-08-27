@@ -1108,6 +1108,47 @@ else if (selectedHarbor is not null)
                                     <span class="text-muted">Disabled</span>
                                 }
                             </dd>
+
+                            <dt class="col-sm-3 text-muted">Admin Credentials</dt>
+                            <dd class="col-sm-9">
+                                @if (checkingCredentials)
+                                {
+                                    <span class="spinner-border spinner-border-sm text-primary"></span>
+                                }
+                                else if (credentialError is not null)
+                                {
+                                    <span class="badge bg-danger-subtle text-danger border border-danger-subtle">Unavailable</span>
+                                    <div class="text-danger small mt-1">@credentialError</div>
+                                }
+                                else if (credentialCheck is null)
+                                {
+                                    <span class="text-muted">—</span>
+                                }
+                                else if (credentialCheck.Authenticated && credentialCheck.IsSysAdmin)
+                                {
+                                    <span class="badge bg-success-subtle text-success border border-success-subtle">Valid</span>
+                                    <span class="text-muted small ms-2">@credentialCheck.Message</span>
+                                }
+                                else
+                                {
+                                    <span class="badge bg-danger-subtle text-danger border border-danger-subtle">
+                                        @(credentialCheck.Authenticated ? "Not an administrator" : "Rejected")
+                                    </span>
+                                    <div class="text-danger small mt-1">@credentialCheck.Message</div>
+                                    <div class="text-muted small mt-1">
+                                        Registries, replication, robot accounts and project webhooks all need an
+                                        authenticated administrator; the project list and this page do not, which is
+                                        why they keep working.
+                                    </div>
+                                }
+                                <div class="mt-2">
+                                    <button class="btn btn-sm btn-outline-secondary"
+                                            disabled="@checkingCredentials"
+                                            @onclick="CheckCredentials">
+                                        <i class="bi bi-shield-check me-1"></i>Test credentials
+                                    </button>
+                                </div>
+                            </dd>
                         </dl>
                     </div>
                 </div>
@@ -1290,6 +1331,9 @@ else
     private HarborSystemInfo? systemInfo;
     private bool loadingInfo;
     private string? infoError;
+    private HarborCredentialCheck? credentialCheck;
+    private bool checkingCredentials;
+    private string? credentialError;
 
     // Registries
     private List<HarborRegistryInfo>? registries;
@@ -1529,6 +1573,25 @@ else
         }
         catch (Exception ex) { infoError = ex.Message; }
         finally { loadingInfo = false; }
+
+        // System info is one of the few endpoints Harbor answers anonymously, so it succeeding
+        // says nothing about the stored credentials. Check them separately.
+        await CheckCredentials();
+    }
+
+    private async Task CheckCredentials()
+    {
+        if (selectedHarbor?.Config is null) return;
+        checkingCredentials = true;
+        credentialError = null;
+        credentialCheck = null;
+        StateHasChanged();
+        try
+        {
+            credentialCheck = await HarborService.VerifyCredentialsAsync(TenantId, selectedHarbor.Config);
+        }
+        catch (Exception ex) { credentialError = ex.Message; }
+        finally { checkingCredentials = false; }
     }
 
     private async Task LoadWebhooks()

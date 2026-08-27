@@ -3,9 +3,8 @@ using System.Text;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
 using Lucene.Net.Documents;
-using Microsoft.EntityFrameworkCore;
 
-namespace EntKube.Web.Services.Telemetry;
+namespace EntKube.Telemetry;
 
 /// <summary>
 /// The <c>traces</c> signal manager: the trace-summary index. At span ingest it turns each batch into
@@ -16,7 +15,7 @@ namespace EntKube.Web.Services.Telemetry;
 /// </summary>
 public sealed class TraceSummarySegmentManager(
     Guid tenantId,
-    IDbContextFactory<ApplicationDbContext> catalog,
+    ISegmentCatalog catalog,
     ISegmentBlobStore blobs,
     SegmentEngineOptions options,
     ILogger<TraceSummarySegmentManager> logger)
