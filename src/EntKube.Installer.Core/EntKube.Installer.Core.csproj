@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>EntKube.Installer</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Shell quoting is internal — it is a detail of how a remote command is assembled, not API —
+         but it is also the boundary that stops a connection string or a password from becoming
+         arbitrary code on the server. That is worth testing directly rather than only through the
+         commands that happen to use it. -->
+    <InternalsVisibleTo Include="EntKube.Web.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- SSH and SFTP for installing onto a remote server. Only the SshExecutor touches this; the
+         local install path does not load it. -->
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
+  </ItemGroup>
+
+</Project>

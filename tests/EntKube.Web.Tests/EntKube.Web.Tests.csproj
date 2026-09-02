@@ -35,6 +35,9 @@
     <ProjectReference Include="..\..\src\EntKube.Agent\EntKube.Agent.csproj" />
     <ProjectReference Include="..\..\src\EntKube.Mcp\EntKube.Mcp.csproj" />
     <ProjectReference Include="..\..\src\EntKube.Cli\EntKube.Cli.csproj" />
+    <ProjectReference Include="..\..\src\EntKube.Installer.Core\EntKube.Installer.Core.csproj" />
+    <ProjectReference Include="..\..\src\EntKube.Installer\EntKube.Installer.csproj" />
+    <ProjectReference Include="..\..\src\EntKube.Installer.Gui\EntKube.Installer.Gui.csproj" />
   </ItemGroup>
 
 </Project>

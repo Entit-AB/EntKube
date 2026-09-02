@@ -9,6 +9,8 @@
     <Project Path="src/EntKube.ApiClient/EntKube.ApiClient.csproj" />
     <Project Path="src/EntKube.Mcp/EntKube.Mcp.csproj" />
     <Project Path="src/EntKube.Cli/EntKube.Cli.csproj" />
+    <Project Path="src/EntKube.Installer.Core/EntKube.Installer.Core.csproj" />
+    <Project Path="src/EntKube.Installer/EntKube.Installer.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/EntKube.Web.Tests/EntKube.Web.Tests.csproj" />
