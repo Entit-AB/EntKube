@@ -43,6 +43,11 @@ public class AppDeploymentRouteRequest
     /// the timeout for long-lived streams.
     /// </summary>
     public int? RequestTimeoutSeconds { get; set; }
+
+    // Session affinity is deliberately absent, exactly like the canary fields: this request is
+    // rebuilt from scratch by every edit form, so carrying affinity here would let a form that
+    // never showed it reset it to None on save. It is set through
+    // <see cref="AppRouteService.UpdateDeploymentRouteSessionAffinityAsync"/> instead.
 }
 
 /// <summary>
@@ -309,6 +314,43 @@ public class AppRouteService(
     }
 
     /// <summary>
+    /// Sets session affinity on a deployment route — the sticky-session flag the generated
+    /// DestinationRule turns into <c>loadBalancer.consistentHash</c>.
+    ///
+    /// Clears ClusterAppliedAt like every other traffic change here: the affinity only exists
+    /// once the DestinationRule reaches the cluster, and showing it as live before then would
+    /// claim sessions were pinned when they were still being spread across pods.
+    /// </summary>
+    public async Task UpdateDeploymentRouteSessionAffinityAsync(
+        Guid deploymentRouteId, SessionAffinityMode mode, string? key, int? ttlSeconds,
+        CancellationToken ct = default)
+    {
+        if (ExternalRouteService.ValidateSessionAffinity(mode, key) is string error)
+        {
+            throw new InvalidOperationException(error);
+        }
+
+        if (ttlSeconds is < 0)
+        {
+            throw new InvalidOperationException(
+                "Affinity cookie lifetime cannot be negative. Leave it empty for a session cookie.");
+        }
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        AppDeploymentRoute dr = await db.AppDeploymentRoutes
+            .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct)
+            ?? throw new InvalidOperationException("Deployment route not found.");
+
+        dr.SessionAffinity = mode;
+        dr.SessionAffinityKey = ExternalRouteService.NormalizeAffinityKey(mode, key);
+        dr.SessionAffinityTtlSeconds = mode == SessionAffinityMode.Cookie ? ttlSeconds : null;
+        dr.ClusterAppliedAt = null;
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
     /// Sets the canary service and traffic share for a route.
     ///
     /// Clears ClusterAppliedAt so the route shows as needing re-apply, exactly like a
@@ -502,6 +544,7 @@ public class AppRouteService(
             // Each deployment route carries its own timeout, so a streaming path can opt out
             // (0) while the rest of the hostname still fails fast.
             rules.Append(ExternalRouteService.RenderTimeouts(dr.RequestTimeoutSeconds, "      "));
+            rules.Append(ExternalRouteService.RenderRetry("      "));
         }
 
         return

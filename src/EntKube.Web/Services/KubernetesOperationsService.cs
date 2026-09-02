@@ -1266,10 +1266,18 @@ public class KubernetesOperationsService(
             // non-root namespace is only guaranteed to affect traffic originating from that
             // namespace, not from gateway pods in istio-system. The FQDN host uniquely
             // identifies the target service regardless of where the rule is stored.
-            foreach (AppDeploymentRoute enabledRoute in enabledRoutes)
+            // Grouped by backend Service: there is one DestinationRule per Service, so several
+            // paths on the same Service must agree on one document rather than each applying
+            // its own and the last one landing.
+            IEnumerable<IGrouping<(string Namespace, string Service), AppDeploymentRoute>> byService = enabledRoutes
+                .GroupBy(r => (
+                    Namespace: r.AppDeployment?.Namespace ?? dr.AppDeployment.Namespace,
+                    Service: r.ServiceName));
+
+            foreach (IGrouping<(string Namespace, string Service), AppDeploymentRoute> group in byService)
             {
-                string svc = enabledRoute.ServiceName;
-                string svcNs = enabledRoute.AppDeployment?.Namespace ?? dr.AppDeployment.Namespace;
+                string svc = group.Key.Service;
+                string svcNs = group.Key.Namespace;
 
                 // Read the live Service so TLS-serving ports keep TLS. A service-wide DISABLE
                 // would push plaintext into them and the backend would drop the connection.
@@ -1284,7 +1292,8 @@ public class KubernetesOperationsService(
                     namespaceModes.GetValueOrDefault(svcNs, MeshMtlsMode.Permissive));
 
                 string destinationRuleYaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
-                    svc, svcNs, gwNamespace, ports, alwaysEmit: true, serviceWideTlsMode: backendTlsMode);
+                    svc, svcNs, gwNamespace, ports, alwaysEmit: true, serviceWideTlsMode: backendTlsMode,
+                    sessionAffinity: SessionAffinitySpec.Merge(group.Select(SessionAffinitySpec.From)));
 
                 await ApplyRawYamlAsync(kubeconfig, destinationRuleYaml, ct);
             }
@@ -1826,19 +1835,28 @@ public class KubernetesOperationsService(
         (_, string gwNamespace) = ExternalRouteService.ResolveGateway(cluster.Components);
         string backendTlsMode = MeshMtlsService.BackendTlsMode(mode);
 
-        List<string> services = await db.AppDeploymentRoutes
+        // The routes, not just their service names: this rewrites the same DestinationRules the
+        // route apply writes, so it has to carry their session affinity forward. Selecting only
+        // the names would rewrite each rule without its loadBalancer block and quietly drop
+        // affinity from every published service in the namespace.
+        List<AppDeploymentRoute> nsRoutes = await db.AppDeploymentRoutes
             .Where(r => r.IsEnabled
                      && r.AppDeployment.ClusterId == clusterId
                      && r.AppDeployment.Namespace == ns)
-            .Select(r => r.ServiceName)
-            .Distinct()
+            .OrderBy(r => r.PathPrefix)
             .ToListAsync(ct);
 
-        foreach (string svc in services)
+        List<IGrouping<string, AppDeploymentRoute>> services = nsRoutes
+            .GroupBy(r => r.ServiceName)
+            .ToList();
+
+        foreach (IGrouping<string, AppDeploymentRoute> group in services)
         {
+            string svc = group.Key;
             List<KubeServicePort> ports = await GetServicePortsAsync(kubeconfig, ns, svc, ct);
             string ruleYaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
-                svc, ns, gwNamespace, ports, alwaysEmit: true, serviceWideTlsMode: backendTlsMode);
+                svc, ns, gwNamespace, ports, alwaysEmit: true, serviceWideTlsMode: backendTlsMode,
+                sessionAffinity: SessionAffinitySpec.Merge(group.Select(SessionAffinitySpec.From)));
             await ApplyRawYamlAsync(kubeconfig, ruleYaml, ct);
         }
 

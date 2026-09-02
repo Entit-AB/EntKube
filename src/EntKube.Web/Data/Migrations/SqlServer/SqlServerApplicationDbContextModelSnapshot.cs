@@ -625,6 +625,18 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<int>("ServicePort")
                         .HasColumnType("int");
 
+                    b.Property<string>("SessionAffinity")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("SessionAffinityKey")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<int?>("SessionAffinityTtlSeconds")
+                        .HasColumnType("int");
+
                     b.HasKey("Id");
 
                     b.HasIndex("AppDeploymentId");
@@ -2810,6 +2822,18 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasColumnType("nvarchar(200)");
 
                     b.Property<int>("ServicePort")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SessionAffinity")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("SessionAffinityKey")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<int?>("SessionAffinityTtlSeconds")
                         .HasColumnType("int");
 
                     b.Property<string>("TlsCertificate")

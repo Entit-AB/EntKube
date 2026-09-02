@@ -69,6 +69,34 @@ public class ExternalRoute
     /// </summary>
     public int? RequestTimeoutSeconds { get; set; }
 
+    /// <summary>
+    /// Pins a client to one backend pod for the life of its session. Rendered as
+    /// <c>loadBalancer.consistentHash</c> on the backend Service's DestinationRule, so it
+    /// applies to every route pointing at <see cref="ServiceName"/> — a Service, not a hostname, is what Istio
+    /// load balances.
+    ///
+    /// Istio-only: a Traefik gateway ignores DestinationRules entirely, and nothing is emitted
+    /// for it. Defaults to <see cref="SessionAffinityMode.None"/>, which generates exactly the
+    /// DestinationRule this field did not exist to change.
+    /// </summary>
+    public SessionAffinityMode SessionAffinity { get; set; } = SessionAffinityMode.None;
+
+    /// <summary>
+    /// The cookie name, header name, or query parameter the hash is taken from, depending on
+    /// <see cref="SessionAffinity"/>. Required for
+    /// <see cref="SessionAffinityMode.Header"/> and <see cref="SessionAffinityMode.QueryParameter"/>;
+    /// optional for <see cref="SessionAffinityMode.Cookie"/> (blank uses
+    /// <see cref="Services.ExternalRouteService.DefaultAffinityCookieName"/>); unused for
+    /// <see cref="SessionAffinityMode.SourceIp"/>.
+    /// </summary>
+    public string? SessionAffinityKey { get; set; }
+
+    /// <summary>
+    /// Lifetime of the affinity cookie in seconds. Null issues a session cookie, which expires
+    /// when the browser closes. Only meaningful for <see cref="SessionAffinityMode.Cookie"/>.
+    /// </summary>
+    public int? SessionAffinityTtlSeconds { get; set; }
+
     /// <summary>How TLS is handled — automatic via ClusterIssuer or manual cert upload.</summary>
     public TlsMode TlsMode { get; set; } = TlsMode.ClusterIssuer;
 

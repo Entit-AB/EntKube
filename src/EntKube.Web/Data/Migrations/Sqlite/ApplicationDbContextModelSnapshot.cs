@@ -620,6 +620,18 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<int>("ServicePort")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("SessionAffinity")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SessionAffinityKey")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("SessionAffinityTtlSeconds")
+                        .HasColumnType("INTEGER");
+
                     b.HasKey("Id");
 
                     b.HasIndex("AppDeploymentId");
@@ -2804,6 +2816,18 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.Property<int>("ServicePort")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SessionAffinity")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SessionAffinityKey")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("SessionAffinityTtlSeconds")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("TlsCertificate")

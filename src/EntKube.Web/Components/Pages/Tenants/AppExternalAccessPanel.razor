@@ -313,6 +313,7 @@
                                                 <th class="small">Service</th>
                                                 <th class="small" title="Gateway request timeout. 0 waits forever — only for long-lived streams.">Timeout</th>
                                                 <th class="small" title="Send a share of traffic to a second Service. EntKube splits the traffic; you provide the canary workload. Takes effect when the route is applied.">Canary</th>
+                                                <th class="small" title="Sticky sessions: pin a client to one backend pod by hashing a cookie, header, query parameter or source IP. Istio only, and it applies to the whole backend Service. Takes effect when the route is applied.">Sticky</th>
                                                 <th class="small">Cluster</th>
                                                 <th class="small">Health</th>
                                                 <th></th>
@@ -366,6 +367,52 @@
                                                         @if (!string.IsNullOrWhiteSpace(dr.CanaryServiceName) && dr.CanaryWeight > 0)
                                                         {
                                                             <small class="text-info">@(100 - dr.CanaryWeight)% stable</small>
+                                                        }
+                                                    </td>
+                                                    @{
+                                                        SessionAffinityMode drAffinity = EffectiveAffinity(dr);
+                                                    }
+                                                    <td class="small align-middle" style="width: 10rem;">
+                                                        <select class="form-select form-select-sm"
+                                                                aria-label="@($"Session affinity for {dr.PathPrefix}")"
+                                                                value="@drAffinity"
+                                                                @onchange="e => SaveDrAffinityMode(dr, e.Value?.ToString())">
+                                                            <option value="@nameof(SessionAffinityMode.None)">off</option>
+                                                            <option value="@nameof(SessionAffinityMode.Cookie)">cookie</option>
+                                                            <option value="@nameof(SessionAffinityMode.Header)">header</option>
+                                                            <option value="@nameof(SessionAffinityMode.QueryParameter)">query</option>
+                                                            <option value="@nameof(SessionAffinityMode.SourceIp)">source IP</option>
+                                                        </select>
+                                                        @if (drAffinity is SessionAffinityMode.Cookie
+                                                            or SessionAffinityMode.Header
+                                                            or SessionAffinityMode.QueryParameter)
+                                                        {
+                                                            <div class="input-group input-group-sm mt-1">
+                                                                <input class="form-control form-control-sm font-monospace"
+                                                                       placeholder="@AffinityKeyPlaceholder(drAffinity)"
+                                                                       aria-label="@($"Session affinity key for {dr.PathPrefix}")"
+                                                                       value="@dr.SessionAffinityKey"
+                                                                       @onchange="e => SaveDrAffinityKey(dr, e.Value?.ToString())" />
+                                                                @if (drAffinity == SessionAffinityMode.Cookie)
+                                                                {
+                                                                    <input type="number" min="0"
+                                                                           class="form-control form-control-sm"
+                                                                           style="max-width: 4rem;"
+                                                                           placeholder="ttl"
+                                                                           title="Affinity cookie lifetime in seconds. Empty issues a session cookie."
+                                                                           aria-label="@($"Session affinity cookie lifetime for {dr.PathPrefix}")"
+                                                                           value="@dr.SessionAffinityTtlSeconds"
+                                                                           @onchange="e => SaveDrAffinityTtl(dr, e.Value?.ToString())" />
+                                                                }
+                                                            </div>
+                                                        }
+                                                        @if (pendingAffinityMode.ContainsKey(dr.Id))
+                                                        {
+                                                            <small class="text-warning">name it to save</small>
+                                                        }
+                                                        else if (drAffinity == SessionAffinityMode.SourceIp)
+                                                        {
+                                                            <small class="text-muted">one pod per client IP</small>
                                                         }
                                                     </td>
                                                     <td class="small align-middle">@ClusterStatusBadge(dr)</td>
@@ -1014,6 +1061,89 @@
         try
         {
             await AppRouteService.UpdateDeploymentRouteTimeoutAsync(dr.Id, seconds);
+            await LoadAsync();
+        }
+        catch (Exception ex) { applyRouteError = ex.Message; }
+    }
+
+    // ── Session affinity ──
+    //
+    // Header and query-parameter affinity are meaningless without a name to hash on, so the
+    // service refuses to save them bare. Picking one in the dropdown therefore parks the choice
+    // here until the name is typed, instead of throwing an error at someone who has done nothing
+    // wrong yet — they cannot type the header name before choosing "header".
+    private readonly Dictionary<Guid, SessionAffinityMode> pendingAffinityMode = [];
+
+    private SessionAffinityMode EffectiveAffinity(AppDeploymentRoute dr) =>
+        pendingAffinityMode.TryGetValue(dr.Id, out SessionAffinityMode pending) ? pending : dr.SessionAffinity;
+
+    private static string AffinityKeyPlaceholder(SessionAffinityMode mode) => mode switch
+    {
+        SessionAffinityMode.Cookie => ExternalRouteService.DefaultAffinityCookieName,
+        SessionAffinityMode.Header => "x-tenant-id",
+        _ => "parameter"
+    };
+
+    private static bool NeedsAffinityKey(SessionAffinityMode mode) =>
+        mode is SessionAffinityMode.Header or SessionAffinityMode.QueryParameter;
+
+    private async Task SaveDrAffinityMode(AppDeploymentRoute dr, string? raw)
+    {
+        applyRouteError = null;
+
+        if (!Enum.TryParse(raw, out SessionAffinityMode mode) || mode == EffectiveAffinity(dr))
+            return;
+
+        if (NeedsAffinityKey(mode) && string.IsNullOrWhiteSpace(dr.SessionAffinityKey))
+        {
+            pendingAffinityMode[dr.Id] = mode;
+            return;
+        }
+
+        pendingAffinityMode.Remove(dr.Id);
+        await SaveDrAffinity(dr, mode, dr.SessionAffinityKey, dr.SessionAffinityTtlSeconds);
+    }
+
+    private async Task SaveDrAffinityKey(AppDeploymentRoute dr, string? raw)
+    {
+        applyRouteError = null;
+
+        SessionAffinityMode mode = EffectiveAffinity(dr);
+        string? key = string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
+
+        if (key == dr.SessionAffinityKey && mode == dr.SessionAffinity) return;
+
+        if (NeedsAffinityKey(mode) && key is null)
+        {
+            applyRouteError = ExternalRouteService.ValidateSessionAffinity(mode, key);
+            return;
+        }
+
+        pendingAffinityMode.Remove(dr.Id);
+        await SaveDrAffinity(dr, mode, key, dr.SessionAffinityTtlSeconds);
+    }
+
+    private async Task SaveDrAffinityTtl(AppDeploymentRoute dr, string? raw)
+    {
+        applyRouteError = null;
+
+        int? ttl = string.IsNullOrWhiteSpace(raw) ? null : int.TryParse(raw, out int parsed) ? parsed : -1;
+        if (ttl == dr.SessionAffinityTtlSeconds) return;
+
+        if (ttl is < 0)
+        {
+            applyRouteError = "Affinity cookie lifetime must be 0 or a positive number of seconds.";
+            return;
+        }
+
+        await SaveDrAffinity(dr, EffectiveAffinity(dr), dr.SessionAffinityKey, ttl);
+    }
+
+    private async Task SaveDrAffinity(AppDeploymentRoute dr, SessionAffinityMode mode, string? key, int? ttl)
+    {
+        try
+        {
+            await AppRouteService.UpdateDeploymentRouteSessionAffinityAsync(dr.Id, mode, key, ttl);
             await LoadAsync();
         }
         catch (Exception ex) { applyRouteError = ex.Message; }

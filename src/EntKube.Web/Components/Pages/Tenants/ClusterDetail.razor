@@ -1500,6 +1500,7 @@ else if (section == "components")
                                                             <th>Service</th>
                                                             <th>TLS</th>
                                                             <th title="Gateway request timeout. 0 waits forever — only for long-lived streams.">Timeout</th>
+                                                            <th title="Sticky sessions: pin a client to one backend pod by hashing a cookie, header, query parameter or source IP. Istio only, and it applies to the whole backend Service.">Sticky</th>
                                                             <th>Health</th>
                                                             <th class="text-end" style="width: 140px;">Actions</th>
                                                         </tr>
@@ -1552,6 +1553,62 @@ else if (section == "components")
                                                                     @if ((route.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds) == 0)
                                                                     {
                                                                         <small class="text-warning">waits forever</small>
+                                                                    }
+                                                                </td>
+                                                                @{
+                                                                    SessionAffinityMode routeAffinity = EffectiveAffinity(route);
+                                                                }
+                                                                <td style="width: 11rem;">
+                                                                    @if (!IsIstioGateway)
+                                                                    {
+                                                                        <span class="text-muted small"
+                                                                              title="Sticky sessions are carried by an Istio DestinationRule. This cluster's gateway is not Istio, so there is nothing to attach them to.">
+                                                                            —
+                                                                        </span>
+                                                                    }
+                                                                    else
+                                                                    {
+                                                                    <select class="form-select form-select-sm"
+                                                                            aria-label="@($"Session affinity for {route.Hostname}")"
+                                                                            value="@routeAffinity"
+                                                                            @onchange="e => SaveRouteAffinityMode(route, comp.Id, e.Value?.ToString())">
+                                                                        <option value="@nameof(SessionAffinityMode.None)">off</option>
+                                                                        <option value="@nameof(SessionAffinityMode.Cookie)">cookie</option>
+                                                                        <option value="@nameof(SessionAffinityMode.Header)">header</option>
+                                                                        <option value="@nameof(SessionAffinityMode.QueryParameter)">query</option>
+                                                                        <option value="@nameof(SessionAffinityMode.SourceIp)">source IP</option>
+                                                                    </select>
+                                                                    @if (routeAffinity is SessionAffinityMode.Cookie
+                                                                        or SessionAffinityMode.Header
+                                                                        or SessionAffinityMode.QueryParameter)
+                                                                    {
+                                                                        <div class="input-group input-group-sm mt-1">
+                                                                            <input class="form-control form-control-sm font-monospace"
+                                                                                   placeholder="@AffinityKeyPlaceholder(routeAffinity)"
+                                                                                   aria-label="@($"Session affinity key for {route.Hostname}")"
+                                                                                   value="@route.SessionAffinityKey"
+                                                                                   @onchange="e => SaveRouteAffinityKey(route, comp.Id, e.Value?.ToString())" />
+                                                                            @if (routeAffinity == SessionAffinityMode.Cookie)
+                                                                            {
+                                                                                <input type="number" min="0"
+                                                                                       class="form-control form-control-sm"
+                                                                                       style="max-width: 4.5rem;"
+                                                                                       placeholder="ttl"
+                                                                                       title="Affinity cookie lifetime in seconds. Empty issues a session cookie."
+                                                                                       aria-label="@($"Session affinity cookie lifetime for {route.Hostname}")"
+                                                                                       value="@route.SessionAffinityTtlSeconds"
+                                                                                       @onchange="e => SaveRouteAffinityTtl(route, comp.Id, e.Value?.ToString())" />
+                                                                            }
+                                                                        </div>
+                                                                    }
+                                                                    @if (pendingAffinityMode.ContainsKey(route.Id))
+                                                                    {
+                                                                        <small class="text-warning">name it to save</small>
+                                                                    }
+                                                                    else if (routeAffinity == SessionAffinityMode.SourceIp)
+                                                                    {
+                                                                        <small class="text-muted">one pod per client IP</small>
+                                                                    }
                                                                     }
                                                                 </td>
                                                                 <td>
@@ -2032,6 +2089,11 @@ else if (section == "components")
         EntKube.Web.Services.Telemetry.TelemetryIngestDefaults.ApplyTo(
             entry, regFormFieldValues, Cluster.Id, TenantId, IngestTokens, Config, inClusterIngest);
 
+        // Same reasoning for the query component's indexer address: the Service name contains the
+        // indexer's release name, so the field is filled from the indexer this cluster actually has
+        // rather than from a catalog literal that is only right for one particular naming.
+        EntKubeTelemetryService.ApplyIndexerUrlDefault(entry, regFormFieldValues, indexerUrl);
+
         // Load available CNPG databases and ClusterIssuers if this component type needs them.
 
         keycloakDatabases = entry.FormFields.Any(f => f.Type == FormFieldType.CnpgDatabase)
@@ -2089,11 +2151,6 @@ else if (section == "components")
             // Configure Loki S3 chunk storage if a storage link was selected.
 
             await SaveLokiConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
-        // Same reasoning for the query component's indexer address: the Service name contains the
-        // indexer's release name, so the field is filled from the indexer this cluster actually has
-        // rather than from a catalog literal that is only right for one particular naming.
-        EntKubeTelemetryService.ApplyIndexerUrlDefault(entry, regFormFieldValues, indexerUrl);
-
 
             // Configure Mimir / Tempo S3 storage if a storage link was selected.
 
@@ -3613,6 +3670,111 @@ else if (section == "components")
     /// Persists an edited request timeout and re-applies the route — the new value only takes
     /// effect once the regenerated HTTPRoute reaches the cluster.
     /// </summary>
+    // ── Session affinity ──
+    //
+    // Header and query-parameter affinity need a name to hash on, and the service refuses to
+    // save them without one. Choosing the mode therefore parks it here until the name is typed:
+    // the name cannot be typed before the mode is chosen, so rejecting the mode change outright
+    // would leave no order in which the operator could set it.
+    private readonly Dictionary<Guid, SessionAffinityMode> pendingAffinityMode = [];
+
+    /// <summary>
+    /// Session affinity is an Istio DestinationRule setting. A Traefik gateway never reads one,
+    /// so offering the control there would be offering a switch wired to nothing.
+    /// </summary>
+    private bool IsIstioGateway =>
+        ExternalRouteService.ResolveGatewayClass(components ?? []) == "istio";
+
+    private SessionAffinityMode EffectiveAffinity(ExternalRoute route) =>
+        pendingAffinityMode.TryGetValue(route.Id, out SessionAffinityMode pending) ? pending : route.SessionAffinity;
+
+    private static string AffinityKeyPlaceholder(SessionAffinityMode mode) => mode switch
+    {
+        SessionAffinityMode.Cookie => ExternalRouteService.DefaultAffinityCookieName,
+        SessionAffinityMode.Header => "x-tenant-id",
+        _ => "parameter"
+    };
+
+    private static bool NeedsAffinityKey(SessionAffinityMode mode) =>
+        mode is SessionAffinityMode.Header or SessionAffinityMode.QueryParameter;
+
+    private async Task SaveRouteAffinityMode(ExternalRoute route, Guid componentId, string? raw)
+    {
+        routeError = null;
+
+        if (!Enum.TryParse(raw, out SessionAffinityMode mode) || mode == EffectiveAffinity(route))
+        {
+            return;
+        }
+
+        if (NeedsAffinityKey(mode) && string.IsNullOrWhiteSpace(route.SessionAffinityKey))
+        {
+            pendingAffinityMode[route.Id] = mode;
+            return;
+        }
+
+        pendingAffinityMode.Remove(route.Id);
+        await SaveRouteAffinity(route, componentId, mode, route.SessionAffinityKey, route.SessionAffinityTtlSeconds);
+    }
+
+    private async Task SaveRouteAffinityKey(ExternalRoute route, Guid componentId, string? raw)
+    {
+        routeError = null;
+
+        SessionAffinityMode mode = EffectiveAffinity(route);
+        string? key = string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
+
+        if (key == route.SessionAffinityKey && mode == route.SessionAffinity)
+        {
+            return;
+        }
+
+        if (NeedsAffinityKey(mode) && key is null)
+        {
+            routeError = ExternalRouteService.ValidateSessionAffinity(mode, key);
+            return;
+        }
+
+        pendingAffinityMode.Remove(route.Id);
+        await SaveRouteAffinity(route, componentId, mode, key, route.SessionAffinityTtlSeconds);
+    }
+
+    private async Task SaveRouteAffinityTtl(ExternalRoute route, Guid componentId, string? raw)
+    {
+        routeError = null;
+
+        int? ttl = string.IsNullOrWhiteSpace(raw) ? null : int.TryParse(raw, out int parsed) ? parsed : -1;
+        if (ttl == route.SessionAffinityTtlSeconds)
+        {
+            return;
+        }
+
+        if (ttl is < 0)
+        {
+            routeError = "Affinity cookie lifetime must be 0 or a positive number of seconds.";
+            return;
+        }
+
+        await SaveRouteAffinity(route, componentId, EffectiveAffinity(route), route.SessionAffinityKey, ttl);
+    }
+
+    private async Task SaveRouteAffinity(
+        ExternalRoute route, Guid componentId, SessionAffinityMode mode, string? key, int? ttl)
+    {
+        try
+        {
+            await RouteService.UpdateRouteSessionAffinityAsync(route.Id, mode, key, ttl);
+            componentRoutes = await RouteService.GetRoutesAsync(componentId);
+            // Re-apply: the DestinationRule carrying the affinity is written by the route apply,
+            // so without this the table would show a setting the cluster does not have.
+            await LifecycleService.ApplyExternalRoutesAsync(componentId);
+        }
+        catch (InvalidOperationException ex)
+        {
+            routeError = ex.Message;
+        }
+    }
+
     private async Task SaveRouteTimeout(ExternalRoute route, Guid componentId, string? raw)
     {
         routeError = null;

@@ -640,6 +640,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(r => r.GatewayName).HasMaxLength(200);
             entity.Property(r => r.GatewayNamespace).HasMaxLength(63);
             entity.Property(r => r.TlsMode).HasConversion<string>().HasMaxLength(20);
+            entity.Property(r => r.SessionAffinity).HasConversion<string>().HasMaxLength(20);
+            entity.Property(r => r.SessionAffinityKey).HasMaxLength(200);
 
             entity.HasOne(r => r.Component)
                 .WithMany(c => c.ExternalRoutes)
@@ -2029,6 +2031,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(r => r.ServiceName).HasMaxLength(200).IsRequired();
             entity.Property(r => r.GatewayName).HasMaxLength(200);
             entity.Property(r => r.GatewayNamespace).HasMaxLength(63);
+            entity.Property(r => r.SessionAffinity).HasConversion<string>().HasMaxLength(20);
+            entity.Property(r => r.SessionAffinityKey).HasMaxLength(200);
 
             entity.HasOne(r => r.AppRoute)
                 .WithMany(ar => ar.DeploymentRoutes)

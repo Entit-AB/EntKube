@@ -26,6 +26,17 @@ public class ExternalRouteRequest
     /// timeout for long-lived streams.
     /// </summary>
     public int? RequestTimeoutSeconds { get; set; }
+
+    /// <summary>
+    /// Pin clients to one backend pod (Istio consistent hashing). Defaults to no affinity.
+    /// </summary>
+    public SessionAffinityMode SessionAffinity { get; set; } = SessionAffinityMode.None;
+
+    /// <summary>Cookie / header / query-parameter name the affinity hash is taken from.</summary>
+    public string? SessionAffinityKey { get; set; }
+
+    /// <summary>Affinity cookie lifetime in seconds. Null issues a session cookie.</summary>
+    public int? SessionAffinityTtlSeconds { get; set; }
 }
 
 /// <summary>
@@ -82,6 +93,11 @@ public class ExternalRouteService(
         {
             throw new InvalidOperationException(
                 "TLS certificate is required when using manual TLS.");
+        }
+
+        if (ValidateSessionAffinity(request.SessionAffinity, request.SessionAffinityKey) is string affinityError)
+        {
+            throw new InvalidOperationException(affinityError);
         }
 
         // Check for duplicate hostname on this cluster.
@@ -141,7 +157,10 @@ public class ExternalRouteService(
             TlsPrivateKey = request.TlsPrivateKey,
             GatewayName = gatewayName,
             GatewayNamespace = gatewayNamespace,
-            RequestTimeoutSeconds = request.RequestTimeoutSeconds
+            RequestTimeoutSeconds = request.RequestTimeoutSeconds,
+            SessionAffinity = request.SessionAffinity,
+            SessionAffinityKey = NormalizeAffinityKey(request.SessionAffinity, request.SessionAffinityKey),
+            SessionAffinityTtlSeconds = request.SessionAffinityTtlSeconds
         };
 
         db.ExternalRoutes.Add(route);
@@ -247,6 +266,55 @@ public class ExternalRouteService(
     }
 
     /// <summary>
+    /// Sets session affinity on an existing route. Takes effect on the next apply of the
+    /// component's routes — the DestinationRule is written there, not here, so nothing changes
+    /// in the cluster until the operator re-applies.
+    /// </summary>
+    public async Task UpdateRouteSessionAffinityAsync(
+        Guid routeId, SessionAffinityMode mode, string? key, int? ttlSeconds,
+        CancellationToken ct = default)
+    {
+        if (ValidateSessionAffinity(mode, key) is string error)
+        {
+            throw new InvalidOperationException(error);
+        }
+
+        if (ttlSeconds is < 0)
+        {
+            throw new InvalidOperationException(
+                "Affinity cookie lifetime cannot be negative. Leave it empty for a session cookie.");
+        }
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ExternalRoute route = await db.ExternalRoutes
+            .FirstOrDefaultAsync(r => r.Id == routeId, ct)
+            ?? throw new InvalidOperationException("Route not found.");
+
+        route.SessionAffinity = mode;
+        route.SessionAffinityKey = NormalizeAffinityKey(mode, key);
+        route.SessionAffinityTtlSeconds = mode == SessionAffinityMode.Cookie ? ttlSeconds : null;
+        await db.SaveChangesAsync(ct);
+
+        logger.LogInformation(
+            "External route {Hostname} session affinity set to {Mode}", route.Hostname, mode);
+    }
+
+    /// <summary>
+    /// Trims the affinity key and drops it for the modes that have nothing to hash on, so a key
+    /// left behind by a mode change cannot reappear if the mode is switched back.
+    /// </summary>
+    public static string? NormalizeAffinityKey(SessionAffinityMode mode, string? key)
+    {
+        if (mode is SessionAffinityMode.None or SessionAffinityMode.SourceIp)
+        {
+            return null;
+        }
+
+        return string.IsNullOrWhiteSpace(key) ? null : key.Trim();
+    }
+
+    /// <summary>
     /// Deletes an external route. The caller should also remove the HTTPRoute
     /// from the cluster (via kubectl delete or the K8s API).
     /// </summary>
@@ -331,6 +399,7 @@ public class ExternalRouteService(
 
         rule.Append(RenderHstsFilter("      "));
         rule.Append(RenderTimeouts(route.RequestTimeoutSeconds, "      "));
+        rule.Append(RenderRetry("      "));
 
         return
             $"apiVersion: gateway.networking.k8s.io/v1\n" +
@@ -490,13 +559,23 @@ public class ExternalRouteService(
     /// lets a sidecar-less backend serve traffic. A namespace under STRICT mesh mTLS passes
     /// ISTIO_MUTUAL instead — see <see cref="MeshMtlsService.BackendTlsMode"/>.
     /// </param>
+    /// <param name="sessionAffinity">
+    /// Pins clients to a single backend pod via <c>loadBalancer.consistentHash</c>. Null or
+    /// <see cref="SessionAffinityMode.None"/> emits no loadBalancer block at all, leaving the
+    /// rule byte-identical to what it was before affinity existed.
+    /// </param>
     public static string GenerateBackendDestinationRuleYaml(
         string serviceName, string serviceNamespace, string gatewayNamespace,
-        IEnumerable<KubeServicePort> ports, bool alwaysEmit, string serviceWideTlsMode = "DISABLE")
+        IEnumerable<KubeServicePort> ports, bool alwaysEmit, string serviceWideTlsMode = "DISABLE",
+        SessionAffinitySpec? sessionAffinity = null)
     {
         List<KubeServicePort> tlsPorts = ports.Where(IsTlsBackendPort).ToList();
 
-        if (tlsPorts.Count == 0 && !alwaysEmit)
+        // Rendered once: an affinity that cannot be rendered (a header rule with no header name)
+        // must not be the reason a rule is emitted below.
+        string serviceWideHash = RenderConsistentHash(sessionAffinity, "    ");
+
+        if (tlsPorts.Count == 0 && !alwaysEmit && serviceWideHash.Length == 0)
         {
             return "";
         }
@@ -517,6 +596,9 @@ public class ExternalRouteService(
             $"    tls:\n" +
             $"      mode: {serviceWideTlsMode}\n");
 
+        yaml.Append(RenderConnectionPool("    "));
+        yaml.Append(serviceWideHash);
+
         if (tlsPorts.Count > 0)
         {
             yaml.Append("    portLevelSettings:\n");
@@ -532,10 +614,127 @@ public class ExternalRouteService(
                     $"        tls:\n" +
                     $"          mode: SIMPLE\n" +
                     $"          insecureSkipVerify: true\n");
+
+                // Repeated per port on purpose. Istio documents port-level settings as
+                // replacing the destination-level policy rather than merging with it —
+                // "traffic settings specified at the destination level will not be inherited
+                // when overridden by port-level settings" — so a TLS port listed here would
+                // otherwise fall back to the default load balancer and lose the affinity the
+                // plaintext ports keep. The same applies to the connection pool: a port that
+                // overrode tls but inherited nothing would keep Envoy's one-hour idle timeout,
+                // which is the whole bug RenderConnectionPool exists to close.
+                yaml.Append(RenderConnectionPool("        "));
+                yaml.Append(RenderConsistentHash(sessionAffinity, "        "));
             }
         }
 
         return yaml.ToString();
+    }
+
+    /// <summary>
+    /// How long Envoy may hold an idle upstream connection to a backend before closing it.
+    ///
+    /// This exists because of a race, not a performance concern. Envoy's default upstream idle
+    /// timeout is one hour; Kestrel — every .NET backend EntKube publishes — closes an idle
+    /// keep-alive socket after 130 seconds (<c>KeepAliveTimeout</c>). Between those two numbers
+    /// sits a window where Envoy still believes a socket is good and Kestrel has already sent
+    /// its FIN. A request dispatched into that socket gets "unexpected eof while reading", and
+    /// the client sees <c>upstream connect error or disconnect/reset before headers. reset
+    /// reason: connection termination</c> with <c>response_flags=UC</c> on the gateway. It is
+    /// intermittent by nature: it needs a pool entry that has been idle past 130 seconds and a
+    /// request arriving before Envoy notices the close.
+    ///
+    /// Any value comfortably below 130 makes the pool the first to give up, so the socket is
+    /// gone before Kestrel can close it out from under a request. 60s leaves room for a backend
+    /// tuned lower than the default without turning connection reuse off.
+    /// </summary>
+    public const int BackendConnectionIdleTimeoutSeconds = 60;
+
+    /// <summary>
+    /// Renders the <c>connectionPool</c> block of a DestinationRule trafficPolicy, every line
+    /// prefixed with <paramref name="indent"/> (the indentation of <c>tls:</c> at the level it is
+    /// being written into). See <see cref="BackendConnectionIdleTimeoutSeconds"/> for why.
+    ///
+    /// Unconditional: this is a property of the Envoy/Kestrel pairing, not of any one route's
+    /// configuration, and a backend that closes idle sockets later than Envoy loses nothing by
+    /// having its pool entries recycled a minute in.
+    /// </summary>
+    public static string RenderConnectionPool(string indent) =>
+        $"{indent}connectionPool:\n" +
+        $"{indent}  http:\n" +
+        $"{indent}    idleTimeout: {BackendConnectionIdleTimeoutSeconds}s\n";
+
+    /// <summary>
+    /// Cookie name used when a route asks for cookie affinity without naming one. Envoy sets
+    /// this cookie itself on the first response, so the application never has to know it exists.
+    /// </summary>
+    public const string DefaultAffinityCookieName = "ENTKUBE_AFFINITY";
+
+    /// <summary>
+    /// Renders the <c>loadBalancer.consistentHash</c> block of a DestinationRule trafficPolicy,
+    /// every line prefixed with <paramref name="indent"/> (the indentation of <c>tls:</c> at the
+    /// level it is being written into).
+    ///
+    /// Returns "" for no affinity, and also for an affinity that cannot be expressed — a header
+    /// or query-parameter rule with no name to hash on. Emitting a half-written consistentHash
+    /// would be rejected by the API server and take the whole apply down with it, including the
+    /// TLS settings in the same document that are keeping the route alive.
+    /// </summary>
+    public static string RenderConsistentHash(SessionAffinitySpec? affinity, string indent)
+    {
+        if (affinity is not { } spec || spec.Mode == SessionAffinityMode.None)
+        {
+            return "";
+        }
+
+        string? key = string.IsNullOrWhiteSpace(spec.Key) ? null : spec.Key.Trim();
+
+        string inner = spec.Mode switch
+        {
+            // ttl is always written, never omitted: Istio's validating webhook rejects an
+            // httpCookie without one ("ttl required for HttpCookie"), and a rejected
+            // DestinationRule fails the apply it travels with. 0s is Envoy's session cookie —
+            // it expires when the browser closes — which is what "no lifetime set" means here.
+            SessionAffinityMode.Cookie =>
+                $"{indent}      httpCookie:\n" +
+                $"{indent}        name: {key ?? DefaultAffinityCookieName}\n" +
+                $"{indent}        ttl: {(spec.TtlSeconds is int ttl and > 0 ? ttl : 0)}s\n",
+            SessionAffinityMode.Header when key is not null =>
+                $"{indent}      httpHeaderName: {key}\n",
+            SessionAffinityMode.QueryParameter when key is not null =>
+                $"{indent}      httpQueryParameterName: {key}\n",
+            SessionAffinityMode.SourceIp =>
+                $"{indent}      useSourceIp: true\n",
+            _ => ""
+        };
+
+        if (inner.Length == 0)
+        {
+            return "";
+        }
+
+        return $"{indent}loadBalancer:\n" +
+               $"{indent}  consistentHash:\n" +
+               inner;
+    }
+
+    /// <summary>
+    /// Reports the reason <paramref name="mode"/> cannot be applied with <paramref name="key"/>,
+    /// or null when the pair is valid. Callers surface this before saving, so an affinity that
+    /// would silently render nothing is refused at the point someone can still fix it.
+    /// </summary>
+    public static string? ValidateSessionAffinity(SessionAffinityMode mode, string? key)
+    {
+        bool hasKey = !string.IsNullOrWhiteSpace(key);
+
+        return mode switch
+        {
+            SessionAffinityMode.Header when !hasKey =>
+                "Header affinity needs the name of the header to hash on (e.g. x-tenant-id).",
+            SessionAffinityMode.QueryParameter when !hasKey =>
+                "Query-parameter affinity needs the name of the parameter to hash on.",
+            _ => null
+        };
     }
 
     /// <summary>The request timeout applied to generated HTTPRoute rules when a route sets none.</summary>
@@ -565,12 +764,55 @@ public class ExternalRouteService(
             return "";
         }
 
-        // backendRequest must not exceed request; equal values give the single retry-less
-        // attempt the same budget as the overall request.
+        // backendRequest must not exceed request; equal values give each attempt the same budget
+        // as the overall request. Gateway API bounds every retry attempt by request, so a retry
+        // after a full backendRequest timeout has no budget left — deliberate. The retries this
+        // route carries (see RenderRetry) are for connections that fail instantly, not for
+        // second-guessing a backend that is merely slow.
         return $"{indent}timeouts:\n" +
                $"{indent}  request: {seconds}s\n" +
                $"{indent}  backendRequest: {seconds}s\n";
     }
+
+    /// <summary>Attempts a failed backend request gets, including the first.</summary>
+    public const int DefaultRetryAttempts = 2;
+
+    /// <summary>
+    /// Minimum wait between attempts. Small on purpose: the failures this retries are refused or
+    /// reset connections, which fail in under a millisecond, so a long backoff would only add
+    /// latency to a request that is about to succeed.
+    /// </summary>
+    public const string DefaultRetryBackoff = "50ms";
+
+    /// <summary>
+    /// Renders the Gateway API <c>retry</c> block for one HTTPRoute rule, each line prefixed with
+    /// <paramref name="indent"/> (the indentation of the rule's other keys).
+    ///
+    /// A connection that is refused, reset, or dropped before the backend saw the request is safe
+    /// to retry regardless of method — nothing happened on the other end to repeat. Without this
+    /// the client owns that failure and sees a 503.
+    ///
+    /// Two caveats worth knowing before reading a retry into this block:
+    ///
+    /// Gateway API has no vocabulary for reset conditions. <c>retry</c> takes attempts, a backoff
+    /// and status codes, nothing else, so the conditions cannot be named here. Istio fills them in
+    /// on conversion with a fixed <c>connect-failure,refused-stream,unavailable,cancelled</c> plus
+    /// whatever <c>codes</c> lists. Notably absent from that list is Envoy's <c>reset</c>, which is
+    /// the condition an upstream half-closed socket actually trips — so this block does NOT cover
+    /// the Kestrel idle-timeout race. <see cref="BackendConnectionIdleTimeoutSeconds"/> is what
+    /// closes that; this is the layer underneath it.
+    ///
+    /// <c>codes</c> is listed rather than left empty because Istio applies a default retry policy
+    /// of its own to any route that sets none, and that default retries 503 via
+    /// <c>retriable-status-codes</c>. Setting <c>retry</c> at all replaces the default outright, so
+    /// omitting 503 here would quietly take away retries the cluster has today.
+    /// </summary>
+    public static string RenderRetry(string indent) =>
+        $"{indent}retry:\n" +
+        $"{indent}  attempts: {DefaultRetryAttempts}\n" +
+        $"{indent}  backoff: {DefaultRetryBackoff}\n" +
+        $"{indent}  codes:\n" +
+        $"{indent}    - 503\n";
 
     /// <summary>
     /// Generates a TLSRoute YAML for passthrough-mode routes. The gateway routes by SNI
@@ -1073,4 +1315,33 @@ public record RouteUptimeSummary(
     List<ExternalRouteHealthHistory> History)
 {
     public string UptimeDisplay => UptimePercent.HasValue ? $"{UptimePercent:F2}%" : "No data";
+}
+
+/// <summary>
+/// One backend Service's session-affinity setting, lifted out of whichever kind of route asked
+/// for it. A DestinationRule belongs to the Service, and both an ExternalRoute (platform
+/// component) and an AppDeploymentRoute (customer app) can point at the same Service, so the
+/// generator takes this rather than a route.
+/// </summary>
+public sealed record SessionAffinitySpec(SessionAffinityMode Mode, string? Key, int? TtlSeconds)
+{
+    /// <summary>No affinity — the gateway load balances freely.</summary>
+    public static readonly SessionAffinitySpec None = new(SessionAffinityMode.None, null, null);
+
+    public bool IsActive => Mode != SessionAffinityMode.None;
+
+    public static SessionAffinitySpec From(ExternalRoute route) =>
+        new(route.SessionAffinity, route.SessionAffinityKey, route.SessionAffinityTtlSeconds);
+
+    public static SessionAffinitySpec From(AppDeploymentRoute route) =>
+        new(route.SessionAffinity, route.SessionAffinityKey, route.SessionAffinityTtlSeconds);
+
+    /// <summary>
+    /// Collapses the routes sharing one Service into the single affinity its DestinationRule can
+    /// carry. The first route asking for affinity wins: there is one rule per Service, so two
+    /// routes disagreeing cannot both be honoured, and picking the first (callers iterate in a
+    /// stable order) at least keeps successive applies from flapping the cluster between them.
+    /// </summary>
+    public static SessionAffinitySpec Merge(IEnumerable<SessionAffinitySpec> specs) =>
+        specs.FirstOrDefault(spec => spec.IsActive) ?? None;
 }

@@ -444,6 +444,62 @@ public class ExternalRouteServiceTests : IDisposable
         yaml.Should().Contain("        request: 30s");
     }
 
+    // ──────── Retries ────────
+
+    /// <summary>Walks to the retry block of the route's first (and here only) rule.</summary>
+    private static Dictionary<object, object> FirstRuleRetry(string yaml)
+    {
+        object root = new YamlDotNet.Serialization.DeserializerBuilder().Build()
+            .Deserialize<object>(new StringReader(yaml))!;
+
+        Dictionary<object, object> spec = (Dictionary<object, object>)((Dictionary<object, object>)root)["spec"];
+        List<object> rules = (List<object>)spec["rules"];
+        return (Dictionary<object, object>)((Dictionary<object, object>)rules[0])["retry"];
+    }
+
+    [Fact]
+    public void GenerateHttpRouteYaml_RetriesConnectionFailures()
+    {
+        // A connection refused or reset before the backend read the request is safe to retry for
+        // any method — nothing happened upstream to repeat. Without this the client owns it.
+        Dictionary<object, object> retry = FirstRuleRetry(
+            ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/", null)));
+
+        retry["attempts"].Should().Be(ExternalRouteService.DefaultRetryAttempts.ToString());
+        retry["backoff"].Should().Be(ExternalRouteService.DefaultRetryBackoff);
+    }
+
+    [Fact]
+    public void GenerateHttpRouteYaml_RetryListsFiveOhThree()
+    {
+        // Istio applies a default retry policy to any route that sets none, and that default
+        // retries 503 through retriable-status-codes. Setting retry replaces the default whole,
+        // so leaving codes out would silently withdraw retries the cluster already has.
+        List<object> codes = (List<object>)FirstRuleRetry(
+            ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/", null)))["codes"];
+
+        codes.Should().ContainSingle().Which.Should().Be("503");
+    }
+
+    [Fact]
+    public void GenerateHttpRouteYaml_StreamingRoute_StillRetriesConnectionFailures()
+    {
+        // A timeout of 0 opts out of timeouts, not out of retries: a stream that never opened
+        // because the socket was dead is exactly the case worth a second attempt.
+        string yaml = ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/", 0));
+
+        yaml.Should().NotContain("timeouts:");
+        FirstRuleRetry(yaml)["attempts"].Should().Be(ExternalRouteService.DefaultRetryAttempts.ToString());
+    }
+
+    [Fact]
+    public void GenerateHttpRouteYaml_PathPrefixedRoute_NestsRetryInsideTheRule()
+    {
+        // Same level as timeouts — a sibling of matches/backendRefs, not of the list item.
+        ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/api", 30))
+            .Should().Contain("      retry:");
+    }
+
     [Fact]
     public async Task AddRoute_PersistsRequestTimeout()
     {
@@ -594,6 +650,317 @@ public class ExternalRouteServiceTests : IDisposable
 
         yaml.IndexOf("number: 443", StringComparison.Ordinal)
             .Should().BeLessThan(yaml.IndexOf("number: 8443", StringComparison.Ordinal));
+    }
+
+    // ──────── Session affinity (consistentHash) ────────
+
+    /// <summary>
+    /// Parses the generated rule and walks down to a trafficPolicy, so the assertions below test
+    /// the structure Istio will read rather than the substrings the generator happens to write.
+    /// </summary>
+    private static Dictionary<object, object> TrafficPolicy(string yaml, int? portNumber = null)
+    {
+        object root = new YamlDotNet.Serialization.DeserializerBuilder().Build()
+            .Deserialize<object>(new StringReader(yaml))!;
+
+        Dictionary<object, object> spec = (Dictionary<object, object>)((Dictionary<object, object>)root)["spec"];
+        Dictionary<object, object> policy = (Dictionary<object, object>)spec["trafficPolicy"];
+
+        if (portNumber is null)
+        {
+            return policy;
+        }
+
+        List<object> portSettings = (List<object>)policy["portLevelSettings"];
+        return portSettings
+            .Cast<Dictionary<object, object>>()
+            .Single(p => (string)((Dictionary<object, object>)p["port"])["number"] == portNumber.Value.ToString());
+    }
+
+    private static Dictionary<object, object> ConsistentHash(Dictionary<object, object> trafficPolicy) =>
+        (Dictionary<object, object>)((Dictionary<object, object>)trafficPolicy["loadBalancer"])["consistentHash"];
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_NoAffinity_EmitsNoLoadBalancer()
+    {
+        // The default must leave the rule exactly as it was before affinity existed — every
+        // cluster running today is on this path.
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [new KubeServicePort("http", 80, "TCP")], alwaysEmit: true);
+
+        yaml.Should().NotContain("loadBalancer");
+        yaml.Should().NotContain("consistentHash");
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_CookieAffinity_HashesOnTheNamedCookie()
+    {
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [new KubeServicePort("http", 80, "TCP")], alwaysEmit: true,
+            sessionAffinity: new SessionAffinitySpec(SessionAffinityMode.Cookie, "SESSIONID", 3600));
+
+        Dictionary<object, object> cookie =
+            (Dictionary<object, object>)ConsistentHash(TrafficPolicy(yaml))["httpCookie"];
+
+        cookie["name"].Should().Be("SESSIONID");
+        cookie["ttl"].Should().Be("3600s");
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_CookieAffinity_DefaultsTheNameAndAsksForASessionCookie()
+    {
+        // No cookie name and no lifetime is the common case: Envoy issues the cookie itself, and
+        // ttl 0s is its session cookie. The field cannot simply be left out — Istio's webhook
+        // rejects an httpCookie without a ttl, and that rejection fails the whole apply.
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [], alwaysEmit: true,
+            sessionAffinity: new SessionAffinitySpec(SessionAffinityMode.Cookie, null, null));
+
+        Dictionary<object, object> cookie =
+            (Dictionary<object, object>)ConsistentHash(TrafficPolicy(yaml))["httpCookie"];
+
+        cookie["name"].Should().Be(ExternalRouteService.DefaultAffinityCookieName);
+        cookie["ttl"].Should().Be("0s");
+    }
+
+    [Theory]
+    [InlineData(SessionAffinityMode.Header, "httpHeaderName")]
+    [InlineData(SessionAffinityMode.QueryParameter, "httpQueryParameterName")]
+    public void GenerateBackendDestinationRuleYaml_KeyedAffinity_HashesOnTheGivenName(
+        SessionAffinityMode mode, string expectedField)
+    {
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [], alwaysEmit: true,
+            sessionAffinity: new SessionAffinitySpec(mode, "x-tenant-id", null));
+
+        ConsistentHash(TrafficPolicy(yaml))[expectedField].Should().Be("x-tenant-id");
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_SourceIpAffinity_HashesOnTheClientAddress()
+    {
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [], alwaysEmit: true,
+            sessionAffinity: new SessionAffinitySpec(SessionAffinityMode.SourceIp, null, null));
+
+        ConsistentHash(TrafficPolicy(yaml))["useSourceIp"].Should().Be("true");
+    }
+
+    // ──────── Connection pool (Envoy/Kestrel idle-timeout race) ────────
+
+    private static Dictionary<object, object> ConnectionPoolHttp(Dictionary<object, object> trafficPolicy) =>
+        (Dictionary<object, object>)((Dictionary<object, object>)trafficPolicy["connectionPool"])["http"];
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_SetsAnIdleTimeoutBelowKestrelsKeepAlive()
+    {
+        // Envoy pools an idle upstream socket for an hour; Kestrel closes it at 130s. Whichever
+        // number is larger owns the race, so ours has to be the smaller one.
+        ExternalRouteService.BackendConnectionIdleTimeoutSeconds.Should().BeLessThan(130);
+
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [new KubeServicePort("http", 80, "TCP")], alwaysEmit: true);
+
+        ConnectionPoolHttp(TrafficPolicy(yaml))["idleTimeout"]
+            .Should().Be($"{ExternalRouteService.BackendConnectionIdleTimeoutSeconds}s");
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_TlsPort_KeepsItsOwnIdleTimeout()
+    {
+        // Port-level settings replace the destination-level policy rather than merging with it.
+        // A TLS port that only overrode tls would inherit no connection pool at all and fall back
+        // to Envoy's one-hour default — the exact bug this closes, reopened on port 443.
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [new KubeServicePort("https", 443, "TCP")], alwaysEmit: true);
+
+        Dictionary<object, object> port443 = TrafficPolicy(yaml, 443);
+
+        ConnectionPoolHttp(port443)["idleTimeout"]
+            .Should().Be($"{ExternalRouteService.BackendConnectionIdleTimeoutSeconds}s");
+
+        // The settings that were already correct are still there alongside it.
+        Dictionary<object, object> tls = (Dictionary<object, object>)port443["tls"];
+        tls["mode"].Should().Be("SIMPLE");
+        tls["insecureSkipVerify"].Should().Be("true");
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_TlsPortWithAffinity_KeepsBothOverrides()
+    {
+        // Two things now have to be repeated into every port entry. Losing either one is silent.
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [new KubeServicePort("https", 443, "TCP")], alwaysEmit: true,
+            sessionAffinity: new SessionAffinitySpec(SessionAffinityMode.Cookie, "SESSIONID", 3600));
+
+        Dictionary<object, object> port443 = TrafficPolicy(yaml, 443);
+
+        ConnectionPoolHttp(port443)["idleTimeout"]
+            .Should().Be($"{ExternalRouteService.BackendConnectionIdleTimeoutSeconds}s");
+        ((Dictionary<object, object>)ConsistentHash(port443)["httpCookie"])["name"]
+            .Should().Be("SESSIONID");
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_NoTlsPort_StillEmitsNothingWhenNotAlwaysEmit()
+    {
+        // The connection pool must not become a reason to start shipping a DestinationRule where
+        // none exists today: the rule would also carry tls DISABLE, which is wrong for a service
+        // whose namespace runs STRICT mesh mTLS.
+        ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [new KubeServicePort("http", 80, "TCP")], alwaysEmit: false)
+            .Should().BeEmpty();
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_HeaderAffinityWithoutAName_EmitsNoLoadBalancer()
+    {
+        // A consistentHash with no field set is rejected by the API server, and that rejection
+        // would take the tls settings in the same document down with it.
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [], alwaysEmit: true,
+            sessionAffinity: new SessionAffinitySpec(SessionAffinityMode.Header, "   ", null));
+
+        yaml.Should().NotContain("loadBalancer");
+        TrafficPolicy(yaml).Should().ContainKey("tls");
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_AffinityAlone_IsReasonEnoughToEmitTheRule()
+    {
+        // A plaintext-only service on a call site that ships nothing today: without affinity
+        // there is no rule to write, with affinity there has to be one.
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [new KubeServicePort("http", 80, "TCP")], alwaysEmit: false,
+            sessionAffinity: new SessionAffinitySpec(SessionAffinityMode.SourceIp, null, null));
+
+        yaml.Should().Contain("name: entkube-disable-mtls-svc");
+        ConsistentHash(TrafficPolicy(yaml))["useSourceIp"].Should().Be("true");
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_UnrenderableAffinity_DoesNotForceARule()
+    {
+        // An affinity that renders nothing must not be the reason a call site that ships no rule
+        // today starts shipping one.
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system", [new KubeServicePort("http", 80, "TCP")], alwaysEmit: false,
+            sessionAffinity: new SessionAffinitySpec(SessionAffinityMode.Header, null, null));
+
+        yaml.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void GenerateBackendDestinationRuleYaml_TlsPort_KeepsTheAffinityItWouldOtherwiseLose()
+    {
+        // Istio does not inherit destination-level traffic settings into port-level ones, so the
+        // TLS port needs its own copy or it alone would load balance freely.
+        string yaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+            "svc", "apps", "istio-system",
+            [new KubeServicePort("http", 80, "TCP"), new KubeServicePort("https", 8443, "TCP")],
+            alwaysEmit: true,
+            sessionAffinity: new SessionAffinitySpec(SessionAffinityMode.Cookie, "SESSIONID", null));
+
+        Dictionary<object, object> portPolicy = TrafficPolicy(yaml, portNumber: 8443);
+
+        ((Dictionary<object, object>)portPolicy["tls"])["mode"].Should().Be("SIMPLE");
+        ((Dictionary<object, object>)ConsistentHash(portPolicy)["httpCookie"])["name"]
+            .Should().Be("SESSIONID");
+    }
+
+    [Fact]
+    public void SessionAffinitySpec_Merge_TakesTheFirstRouteAskingForAffinity()
+    {
+        // One DestinationRule per Service: routes that disagree cannot both be honoured, and a
+        // stable winner keeps successive applies from flapping the cluster between them.
+        SessionAffinitySpec merged = SessionAffinitySpec.Merge([
+            SessionAffinitySpec.None,
+            new SessionAffinitySpec(SessionAffinityMode.Cookie, "FIRST", null),
+            new SessionAffinitySpec(SessionAffinityMode.Header, "second", null)
+        ]);
+
+        merged.Mode.Should().Be(SessionAffinityMode.Cookie);
+        merged.Key.Should().Be("FIRST");
+    }
+
+    [Fact]
+    public void SessionAffinitySpec_Merge_NoRouteAsking_IsNoAffinity()
+    {
+        SessionAffinitySpec.Merge([SessionAffinitySpec.None, SessionAffinitySpec.None])
+            .IsActive.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(SessionAffinityMode.Header, null)]
+    [InlineData(SessionAffinityMode.Header, "  ")]
+    [InlineData(SessionAffinityMode.QueryParameter, null)]
+    public void ValidateSessionAffinity_KeyedModesWithoutAKey_AreRefused(SessionAffinityMode mode, string? key)
+    {
+        ExternalRouteService.ValidateSessionAffinity(mode, key).Should().NotBeNull();
+    }
+
+    [Theory]
+    [InlineData(SessionAffinityMode.None, null)]
+    [InlineData(SessionAffinityMode.SourceIp, null)]
+    [InlineData(SessionAffinityMode.Cookie, null)]
+    [InlineData(SessionAffinityMode.Header, "x-tenant-id")]
+    public void ValidateSessionAffinity_AcceptsWhatCanBeRendered(SessionAffinityMode mode, string? key)
+    {
+        ExternalRouteService.ValidateSessionAffinity(mode, key).Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(SessionAffinityMode.None)]
+    [InlineData(SessionAffinityMode.SourceIp)]
+    public void NormalizeAffinityKey_DropsAKeyTheModeCannotUse(SessionAffinityMode mode)
+    {
+        // Otherwise a header name left behind by a mode change reappears if the mode is switched
+        // back, silently hashing on something nobody chose this time.
+        ExternalRouteService.NormalizeAffinityKey(mode, "x-tenant-id").Should().BeNull();
+    }
+
+    [Fact]
+    public void NormalizeAffinityKey_TrimsTheKeyItKeeps()
+    {
+        ExternalRouteService.NormalizeAffinityKey(SessionAffinityMode.Header, "  x-tenant-id  ")
+            .Should().Be("x-tenant-id");
+    }
+
+    private Task<ExternalRoute> AddRouteForAffinityTestAsync() =>
+        sut.AddRouteAsync(componentId, new ExternalRouteRequest
+        {
+            Hostname = $"affinity-{Guid.NewGuid():N}.example.com",
+            ServiceName = "sticky-app",
+            ServicePort = 80,
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt-prod"
+        });
+
+    [Fact]
+    public async Task UpdateRouteSessionAffinityAsync_SwitchingAwayFromAKeyedMode_ClearsTheKey()
+    {
+        ExternalRoute route = await AddRouteForAffinityTestAsync();
+
+        await sut.UpdateRouteSessionAffinityAsync(route.Id, SessionAffinityMode.Header, "x-tenant-id", null);
+        await sut.UpdateRouteSessionAffinityAsync(route.Id, SessionAffinityMode.SourceIp, "x-tenant-id", 60);
+
+        ExternalRoute saved = await db.ExternalRoutes.AsNoTracking().FirstAsync(r => r.Id == route.Id);
+        saved.SessionAffinity.Should().Be(SessionAffinityMode.SourceIp);
+        saved.SessionAffinityKey.Should().BeNull();
+        // A ttl only means anything for a cookie; keeping it would show a lifetime on a mode
+        // that has no cookie to expire.
+        saved.SessionAffinityTtlSeconds.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task UpdateRouteSessionAffinityAsync_HeaderWithoutAName_IsRefused()
+    {
+        ExternalRoute route = await AddRouteForAffinityTestAsync();
+
+        Func<Task> act = () => sut.UpdateRouteSessionAffinityAsync(route.Id, SessionAffinityMode.Header, null, null);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*header*");
     }
 
     // ──────── Gateway resolution ────────
