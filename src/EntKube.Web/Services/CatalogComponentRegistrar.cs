@@ -74,8 +74,14 @@ public class CatalogComponentRegistrar(
         Dictionary<string, string> values = new(formValues);
         // Prefer the cluster's own indexer when it has one — a collector installed after the telemetry
         // components should ship to them, not back across the WAN.
-        string? inClusterIngest = await entKubeTelemetryService.GetInClusterIngestUrlAsync(clusterId);
+        string? indexerUrl = await entKubeTelemetryService.GetInClusterIndexerUrlAsync(clusterId);
+        string? inClusterIngest = indexerUrl is null ? null : indexerUrl + "/ingest/otlp";
         TelemetryIngestDefaults.ApplyTo(entry, values, clusterId, tenantId, ingestTokens, configuration, inClusterIngest);
+
+        // The query component federates from the indexer's Service, whose name carries that indexer's
+        // release name — so it cannot come from a catalog literal without being wrong for any release the
+        // operator names differently, including the default one.
+        EntKubeTelemetryService.ApplyIndexerUrlDefault(entry, values, indexerUrl);
         formValues = values;
 
         string mergedValues = MergeFormValues(entry, formValues, existing);

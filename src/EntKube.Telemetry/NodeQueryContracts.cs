@@ -3,6 +3,54 @@ using EntKube.Web.Services;
 namespace EntKube.Telemetry;
 
 /// <summary>
+/// Encodes a query body into a URL parameter, so a request that logically has a body can still be sent as
+/// a GET.
+///
+/// This exists for the Kubernetes API server's proxy. It maps HTTP methods onto RBAC verbs on the
+/// <c>services/proxy</c> subresource — GET needs <c>get</c>, POST needs <c>create</c> — so a kubeconfig
+/// perfectly able to read through the proxy can be refused the moment a query is sent as a POST. Loki and
+/// Prometheus never hit this because their APIs are GET-only; ours has bodies, so the body travels in the
+/// URL instead.
+/// </summary>
+public static class NodeQuery
+{
+    /// <summary>Query-string parameter carrying the encoded body.</summary>
+    public const string Parameter = "q";
+
+    public static string Encode<T>(T body) => Base64Url(
+        System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(body));
+
+    public static T? Decode<T>(string? encoded) =>
+        string.IsNullOrEmpty(encoded) ? default
+        : System.Text.Json.JsonSerializer.Deserialize<T>(FromBase64Url(encoded));
+
+    // Base64url: '+' and '/' are not safe unescaped in a URL, and '=' padding is noise here.
+    private static string Base64Url(byte[] bytes) =>
+        Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_').TrimEnd('=');
+
+    private static byte[] FromBase64Url(string value)
+    {
+        string padded = value.Replace('-', '+').Replace('_', '/');
+        return Convert.FromBase64String(padded.PadRight(padded.Length + ((4 - (padded.Length % 4)) % 4), '='));
+    }
+}
+
+/// <summary>Transport-level constants shared by the management plane, the node, and a querier.</summary>
+public static class NodeApi
+{
+    /// <summary>
+    /// Header carrying the node's own credential.
+    ///
+    /// Deliberately NOT <c>Authorization</c> when the caller arrives through the Kubernetes API server's
+    /// proxy — there, <c>Authorization</c> belongs to the API server, and a caller that overwrites it is
+    /// rejected by the API server rather than reaching the node at all. That failure presents as a 401 and
+    /// looks exactly like the node refusing the token, which it never saw. Unknown headers are forwarded
+    /// untouched, so this one arrives intact.
+    /// </summary>
+    public const string TokenHeader = "X-EntKube-Ingest-Key";
+}
+
+/// <summary>
 /// Wire shapes for the in-cluster telemetry node's query API — the contract between the management plane
 /// and a node, and between a querier and its indexer.
 ///

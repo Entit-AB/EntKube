@@ -170,8 +170,61 @@ public abstract class SegmentManagerBase : IDisposable
         _dirA = Path.Combine(tenantRoot, "active", $"{Signal}.a");
         _dirB = Path.Combine(tenantRoot, "active", $"{Signal}.b");
         _cache = new SegmentCache(blobs, Path.Combine(tenantRoot, "cache", Signal));
-        _active = ActiveSegmentIndex.OpenAt(_dirA, _analyzer);
-        _activeIsA = true;
+        (_active, _activeIsA) = AdoptExistingActive();
+
+        // Age the segment by the data in it, not by when this process happened to start. The roll trigger
+        // asks "how long has unsealed data been sitting here", and answering it from process start means a
+        // pod that restarts more often than the roll interval can never satisfy it — the clock returns to
+        // zero every time, and the segment is never sealed by age again.
+        _activeSince = _active.MinTs ?? DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Opens whichever of the two active directories a previous process left its unsealed index in.
+    ///
+    /// <para>A roll ping-pongs between A and B and MOVES the sealed directory into the segment cache, so
+    /// normally at most one of them holds an unsealed index — but which one depends on how many rolls
+    /// happened before the process last stopped. Opening A unconditionally therefore orphaned anything
+    /// left in B: still on disk, still charged against the volume, invisible to every query, and never
+    /// sealed.</para>
+    ///
+    /// <para>Nothing is deleted when both hold data — the case where a crash landed between the roll's
+    /// directory swap and the move of the sealed files. The newer one becomes active; the older is left
+    /// exactly where it is, and the next roll re-opens that directory in <c>CREATE_OR_APPEND</c> mode and
+    /// absorbs its documents into the following segment.</para>
+    /// </summary>
+    private (ActiveSegmentIndex Active, bool IsA) AdoptExistingActive()
+    {
+        ActiveSegmentIndex a = ActiveSegmentIndex.OpenAt(_dirA, _analyzer);
+        ActiveSegmentIndex b = ActiveSegmentIndex.OpenAt(_dirB, _analyzer);
+
+        bool useA = (a.HasData, b.HasData) switch
+        {
+            (true, true) => a.MaxTs >= b.MaxTs,
+            (false, true) => false,
+            _ => true,   // A has data, or neither does and A is the conventional start
+        };
+
+        if (a.HasData && b.HasData)
+        {
+            _logger.LogWarning(
+                "Both {Signal} active directories hold unsealed data ({DocsA} in {DirA}, {DocsB} in {DirB}) — "
+                + "a previous process stopped between rolling and sealing. Adopting the newer as active; the "
+                + "other is retained and will be absorbed into the next segment.",
+                Signal, a.DocCount, _dirA, b.DocCount, _dirB);
+        }
+
+        ActiveSegmentIndex chosen = useA ? a : b;
+        (useA ? b : a).Dispose();   // closes the handle only — the files stay on disk
+
+        if (chosen.HasData)
+        {
+            _logger.LogInformation(
+                "Recovered {Signal} active index from disk: {Docs} unsealed documents from {Min:o}, awaiting seal.",
+                Signal, chosen.DocCount, chosen.MinTs);
+        }
+
+        return (chosen, useA);
     }
 
     /// <summary>Analyzer for tokenizing query text — matches the indexing analyzer so tokens align.</summary>

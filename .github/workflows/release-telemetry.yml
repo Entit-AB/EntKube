@@ -57,15 +57,20 @@ jobs:
             --set node.ingestToken=lint --set node.queryToken=lint
 
       # Rendering both roles catches template errors that lint does not — a bad reference inside a
-      # conditional block only fails when that block is actually rendered.
-      - name: Render both roles
+      # conditional block only fails when that block is actually rendered — and checks that no value
+      # comes out in scientific notation, which .NET's Int64 binder rejects at pod startup.
+      - name: Render both roles and check values
         run: |
-          helm template rel charts/entkube-telemetry \
+          rendered=$(helm template rel charts/entkube-telemetry \
             --set node.tenantId=00000000-0000-0000-0000-000000000001 \
             --set node.clusterId=00000000-0000-0000-0000-000000000002 \
             --set node.ingestToken=lint --set node.queryToken=lint \
             --set objectStorage.bucket=b --set objectStorage.accessKey=a --set objectStorage.secretKey=s \
-            --set querier.enabled=true > /dev/null
+            --set querier.enabled=true)
+          if printf '%s' "$rendered" | grep -nE 'value: "[0-9.]+e\+[0-9]+"'; then
+            echo "::error::A value renders in scientific notation; pipe it through | int64 in the template."
+            exit 1
+          fi
 
   publish:
     name: Build and publish
@@ -75,6 +80,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+
+      # Cross-building linux/arm64 on an amd64 runner needs the emulation binaries registered.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -95,14 +104,15 @@ jobs:
             | helm registry login ${{ env.REGISTRY }} \
                 --username "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
 
-      # One script builds, verifies and publishes, so CI and a laptop cannot drift apart in how a release
-      # is made. Everything CI does here can be reproduced by running the same command locally.
+      # One script builds, verifies and publishes every EntKube artifact, so CI and a laptop cannot drift
+      # apart in how a release is made. Everything CI does here can be reproduced by running the same
+      # command locally.
       - name: Build and publish
         run: |
           ARGS=()
           [[ -n "${{ inputs.version }}" ]] && ARGS+=(--version "${{ inputs.version }}")
           [[ "${{ inputs.dry_run }}" != "true" ]] && ARGS+=(--push)
-          scripts/build-telemetry.sh "${ARGS[@]}"
+          scripts/release.sh telemetry "${ARGS[@]}"
 
       - name: Upload chart package
         uses: actions/upload-artifact@v4

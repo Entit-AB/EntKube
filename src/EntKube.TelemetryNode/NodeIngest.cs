@@ -85,12 +85,21 @@ public static class NodeIngest
     {
         if (string.IsNullOrEmpty(expected)) return false;
 
+        // Our own header is checked FIRST. A request forwarded by the Kubernetes API server's proxy can
+        // still carry an Authorization header that belongs to the API server, not to us; trying that one
+        // first would compare against a credential that was never meant for this node and reject a caller
+        // whose real token is sitting in the next header along.
         string? presented = null;
-        string authorization = ctx.Request.Headers.Authorization.ToString();
-        if (authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-            presented = authorization["Bearer ".Length..].Trim();
-        else if (ctx.Request.Headers.TryGetValue("X-EntKube-Ingest-Key", out Microsoft.Extensions.Primitives.StringValues key))
+        if (ctx.Request.Headers.TryGetValue(NodeApi.TokenHeader, out Microsoft.Extensions.Primitives.StringValues key))
+        {
             presented = key.ToString();
+        }
+        else
+        {
+            string authorization = ctx.Request.Headers.Authorization.ToString();
+            if (authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                presented = authorization["Bearer ".Length..].Trim();
+        }
 
         if (string.IsNullOrEmpty(presented)) return false;
 

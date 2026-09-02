@@ -231,7 +231,7 @@ public class EntKubeTelemetryCatalogTests
         TestDbContextFactory factory = new(connection);
         IConfiguration config = TestServices.TestConfiguration("https://entkube.example.com");
         VaultService vault = new(factory, new VaultEncryptionService(TestRootKey));
-        EntKubeTelemetryService sut = new(factory, vault, new IngestTokenService(config));
+        EntKubeTelemetryService sut = new(factory, vault, new IngestTokenService(config), config);
 
         component.Cluster = db.KubernetesClusters.First(c => c.Id == clusterId);
 
@@ -270,7 +270,7 @@ public class EntKubeTelemetryCatalogTests
         TestDbContextFactory factory = new(connection);
         IConfiguration config = TestServices.TestConfiguration("https://entkube.example.com");
         VaultService vault = new(factory, new VaultEncryptionService(TestRootKey));
-        EntKubeTelemetryService sut = new(factory, vault, new IngestTokenService(config));
+        EntKubeTelemetryService sut = new(factory, vault, new IngestTokenService(config), config);
 
         // Persisted, because healing stores the query token as a vault secret and that row has a
         // foreign key to the component.
@@ -311,5 +311,256 @@ public class EntKubeTelemetryCatalogTests
         // none of them has ever needed a pull secret, and why this must stay opt-in rather than blanket.
         CatalogEntry collector = ComponentCatalog.GetByKey("otel-collector")!;
         collector.ImageRegistryHost.Should().BeNull();
+    }
+
+    [Fact]
+    public void The_query_component_does_not_deploy_an_indexer_of_its_own()
+    {
+        CatalogEntry querier = ComponentCatalog.GetByKey(EntKubeTelemetryService.QuerierKey)!;
+
+        // Both entries install the same chart, and that chart renders the indexer by default. Left alone,
+        // installing the Query component stands up a second indexer that receives nothing — the collector
+        // ships to one endpoint — and sits on an empty volume.
+        ComponentFormField? indexerToggle =
+            querier.FormFields.FirstOrDefault(f => f.YamlPath == "indexer.enabled");
+        indexerToggle.Should().NotBeNull();
+        indexerToggle!.DefaultValue.Should().Be("false");
+
+        // ...which then means it must be told where the real indexer is.
+        querier.FormFields.Should().Contain(f => f.YamlPath == "querier.indexerUrl");
+    }
+
+    // ──────── The indexer's address ────────
+
+    [Fact]
+    public void The_query_components_default_indexer_url_matches_what_the_chart_actually_names_that_Service()
+    {
+        CatalogEntry indexer = ComponentCatalog.GetByKey(EntKubeTelemetryService.IndexerKey)!;
+        CatalogEntry querier = ComponentCatalog.GetByKey(EntKubeTelemetryService.QuerierKey)!;
+
+        string expected = EntKubeTelemetryService.IndexerServiceUrl(
+            indexer.DefaultReleaseName!, indexer.DefaultNamespace);
+
+        // The querier addresses the indexer by the chart's fullname for the INDEXER's release. Get that
+        // rule wrong in either place and the name resolves nowhere: the querier comes up healthy and fails
+        // every query with "Name or service not known" on BOTH tiers, which reads like a storage outage
+        // rather than a hostname typo.
+        querier.FormFields.Single(f => f.Key == EntKubeTelemetryService.IndexerUrlFieldKey)
+            .DefaultValue.Should().Be(expected);
+
+        // The const the heal recognises as EntKube-generated has to BE that address, or a querier
+        // installed with the default is treated as an operator's deliberate choice and never corrected.
+        expected.Should().Be(EntKubeTelemetryService.DefaultIndexerUrl);
+    }
+
+    [Theory]
+    // The release name already contains the chart name: no prefix, or every object doubles it.
+    [InlineData("entkube-telemetry", "entkube-telemetry-indexer")]
+    [InlineData("entkube-telemetry-query", "entkube-telemetry-query-indexer")]
+    // It does not: the chart name is prefixed.
+    [InlineData("tel", "tel-entkube-telemetry-indexer")]
+    [InlineData("prod", "prod-entkube-telemetry-indexer")]
+    public void The_derived_Service_name_follows_the_charts_own_fullname_rule(string release, string expected)
+    {
+        // Mirrors entkube-telemetry.fullname in _helpers.tpl. These four cases are verified against
+        // `helm template` output; if that helper changes, this is what fails rather than a cluster.
+        EntKubeTelemetryService.IndexerServiceUrl(release, "monitoring")
+            .Should().Be($"http://{expected}.monitoring:8080");
+    }
+
+    [Fact]
+    public void The_chart_still_collapses_a_release_name_that_contains_the_chart_name()
+    {
+        string helpers = File.ReadAllText(
+            Path.Combine(RepoRoot(), "charts", "entkube-telemetry", "templates", "_helpers.tpl"));
+
+        // The C# above can only mirror a rule the chart actually applies, and nothing else in the test
+        // suite would notice the chart dropping it — the names would simply stop matching in a cluster.
+        helpers.Should().Contain("contains $name .Release.Name",
+            "EntKubeTelemetryService.Fullname mirrors the chart's fullname collapse; without it every "
+            + "derived Service name gains a doubled prefix and resolves nowhere");
+    }
+
+    [Fact]
+    public async Task The_indexer_address_is_derived_from_the_indexer_row_not_whichever_row_comes_first()
+    {
+        using SqliteConnection connection = new("DataSource=:memory:");
+        connection.Open();
+        using ApplicationDbContext db = new(
+            new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(connection).Options);
+        db.Database.EnsureCreated();
+
+        Guid tenantId = Guid.NewGuid();
+        Guid envId = Guid.NewGuid();
+        Guid clusterId = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = tenantId, Name = "Acme", Slug = "acme" });
+        db.Environments.Add(new EntKube.Web.Data.Environment { Id = envId, TenantId = tenantId, Name = "prod" });
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = clusterId, TenantId = tenantId, EnvironmentId = envId,
+            Name = "c1", ApiServerUrl = "https://k8s.example.com",
+        });
+
+        // Deliberately inserted FIRST. Both components install the same chart, so a lookup keyed on the
+        // chart name can return this one — and derive an indexer address inside the query release, which
+        // renders no indexer at all (indexer.enabled=false). That address resolves nowhere, and it would
+        // be handed to the collector as its ingest endpoint: every log line dropped, nothing logged.
+        db.ClusterComponents.Add(new ClusterComponent
+        {
+            Id = Guid.NewGuid(), ClusterId = clusterId, Name = EntKubeTelemetryService.QuerierKey,
+            ComponentType = "HelmChart", HelmChartName = EntKubeTelemetryService.ChartName,
+            ReleaseName = "entkube-telemetry-query", Namespace = "monitoring",
+        });
+        db.ClusterComponents.Add(new ClusterComponent
+        {
+            Id = Guid.NewGuid(), ClusterId = clusterId, Name = EntKubeTelemetryService.IndexerKey,
+            ComponentType = "HelmChart", HelmChartName = EntKubeTelemetryService.ChartName,
+            ReleaseName = "entkube-telemetry", Namespace = "monitoring",
+        });
+        db.SaveChanges();
+
+        TestDbContextFactory factory = new(connection);
+        IConfiguration config = TestServices.TestConfiguration("https://entkube.example.com");
+        VaultService vault = new(factory, new VaultEncryptionService(TestRootKey));
+        EntKubeTelemetryService sut = new(factory, vault, new IngestTokenService(config), config);
+
+        (await sut.GetInClusterIndexerUrlAsync(clusterId))
+            .Should().Be("http://entkube-telemetry-indexer.monitoring:8080");
+        (await sut.GetInClusterIngestUrlAsync(clusterId))
+            .Should().Be("http://entkube-telemetry-indexer.monitoring:8080/ingest/otlp");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(EntKubeTelemetryService.DefaultIndexerUrl)]
+    public async Task A_querier_pointed_at_an_indexer_that_does_not_exist_is_corrected_at_install(string? stored)
+    {
+        // The indexer is NOT on the default release name, so the catalog's default address is wrong for
+        // this cluster — which is the whole reason the field cannot be a literal.
+        (EntKubeTelemetryService sut, ClusterComponent querier) =
+            QuerierOnClusterWithIndexer(indexerRelease: "telemetry-prod");
+
+        string? values = stored is null ? null : $"querier:\n  indexerUrl: {stored}\n";
+        (string? healed, string? corrected) = await sut.FixQuerierIndexerUrlAsync(querier, values);
+
+        // The stored copy is the querier's own; a catalog fix never reaches it, so re-applying the
+        // component has to be what repairs it.
+        corrected.Should().Be("http://telemetry-prod-entkube-telemetry-indexer.monitoring:8080");
+        YamlFormMerger.ExtractValue(healed!, EntKubeTelemetryService.IndexerUrlYamlPath)
+            .Should().Be(corrected);
+    }
+
+    [Fact]
+    public async Task A_querier_that_is_already_right_is_not_rewritten_on_every_apply()
+    {
+        (EntKubeTelemetryService sut, ClusterComponent querier) = QuerierOnClusterWithIndexer();
+
+        const string values = "querier:\n  indexerUrl: " + EntKubeTelemetryService.DefaultIndexerUrl + "\n";
+        (string? healed, string? corrected) = await sut.FixQuerierIndexerUrlAsync(querier, values);
+
+        // Under the default release name the catalog's address IS the derived one. Reporting a correction
+        // here would put a repoint line in the install log of every apply that changed nothing.
+        corrected.Should().BeNull();
+        healed.Should().Be(values);
+    }
+
+    [Fact]
+    public async Task An_indexer_address_the_operator_chose_is_left_alone()
+    {
+        (EntKubeTelemetryService sut, ClusterComponent querier) = QuerierOnClusterWithIndexer();
+
+        // Federating with an indexer EntKube did not install is a legitimate choice, and silently
+        // redirecting a querier onto different data would be worse than the bug this heal exists for.
+        const string chosen = "http://telemetry.shared.svc.cluster.local:8080";
+        (string? healed, string? corrected) =
+            await sut.FixQuerierIndexerUrlAsync(querier, $"querier:\n  indexerUrl: {chosen}\n");
+
+        corrected.Should().BeNull();
+        YamlFormMerger.ExtractValue(healed!, EntKubeTelemetryService.IndexerUrlYamlPath).Should().Be(chosen);
+    }
+
+    [Fact]
+    public async Task The_indexer_itself_is_never_repointed()
+    {
+        (EntKubeTelemetryService sut, ClusterComponent querier) = QuerierOnClusterWithIndexer();
+        querier.Name = EntKubeTelemetryService.IndexerKey;
+
+        // An indexer serves its own hot tier; giving it an indexer address would be meaningless.
+        (_, string? corrected) = await sut.FixQuerierIndexerUrlAsync(querier, valuesYaml: null);
+        corrected.Should().BeNull();
+    }
+
+    /// <summary>A cluster carrying an indexer under its default release name, plus the querier row that
+    /// reads from it. The connection is intentionally left open for the lifetime of the returned service.</summary>
+    private static (EntKubeTelemetryService Sut, ClusterComponent Querier) QuerierOnClusterWithIndexer(
+        string indexerRelease = "entkube-telemetry")
+    {
+        SqliteConnection connection = new("DataSource=:memory:");
+        connection.Open();
+        ApplicationDbContext db = new(
+            new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(connection).Options);
+        db.Database.EnsureCreated();
+
+        Guid tenantId = Guid.NewGuid();
+        Guid envId = Guid.NewGuid();
+        Guid clusterId = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = tenantId, Name = "Acme", Slug = "acme" });
+        db.Environments.Add(new EntKube.Web.Data.Environment { Id = envId, TenantId = tenantId, Name = "prod" });
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = clusterId, TenantId = tenantId, EnvironmentId = envId,
+            Name = "c1", ApiServerUrl = "https://k8s.example.com",
+        });
+        db.ClusterComponents.Add(new ClusterComponent
+        {
+            Id = Guid.NewGuid(), ClusterId = clusterId, Name = EntKubeTelemetryService.IndexerKey,
+            ComponentType = "HelmChart", HelmChartName = EntKubeTelemetryService.ChartName,
+            ReleaseName = indexerRelease, Namespace = "monitoring",
+        });
+        ClusterComponent querier = new()
+        {
+            Id = Guid.NewGuid(), ClusterId = clusterId, Name = EntKubeTelemetryService.QuerierKey,
+            ComponentType = "HelmChart", HelmChartName = EntKubeTelemetryService.ChartName,
+            ReleaseName = "entkube-telemetry-query", Namespace = "monitoring",
+        };
+        db.ClusterComponents.Add(querier);
+        db.SaveChanges();
+
+        TestDbContextFactory factory = new(connection);
+        IConfiguration config = TestServices.TestConfiguration("https://entkube.example.com");
+        VaultService vault = new(factory, new VaultEncryptionService(TestRootKey));
+        querier.Cluster = db.KubernetesClusters.First(c => c.Id == clusterId);
+
+        return (new EntKubeTelemetryService(factory, vault, new IngestTokenService(config), config), querier);
+    }
+
+    [Fact]
+    public void The_indexer_component_does_deploy_one()
+    {
+        CatalogEntry indexer = ComponentCatalog.GetByKey(EntKubeTelemetryService.IndexerKey)!;
+
+        // Nothing turns it off, so the chart default (true) applies.
+        indexer.FormFields.Should().NotContain(f => f.YamlPath == "indexer.enabled");
+    }
+
+    [Fact]
+    public async Task The_query_token_is_the_same_for_every_component_on_a_cluster()
+    {
+        IConfiguration config = TestServices.TestConfiguration("https://entkube.example.com");
+        IngestTokenService tokens = new(config);
+        Guid clusterId = Guid.NewGuid();
+        Guid tenantId = Guid.NewGuid();
+
+        // Derived rather than stored, so an indexer and a querier agree without anything being copied —
+        // and so the management plane computes the same value to read with. A stored random token is what
+        // produced "401 Unauthorized" from a node that was otherwise healthy.
+        tokens.MintQuery(clusterId, tenantId).Should().Be(tokens.MintQuery(clusterId, tenantId));
+        tokens.MintQuery(clusterId, tenantId).Should().NotBe(tokens.MintQuery(Guid.NewGuid(), tenantId));
+
+        // A query token must not double as an ingest token.
+        tokens.TryValidate(tokens.MintQuery(clusterId, tenantId), out _, out _).Should().BeFalse();
+        tokens.MintQuery(clusterId, tenantId).Should().NotBe(tokens.Mint(clusterId, tenantId));
+
+        await Task.CompletedTask;
     }
 }

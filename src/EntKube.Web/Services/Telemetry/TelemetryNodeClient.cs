@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using EntKube.Web.Data;
@@ -25,14 +24,11 @@ namespace EntKube.Web.Services.Telemetry;
 public sealed class TelemetryNodeClient(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     KubernetesProxyClientPool clientPool,
-    VaultService vaultService,
+    IngestTokenService ingestTokens,
     ILogger<TelemetryNodeClient> logger)
 {
     /// <summary>Chart name both telemetry components install — how their ClusterComponents are recognised.</summary>
     private const string ChartName = "entkube-telemetry";
-
-    /// <summary>Vault secret holding the bearer token the node expects on query requests.</summary>
-    private const string QueryTokenSecret = "telemetry-query-token";
 
     /// <summary>What it takes to talk to one cluster's node.</summary>
     public sealed record NodeEndpoint(string Kubeconfig, string Namespace, string ServiceName, int Port, string Token);
@@ -71,7 +67,14 @@ public sealed class TelemetryNodeClient(
                 + $"/api/v1/namespaces/{endpoint.Namespace}/services/{endpoint.ServiceName}:{endpoint.Port}/proxy";
 
             using HttpRequestMessage request = new(method, $"{baseUrl}/{path}");
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", endpoint.Token);
+
+            // NOT Authorization. This request is addressed to the API server's proxy endpoint, and
+            // Authorization is what authenticates to the API SERVER — the k8s client sets it from the
+            // kubeconfig. Overwriting it with the node's token makes the API server reject the call with
+            // 401 before it is ever forwarded, which reads exactly like the node rejecting the token and
+            // is nothing of the sort. The API server passes unknown headers through untouched, so the
+            // node's own credential travels in one of those instead.
+            request.Headers.Add(EntKube.Telemetry.NodeApi.TokenHeader, endpoint.Token);
             if (body is not null) request.Content = JsonContent.Create(body, body.GetType());
 
             using HttpResponseMessage response = await k8s.HttpClient.SendAsync(request, ct);
@@ -81,7 +84,21 @@ public sealed class TelemetryNodeClient(
                 // A stale endpoint (component moved or reinstalled) presents as a 404 from the proxy;
                 // drop the cache so the next attempt re-resolves rather than failing the same way.
                 if (response.StatusCode is System.Net.HttpStatusCode.NotFound) Invalidate(clusterId);
-                return KubernetesOperationResult<T>.Failure($"{(int)response.StatusCode} {response.ReasonPhrase}: {detail}");
+
+                // Say WHO refused. A request to a node travels through the Kubernetes API server's proxy,
+                // so a 401 can come from either end, and the two need completely different fixes: the API
+                // server means the kubeconfig was not accepted, the node means its own token was not. The
+                // bare "401 Unauthorized" this used to report is the same either way, which is exactly how
+                // a header conflict at the API server gets mistaken for a token problem at the node.
+                string who = DescribeRejector(response, detail);
+                logger.LogWarning(
+                    "Telemetry node query failed: {Method} {Path} on cluster {ClusterId} returned {Status} "
+                    + "({Who}). Body: {Detail}",
+                    method, path, clusterId, (int)response.StatusCode, who, Truncate(detail));
+
+                return KubernetesOperationResult<T>.Failure(
+                    $"{(int)response.StatusCode} {response.ReasonPhrase} — {who}"
+                    + (string.IsNullOrWhiteSpace(detail) ? "" : $": {Truncate(detail)}"));
             }
 
             T? value = await response.Content.ReadFromJsonAsync<T>(ct);
@@ -95,6 +112,40 @@ public sealed class TelemetryNodeClient(
             return KubernetesOperationResult<T>.Failure(ex.Message);
         }
     }
+
+    /// <summary>
+    /// Works out which end of the proxy refused the request.
+    ///
+    /// The Kubernetes API server answers with a JSON <c>Status</c> object — <c>{"kind":"Status",…}</c> —
+    /// whether it is rejecting credentials or RBAC. The node answers with an empty body for an auth
+    /// failure and its own JSON otherwise. That difference is enough to tell them apart, and telling them
+    /// apart is the difference between "fix the kubeconfig" and "fix the node's token".
+    /// </summary>
+    private static string DescribeRejector(HttpResponseMessage response, string body)
+    {
+        bool fromApiServer = body.Contains("\"kind\"", StringComparison.Ordinal)
+                             && body.Contains("Status", StringComparison.Ordinal);
+
+        if (fromApiServer)
+        {
+            return response.StatusCode switch
+            {
+                System.Net.HttpStatusCode.Unauthorized =>
+                    "rejected by the Kubernetes API server — the cluster's stored kubeconfig was not accepted",
+                System.Net.HttpStatusCode.Forbidden =>
+                    "rejected by the Kubernetes API server — the kubeconfig lacks permission on services/proxy "
+                    + "for this verb (a read needs get, a search needs create)",
+                _ => "reported by the Kubernetes API server",
+            };
+        }
+
+        return response.StatusCode == System.Net.HttpStatusCode.Unauthorized
+            ? "rejected by the telemetry node — it did not accept the query token"
+            : "reported by the telemetry node";
+    }
+
+    private static string Truncate(string s) =>
+        string.IsNullOrEmpty(s) ? "(empty)" : s.Length <= 400 ? s : s[..400] + "…";
 
     /// <summary>Finds the cluster's node: its component, its query token, and its Service.</summary>
     private async Task<NodeEndpoint?> ResolveAsync(Guid clusterId, CancellationToken ct)
@@ -132,11 +183,25 @@ public sealed class TelemetryNodeClient(
             .Select(c => new { c.Id, c.Namespace, c.Cluster.TenantId, c.Cluster.Kubeconfig })
             .FirstOrDefaultAsync(ct);
 
-        if (component is null || string.IsNullOrWhiteSpace(component.Kubeconfig)) return null;
+        if (component is null) return null;
 
-        string? token = await vaultService.GetComponentSecretValueAsync(
-            component.TenantId, component.Id, QueryTokenSecret, ct);
-        if (string.IsNullOrEmpty(token)) return null;
+        // Everything from here on is a way for a node that is installed to be unreachable — and every one
+        // of them ends with reads quietly going to the management plane's store instead, which for a
+        // cut-over cluster is empty. "Empty with no error" is the single hardest state to diagnose in this
+        // system, so each of these says so rather than returning null in silence.
+        if (string.IsNullOrWhiteSpace(component.Kubeconfig))
+        {
+            logger.LogWarning(
+                "Cluster {ClusterId} has an installed telemetry component but no kubeconfig, so its node "
+                + "cannot be queried; telemetry reads fall back to the management-plane store.", clusterId);
+            return null;
+        }
+
+        // Derived, not looked up. A cluster can carry more than one telemetry component, and reading the
+        // token off whichever row came back first is only correct while every row agrees — which is
+        // precisely the assumption that fails, as a 401 from a node that is otherwise perfectly healthy.
+        // Both sides computing it from (cluster, tenant) removes the possibility.
+        string token = ingestTokens.MintQuery(clusterId, component.TenantId);
 
         string ns = string.IsNullOrWhiteSpace(component.Namespace) ? "monitoring" : component.Namespace;
 
@@ -148,7 +213,15 @@ public sealed class TelemetryNodeClient(
         V1Service? chosen =
             services.Items.FirstOrDefault(s => Component(s) == "querier")
             ?? services.Items.FirstOrDefault(s => Component(s) == "indexer");
-        if (chosen?.Metadata?.Name is not { } serviceName) return null;
+        if (chosen?.Metadata?.Name is not { } serviceName)
+        {
+            logger.LogWarning(
+                "Cluster {ClusterId} has an installed telemetry component, but namespace {Namespace} has no "
+                + "Service labelled app.kubernetes.io/name=entkube-telemetry — the release may be in another "
+                + "namespace, or its pods may never have started. Telemetry reads fall back to the "
+                + "management-plane store, which for a cut-over cluster holds nothing.", clusterId, ns);
+            return null;
+        }
 
         int port = chosen.Spec?.Ports?.FirstOrDefault(p => p.Name == "http")?.Port
                    ?? chosen.Spec?.Ports?.FirstOrDefault()?.Port

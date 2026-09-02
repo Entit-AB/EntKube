@@ -53,9 +53,60 @@ public sealed class ActiveSegmentIndex : IDisposable
         _writer = new IndexWriter(_dir, config);
         _writer.Commit(); // materialize an empty commit so a searcher can open before the first write
         _searcherManager = new SearcherManager(_writer, applyAllDeletes: true, new SearcherFactory());
+        RecoverFromDisk();
     }
 
-    /// <summary>Number of documents written since this active index was created (its future segment size).</summary>
+    /// <summary>
+    /// Timestamp field, in epoch milliseconds. Every signal's schema names it the same and indexes it as
+    /// both an <c>Int64Field</c> (stored) and a <c>NumericDocValuesField</c> (sortable) — which is what
+    /// lets the bounds below be recovered with two top-1 searches instead of a scan.
+    /// </summary>
+    private const string TsField = "ts";
+
+    /// <summary>
+    /// Restores the doc count and time bounds from the index already on disk.
+    ///
+    /// <para>These three values are the seal triggers, and they used to live only in memory: a counter
+    /// incremented per <see cref="Add"/> and two interlocked timestamps. A restart therefore reopened an
+    /// index holding millions of documents and reported <see cref="DocCount"/> as zero — which made
+    /// <see cref="HasData"/> false, which made <c>RollAndSealAsync</c> a no-op that returned before it
+    /// looked at anything. The active index could then never be sealed, by any trigger, for the rest of
+    /// its life: it simply grew, unsealed and unarchived, and every subsequent restart reset the clock
+    /// again. An indexer that restarts more often than its roll interval — for any reason at all, a node
+    /// drain or an upgrade included — accumulates an index it can never let go of.</para>
+    ///
+    /// <para>Cheap enough to do unconditionally: an empty index short-circuits on the doc count, and a
+    /// populated one pays two sorted top-1 searches once per open.</para>
+    /// </summary>
+    private void RecoverFromDisk()
+    {
+        int onDisk = _writer.NumDocs;
+        if (onDisk == 0) return;
+
+        Interlocked.Exchange(ref _count, onDisk);
+
+        IndexSearcher searcher = _searcherManager.Acquire();
+        try
+        {
+            if (BoundaryTs(searcher, newest: false) is long min) Interlocked.Exchange(ref _minTsMs, min);
+            if (BoundaryTs(searcher, newest: true) is long max) Interlocked.Exchange(ref _maxTsMs, max);
+        }
+        finally
+        {
+            _searcherManager.Release(searcher);
+        }
+    }
+
+    /// <summary>The oldest or newest <c>ts</c> in the index, or null when it holds none.</summary>
+    private static long? BoundaryTs(IndexSearcher searcher, bool newest)
+    {
+        var sort = new Sort(new SortField(TsField, SortFieldType.INT64, newest));
+        TopDocs top = searcher.Search(new MatchAllDocsQuery(), 1, sort);
+        if (top.ScoreDocs.Length == 0) return null;
+        return searcher.Doc(top.ScoreDocs[0].Doc).GetField(TsField)?.GetInt64Value();
+    }
+
+    /// <summary>Documents in the active index, recovered from disk on open — its future segment size.</summary>
     public long DocCount => Interlocked.Read(ref _count);
 
     /// <summary>Whether anything has been written (nothing to seal when false).</summary>

@@ -165,7 +165,7 @@ None required, and nothing is thrown away.
 Segments already in management-plane storage stay readable through the existing local
 backend for their full retention window; the two backends coexist per cluster. Switching
 a cluster over is: install the two components, repoint that cluster's `otel-collector`
-exporter from the public EntKube URL to `entkube-telemetry-indexer.<ns>:4318`, and set
+exporter from the public EntKube URL to the indexer's Service (`<fullname>-indexer.<ns>:8080`), and set
 the cluster's log/trace backend to remote. Rolling back is repointing the exporter.
 
 ## 5. Phases
@@ -311,8 +311,8 @@ ignored, so an operator sets 90-day retention, the install succeeds, and the nod
 there the entries cannot install. Both artifacts are built and published by one script, which also refuses
 to release when the chart version, the image tag it deploys, and the version the catalog pins disagree:
 
-    scripts/build-telemetry.sh            # build and verify, publish nothing
-    scripts/build-telemetry.sh --push     # after: az acr login --name entit
+    scripts/release.sh telemetry          # build and verify, publish nothing
+    scripts/release.sh telemetry --push   # after: az acr login --name entit
 
 CI does the same via `.github/workflows/release-telemetry.yml`, on a `telemetry-v*` tag. See
 [docs/releasing.md](releasing.md) for why this one is tag-driven rather than push-driven.
@@ -409,7 +409,8 @@ The order is forced by a dependency and is easy to get wrong:
    (`otel/opentelemetry-collector-contrib`) is public on Docker Hub.
 3. **Re-apply the collector.** This is the step that is easy to miss. Repointing cannot happen when the
    collector is registered — the indexer does not exist yet — so it happens on install: re-applying the
-   collector moves its exporter to `http://<release>-entkube-telemetry-indexer.<ns>:8080/ingest/otlp`.
+   collector moves its exporter to `http://<fullname>-indexer.<ns>:8080/ingest/otlp`, where `<fullname>` is
+   the indexer's release name (plus a `entkube-telemetry-` prefix when it does not already contain it).
    Until then the collector keeps shipping to the management plane and the indexer receives nothing.
 4. *(Optional)* Install the Query component when read load justifies it.
 
@@ -417,6 +418,204 @@ The collector still asks for an ingest URL and a token afterwards, and both are 
 is simply the in-cluster indexer rather than EntKube, and the indexer validates the **same** token, so
 switching destinations changes only the URL. A URL an operator typed themselves is never repointed; only
 one EntKube generated is.
+
+## 5.9 Authenticating to a node through the API-server proxy
+
+The management plane reaches a node through the Kubernetes API server's proxy endpoint. That means the
+request has **two** credentials to satisfy, and they are easy to confuse:
+
+- **`Authorization`** authenticates to the **API server**. The Kubernetes client sets it from the
+  kubeconfig. It is not ours to touch.
+- **`X-EntKube-Ingest-Key`** carries the **node's** token. The API server does not interpret unknown
+  headers and forwards them untouched, so this arrives at the node intact.
+
+Setting `Authorization` to the node's token — the obvious thing to do, and what this originally did —
+makes the **API server** reject the call with **401** before it is ever forwarded. The node never sees the
+request. The failure surfaces as `401 Unauthorized` on the Logs page and reads exactly like the node
+refusing a bad token, which is why it survives several rounds of fixing the token.
+
+`LokiService` and `PrometheusService` never had this problem because they never set `Authorization` at all
+— they simply use the client's own credentials. That is the pattern to follow.
+
+The node checks its own header **first**. A proxied request can still arrive carrying an `Authorization`
+header that belongs to the API server rather than to us, and trying that one first would compare against a
+credential never meant for the node while the real one sits in the next header along. `Authorization:
+Bearer` is still accepted for callers that reach a node directly, which is how a querier talks to its
+indexer inside the cluster.
+
+### GET only, through the proxy
+
+The API server's proxy also maps **HTTP methods onto RBAC verbs** on `services/proxy`: a GET needs `get`,
+a POST needs `create`. A kubeconfig that reads a cluster perfectly well can lack the second — so label
+discovery (a GET) succeeds while a log search (a POST) is refused, which looks precisely like the node
+rejecting the token on some requests and not others.
+
+Every management-plane call to a node is therefore a **GET**, with the request body base64url-encoded into
+a `?q=` parameter (`NodeQuery.Encode`/`Decode`). The node keeps its POST routes for callers that reach it
+directly — a querier talking to its indexer inside the cluster, where no proxy is involved.
+
+The general rule: **anything reached through the API-server proxy should be GET-only.** Loki and Prometheus
+never met either of these problems because their APIs already are.
+
+### The error now says who refused
+
+A 401 can come from either end of the proxy and the two need opposite fixes. They are distinguishable: the
+API server answers with a JSON `Status` object, the node with an empty body. `TelemetryNodeClient` reports
+which one it was, because "401 Unauthorized" alone is the same message for "the kubeconfig was not
+accepted" and "the node did not accept its token" — and that ambiguity is what made this take three
+attempts to find.
+
+## 5.10 The query token is derived, not stored
+
+Every telemetry component on a cluster must present the same query token — a querier authenticates to its
+indexer with it, and the management plane reads with it. The first design minted a random token and stored
+it in the vault, with each new component copying whatever a sibling already held.
+
+That coupling is what fails. A cluster can carry more than one telemetry component, and the management
+plane read the token off whichever component row came back first while connecting to whichever Service the
+labels preferred. The moment those disagree, a perfectly healthy node answers **401 Unauthorized** — with
+nothing in its logs suggesting a configuration problem, because from the node's side the request simply had
+the wrong bearer.
+
+So it is now derived: `IngestTokenService.MintQuery(clusterId, tenantId)`, an HMAC over the same key that
+already signs ingest tokens, domain-separated so a query token cannot be replayed as an ingest one. Both
+sides compute it independently, nothing is copied, and drift is not representable. It is still written to
+the vault so it is visible and injectable, but the vault is no longer the authority — and an install
+*corrects* a stale stored token rather than merely filling a blank one.
+
+## 5.11 Why the Query component needs the Indexer
+
+Both catalog entries install the same chart, and that chart renders the indexer by default. Installing the
+Query component therefore used to stand up a **second indexer** — one that received nothing, because the
+collector ships to a single endpoint, and sat on an empty volume.
+
+The chart now has `indexer.enabled` (default true), and the Query entry sets it false and supplies
+`querier.indexerUrl` instead. A querier-only release renders exactly one workload, pointed at the indexer
+installed by the other release; the chart refuses to render if that URL is missing.
+
+That URL is **derived, never a literal** — it contains the *indexer's* release name, which the operator
+chooses. It is filled in from the indexer row on this cluster at registration
+(`GetInClusterIndexerUrlAsync`) and corrected at install time for anything registered earlier
+(`FixQuerierIndexerUrlAsync`); a value the operator typed themselves is never touched.
+
+The naming rule behind it bit once and is worth stating. The chart originally rendered
+`{release}-{chart}-{role}` unconditionally, so the natural release name for this chart produced
+`entkube-telemetry-entkube-telemetry-indexer` — the prefix doubled — while the catalog's default field
+value carried the undoubled form. That name resolves nowhere: the querier came up healthy and answered
+every request with `Both telemetry tiers failed … Name or service not known`, which reads like an
+object-storage outage rather than a wrong hostname. The chart now uses the standard Helm collapse
+(`contains $name .Release.Name`), so a release named `entkube-telemetry` renders
+`entkube-telemetry-indexer` and a release named `tel` renders `tel-entkube-telemetry-indexer`.
+`EntKubeTelemetryService.Fullname` mirrors that rule in C#, and a test pins the two together — a name
+derived on the management plane that the chart does not render is a hostname that exists nowhere, and DNS
+is the only place the mismatch ever surfaces.
+
+That collapse renames every object in a release installed before it (StatefulSet, Service, Secret,
+ServiceAccount, and the PVCs behind the volume claim templates). It is **not upgradable in place**: Helm
+creates the new objects and orphans the old PVCs, losing the warm tier. Uninstall and reinstall both
+telemetry components, and re-apply the collector afterwards so its exporter picks up the new indexer name.
+
+The management plane prefers the querier over the indexer when both are installed (`TelemetryNodeClient`
+picks by the `app.kubernetes.io/component` label), so a querier that cannot reach its indexer breaks
+*every* query on the cluster even though the indexer beside it is perfectly healthy.
+
+The catalog dependency remains, and is real: a querier reads the segment list and the hot tier *from* an
+indexer over HTTP. Without one it can find no segments and cannot see anything not yet sealed.
+
+**Whether these should be two components at all is a fair question.** One component with an "enable query
+pods" toggle would need no dependency, no cross-release URL and no chance of a stray second indexer —
+the chart already supports exactly that shape. The cost is that read and write capacity then scale
+together and share a release, so a querier upgrade restarts the indexer. Two components is the more
+flexible arrangement; one is the simpler one. Nothing below the catalog layer depends on the choice.
+
+## 5.12 The cutover has two halves, and they must move together
+
+Installing the indexer moves **reads** onto it immediately — `TelemetryNodeClient` finds a node simply by
+looking for one, so the first query after the install goes to the cluster. It does **not** move **writes**.
+The collector's endpoint only changes when the collector is itself re-applied, because the indexer *depends
+on* the collector and is therefore always installed second; there is no earlier moment at which an address
+to repoint to exists (§5.8).
+
+Nothing prompted that re-apply. So the ordinary install order left every cut-over cluster in a state where
+reads went to an empty indexer while writes continued arriving at the management plane — and an empty
+indexer answers every query **successfully**. No error is raised anywhere, on any surface: Observability →
+Logs, the customer log browser, the trace explorer and every dashboard panel all simply show nothing, which
+is indistinguishable from a quiet cluster. This is the worst failure shape this system can produce, and it
+was reachable by following the documented install order exactly.
+
+Two changes close it:
+
+- **The install completes the cutover.** `ComponentInstallOrchestrator` calls
+  `ComponentLifecycleService.EnsureCollectorShipsInClusterAsync` after a successful indexer install: it
+  repoints the collector at the in-cluster indexer and re-applies it, in the same shape as the wg-easy →
+  gateway hook beside it. An endpoint the operator chose themselves is left alone and the collector is not
+  re-applied at all — silently redirecting their telemetry would be worse than the bug.
+- **Reads follow the data, not the component.** `RouteCache` now requires two things before routing to a
+  node: that the node exists, *and* that the management plane is no longer the collector's destination
+  (`EntKubeTelemetryService.ManagementPlaneStillReceivesAsync`). While ingest still lands here, reads stay
+  here. It flips on its own once the cutover completes, so there is no flag and no window of blindness —
+  and a cluster left half-cut-over by an older build heals as soon as its collector is re-applied.
+
+The repointed endpoint is now **written back to the component's stored values**, not merely rendered into
+one helm invocation. It is the collector's real configuration, the Components tab should show it, and the
+read path decides which store holds the data by reading exactly that value — a repoint it could not see
+would send every view to whichever store is empty. It is applied to the stored values, never to the
+secret-injected document, which carries decrypted tokens and must not be persisted.
+
+`TelemetryNodeClient` also now logs a warning for each way an installed node can fail to resolve — no
+kubeconfig, or no Service carrying the chart's label in the release namespace. Both previously returned
+null in silence and fell back to a store that, for a cut-over cluster, holds nothing.
+
+## 5.13 The restart loop: exit 137, and the index that could never be sealed
+
+Observed on a live cluster: `entkube-telemetry-indexer-0` at **219 restarts in 18 hours**, exit code 137,
+`Reason: Error` with no `OOMKilled`, nothing in the container logs, and readiness probe failures in the
+event stream. Memory was 1291Mi against a 2Gi limit, so it was never OOM. Four separate faults compounded,
+and each one made the next worse.
+
+**1. A namespace LimitRange supplied the CPU limit the chart did not.** `monitoring` carries an
+`entkube-defaults` LimitRange with a default container limit of 1 CPU. The chart set `requests.cpu` but no
+`limits.cpu`, so every indexer pod silently inherited a 1-core cap and sat pinned at 979m — hard-throttled
+by CFS in 100ms slices. *Leaving a limit unset is not "no limit"; it is "whatever the namespace decides".*
+
+**2. The probes used the kubelet's default 1-second timeout.** A throttled thread pool misses that while
+being perfectly healthy. Liveness therefore killed a pod whose only problem was that it was busy.
+
+**3. The shutdown seal was unbounded.** `SegmentSealService` ran its final seal with
+`CancellationToken.None` — compress the active segment at zstd **19** and upload it — on a pod that had
+just been killed for lacking CPU. It could not finish inside `terminationGracePeriodSeconds`, so SIGTERM
+became SIGKILL: **exit 137, no log line, no reason recorded**. That is precisely the shape that reads as an
+unexplained kill from the outside.
+
+**4. And the seal triggers reset on every start, so the index could never be sealed again.** This is the
+one that turned a restart loop into unbounded growth. `ActiveSegmentIndex` kept its doc count and time
+bounds as in-process fields — a counter incremented per `Add`, two interlocked timestamps — and
+`SegmentManagerBase` measured the segment's age from process start. On restart the manager reopened an
+index holding millions of documents and reported `DocCount == 0`, so `HasData` was false, so
+`RollAndSealAsync` returned `null` before looking at anything; and `ActiveAge` returned to zero, so the
+60-minute trigger could never fire on a pod living three minutes. The active index grew to **11 GB against
+a catalog holding 16 KB and not one sealed segment.** A bigger index makes every write and merge more
+expensive, which costs more CPU, which trips the probes sooner. That is the spiral.
+
+Separately, the constructor always opened active directory **A**, while a roll ping-pongs A→B. Anything
+left in B when a process stopped was orphaned: on the volume, charged against it, invisible to queries and
+never sealed.
+
+**Fixes.** The engine now recovers its state from the index on disk — `RecoverFromDisk` reads the count
+from the `IndexWriter` and the bounds with two sorted top-1 searches on `ts` (every schema names the field
+identically and gives it `NumericDocValues` for exactly this kind of use). The segment's age comes from its
+oldest event rather than from process start. The manager adopts whichever of A/B a previous process left
+data in, and when both hold data it keeps the newer and leaves the older on disk, where the next roll
+absorbs it — nothing is deleted. The shutdown seal gets a 15-second budget and logs when it runs out, so
+SIGTERM produces a clean exit and a re-read rather than a SIGKILL and a mystery. The chart sets `cpu`
+explicitly on both workloads, gives every probe a real timeout and failure threshold, and adds a
+`startupProbe` so liveness does not begin until the pod is up. `archiveZstdLevel` drops 19 → 6: sealing
+runs on the pod that is ingesting, so the level is a CPU budget, and the top of the range costs many times
+the CPU of the middle for a few percent of ratio.
+
+**The rule worth keeping:** anything that decides whether durable data gets flushed must be derived from
+that data, never from process-local state. A counter that resets on restart is not a fact about an index —
+and the failure it causes is invisible, because "nothing to seal" and "nothing here" look identical.
 
 ## 6. Open items
 

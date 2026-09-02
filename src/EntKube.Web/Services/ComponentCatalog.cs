@@ -1871,7 +1871,7 @@ public static class ComponentCatalog
             Category = "Monitoring",
             HelmRepoUrl = "oci://entit.azurecr.io/helm",
             HelmChartName = "entkube-telemetry",
-            HelmChartVersion = "0.1.0",
+            HelmChartVersion = "0.3.0",
             ImageRegistryHost = "entit.azurecr.io",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "entkube-telemetry",
@@ -1991,7 +1991,7 @@ public static class ComponentCatalog
             Category = "Monitoring",
             HelmRepoUrl = "oci://entit.azurecr.io/helm",
             HelmChartName = "entkube-telemetry",
-            HelmChartVersion = "0.1.0",
+            HelmChartVersion = "0.3.0",
             ImageRegistryHost = "entit.azurecr.io",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "entkube-telemetry-query",
@@ -2003,6 +2003,28 @@ public static class ComponentCatalog
                     Key = "querier-enabled", Label = "Enable query pods",
                     YamlPath = "querier.enabled", Type = FormFieldType.Toggle,
                     DefaultValue = "true", Hidden = true
+                },
+                // Both components install the same chart, which renders the indexer by default. Without
+                // this, installing the Query component stands up a SECOND indexer — one that receives
+                // nothing, because the collector ships to a single endpoint, and holds an empty volume.
+                new ComponentFormField
+                {
+                    Key = "indexer-enabled", Label = "Deploy an indexer in this release",
+                    YamlPath = "indexer.enabled", Type = FormFieldType.Toggle,
+                    DefaultValue = "false", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    // Overwritten at registration by EntKubeTelemetryService.ApplyIndexerUrlDefault with the
+                    // address of the Indexer actually installed on this cluster. This literal is only the
+                    // fallback, and it is derived rather than typed: the Service name is the chart's
+                    // fullname for the INDEXER's release, which is the operator's to choose. Get it wrong
+                    // and the querier fails EVERY query on both tiers with a DNS error while looking healthy.
+                    Key = EntKubeTelemetryService.IndexerUrlFieldKey, Label = "Indexer URL",
+                    YamlPath = EntKubeTelemetryService.IndexerUrlYamlPath, Type = FormFieldType.Text,
+                    DefaultValue = EntKubeTelemetryService.IndexerServiceUrl("entkube-telemetry", "monitoring"),
+                    Placeholder = "http://<indexer-release>-entkube-telemetry-indexer.monitoring:8080",
+                    HelpText = "In-cluster address of the Indexer this component reads the hot tier and the segment list from. Pre-filled from the Indexer installed on this cluster — including its release-name prefix, which the chart puts on every object. Change it only to federate with an indexer EntKube did not install."
                 },
                 new ComponentFormField
                 {
@@ -3008,8 +3030,8 @@ public static class ComponentCatalog
                 {
                     Key = "replicas", Label = "Replicas",
                     YamlPath = "admissionController.replicas", Type = FormFieldType.Number,
-                    DefaultValue = "1",
-                    HelpText = "Number of admission controller replicas. 1 replica shows an expected HA warning — use 3 for production."
+                    DefaultValue = "3",
+                    HelpText = "Number of admission controller replicas. The webhook sits in the API server's request path, so a single replica makes every rolling restart, node drain or eviction a window where admission requests fail. 3 is the upstream HA recommendation. Drop to 1 only on throwaway/dev clusters."
                 },
                 new ComponentFormField
                 {
@@ -3029,18 +3051,38 @@ public static class ComponentCatalog
                     YamlPath = "reportsController.resources.limits.memory", Type = FormFieldType.Text,
                     DefaultValue = "1Gi", Placeholder = "e.g. 1Gi, 2Gi, 4Gi",
                     HelpText = "Memory ceiling for the reports controller. It caches metadata for every scanned resource, so raise this (2Gi+) on clusters with many namespaces/workloads to avoid OOMKilled crash loops."
+                },
+                new ComponentFormField
+                {
+                    Key = "policy-exception-namespace", Label = "PolicyException Namespace",
+                    YamlPath = "features.policyExceptions.namespace", Type = FormFieldType.Text,
+                    DefaultValue = "kyverno", Placeholder = "e.g. kyverno, *",
+                    HelpText = "The one namespace PolicyException resources may live in. Must match the namespace Kyverno is installed into (above) unless you deliberately point it elsewhere. Cannot be empty while exceptions are enabled — the controllers log an error and exceptions end up unscoped, letting any namespace owner except their own workloads from policy. Use \"*\" to allow exceptions in every namespace."
                 }
             ],
             DefaultValues = """
-                # Admission controller — validates and mutates incoming resources
-                # Use replicas: 3 for high-availability production clusters
+                # Admission controller — validates and mutates incoming resources.
+                # 3 replicas, the upstream HA recommendation: this webhook is in the API
+                # server's request path, so a single replica turns every rolling restart,
+                # node drain or eviction into a window where admission calls fail. The
+                # chart's pod anti-affinity is "preferred", not "required", so all three
+                # still schedule on a single-node cluster; the chart also auto-creates a
+                # PodDisruptionBudget (minAvailable: 1) as soon as replicas > 1.
+                #
+                # Every controller below pins limits.memory explicitly, not only requests.
+                # Chart-default limits are not version-stable — 3.8.1 -> 3.9.0 kept the reports
+                # controller at a 128Mi default while raising what it actually needs at startup,
+                # so overriding requests alone silently left a limit that OOMKills the process
+                # during informer cache population.
                 admissionController:
-                  replicas: 1
+                  replicas: 3
                   container:
                     resources:
                       requests:
                         cpu: 100m
                         memory: 256Mi
+                      limits:
+                        memory: 512Mi
 
                 # Background controller — audits existing resources against policies
                 backgroundController:
@@ -3048,6 +3090,8 @@ public static class ComponentCatalog
                     requests:
                       cpu: 50m
                       memory: 128Mi
+                    limits:
+                      memory: 512Mi
 
                 # Cleanup controller — removes generated resources when a policy is deleted
                 cleanupController:
@@ -3055,6 +3099,8 @@ public static class ComponentCatalog
                     requests:
                       cpu: 50m
                       memory: 128Mi
+                    limits:
+                      memory: 256Mi
 
                 # Reports controller — generates PolicyReport and ClusterPolicyReport objects.
                 # Builds PartialObjectMetadata informer caches for every scanned resource kind,
@@ -3069,10 +3115,17 @@ public static class ComponentCatalog
                     limits:
                       memory: 1Gi
 
-                # Enable PolicyException resources so workloads can opt out of specific policies
+                # Enable PolicyException resources so workloads can opt out of specific policies.
+                # The namespace is mandatory when the feature is on: the chart renders
+                # --exceptionNamespace only when it is set, and every controller logs
+                # "--exceptionNamespace cannot be empty" at ERR on start without it. Leaving it
+                # empty also leaves exceptions unscoped, so any namespace owner could except
+                # their own workloads from policy. Scope them to Kyverno's own namespace, which
+                # only cluster operators can write to; set "*" to allow them anywhere.
                 features:
                   policyExceptions:
                     enabled: true
+                    namespace: kyverno
                 """
         },
 

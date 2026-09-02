@@ -61,7 +61,7 @@ public static class TestServices
         IngestTokenService tokens = new(config);
         return new ComponentLifecycleService(
             dbFactory, vaultService, BuildKeycloak(dbFactory, vaultService),
-            tokens, new EntKubeTelemetryService(dbFactory, vaultService, tokens), config,
+            tokens, new EntKubeTelemetryService(dbFactory, vaultService, tokens, config), config,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<ComponentLifecycleService>.Instance);
     }
 }

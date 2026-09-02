@@ -714,6 +714,23 @@ public class ComponentLifecycleService(
 
             if (didRepoint)
             {
+                // Recorded on the component, not merely rendered into this one invocation. This is now
+                // where the collector actually ships, so the Components tab should say so — and the read
+                // path decides whether the management plane or the cluster's node holds the data by
+                // reading exactly this value, so a repoint it cannot see would send every log and trace
+                // view to whichever store is empty.
+                //
+                // Applied to the STORED values, never to valuesYaml above: that document has had the
+                // vault's secrets merged into it and must not be written back in the clear.
+                (string? storedRepoint, bool storedChanged) = TelemetryIngestDefaults.RepointToInCluster(
+                    component.HelmValues, inClusterIngest, configuration);
+
+                if (storedChanged)
+                {
+                    component.HelmValues = storedRepoint;
+                    await db.SaveChangesAsync(ct);
+                }
+
                 logger.LogInformation(
                     "Repointed collector {Component} on cluster {ClusterId} at the in-cluster telemetry "
                     + "indexer ({Url}); its logs and traces now stay in the cluster.",
@@ -729,6 +746,23 @@ public class ComponentLifecycleService(
         if (EntKubeTelemetryService.IsTelemetryNode(valuesCatalog))
         {
             valuesYaml = await entKubeTelemetry.FillMissingIdentityAsync(component, valuesYaml, ct);
+
+            // A querier holds no data of its own: it federates the hot tier and the segment list from the
+            // indexer's Service. That Service name contains the indexer's RELEASE name, so a querier
+            // registered from a catalog literal can be pointed at a host that resolves nowhere — and then
+            // every query fails on both tiers with a DNS error while both pods look perfectly healthy.
+            // Corrected here so re-applying the component fixes it.
+            (string? repointedQuerier, string? indexerUrl) =
+                await entKubeTelemetry.FixQuerierIndexerUrlAsync(component, valuesYaml, ct);
+            valuesYaml = repointedQuerier;
+
+            if (indexerUrl is not null)
+            {
+                logger.LogInformation(
+                    "Repointed telemetry querier {Component} on cluster {ClusterId} at {Url} — its previous "
+                    + "indexer address did not resolve to a Service in this cluster.",
+                    component.Name, component.ClusterId, indexerUrl);
+            }
         }
 
         // Components whose image EntKube publishes to a private registry need the CLUSTER to hold a
@@ -1136,6 +1170,76 @@ public class ComponentLifecycleService(
     {
         Guid? gatewayId = await ResolveWireGuardGatewayIdAsync(wgComponentId, ct);
         return gatewayId is null ? null : await ReapplyGatewayAsync(gatewayId.Value, ct);
+    }
+
+    /// <summary>
+    /// Completes the cutover after a telemetry indexer install: repoints the cluster's OpenTelemetry
+    /// Collector at the indexer beside it and re-applies it, so telemetry starts arriving where the
+    /// management plane has already started reading from.
+    ///
+    /// <para>Without this the two halves move at different times. Reads follow the indexer the instant it
+    /// is installed — the read path finds it by looking for it — while writes stay pointed at the
+    /// management plane until somebody happens to re-apply the collector. Nothing prompts them to, the
+    /// indexer answers queries perfectly well with nothing in it, and the result is every log and trace
+    /// view on every surface going quietly empty. Installing the indexer is the moment the operator asked
+    /// for the cutover, so it is the moment both halves move.</para>
+    ///
+    /// <para>The repointed endpoint is written back to the component's stored values, not merely rendered
+    /// into this one helm invocation: it is now the collector's real configuration, the Components tab
+    /// shows it, and the read path uses it to know that the data has moved.</para>
+    ///
+    /// <para>Returns null when there is nothing to do — the component is not an indexer, the cluster has
+    /// no installed collector, or that collector already ships somewhere the operator chose.</para>
+    /// </summary>
+    public async Task<HelmExecutionResult?> EnsureCollectorShipsInClusterAsync(
+        Guid indexerComponentId, CancellationToken ct = default)
+    {
+        if (await RepointCollectorToInClusterAsync(indexerComponentId, ct) is not Guid collectorId)
+            return null;
+
+        HelmCommand command = await GetInstallCommandAsync(collectorId, ct);
+        return await ExecuteHelmAsync(collectorId, command, ct);
+    }
+
+    /// <summary>
+    /// The database half of <see cref="EnsureCollectorShipsInClusterAsync"/>: rewrites the collector's
+    /// stored endpoint to the cluster's own indexer and returns which collector to re-apply, or null when
+    /// there is nothing to move. Separated from the helm invocation so the decision — which is the part
+    /// with the rules in it — can be tested, and driven, without a helm invocation.
+    /// </summary>
+    public async Task<Guid?> RepointCollectorToInClusterAsync(
+        Guid indexerComponentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ClusterComponent? indexer = await db.ClusterComponents
+            .FirstOrDefaultAsync(c => c.Id == indexerComponentId, ct);
+
+        if (indexer is null || indexer.Name != EntKubeTelemetryService.IndexerKey) return null;
+
+        ClusterComponent? collector = await db.ClusterComponents
+            .FirstOrDefaultAsync(c => c.ClusterId == indexer.ClusterId
+                                      && c.Name == TelemetryIngestDefaults.CollectorKey
+                                      && c.Status == ComponentStatus.Installed, ct);
+        if (collector is null) return null;
+
+        string? inClusterIngest = await entKubeTelemetry.GetInClusterIngestUrlAsync(indexer.ClusterId, ct);
+        (string? repointed, bool didRepoint) = TelemetryIngestDefaults.RepointToInCluster(
+            collector.HelmValues, inClusterIngest, configuration);
+
+        // An operator-chosen destination is left exactly as it is, and re-applying the collector for no
+        // reason would be a surprising side effect of installing something else.
+        if (!didRepoint) return null;
+
+        collector.HelmValues = repointed;
+        await db.SaveChangesAsync(ct);
+
+        logger.LogInformation(
+            "Repointed collector on cluster {ClusterId} at the in-cluster telemetry indexer ({Url}) "
+            + "after its install; re-applying so its logs and traces stay in the cluster.",
+            indexer.ClusterId, inClusterIngest);
+
+        return collector.Id;
     }
 
     private async Task<string> SubstituteManifestPlaceholdersAsync(
@@ -1718,19 +1822,23 @@ public class ComponentLifecycleService(
             // today are left exactly as they are.
             if (gatewayClass == "istio")
             {
-                foreach (ExternalRoute r in allRoutes.Where(r => r.TlsMode != TlsMode.Passthrough))
-                {
-                    string svcNs = r.Component?.Namespace ?? "default";
-                    if (string.IsNullOrWhiteSpace(r.ServiceName))
-                    {
-                        continue;
-                    }
+                // Grouped by backend Service, not by route: one DestinationRule exists per
+                // Service, so two routes onto the same Service would otherwise produce two
+                // documents with the same name and the second would silently overwrite the
+                // first — including its session affinity.
+                IEnumerable<IGrouping<(string Namespace, string Service), ExternalRoute>> byService = allRoutes
+                    .Where(r => r.TlsMode != TlsMode.Passthrough && !string.IsNullOrWhiteSpace(r.ServiceName))
+                    .OrderBy(r => r.Hostname, StringComparer.Ordinal)
+                    .GroupBy(r => (Namespace: r.Component?.Namespace ?? "default", Service: r.ServiceName!));
 
+                foreach (IGrouping<(string Namespace, string Service), ExternalRoute> group in byService)
+                {
                     List<KubeServicePort> ports = await GetServicePortsAsync(
-                        tempKubeconfig, svcNs, r.ServiceName, ct);
+                        tempKubeconfig, group.Key.Namespace, group.Key.Service, ct);
 
                     string destinationRule = ExternalRouteService.GenerateBackendDestinationRuleYaml(
-                        r.ServiceName, svcNs, gatewayNamespace, ports, alwaysEmit: false);
+                        group.Key.Service, group.Key.Namespace, gatewayNamespace, ports, alwaysEmit: false,
+                        sessionAffinity: SessionAffinitySpec.Merge(group.Select(SessionAffinitySpec.From)));
 
                     if (destinationRule.Length > 0)
                     {

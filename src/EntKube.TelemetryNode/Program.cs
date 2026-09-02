@@ -318,6 +318,12 @@ void MapLogRoutes(RouteGroupBuilder group, Func<IServiceProvider, ILogBackend> r
 {
     group.AddEndpointFilter(RequireQueryToken);
 
+    // Does this node actually hold anything? The management plane routes on the answer, and it must be a
+    // real question rather than "is the node reachable": a node that exists but has never received a batch
+    // answers every other query successfully and empty, which is the one failure shape nothing reports.
+    group.MapGet("/has-data", async (IServiceProvider sp, CancellationToken ct) =>
+        Results.Json(await resolve(sp).HasDataAsync(node.ClusterId, ct)));
+
     group.MapGet("/namespaces", async (IServiceProvider sp, int windowMinutes, CancellationToken ct) =>
         Respond(await resolve(sp).GetNamespacesAsync(node.ClusterId, windowMinutes, ct)));
 
@@ -332,16 +338,42 @@ void MapLogRoutes(RouteGroupBuilder group, Func<IServiceProvider, ILogBackend> r
             node.ClusterId, request.ToFilter(), request.From, request.To, request.Limit, ct)))
         .DisableAntiforgery();
 
+    // GET twins of the body-bearing routes. The Kubernetes API server's proxy maps methods onto RBAC
+    // verbs, so a POST through it needs `create` on services/proxy while a GET needs only `get` — and a
+    // read-only kubeconfig has the latter. The management plane therefore uses these; the POST routes stay
+    // for callers that reach the node directly, like a querier talking to its indexer.
+    group.MapGet("/search", async (IServiceProvider sp, string q, CancellationToken ct) =>
+    {
+        LogSearchBody request = NodeQuery.Decode<LogSearchBody>(q)!;
+        return Respond(await resolve(sp).QueryAsync(
+            node.ClusterId, request.ToFilter(), request.From, request.To, request.Limit, ct));
+    });
+
     group.MapPost("/histogram", async (IServiceProvider sp, LogSearchBody request, CancellationToken ct) =>
         Respond(await resolve(sp).GetHistogramAsync(
             node.ClusterId, request.ToFilter(), request.From, request.To, request.Buckets, ct)))
         .DisableAntiforgery();
+
+    group.MapGet("/histogram", async (IServiceProvider sp, string q, CancellationToken ct) =>
+    {
+        LogSearchBody request = NodeQuery.Decode<LogSearchBody>(q)!;
+        return Respond(await resolve(sp).GetHistogramAsync(
+            node.ClusterId, request.ToFilter(), request.From, request.To, request.Buckets, ct));
+    });
 
     group.MapPost("/count", async (IServiceProvider sp, LogSearchBody request, CancellationToken ct) =>
         Respond(await resolve(sp).CountAsync(
             node.ClusterId, request.Namespaces?.FirstOrDefault(), request.Text, request.MinLevel,
             request.From, request.To, ct)))
         .DisableAntiforgery();
+
+    group.MapGet("/count", async (IServiceProvider sp, string q, CancellationToken ct) =>
+    {
+        LogSearchBody request = NodeQuery.Decode<LogSearchBody>(q)!;
+        return Respond(await resolve(sp).CountAsync(
+            node.ClusterId, request.Namespaces?.FirstOrDefault(), request.Text, request.MinLevel,
+            request.From, request.To, ct));
+    });
 
     group.MapGet("/by-trace", async (IServiceProvider sp, string traceId, int limit, CancellationToken ct) =>
         Respond(await resolve(sp).QueryByTraceAsync(node.ClusterId, traceId, limit, ct)));
@@ -350,6 +382,45 @@ void MapLogRoutes(RouteGroupBuilder group, Func<IServiceProvider, ILogBackend> r
 void MapTraceRoutes(RouteGroupBuilder group, Func<IServiceProvider, ITraceQueryService> resolve)
 {
     group.AddEndpointFilter(RequireQueryToken);
+
+    // GET twins, for the same reason as the log routes: a POST through the API server's proxy needs the
+    // `create` verb on services/proxy, a GET needs only `get`.
+    group.MapGet("/has-data", async (IServiceProvider sp, CancellationToken ct) =>
+        Results.Json(await resolve(sp).HasDataAsync(node.ClusterId, ct)));
+
+    group.MapGet("/services", async (IServiceProvider sp, string q, CancellationToken ct) =>
+    {
+        TraceQueryBody b = NodeQuery.Decode<TraceQueryBody>(q)!;
+        return Respond(await resolve(sp).GetServicesAsync(node.ClusterId, ct, b.Namespaces, b.PodPattern, b.WindowMinutes));
+    });
+    group.MapGet("/list", async (IServiceProvider sp, string q, CancellationToken ct) =>
+    {
+        TraceQueryBody b = NodeQuery.Decode<TraceQueryBody>(q)!;
+        return Respond(await resolve(sp).ListTracesAsync(
+            node.ClusterId, b.Service, b.From, b.To, b.MinDurationMs, b.ErrorsOnly, b.Limit, ct,
+            b.Namespaces, b.PodPattern));
+    });
+    group.MapGet("/trace", async (IServiceProvider sp, string q, CancellationToken ct) =>
+    {
+        TraceQueryBody b = NodeQuery.Decode<TraceQueryBody>(q)!;
+        return Respond(await resolve(sp).GetTraceAsync(node.ClusterId, b.TraceId ?? "", ct, b.Namespaces));
+    });
+    group.MapGet("/red", async (IServiceProvider sp, string q, CancellationToken ct) =>
+    {
+        TraceQueryBody b = NodeQuery.Decode<TraceQueryBody>(q)!;
+        return Respond(await resolve(sp).GetServiceRedAsync(
+            node.ClusterId, b.Service ?? "", b.From, b.To, b.Buckets, ct, b.Namespaces, b.PodPattern));
+    });
+    group.MapGet("/map", async (IServiceProvider sp, string q, CancellationToken ct) =>
+    {
+        TraceQueryBody b = NodeQuery.Decode<TraceQueryBody>(q)!;
+        return Respond(await resolve(sp).GetServiceMapAsync(node.ClusterId, b.From, b.To, ct, b.Namespaces, b.PodPattern));
+    });
+    group.MapGet("/stats", async (IServiceProvider sp, string q, CancellationToken ct) =>
+    {
+        TraceQueryBody b = NodeQuery.Decode<TraceQueryBody>(q)!;
+        return Respond(await resolve(sp).GetServiceStatsAsync(node.ClusterId, b.Service ?? "", b.From, b.To, ct));
+    });
 
     group.MapPost("/services", async (IServiceProvider sp, TraceQueryBody q, CancellationToken ct) =>
         Respond(await resolve(sp).GetServicesAsync(node.ClusterId, ct, q.Namespaces, q.PodPattern, q.WindowMinutes)))

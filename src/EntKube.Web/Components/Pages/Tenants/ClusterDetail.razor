@@ -2027,7 +2027,8 @@ else if (section == "components")
         // placeholders in the collector config, which installs and runs fine while dropping every batch.
         // When the cluster already runs its own telemetry indexer, point the collector at that instead of
         // back across the WAN — keeping the logs in the cluster is the whole reason it is there.
-        string? inClusterIngest = await EntKubeTelemetry.GetInClusterIngestUrlAsync(Cluster.Id);
+        string? indexerUrl = await EntKubeTelemetry.GetInClusterIndexerUrlAsync(Cluster.Id);
+        string? inClusterIngest = indexerUrl is null ? null : indexerUrl + "/ingest/otlp";
         EntKube.Web.Services.Telemetry.TelemetryIngestDefaults.ApplyTo(
             entry, regFormFieldValues, Cluster.Id, TenantId, IngestTokens, Config, inClusterIngest);
 
@@ -2088,6 +2089,11 @@ else if (section == "components")
             // Configure Loki S3 chunk storage if a storage link was selected.
 
             await SaveLokiConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
+        // Same reasoning for the query component's indexer address: the Service name contains the
+        // indexer's release name, so the field is filled from the indexer this cluster actually has
+        // rather than from a catalog literal that is only right for one particular naming.
+        EntKubeTelemetryService.ApplyIndexerUrlDefault(entry, regFormFieldValues, indexerUrl);
+
 
             // Configure Mimir / Tempo S3 storage if a storage link was selected.
 

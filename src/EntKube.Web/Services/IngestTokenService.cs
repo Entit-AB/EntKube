@@ -49,6 +49,24 @@ public sealed class IngestTokenService
     }
 
     /// <summary>
+    /// Issues the token the management plane presents when READING telemetry from a cluster's node, and
+    /// that a querier presents to its indexer.
+    ///
+    /// Derived rather than random, and deliberately so. Every telemetry component on a cluster has to
+    /// agree on this value — the querier authenticates to the indexer with it — and a stored random token
+    /// has to be copied between them, which is a thing that can drift. Deriving it from (cluster, tenant)
+    /// means every component computes the same answer independently and nothing has to be kept in step.
+    ///
+    /// The payload is domain-separated from <see cref="Mint"/>, so a query token cannot be replayed as an
+    /// ingest token: <see cref="TryValidate"/> rejects it outright.
+    /// </summary>
+    public string MintQuery(Guid clusterId, Guid tenantId)
+    {
+        byte[] payload = Encoding.UTF8.GetBytes($"query:{clusterId:N}:{tenantId:N}");
+        return $"{Prefix}.{Base64Url(payload)}.{Base64Url(Sign(payload))}";
+    }
+
+    /// <summary>
     /// Verifies a token and extracts the bound identity. Returns false (and zeroed ids) on any
     /// tampering, malformed input, or signature mismatch.
     /// </summary>

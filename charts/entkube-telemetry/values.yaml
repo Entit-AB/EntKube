@@ -80,21 +80,34 @@ telemetry:
   # Seal the active index once it reaches either threshold.
   segmentMaxDocs: 1000000
   segmentMaxAgeMinutes: 60
-  # zstd level for sealed archives (1-22). 19 is the ratio/speed sweet spot.
-  archiveZstdLevel: 19
+  # zstd level for sealed archives (1-22). Sealing runs on the SAME pod that is ingesting, so this is a
+  # CPU budget as much as a compression setting: the high levels cost many times the CPU of the middle
+  # ones for a few percent of ratio, and spending that while a segment is being written is what turns a
+  # busy indexer into a throttled one. Raise it only if archive size genuinely dominates the cost.
+  archiveZstdLevel: 6
 
 indexer:
+  # The write path. Turn it off for a release that deploys ONLY query pods against an indexer installed by
+  # another release — otherwise that release stands up a second indexer of its own, which receives nothing
+  # (the collector ships to one endpoint) and holds an empty volume.
+  enabled: true
   persistence:
     # Sized for the warm tier plus the unsealed active index. Below warmMaxBytes and the size rule will be
     # evicting constantly; well above it is wasted.
     size: 20Gi
     storageClass: ""
+  # ALWAYS set cpu explicitly, including the limit. A namespace LimitRange with a default CPU limit will
+  # otherwise supply one, and a value chosen for general workloads (1 core is a common default) throttles
+  # Lucene indexing hard enough that the health endpoints miss their probe deadlines — the kubelet then
+  # restarts a pod that is merely busy, which loses its unsealed segment and makes the next start busier.
+  # Leaving cpu unset is not "no limit"; it is "whatever the namespace decides", which is worse.
   resources:
     requests:
-      cpu: 200m
-      memory: 512Mi
+      cpu: "1"
+      memory: 1Gi
     limits:
-      memory: 2Gi
+      cpu: "4"
+      memory: 4Gi
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -104,16 +117,23 @@ querier:
   # Off by default: the indexer answers every query itself. Turn this on when query load starts competing
   # with ingest, or when you want more read capacity than one pod.
   enabled: false
+  # In-cluster URL of the indexer to federate with. Leave empty when indexer.enabled is true — the querier
+  # then points at the indexer in this same release. Set it when running query pods as a SEPARATE release
+  # (indexer.enabled=false), because the indexer's Service name is derived from the OTHER release's name
+  # and cannot be guessed from here.
+  indexerUrl: ""
   replicas: 2
   persistence:
     # A read-through cache of cold segments. Set telemetry.warmMaxBytes below this.
     size: 20Gi
     storageClass: ""
+  # Set explicitly for the same reason as the indexer's — see the note there.
   resources:
     requests:
       cpu: 200m
       memory: 512Mi
     limits:
+      cpu: "2"
       memory: 2Gi
   nodeSelector: {}
   tolerations: []

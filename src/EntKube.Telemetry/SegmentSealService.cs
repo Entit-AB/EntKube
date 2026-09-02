@@ -14,6 +14,15 @@ public sealed class SegmentSealService(
     SegmentEngineOptions options,
     ILogger<SegmentSealService> logger) : BackgroundService
 {
+    /// <summary>
+    /// How long the shutdown seal may take before the process gives up and exits.
+    ///
+    /// Sized to sit inside two deadlines at once: the host's own 30-second <c>ShutdownTimeout</c>, and the
+    /// chart's <c>terminationGracePeriodSeconds</c>. Five signals each get this budget in sequence, so it
+    /// must be a small fraction of the grace period rather than most of it.
+    /// </summary>
+    private static readonly TimeSpan ShutdownSealBudget = TimeSpan.FromSeconds(15);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Retention is far cheaper than sealing and needn't run every tick; run it every Nth cycle.
@@ -54,11 +63,40 @@ public sealed class SegmentSealService(
         }
         catch (OperationCanceledException) { /* clean shutdown */ }
 
-        // Best-effort final seal per tenant so buffered events survive a restart.
+        // Best-effort final seal per tenant so buffered events survive a restart — emphasis on BOUNDED.
+        //
+        // This used to run with CancellationToken.None, which made it unbounded in a place that has a hard
+        // deadline: the kubelet sends SIGTERM, waits terminationGracePeriodSeconds, then SIGKILLs. A seal
+        // compresses the whole active segment and uploads it, so if object storage is slow or unreachable —
+        // or the pod is CPU-starved, which is exactly when it is being restarted — it cannot finish, the
+        // process never exits, and the container dies on exit code 137 having logged nothing at all. That
+        // reads as an unexplained kill and is one of the hardest states to diagnose from the outside.
+        //
+        // Sealing is an optimisation, not a correctness requirement: the active index is on a
+        // PersistentVolume and is recovered on the next start. Losing the race costs a re-read, not data,
+        // so it is right to give up and exit cleanly.
+        using CancellationTokenSource shutdown = new(ShutdownSealBudget);
+        logger.LogInformation("Sealing active segments before shutdown (budget {Budget}).", ShutdownSealBudget);
+
         foreach (SegmentManagerBase manager in registry.ActiveManagers)
         {
-            try { await manager.RollAndSealAsync(CancellationToken.None); }
-            catch (Exception ex) { logger.LogWarning(ex, "Final segment seal on shutdown failed."); }
+            try
+            {
+                await manager.RollAndSealAsync(shutdown.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                logger.LogWarning(
+                    "Ran out of time sealing on shutdown; the unsealed index stays on the volume and is "
+                    + "recovered on the next start.");
+                break;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Final segment seal on shutdown failed.");
+            }
         }
+
+        logger.LogInformation("Shutdown seal complete.");
     }
 }

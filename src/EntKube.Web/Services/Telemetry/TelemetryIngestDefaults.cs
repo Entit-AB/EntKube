@@ -147,16 +147,27 @@ public static class TelemetryIngestDefaults
         if (string.Equals(current, inClusterIngestUrl, StringComparison.OrdinalIgnoreCase))
             return (valuesYaml, false);   // already there
 
-        bool oursToChange =
-            IsBlankOrPlaceholder(current)
-            || (IngestUrl(config) is string publicUrl
-                && string.Equals(current, publicUrl, StringComparison.OrdinalIgnoreCase));
-
-        if (!oursToChange) return (valuesYaml, false);
+        if (!IsManagementPlaneDestination(current, config)) return (valuesYaml, false);
 
         return (YamlFormMerger.MergeFormValues(valuesYaml,
             new Dictionary<string, string> { [EndpointYamlPath] = inClusterIngestUrl }), true);
     }
+
+    /// <summary>
+    /// Whether a collector endpoint is one EntKube itself produced to reach the management plane — the
+    /// public ingest URL, or a blank/placeholder that has never been anywhere.
+    ///
+    /// <para>Two callers need exactly this question, and they must not answer it differently.
+    /// <see cref="RepointToInCluster"/> asks it to decide whether the endpoint is EntKube's to rewrite;
+    /// the read path asks it to decide whether the management plane's own store is still receiving this
+    /// cluster's telemetry, and therefore whether that store or the cluster's node holds the data. An
+    /// address the operator chose is neither ours to rewrite nor ours to assume about — and either way
+    /// it is not the management plane, so the data is not here.</para>
+    /// </summary>
+    public static bool IsManagementPlaneDestination(string? endpoint, IConfiguration config) =>
+        IsBlankOrPlaceholder(endpoint)
+        || (IngestUrl(config) is string publicUrl
+            && string.Equals(endpoint, publicUrl, StringComparison.OrdinalIgnoreCase));
 
     private static bool IsBlankOrPlaceholder(string? value) =>
         string.IsNullOrWhiteSpace(value)

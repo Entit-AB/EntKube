@@ -6,10 +6,10 @@ description: >-
 type: application
 
 # Chart version — bump on every chart change.
-version: 0.1.0
+version: 0.3.0
 
 # Version of the entkube-telemetry image this chart is tested against. Used as the default image tag.
-appVersion: "0.1.0"
+appVersion: "0.3.0"
 
 keywords:
   - logging

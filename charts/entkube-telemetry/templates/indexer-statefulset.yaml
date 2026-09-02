@@ -1,3 +1,4 @@
+{{- if .Values.indexer.enabled }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -49,22 +50,39 @@ spec:
                 secretKeyRef: { name: {{ include "entkube-telemetry.secretName" . }}, key: Node__IngestToken }
             # The indexer keeps the full warm window; the querier is the one configured differently.
             - name: Telemetry__WarmRetentionDays
-              value: {{ .Values.telemetry.warmRetentionDays | quote }}
+              value: {{ .Values.telemetry.warmRetentionDays | int64 | quote }}
             {{- include "entkube-telemetry.env" . | nindent 12 }}
           ports:
             - name: http
               containerPort: 8080
               protocol: TCP
+          # Probe budgets are deliberately generous, and the reason is worth stating: this pod spends its
+          # CPU on Lucene indexing, and under a CPU limit the kernel throttles it in 100ms slices. The
+          # kubelet's DEFAULT timeoutSeconds is 1, which a throttled thread pool can miss while being
+          # perfectly healthy — and a liveness probe that fires then restarts a busy indexer, which loses
+          # its unsealed segment, which makes the next start busier still. That spiral is not hypothetical:
+          # it produced 219 restarts in 18 hours. Liveness here is a last resort for a wedged process, not
+          # a load signal.
+          startupProbe:
+            # Recovering a large unsealed index on boot is disk work that happens before the first probe
+            # would otherwise be answered. Liveness does not begin until this passes.
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
           livenessProbe:
             httpGet: { path: /healthz, port: http }
-            initialDelaySeconds: 10
-            periodSeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
           readinessProbe:
             # Checks the data volume is writable, not just that the process is up: an indexer that cannot
             # write its index would still accept OTLP and silently lose every batch.
             httpGet: { path: /readyz, port: http }
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             {{- toYaml .Values.indexer.resources | nindent 12 }}
           volumeMounts:
@@ -97,3 +115,4 @@ spec:
         resources:
           requests:
             storage: {{ .Values.indexer.persistence.size | quote }}
+{{- end }}

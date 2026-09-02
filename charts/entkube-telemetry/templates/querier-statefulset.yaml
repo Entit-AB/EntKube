@@ -1,4 +1,7 @@
 {{- if .Values.querier.enabled }}
+{{- if and (not .Values.indexer.enabled) (not .Values.querier.indexerUrl) }}
+{{- fail "querier.indexerUrl is required when indexer.enabled is false — a querier federates the hot tier from an indexer, and with no indexer in this release it cannot derive where that one is." }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -11,7 +14,7 @@ spec:
   # A StatefulSet rather than a Deployment despite being stateless in the durable sense: each replica needs
   # its OWN ReadWriteOnce volume for the segment cache, and a Deployment's replicas would all try to bind
   # the same PVC. Nothing here is irreplaceable — a lost cache costs re-downloads, not data.
-  replicas: {{ .Values.querier.replicas }}
+  replicas: {{ .Values.querier.replicas | int64 }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "entkube-telemetry.name" . }}
@@ -42,26 +45,37 @@ spec:
             - name: Node__Role
               value: Querier
             - name: Node__IndexerUrl
-              value: "http://{{ include "entkube-telemetry.indexerName" . }}:{{ .Values.service.port }}"
+              value: {{ .Values.querier.indexerUrl | default (printf "http://%s:%v" (include "entkube-telemetry.indexerName" .) .Values.service.port) | quote }}
             # A querier's disk is a read-through LRU cache, NOT a recency window. Ageing it by event time
             # would download last month's segments to answer a query and evict them moments later as
             # "old", so the next identical query pays the download again. Setting the warm window to the
             # full retention disables the age rule and leaves warmMaxBytes + LRU to bound it.
             - name: Telemetry__WarmRetentionDays
-              value: {{ .Values.telemetry.retentionDays | quote }}
+              value: {{ .Values.telemetry.retentionDays | int64 | quote }}
             {{- include "entkube-telemetry.env" . | nindent 12 }}
           ports:
             - name: http
               containerPort: 8080
               protocol: TCP
+          # Same budgets as the indexer, for the same reason: the kubelet's default 1s probe timeout is
+          # missable by a CPU-throttled thread pool that is otherwise perfectly healthy, and a liveness
+          # restart under load only deepens the load. See the indexer's StatefulSet for the full note.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
           livenessProbe:
             httpGet: { path: /healthz, port: http }
-            initialDelaySeconds: 10
-            periodSeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
           readinessProbe:
             httpGet: { path: /readyz, port: http }
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             {{- toYaml .Values.querier.resources | nindent 12 }}
           volumeMounts:
