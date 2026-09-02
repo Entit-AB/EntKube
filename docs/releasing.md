@@ -4,21 +4,53 @@ What ships, how each piece is built, and why each is packaged the way it is.
 
 EntKube is not one artifact. It is a management-plane image, a second image that runs *inside* managed
 clusters, a Helm chart, and four standalone binaries that run in places where neither a container runtime
-nor a .NET runtime can be assumed. Those constraints are what shape the packaging, and they are why there
-is no single "build everything" command: the pieces are released on different cadences and for different
-reasons.
+nor a .NET runtime can be assumed. Those constraints are what shape the packaging.
 
-| Artifact | Ships as | Built by | Published by | Cadence |
-| --- | --- | --- | --- | --- |
-| Management plane | Container image `entit.azurecr.io/entkube` | `Dockerfile` | `.github/workflows/deploy.yml` | Every push to `main` |
-| Telemetry plane | Image `entit.azurecr.io/entkube-telemetry` **+** Helm chart | `scripts/build-telemetry.sh` | `.github/workflows/release-telemetry.yml` | On a version tag |
-| Egress agent | Self-contained binary, 4 platforms | `scripts/build-agent.sh` | By hand — see below | On demand |
-| CLI | Self-contained binary, 4 platforms | `scripts/build-cli.sh` | By hand | On demand |
-| MCP server | Self-contained binary, 4 platforms | `scripts/build-mcp.sh` | By hand | On demand |
-| Terraform provider | Go binary, 5 platforms | `scripts/build-terraform-provider.sh` | By hand | On demand |
+**Everything is built by one script.** `scripts/release.sh` takes target names, builds all of them when
+given none, and publishes what has somewhere to be published when given `--push`.
 
-All build scripts write under `artifacts/` and take the same shape: run from anywhere, no arguments for
-the common case, `--help` or the header comment for the rest.
+```bash
+scripts/release.sh                          # build everything, publish nothing
+scripts/release.sh --push                   # build everything, publish what has a home
+scripts/release.sh telemetry --push         # one target
+scripts/release.sh cli mcp --rid linux-x64  # two targets, one platform
+scripts/release.sh --list                   # what the targets are
+```
+
+| Target | Ships as | Published by | Cadence |
+| --- | --- | --- | --- |
+| `web` | Container image `entit.azurecr.io/entkube` | `.github/workflows/deploy.yml` | Every push to `main` |
+| `telemetry` | Image `entit.azurecr.io/entkube-telemetry` **+** Helm chart | `.github/workflows/release-telemetry.yml` | On a version tag |
+| `agent` | Self-contained binary, 4 platforms | By hand — see below | On demand |
+| `cli` | Self-contained binary, 4 platforms | By hand | On demand |
+| `mcp` | Self-contained binary, 4 platforms | By hand | On demand |
+| `installer` | Self-contained binary, 4 platforms | By hand | On demand |
+| `gui` | Desktop app + bundled client tools, 4 platforms | By hand | On demand |
+| `terraform` | Go binary, 5 platforms | By hand | On demand |
+
+`binaries` is shorthand for the four binary targets; `all` (the default) is everything, `gui`
+included.
+
+Output lands under `artifacts/`, in the same per-target layout as before. Common options:
+
+| Option | Effect |
+| --- | --- |
+| `--push` | Publish the image/chart targets. Binaries have no registry — see the agent section. |
+| `--version <v>` | Override the version. Defaults to the chart's own for `telemetry`, the short SHA for `web`. |
+| `--rid <list>` | Build only these platforms, e.g. `linux-x64,osx-arm64`. Fails if the target ships none of them. |
+| `--configuration <list>` | `Release` (default) or `Debug`, or `Debug,Release` for both. Binary targets only. |
+| `--registry <host>` | Default `entit.azurecr.io`. |
+| `--platforms <list>` | Override the container image platforms. |
+
+> **A note if you remember the old scripts.** `release.sh` replaces `build-agent.sh`, `build-cli.sh`,
+> `build-mcp.sh`, `build-terraform-provider.sh` and `build-telemetry.sh`. Two behaviours changed:
+> configuration and platform are now named options rather than positional arguments, and the binary
+> targets default to **Release only** instead of Debug *and* Release — a release build does not need the
+> Debug copy, and building it doubled every run for nothing. Pass `--configuration Debug,Release` for the
+> old behaviour.
+
+Being one script does not make the pieces one release: they still go out on different cadences, for the
+different reasons set out below. It only means there is one place that knows how to build each of them.
 
 ---
 
@@ -30,6 +62,66 @@ up -d`. Newest-wins is correct here because there is exactly one deployment and 
 built.
 
 Nothing about a release is version-pinned, so nothing needs bumping.
+
+`scripts/release.sh web` does the same build from a laptop, tagging the short SHA so an image built there
+and one built by CI from the same commit carry the same tag. With `--push` it also moves `latest`, because
+that is the tag `docker-compose.yml` on the server pulls — a push that updated only the SHA tag would
+build an image the server never sees. It does not deploy: the server still has to pull, which is the SSH
+step in `deploy.yml`.
+
+### Building this one on an Apple Silicon laptop usually fails, and that is expected
+
+The `linux/arm64` leg dies part-way through `dotnet publish` with **`Illegal instruction`** and exit code
+**132** (128+4, SIGILL). It lands on whichever project happened to be compiling and moves between runs, so
+the error names a different file each time and reads like a source problem. It is not one: the same commit
+builds on the native arm64 runner in CI. The telemetry image is small enough to usually get through, which
+is why `scripts/release.sh telemetry --push` works from a laptop and `web --push` generally does not.
+
+`release.sh` detects it and prints what to do instead. **Publish the management-plane image from CI** — a
+push to `main`, or a `workflow_dispatch` on `deploy.yml` — which builds each architecture on its own native
+runner and merges the digests into the manifest list that `latest` points at.
+
+Building locally anyway means dropping the failing leg:
+
+```
+scripts/release.sh web --push --platforms linux/amd64
+```
+
+That pushes a single-architecture image and deliberately does **not** move `latest`, because arm64 hosts
+pull that tag and an amd64-only `latest` fails them at pull time.
+
+### Both architectures
+
+`linux/amd64` **and** `linux/arm64`, matching `deploy.yml`.
+
+That used to be amd64 only, on the reasoning that there was one server and its architecture was known.
+That reasoning expired: `entkube-install` and the desktop installer put this image on whatever host an
+operator has, and arm64 servers — Graviton, Ampere, Hetzner ARM — are ordinary. An amd64-only image
+fails their pull with `no matching manifest for linux/arm64/v8`, which reads like a registry fault and
+is not one.
+
+`deploy.yml` builds each architecture on a **native runner** rather than cross-building one under QEMU.
+This Dockerfile installs a .NET workload and runs a full publish, and emulating that turns a few minutes
+into the better part of an hour; arm64 hosted runners are free for public repositories. The shape is
+Docker's documented multi-platform pattern and each part of it is load-bearing:
+
+- **Each leg pushes by digest, claiming no tag.** A tag points at one image, so two jobs pushing the
+  same tag would race and the loser's work would be silently discarded.
+- **Digests travel between jobs as artifacts, not job outputs.** A matrix job's outputs are one shared
+  map written by every leg, so the last leg to finish wins and blanks the other's key — leaving the
+  merge step to build a one-architecture manifest from a blank reference.
+- **A separate `merge` job** assembles the manifest list and applies the tags.
+- **Provenance attestations are disabled.** Buildx otherwise adds a manifest entry with platform
+  `unknown/unknown`, which several container runtimes report as a platform mismatch instead of
+  ignoring — the same class of failure this change exists to remove.
+- **The manifest is inspected before the deploy runs**, and the workflow fails if either architecture
+  is missing. A partial manifest is otherwise discovered on someone else's server.
+
+`deploy` depends on `merge`, so a broken build for *either* architecture stops the deploy rather than
+quietly republishing a single-architecture image. That is the intended trade — silent degradation back
+to amd64-only is precisely the bug being fixed — but it does mean an arm64 failure blocks an amd64
+deploy. If that is ever the wrong call, removing the `linux/arm64` entry from the `build` matrix is a
+one-line rollback.
 
 ---
 
@@ -48,7 +140,7 @@ So it is released on a tag (`telemetry-v*`) or a deliberate `workflow_dispatch`,
 
 ### Three things must agree
 
-This is the whole reason `scripts/build-telemetry.sh` exists rather than a pair of raw commands:
+This is the whole reason the `telemetry` target does more than run a pair of raw commands:
 
 1. **`Chart.yaml` `version`** — what the chart is published as.
 2. **`Chart.yaml` `appVersion`** — the image tag the chart deploys. `values.yaml` leaves `image.tag` empty
@@ -69,14 +161,14 @@ checked too — publishing to a path installs never look in is otherwise invisib
 #      charts/entkube-telemetry/Chart.yaml   version: + appVersion:
 #      src/EntKube.Web/Services/ComponentCatalog.cs   HelmChartVersion on BOTH entries
 # 2. Verify locally — builds the image, lints and packages the chart, publishes nothing:
-scripts/build-telemetry.sh
+scripts/release.sh telemetry
 
 # 3. Publish, either by tag...
 git tag telemetry-v0.2.0 && git push origin telemetry-v0.2.0
 
 #    ...or from a laptop with a registry session:
 az acr login --name entit
-scripts/build-telemetry.sh --push
+scripts/release.sh telemetry --push
 ```
 
 CI runs the same script, so a release made from a laptop and one made by CI are the same release.
@@ -85,6 +177,48 @@ CI runs the same script, so a release made from a laptop and one made by CI are 
 
 Nothing else to change: the catalog entries already point at the new version, which is what step 1
 guaranteed. Existing installs are untouched until an operator upgrades the component.
+
+### Numbers in Helm values
+
+Helm parses YAML numbers as **float64**, and Go renders anything past about a million in scientific
+notation. So a plain `{{ .Values.telemetry.segmentMaxDocs | quote }}` emits `"1e+06"` for `1000000`, and
+`"8.589934592e+09"` for an 8 GiB byte count. .NET's `Int64` configuration binder rejects both, and the pod
+dies at startup with a message that names the configuration key and never mentions Helm.
+
+Every integer in the chart therefore goes through `| int64`. Doubles do not need it — .NET's double parser
+accepts exponent form.
+
+This only shows up above a certain magnitude, which is what makes it easy to reintroduce: `90` and `14`
+render fine forever, and the bug appears the day someone raises a limit. Both `scripts/release.sh` and CI
+render the chart and fail on any `value: "…e+…"`.
+
+### Architecture
+
+The image is built for **`linux/amd64` and `linux/arm64`**, and the script refuses to finish without
+amd64. That guard exists because the failure is remote, late and misleading: an image built only for the
+machine that ran the build pushes fine, the chart installs fine, the pull secret works — and then every
+pod reports
+
+```
+no match for platform in manifest sha256:...: not found
+```
+
+which reads like a registry fault and is not one. It simply means the manifest list holds no entry for the
+node's architecture. Building on an Apple Silicon laptop and deploying to amd64 nodes hits this every time.
+
+Two mechanics worth knowing:
+
+- **A multi-platform image only exists in a registry.** The local daemon holds one image per tag, so it
+  cannot be `--load`ed. A verify-only run (`scripts/release.sh telemetry` with no `--push`) therefore
+  builds just the first platform; the full set is built on `--push`, straight to the registry.
+- **Provenance attestations are disabled** (`--provenance=false`). Buildx otherwise adds a manifest entry
+  with platform `unknown/unknown`, which several container runtimes report as a platform mismatch instead
+  of ignoring. Nothing here consumes the attestation.
+
+`release-telemetry.yml` sets up QEMU so an amd64 runner can cross-build arm64. That is a
+reasonable trade there — the telemetry image is small and released on a tag, not on every push —
+whereas `deploy.yml` uses native arm64 runners because the management-plane image is far more
+expensive to build and is built on every merge.
 
 ### Registry authentication — two separate surfaces
 
@@ -155,9 +289,9 @@ So it ships as a **single self-contained executable per platform**, built with
 `PublishSingleFile` + `IncludeNativeLibrariesForSelfExtract` + `DebugType=embedded`:
 
 ```bash
-scripts/build-agent.sh                    # all platforms, Debug + Release
-scripts/build-agent.sh Release            # one configuration
-scripts/build-agent.sh Release linux-x64  # one target
+scripts/release.sh agent                        # all platforms, Release
+scripts/release.sh agent --rid linux-x64        # one platform
+scripts/release.sh agent --configuration Debug  # a debug build
 ```
 
 Output: `artifacts/agent/<configuration>/<rid>/entkube-agent[.exe]` for `osx-arm64`, `osx-x64`,
@@ -170,7 +304,7 @@ Consequences of that packaging, all deliberate:
 - **Distribution is by hand.** There is no registry to push to — the whole point is a network that cannot
   reach one. Copy the binary to the host that needs it.
 - **Each binary needs an `agent.json` beside it**, carrying the server URL, the token generated in EntKube
-  (Storage → Egress Agents → Add Agent), and the host/port allowlist. `build-agent.sh` prints a template.
+  (Storage → Egress Agents → Add Agent), and the host/port allowlist. `release.sh` prints a template.
 - **The allowlist is the security boundary, and it is local.** The agent refuses any host not on its own
   list regardless of what EntKube asks for, and EntKube cannot widen it. Changing it means editing that
   file on the host and restarting. That is what makes running the agent acceptable, so it is not
@@ -182,19 +316,81 @@ are useful.
 
 ---
 
-## CLI, MCP server, Terraform provider
+## CLI, MCP server, installer, Terraform provider
 
 ```bash
-scripts/build-cli.sh                # artifacts/cli/<config>/<rid>/entkube[.exe]
-scripts/build-mcp.sh                # artifacts/mcp/<config>/<rid>/entkube-mcp[.exe]
-scripts/build-terraform-provider.sh # artifacts/terraform-provider/<os>_<arch>/terraform-provider-entkube[.exe]
+scripts/release.sh cli        # artifacts/cli/<config>/<rid>/entkube[.exe]
+scripts/release.sh mcp        # artifacts/mcp/<config>/<rid>/entkube-mcp[.exe]
+scripts/release.sh installer  # artifacts/installer/<config>/<rid>/entkube-install[.exe]
+scripts/release.sh terraform  # artifacts/terraform-provider/<os>_<arch>/terraform-provider-entkube[.exe]
+scripts/release.sh gui        # artifacts/gui/<config>/<rid>/  (a directory, not one file)
+scripts/release.sh binaries   # the four binary targets, including the agent
 ```
 
-The first two take the same `[configuration] [rid]` arguments as the agent. The Terraform provider is Go
-and builds all five platforms unconditionally (`darwin/arm64`, `darwin/amd64`, `linux/amd64`,
-`linux/arm64`, `windows/amd64`).
+The first two take the same options as the agent. The Terraform provider is Go and ships one platform
+more — `linux-arm64`, because Terraform runs on arm64 CI far more often than .NET does — so its full set
+is `darwin/arm64`, `darwin/amd64`, `linux/amd64`, `linux/arm64`, `windows/amd64`. `--rid` uses the same
+vocabulary for both toolchains and is translated to `GOOS/GOARCH` for this target.
 
 None of these is published automatically. Attach them to a release, or copy them where they are needed.
+
+---
+
+## Management-plane installer
+
+`entkube-install` stands up the management plane on a server: it writes the compose file, the
+Caddyfile and `.env`, pulls the images and starts everything. It is packaged like the agent and the
+CLI — one self-contained executable per platform — for a stronger version of the same reason: it runs
+on a freshly provisioned host *before* EntKube exists, so requiring a .NET runtime first would be the
+exact step it exists to remove.
+
+It is a terminal wizard rather than a windowed one because a server is reached over SSH far more often
+than it is sat in front of, and a headless host frequently has no display server at all.
+
+Two things about it are worth knowing before changing it:
+
+- **It generates `docker-compose.yml` rather than shipping the repository's copy.** The choices it
+  offers are structural — an external database has to remove the postgres service *and* the
+  health-gated `depends_on` that references it — and a compose override file cannot reliably do that.
+  So `docker-compose.yml` in the repository root stays the reference for a hand-rolled install, and
+  the installer holds a second rendering of the same knowledge. `InstallerRendererTests` pins the
+  parts that must not drift between them.
+- **It never regenerates `VAULT__ROOTKEY` or `POSTGRES_PASSWORD`.** Both failures are silent: a new
+  vault key leaves the app starting normally with every stored secret decrypting to nothing, and a new
+  database password does not reach an already-initialised Postgres volume. Re-running the installer is
+  a supported, routine operation, so this has to hold on every run and not merely by convention.
+
+See [docs/installing.md](installing.md).
+
+---
+
+## Installer GUI
+
+`entkube-installer` is a desktop front-end that performs the same install against a server over SSH,
+and can put the client tools on the machine it runs on.
+
+It shares the install with the console installer rather than reproducing it: preflight, the
+compose/.env renderer, the pull/start sequence and the health probe are one code path parameterised
+by an `IExecutor`, which is either a local shell or an SSH connection. The alternative — uploading
+`entkube-install` and running it remotely — would have cost a ~76 MB transfer per install and two
+architectures of that binary carried inside the GUI to cover a decision it cannot make in advance.
+
+Three things are worth knowing before changing it:
+
+- **It is not built as a single file.** Avalonia carries native libraries, and self-extracting them
+  on every launch is slower and a known source of platform-specific breakage. The app ships as a
+  directory anyway, because of the point below.
+- **The client tools are bundled into `tools/` beside the executable** by `scripts/release.sh gui`,
+  built for that same platform. That folder must travel with the app. They are not embedded (four
+  self-contained .NET binaries are ~250 MB) and not downloaded (these have no release host).
+- **Host keys are verified.** SSH.NET does not check `known_hosts`, so the application does, and an
+  unrecognised key is a dialog rather than an assumption. The session carries a sudo password and
+  writes the vault root key; accepting any key offered would put both on whatever answered.
+
+The SSH path has integration tests that need a real `sshd` and no-op without one — see
+[installing.md](installing.md#testing-the-ssh-path). They are worth running after any change to
+`SshExecutor`: they are what caught a sudo pipeline that blocked forever, an SFTP permission call
+that rejected its own argument, and a missing-`docker` check that reported the wrong cause.
 
 ---
 

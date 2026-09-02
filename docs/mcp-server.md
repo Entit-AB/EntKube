@@ -15,7 +15,7 @@ path into EntKube. Whatever the token cannot do, the model cannot do.
    every read-only tool; add `apps:write` and `ops:write` only if you intend to
    let the model act.
 3. Copy the token — it is shown once.
-4. Build the server (`scripts/build-mcp.sh Release`) or use a published binary.
+4. Build the server (`scripts/release.sh mcp`) or use a published binary.
 5. Point your MCP client at it:
 
 ```json

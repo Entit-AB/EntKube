@@ -9,7 +9,7 @@ nothing more.
 
 1. In EntKube, open the tenant → **API tokens** → **New token**, granting only the
    scopes the automation needs.
-2. Build (`scripts/build-cli.sh Release`) or use a published binary.
+2. Build (`scripts/release.sh cli`) or use a published binary.
 3. Point it at your instance:
 
 ```bash

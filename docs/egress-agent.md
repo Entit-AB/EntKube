@@ -70,9 +70,9 @@ port 443.
 Build every platform at once:
 
 ```bash
-scripts/build-agent.sh                    # all platforms, Debug + Release
-scripts/build-agent.sh Release            # one configuration
-scripts/build-agent.sh Release osx-arm64  # one target
+scripts/release.sh agent                       # all platforms, Release
+scripts/release.sh agent --rid osx-arm64       # one platform
+scripts/release.sh agent --configuration Debug # a debug build
 ```
 
 Output lands in `artifacts/agent/<configuration>/<rid>/`, covering

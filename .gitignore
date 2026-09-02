@@ -450,5 +450,5 @@ src/EntKube.Web/keys/
 
 */kubecontext.yaml
 
-# Terraform provider build output (see scripts/build-terraform-provider.sh)
+# Terraform provider build output (see scripts/release.sh terraform)
 artifacts/terraform-provider/
