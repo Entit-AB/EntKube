@@ -465,6 +465,73 @@ public static class YamlFormMerger
         return SerializeToYaml(root);
     }
 
+    /// <summary>
+    /// Makes an enabled <c>secretTargets</c> block coherent for trust-manager, by granting the Secret
+    /// permission the chart requires alongside it.
+    ///
+    /// <c>secretTargets.enabled: true</c> passes <c>--secret-targets-enabled</c> to the binary, which then
+    /// starts a cluster-wide Secret informer. The RBAC for that informer is gated on
+    /// <c>authorizedSecretsAll</c> (or a non-empty <c>authorizedSecrets</c> list) — so <c>enabled</c> on its
+    /// own produces a controller that watches Secrets it is not permitted to list: the cache never syncs
+    /// and the pod crash-loops, with nothing in the Bundle status to say why.
+    ///
+    /// The catalog's defaults carry both keys, but that only helps a fresh install.
+    /// <see cref="ComponentLifecycleService.FillMissingCatalogDefaults"/> is top-level and additive by
+    /// design, so a component registered before those defaults keeps its own <c>secretTargets</c> block and
+    /// never grows the companion key — including at the moment an operator turns the "Allow Secret targets"
+    /// toggle on, which is exactly when it starts to matter.
+    ///
+    /// Only ever adds permission to a target the operator has already switched on: values with
+    /// <c>enabled</c> absent or false are returned untouched, so this cannot widen a cluster's trust-manager
+    /// RBAC on its own.
+    /// </summary>
+    public static string EnsureTrustManagerSecretTargets(string yaml)
+    {
+        if (string.IsNullOrWhiteSpace(yaml)) return yaml;
+
+        YamlMappingNode root = ParseOrCreateRoot(yaml);
+
+        if (!TryGetMapping(root, "secretTargets", out YamlMappingNode? secretTargets)) return yaml;
+        if (!IsTrue(secretTargets, "enabled")) return yaml;
+        if (IsTrue(secretTargets, "authorizedSecretsAll")) return yaml;
+
+        // An explicit list of Secret names is the other way the chart grants the permission, and it is the
+        // narrower one. Someone who wrote a list meant that list.
+        if (TryGetValue(secretTargets, "authorizedSecrets", out YamlNode? authorized)
+            && authorized is YamlSequenceNode { Children.Count: > 0 })
+        {
+            return yaml;
+        }
+
+        SetScalar(secretTargets, "authorizedSecretsAll", "true");
+        return SerializeToYaml(root);
+    }
+
+    private static bool TryGetMapping(YamlMappingNode parent, string key, out YamlMappingNode? mapping)
+    {
+        mapping = TryGetValue(parent, key, out YamlNode? value) ? value as YamlMappingNode : null;
+        return mapping is not null;
+    }
+
+    private static bool TryGetValue(YamlMappingNode parent, string key, out YamlNode? value)
+    {
+        YamlScalarNode? found = parent.Children.Keys.OfType<YamlScalarNode>().FirstOrDefault(k => k.Value == key);
+        value = found is null ? null : parent.Children[found];
+        return value is not null;
+    }
+
+    private static bool IsTrue(YamlMappingNode parent, string key)
+        => TryGetValue(parent, key, out YamlNode? value)
+           && value is YamlScalarNode scalar
+           && string.Equals(scalar.Value, "true", StringComparison.OrdinalIgnoreCase);
+
+    private static void SetScalar(YamlMappingNode parent, string key, string value)
+    {
+        YamlScalarNode? found = parent.Children.Keys.OfType<YamlScalarNode>().FirstOrDefault(k => k.Value == key);
+        if (found is not null) parent.Children.Remove(found);
+        parent.Children[new YamlScalarNode(key)] = new YamlScalarNode(value);
+    }
+
     private static YamlMappingNode GetOrCreateMapping(YamlMappingNode parent, string key)
     {
         YamlScalarNode? existing = parent.Children.Keys
