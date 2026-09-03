@@ -20,6 +20,7 @@ public sealed class SegmentTraceEngineTests : IDisposable
     private readonly SqliteConnection _connection;
     private readonly ApplicationDbContext _context;
     private readonly TestDbContextFactory _factory;
+    private readonly ISegmentCatalog _catalog;
     private readonly ClusterTenantResolver _resolver;
     private readonly Guid _tenantId = Guid.NewGuid();
     private readonly Guid _clusterId = Guid.NewGuid();
@@ -47,6 +48,7 @@ public sealed class SegmentTraceEngineTests : IDisposable
         _context.SaveChanges();
 
         _factory = new TestDbContextFactory(_connection);
+        _catalog = new EfSegmentCatalog(_factory);
         _resolver = new ClusterTenantResolver(_factory);
     }
 
@@ -63,7 +65,7 @@ public sealed class SegmentTraceEngineTests : IDisposable
         };
         var store = new LocalSegmentBlobStore(blobsDir);
         _registry = new SegmentManagerRegistry<SpanSegmentManager>(tid =>
-            new SpanSegmentManager(tid, _factory, store, options, NullLogger<SpanSegmentManager>.Instance));
+            new SpanSegmentManager(tid, _catalog, store, options, NullLogger<SpanSegmentManager>.Instance));
         _registries.Add(_registry);
         return _registry.For(_tenantId);
     }
@@ -81,9 +83,9 @@ public sealed class SegmentTraceEngineTests : IDisposable
             var options = new SegmentEngineOptions { DataPath = dataPath };
             var store = new LocalSegmentBlobStore(blobsDir);
             _traceReg = new SegmentManagerRegistry<TraceSummarySegmentManager>(tid =>
-                new TraceSummarySegmentManager(tid, _factory, store, options, NullLogger<TraceSummarySegmentManager>.Instance));
+                new TraceSummarySegmentManager(tid, _catalog, store, options, NullLogger<TraceSummarySegmentManager>.Instance));
         }
-        return new SegmentTraceService(_registry!, _traceReg, _factory, _resolver, NullLogger<SegmentTraceService>.Instance);
+        return new SegmentTraceService(_registry!, _traceReg, _catalog, _resolver, NullLogger<SegmentTraceService>.Instance);
     }
 
     private static SpanIngestRecord Span(

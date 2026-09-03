@@ -5,6 +5,8 @@
 @inject VaultService VaultService
 @inject ComponentLifecycleService LifecycleService
 @inject ComponentInstallOrchestrator InstallOrchestrator
+@inject EntKube.Web.Services.Upgrades.ComponentUpgradeRunner UpgradeRunner
+@inject EntKube.Web.Services.Upgrades.ReleaseVolumeGuard VolumeGuard
 @inject ExternalRouteService RouteService
 @inject ComponentScanService ScanService
 @inject BlueprintFromClusterService BlueprintFromClusterService
@@ -14,8 +16,12 @@
 @inject LokiService LokiService
 @inject MimirService MimirService
 @inject TempoService TempoService
+@inject EntKube.Web.Services.Dr.VeleroService VeleroService
 @inject StorageService StorageService
 @inject HeadscaleService HeadscaleService
+@inject IngestTokenService IngestTokens
+@inject EntKubeTelemetryService EntKubeTelemetry
+@inject Microsoft.Extensions.Configuration.IConfiguration Config
 
 @* ═══════════════════════════════════════════════════════════════════
    Cluster Detail — a full-page view for a single cluster.
@@ -90,6 +96,11 @@
         </button>
     </li>
     <li class="nav-item" role="presentation">
+        <button class="nav-link @(section == "workloads" ? "active" : "")" @onclick='() => section = "workloads"' role="tab" aria-selected="@(section == "workloads")" tabindex="@(section == "workloads" ? 0 : -1)">
+            <i class="bi bi-boxes me-1"></i>Workloads
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
         <button class="nav-link @(section == "components" ? "active" : "")" @onclick='() => section = "components"' role="tab" aria-selected="@(section == "components")" tabindex="@(section == "components" ? 0 : -1)">
             <i class="bi bi-puzzle me-1"></i>Components
         </button>
@@ -133,6 +144,10 @@
 else if (section == "nodes")
 {
     <ClusterNodes ClusterId="Cluster.Id" />
+}
+else if (section == "workloads")
+{
+    <WorkloadsTab ClusterId="Cluster.Id" />
 }
 else if (section == "logs")
 {
@@ -962,6 +977,37 @@ else if (section == "components")
                             </div>
                         }
 
+                        @* ── Confirm an upgrade that has to take the workload offline ──
+                           The release holds a volume only one node can mount, so a rolling
+                           update would stall on Multi-Attach. Say what goes down before doing it. *@
+                        @if (pendingUpgrade?.ComponentId == comp.Id && pendingUpgradePreflight is not null)
+                        {
+                            <div class="px-3 py-2 bg-warning bg-opacity-10 border-top">
+                                <div class="d-flex align-items-start gap-2 mb-2">
+                                    <i class="bi bi-exclamation-triangle text-warning mt-1"></i>
+                                    <small>
+                                        <strong>This apply needs downtime.</strong>
+                                        @(pendingUpgradePreflight.Blocked.Count == 1 ? "This workload holds" : "These workloads hold")
+                                        a volume no second pod can mount, so it is scaled to zero, upgraded, then scaled
+                                        back up — @pendingUpgradePreflight.ReplicasAffected replica(s) offline in between.
+                                        <ul class="mb-0 mt-1 ps-3">
+                                            @foreach (EntKube.Web.Services.Upgrades.BlockedWorkload w in pendingUpgradePreflight.Blocked)
+                                            {
+                                                <li><code>Deployment/@w.Name</code> — @w.Replicas replica(s), holds @string.Join(", ", w.Claims)</li>
+                                            }
+                                        </ul>
+                                    </small>
+                                </div>
+                                <div class="d-flex gap-1 justify-content-end">
+                                    <button class="btn btn-sm btn-warning"
+                                            @onclick="() => RunUpgradeAsync(pendingUpgrade!.Value.ComponentId, pendingUpgrade!.Value.NoWait)">
+                                        <i class="bi bi-arrow-up-circle me-1"></i>Apply with downtime
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="CancelPendingUpgrade">Cancel</button>
+                                </div>
+                            </div>
+                        }
+
                         @* ── Operation output ── *@
                         @if (operationOutput is not null && operationComponentId == comp.Id)
                         {
@@ -1182,12 +1228,24 @@ else if (section == "components")
                                                     <div class="row g-2 mt-1">
                                                         <div class="col-md-4">
                                                             <label class="form-label small mb-0">Namespace</label>
-                                                            <input type="text" class="form-control form-control-sm" @bind="editNamespace" @bind:event="oninput" />
+                                                            <input type="text" class="form-control form-control-sm" @bind="editNamespace" @bind:event="oninput"
+                                                                   disabled="@(comp.Status == ComponentStatus.Installed)" />
                                                         </div>
                                                         <div class="col-md-4">
                                                             <label class="form-label small mb-0">Release name</label>
-                                                            <input type="text" class="form-control form-control-sm" @bind="editReleaseName" @bind:event="oninput" />
+                                                            <input type="text" class="form-control form-control-sm" @bind="editReleaseName" @bind:event="oninput"
+                                                                   disabled="@(comp.Status == ComponentStatus.Installed)" />
                                                         </div>
+                                                        @if (comp.Status == ComponentStatus.Installed)
+                                                        {
+                                                            <div class="col-12">
+                                                                <small class="text-muted">
+                                                                    <i class="bi bi-lock me-1"></i>Helm identifies a release by its namespace and name.
+                                                                    Uninstall this component to move it — changing these in place would leave the running
+                                                                    release behind.
+                                                                </small>
+                                                            </div>
+                                                        }
                                                     </div>
                                                 </div>
                                             }
@@ -1345,22 +1403,28 @@ else if (section == "components")
                                         <div class="card border-0 bg-light mb-3">
                                             <div class="card-body py-2">
                                                 <div class="row g-2 mb-2">
-                                                    <div class="col-md-5">
+                                                    <div class="col-md-4">
                                                         <label class="form-label small mb-0">Hostname</label>
                                                         <input type="text" class="form-control form-control-sm"
                                                                placeholder="e.g. grafana.example.com"
                                                                @bind="routeHostname" @bind:event="oninput" />
                                                     </div>
-                                                    <div class="col-md-4">
+                                                    <div class="col-md-3">
                                                         <label class="form-label small mb-0">Service name</label>
                                                         <input type="text" class="form-control form-control-sm"
                                                                placeholder="@(comp.ReleaseName ?? comp.Name)"
                                                                @bind="routeServiceName" @bind:event="oninput" />
                                                     </div>
-                                                    <div class="col-md-3">
+                                                    <div class="col-md-2">
                                                         <label class="form-label small mb-0">Port</label>
                                                         <input type="number" class="form-control form-control-sm"
                                                                @bind="routeServicePort" />
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small mb-0">Timeout (s)</label>
+                                                        <input type="number" min="0" class="form-control form-control-sm"
+                                                               @bind="routeTimeoutSeconds" />
+                                                        <small class="text-muted">0 = no timeout (websockets, streams)</small>
                                                     </div>
                                                 </div>
                                                 <div class="row g-2 mb-2">
@@ -1435,6 +1499,8 @@ else if (section == "components")
                                                             <th>Hostname</th>
                                                             <th>Service</th>
                                                             <th>TLS</th>
+                                                            <th title="Gateway request timeout. 0 waits forever — only for long-lived streams.">Timeout</th>
+                                                            <th title="Sticky sessions: pin a client to one backend pod by hashing a cookie, header, query parameter or source IP. Istio only, and it applies to the whole backend Service.">Sticky</th>
                                                             <th>Health</th>
                                                             <th class="text-end" style="width: 140px;">Actions</th>
                                                         </tr>
@@ -1442,11 +1508,23 @@ else if (section == "components")
                                                     <tbody>
                                                         @foreach (ExternalRoute route in componentRoutes)
                                                         {
-                                                            <tr>
+                                                            bool isShadowed = shadowedRouteHostnames.Contains(route.Hostname);
+                                                            <tr class="@(isShadowed ? "table-warning" : null)">
                                                                 <td>
                                                                     <a href="https://@route.Hostname" target="_blank" class="text-decoration-none">
                                                                         <i class="bi bi-box-arrow-up-right me-1"></i>@route.Hostname
                                                                     </a>
+                                                                    @if (isShadowed)
+                                                                    {
+                                                                        <div class="small text-warning-emphasis mt-1">
+                                                                            <i class="bi bi-exclamation-triangle me-1"></i>
+                                                                            <strong>Not applied.</strong>
+                                                                            An application route already serves this hostname with its own
+                                                                            per-path rules. Applying this route would replace them all with
+                                                                            <code>@route.ServiceName</code>, so it is held back. Remove it
+                                                                            here, and add the path to the application route instead.
+                                                                        </div>
+                                                                    }
                                                                 </td>
                                                                 <td><code>@route.ServiceName:@route.ServicePort</code></td>
                                                                 <td>
@@ -1461,6 +1539,76 @@ else if (section == "components")
                                                                         <span class="badge bg-info text-dark">
                                                                             <i class="bi bi-file-earmark-lock me-1"></i>Manual
                                                                         </span>
+                                                                    }
+                                                                </td>
+                                                                <td style="width: 120px;">
+                                                                    <div class="input-group input-group-sm">
+                                                                        <input type="number" min="0" class="form-control form-control-sm"
+                                                                               style="max-width: 5rem;"
+                                                                               aria-label="@($"Request timeout in seconds for {route.Hostname}")"
+                                                                               value="@(route.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds)"
+                                                                               @onchange="e => SaveRouteTimeout(route, comp.Id, e.Value?.ToString())" />
+                                                                        <span class="input-group-text px-1 small">s</span>
+                                                                    </div>
+                                                                    @if ((route.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds) == 0)
+                                                                    {
+                                                                        <small class="text-warning">waits forever</small>
+                                                                    }
+                                                                </td>
+                                                                @{
+                                                                    SessionAffinityMode routeAffinity = EffectiveAffinity(route);
+                                                                }
+                                                                <td style="width: 11rem;">
+                                                                    @if (!IsIstioGateway)
+                                                                    {
+                                                                        <span class="text-muted small"
+                                                                              title="Sticky sessions are carried by an Istio DestinationRule. This cluster's gateway is not Istio, so there is nothing to attach them to.">
+                                                                            —
+                                                                        </span>
+                                                                    }
+                                                                    else
+                                                                    {
+                                                                    <select class="form-select form-select-sm"
+                                                                            aria-label="@($"Session affinity for {route.Hostname}")"
+                                                                            value="@routeAffinity"
+                                                                            @onchange="e => SaveRouteAffinityMode(route, comp.Id, e.Value?.ToString())">
+                                                                        <option value="@nameof(SessionAffinityMode.None)">off</option>
+                                                                        <option value="@nameof(SessionAffinityMode.Cookie)">cookie</option>
+                                                                        <option value="@nameof(SessionAffinityMode.Header)">header</option>
+                                                                        <option value="@nameof(SessionAffinityMode.QueryParameter)">query</option>
+                                                                        <option value="@nameof(SessionAffinityMode.SourceIp)">source IP</option>
+                                                                    </select>
+                                                                    @if (routeAffinity is SessionAffinityMode.Cookie
+                                                                        or SessionAffinityMode.Header
+                                                                        or SessionAffinityMode.QueryParameter)
+                                                                    {
+                                                                        <div class="input-group input-group-sm mt-1">
+                                                                            <input class="form-control form-control-sm font-monospace"
+                                                                                   placeholder="@AffinityKeyPlaceholder(routeAffinity)"
+                                                                                   aria-label="@($"Session affinity key for {route.Hostname}")"
+                                                                                   value="@route.SessionAffinityKey"
+                                                                                   @onchange="e => SaveRouteAffinityKey(route, comp.Id, e.Value?.ToString())" />
+                                                                            @if (routeAffinity == SessionAffinityMode.Cookie)
+                                                                            {
+                                                                                <input type="number" min="0"
+                                                                                       class="form-control form-control-sm"
+                                                                                       style="max-width: 4.5rem;"
+                                                                                       placeholder="ttl"
+                                                                                       title="Affinity cookie lifetime in seconds. Empty issues a session cookie."
+                                                                                       aria-label="@($"Session affinity cookie lifetime for {route.Hostname}")"
+                                                                                       value="@route.SessionAffinityTtlSeconds"
+                                                                                       @onchange="e => SaveRouteAffinityTtl(route, comp.Id, e.Value?.ToString())" />
+                                                                            }
+                                                                        </div>
+                                                                    }
+                                                                    @if (pendingAffinityMode.ContainsKey(route.Id))
+                                                                    {
+                                                                        <small class="text-warning">name it to save</small>
+                                                                    }
+                                                                    else if (routeAffinity == SessionAffinityMode.SourceIp)
+                                                                    {
+                                                                        <small class="text-muted">one pod per client IP</small>
+                                                                    }
                                                                     }
                                                                 </td>
                                                                 <td>
@@ -1579,6 +1727,10 @@ else if (section == "components")
     private Guid? confirmDeleteComponentId;
     private Guid? selectedComponentId;
     private string compDetailTab = "config";
+    /// <summary>An apply that is waiting for the operator to accept the downtime it needs.</summary>
+    private (Guid ComponentId, bool NoWait)? pendingUpgrade;
+    private EntKube.Web.Services.Upgrades.VolumePreflight? pendingUpgradePreflight;
+
     private Guid? operationInProgress;
     private string? operationOutput;
     private Guid? operationComponentId;
@@ -1637,9 +1789,15 @@ else if (section == "components")
     // External Routes
     private List<ExternalRoute>? componentRoutes;
     private Dictionary<Guid, RouteUptimeSummary> routeUptimes = new();
+
+    // Hostnames an application route already serves. Routes on these hostnames are deliberately
+    // not applied to the cluster, so the list has to say so rather than show them as normal.
+    private IReadOnlySet<string> shadowedRouteHostnames =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private string routeHostname = "";
     private string routeServiceName = "";
     private int routeServicePort = 80;
+    private int routeTimeoutSeconds = ExternalRouteService.DefaultRequestTimeoutSeconds;
     private string routeTlsMode = "ClusterIssuer";
     private string routeIssuerName = "letsencrypt-prod";
     private string routeTlsCert = "";
@@ -1921,6 +2079,21 @@ else if (section == "components")
             }
         }
 
+        // The telemetry collector's ingest URL + token are ours to issue, not the operator's to look up.
+        // Pre-fill them so the fields arrive complete — left blank they render as REPLACE_WITH_*
+        // placeholders in the collector config, which installs and runs fine while dropping every batch.
+        // When the cluster already runs its own telemetry indexer, point the collector at that instead of
+        // back across the WAN — keeping the logs in the cluster is the whole reason it is there.
+        string? indexerUrl = await EntKubeTelemetry.GetInClusterIndexerUrlAsync(Cluster.Id);
+        string? inClusterIngest = indexerUrl is null ? null : indexerUrl + "/ingest/otlp";
+        EntKube.Web.Services.Telemetry.TelemetryIngestDefaults.ApplyTo(
+            entry, regFormFieldValues, Cluster.Id, TenantId, IngestTokens, Config, inClusterIngest);
+
+        // Same reasoning for the query component's indexer address: the Service name contains the
+        // indexer's release name, so the field is filled from the indexer this cluster actually has
+        // rather than from a catalog literal that is only right for one particular naming.
+        EntKubeTelemetryService.ApplyIndexerUrlDefault(entry, regFormFieldValues, indexerUrl);
+
         // Load available CNPG databases and ClusterIssuers if this component type needs them.
 
         keycloakDatabases = entry.FormFields.Any(f => f.Type == FormFieldType.CnpgDatabase)
@@ -1984,6 +2157,10 @@ else if (section == "components")
             await SaveMimirConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
 
             await SaveTempoConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
+            await SaveVeleroConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
+
+            // Configure the in-cluster telemetry components: identity, tokens, and the segment bucket.
+            await SaveEntKubeTelemetryConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
 
 
             showRegisterForm = false;
@@ -2127,6 +2304,15 @@ else if (section == "components")
                     editFormFieldValues["admin-username"] = harborConfig.AdminUsername;
                 }
 
+                // Repopulate the Velero storage picker from the component's stored config,
+                // so editing an installed component does not show an empty dropdown for
+                // something that is already pointed at a bucket.
+                if (catalogMatch?.Key == "velero"
+                    && EntKube.Web.Services.Dr.VeleroService.TryReadConfig(comp.Configuration)?.StorageLinkId is Guid veleroLinkId)
+                {
+                    editFormFieldValues["storage-link"] = veleroLinkId.ToString();
+                }
+
                 // Load Loki storage link ID from the component's Configuration JSON.
                 if (catalogMatch?.Key == "loki")
                 {
@@ -2190,20 +2376,36 @@ else if (section == "components")
             // Secret-marked fields are stored in the vault instead of plain YAML.
 
             ClusterComponent comp = components!.First(c => c.Id == componentId);
-            comp.HelmRepoUrl = string.IsNullOrWhiteSpace(editRepoUrl) ? null : editRepoUrl.Trim();
-            comp.HelmChartName = string.IsNullOrWhiteSpace(editChartName) ? null : editChartName.Trim();
-            comp.HelmChartVersion = string.IsNullOrWhiteSpace(editChartVersion) ? null : editChartVersion.Trim();
-            comp.Namespace = string.IsNullOrWhiteSpace(editNamespace) ? null : editNamespace.Trim();
-            comp.ReleaseName = string.IsNullOrWhiteSpace(editReleaseName) ? null : editReleaseName.Trim();
+
+            string? repoUrl      = string.IsNullOrWhiteSpace(editRepoUrl)      ? null : editRepoUrl.Trim();
+            string? chartName    = string.IsNullOrWhiteSpace(editChartName)    ? null : editChartName.Trim();
+            string? chartVersion = string.IsNullOrWhiteSpace(editChartVersion) ? null : editChartVersion.Trim();
+            string? ns           = string.IsNullOrWhiteSpace(editNamespace)    ? null : editNamespace.Trim();
+            string? releaseName  = string.IsNullOrWhiteSpace(editReleaseName)  ? null : editReleaseName.Trim();
 
             string mergedValues = MergeEditFormFields();
-            comp.HelmValues = string.IsNullOrWhiteSpace(mergedValues) ? null : mergedValues;
+            string? helmValues = string.IsNullOrWhiteSpace(mergedValues) ? null : mergedValues;
 
-            await LifecycleService.UpdateConfigurationAsync(
+            // Persist first, then mirror onto the in-memory component. Assigning first left the
+            // card showing values the database had rejected (an installed component refuses a
+            // namespace move) until the next reload.
+            ClusterComponent saved = await LifecycleService.UpdateConfigurationAsync(
                 componentId,
-                helmValues: comp.HelmValues,
-                chartVersion: comp.HelmChartVersion,
-                helmRepoUrl: comp.HelmRepoUrl);
+                helmValues: helmValues,
+                chartVersion: chartVersion,
+                helmRepoUrl: repoUrl,
+                componentNamespace: ns,
+                releaseName: releaseName,
+                chartName: chartName);
+
+            // Mirror what was actually stored, not what was typed — a blank field means "leave
+            // it alone" to the service, and the card should say so rather than show it empty.
+            comp.HelmValues = saved.HelmValues;
+            comp.HelmChartVersion = saved.HelmChartVersion;
+            comp.HelmRepoUrl = saved.HelmRepoUrl;
+            comp.HelmChartName = saved.HelmChartName;
+            comp.Namespace = saved.Namespace;
+            comp.ReleaseName = saved.ReleaseName;
 
             // Store any secret-marked form field values in the vault.
 
@@ -2230,6 +2432,7 @@ else if (section == "components")
             await SaveMimirConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
 
             await SaveTempoConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
+            await SaveVeleroConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
 
             await LoadComponents();
         }
@@ -2265,112 +2468,84 @@ else if (section == "components")
         }
     }
 
+    /// <summary>
+    /// Applies a component's current configuration to the cluster — the same
+    /// `helm upgrade --install` whether it is a version bump or a values change.
+    ///
+    /// Routed through <see cref="EntKube.Web.Services.Upgrades.ComponentUpgradeRunner"/> so
+    /// this shares the fleet upgrade page's handling of releases that cannot be rolled in
+    /// place. A component holding a ReadWriteOnce volume has to be taken to zero replicas
+    /// first, which is downtime, so it stops here for confirmation instead of silently
+    /// dropping the workload.
+    /// </summary>
     private async Task UpgradeComponent(Guid componentId, bool noWait = false)
     {
         componentError = null;
+
+        EntKube.Web.Services.Upgrades.VolumePreflight preflight;
+        try
+        {
+            preflight = await VolumeGuard.InspectAsync(componentId);
+        }
+        catch (Exception ex)
+        {
+            preflight = EntKube.Web.Services.Upgrades.VolumePreflight.Failure(ex.Message);
+        }
+
+        if (preflight.RequiresScaleDown)
+        {
+            pendingUpgrade = (componentId, noWait);
+            pendingUpgradePreflight = preflight;
+            return;
+        }
+
+        await RunUpgradeAsync(componentId, noWait);
+    }
+
+    /// <summary>Runs the upgrade for real, with downtime already accepted where it is needed.</summary>
+    private void CancelPendingUpgrade()
+    {
+        pendingUpgrade = null;
+        pendingUpgradePreflight = null;
+    }
+
+    private async Task RunUpgradeAsync(Guid componentId, bool noWait)
+    {
+        componentError = null;
         operationInProgress = componentId;
+        pendingUpgrade = null;
+        pendingUpgradePreflight = null;
         StateHasChanged();
 
         try
         {
-            // For upgrade, we use the same install command (upgrade --install is idempotent).
-            // But first reset status to allow the operation.
-
+            // Helm builds its command from the component's stored chart version, so an
+            // "Upgrade" click would otherwise re-run `--version <current>` — a no-op that
+            // leaves the Upgrade badge in place. Pin to the catalog version first when the
+            // catalog has moved ahead; a plain "Apply" passes null and keeps its version.
             ClusterComponent comp = components!.First(c => c.Id == componentId);
-
-            // The helm command is built from the component's *stored* chart version, so an
-            // "Upgrade" click would otherwise re-run `helm upgrade --version <current>` — a
-            // no-op that leaves the Upgrade badge in place. Pin the component to the catalog
-            // version first so helm actually pulls the newer chart.
-
             CatalogEntry? upgradeCatalog = ResolveCatalog(comp);
-            if (HasCatalogUpdate(comp, upgradeCatalog))
-            {
-                await LifecycleService.UpdateConfigurationAsync(
-                    componentId, helmValues: null, chartVersion: upgradeCatalog!.HelmChartVersion);
-                comp.HelmChartVersion = upgradeCatalog.HelmChartVersion;
-            }
+            string? targetVersion = HasCatalogUpdate(comp, upgradeCatalog)
+                ? upgradeCatalog!.HelmChartVersion
+                : null;
 
-            comp.Status = ComponentStatus.Installing;
-            await LifecycleService.MarkInstallResultAsync(componentId, false, "Upgrading...");
-
-            await LifecycleService.PrepareInstallAsync(componentId);
-
-            // Refresh Keycloak DB config into HelmValues from the stored config (if any).
-            await KeycloakService.RefreshDatabaseHelmValuesIfConfiguredAsync(TenantId, componentId);
-            // Grant all schema privileges to the database owner so Liquibase can run on install.
-            await KeycloakService.GrantDatabaseOwnerPermissionsIfConfiguredAsync(TenantId, componentId);
-            // Release any stuck Liquibase lock so migrations can proceed on startup.
-            await KeycloakService.ReleaseLiquibaseLockIfConfiguredAsync(TenantId, componentId);
-            // Update realm frontendUrl to match the configured admin URL (fixes restored-database URL mismatch).
-            await KeycloakService.FixRealmUrlsIfConfiguredAsync(TenantId, componentId);
-            // Refresh Harbor CNPG + S3 credentials in Helm values before install/upgrade.
-            await HarborService.RefreshHelmValuesIfConfiguredAsync(TenantId, componentId);
-
-            HelmCommand command = await LifecycleService.GetInstallCommandAsync(componentId);
-            command.NoWait = noWait;
-
-            // Pre-sync component secrets so they exist in K8s before the pod starts.
-            HelmExecutionResult preSyncResult = await LifecycleService.SyncComponentSecretsAsync(componentId);
-
-            HelmExecutionResult result = await LifecycleService.ExecuteHelmAsync(componentId, command);
-
-            if (!string.IsNullOrWhiteSpace(preSyncResult.Output))
-            {
-                result = new HelmExecutionResult
+            EntKube.Web.Services.Upgrades.ComponentUpgradeOutcome outcome =
+                await UpgradeRunner.UpgradeAsync(new EntKube.Web.Services.Upgrades.ComponentUpgradeRequest
                 {
-                    Success = result.Success,
-                    ExitCode = result.ExitCode,
-                    Output = $"--- Pre-install Secret Sync ---\n{preSyncResult.Output}\n\n{result.Output}"
-                };
-            }
+                    TenantId = TenantId,
+                    ComponentId = componentId,
+                    TargetChartVersion = targetVersion,
+                    NoWait = noWait,
+                    AllowScaleDown = true,
+                });
 
-            if (result.Success)
-            {
-                HelmExecutionResult subchartResult = await LifecycleService.InstallSubchartsAsync(componentId);
-
-                if (!string.IsNullOrWhiteSpace(subchartResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success && subchartResult.Success,
-                        Output = result.Output + "\n" + subchartResult.Output
-                    };
-                }
-            }
-
-            await LifecycleService.MarkInstallResultAsync(componentId, result.Success, result.Success ? null : result.Output);
-
-            // After successful upgrade, sync secrets then apply external routes.
-
-            if (result.Success)
-            {
-                HelmExecutionResult syncResult = await LifecycleService.SyncComponentSecretsAsync(componentId);
-
-                if (!string.IsNullOrWhiteSpace(syncResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success,
-                        Output = result.Output + "\n\n--- Secret Sync ---\n" + syncResult.Output
-                    };
-                }
-
-                await HeadscaleService.EnsureExternalRouteAfterInstallAsync(componentId);
-
-                HelmExecutionResult routeResult = await LifecycleService.ApplyExternalRoutesAsync(componentId);
-                if (!string.IsNullOrWhiteSpace(routeResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success && routeResult.Success,
-                        Output = result.Output + "\n\n--- Route Apply ---\n" + routeResult.Output
-                    };
-                }
-            }
-
-            operationOutput = result.Output;
+            operationOutput = outcome.Output;
             operationComponentId = componentId;
+
+            if (!outcome.Success && string.IsNullOrWhiteSpace(outcome.Output))
+            {
+                componentError = outcome.Error;
+            }
         }
         catch (InvalidOperationException ex)
         {
@@ -3199,6 +3374,51 @@ else if (section == "components")
     /// component has a StorageLink or CnpgDatabase form field (i.e. it is Harbor). Also
     /// creates an HTTPRoute for the configured hostname if one was provided.
     /// </summary>
+    /// <summary>
+    /// Points Velero at the selected storage link: bucket, endpoint and region into Helm
+    /// values, credentials into the vault. Nothing about the bucket is typed by hand, so a
+    /// rotated key is picked up by re-applying rather than by hunting through Helm values.
+    /// </summary>
+    /// <summary>
+    /// Fills in what the telemetry node refuses to start without and an operator cannot reasonably supply:
+    /// the tenant and cluster it serves, and the two bearer tokens. Without this the chart renders no
+    /// further than its own guard — "node.tenantId is required" — which is the install failing early and
+    /// loudly rather than deploying a node that has no idea whose data it is holding.
+    ///
+    /// The bucket is separate and optional: a node with no object storage still runs, it just seals to its
+    /// own volume.
+    /// </summary>
+    private async Task SaveEntKubeTelemetryConfigIfNeeded(
+        Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
+    {
+        if (catalogEntry?.Key is not (EntKubeTelemetryService.IndexerKey or EntKubeTelemetryService.QuerierKey))
+            return;
+
+        await EntKubeTelemetry.ConfigureIdentityAsync(TenantId, componentId);
+
+        if (fieldValues.TryGetValue("storage-link", out string? slIdStr)
+            && Guid.TryParse(slIdStr, out Guid storageLinkId)
+            && storageLinkId != Guid.Empty)
+        {
+            await EntKubeTelemetry.WriteStorageHelmValuesAsync(TenantId, componentId, storageLinkId);
+        }
+    }
+
+    private async Task SaveVeleroConfigIfNeeded(
+        Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
+    {
+        if (catalogEntry?.Key != "velero") return;
+
+        if (!fieldValues.TryGetValue("storage-link", out string? slIdStr)
+            || !Guid.TryParse(slIdStr, out Guid storageLinkId)
+            || storageLinkId == Guid.Empty)
+        {
+            return;
+        }
+
+        await VeleroService.WriteStorageHelmValuesAsync(TenantId, componentId, storageLinkId);
+    }
+
     private async Task SaveLokiConfigIfNeeded(
         Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
     {
@@ -3357,7 +3577,10 @@ else if (section == "components")
             TlsMode = isManual ? TlsMode.Manual : TlsMode.ClusterIssuer,
             ClusterIssuerName = isManual ? null : issuerName,
             TlsCertificate = isManual ? tlsCert : null,
-            TlsPrivateKey = isManual && !string.IsNullOrWhiteSpace(tlsKey) ? tlsKey : null
+            TlsPrivateKey = isManual && !string.IsNullOrWhiteSpace(tlsKey) ? tlsKey : null,
+            // Image pushes/pulls run through this route and a single layer can take minutes,
+            // so Harbor gets the registry budget rather than the default request timeout.
+            RequestTimeoutSeconds = ExternalRouteService.RegistryRequestTimeoutSeconds
         };
 
         await RouteService.AddRouteAsync(componentId, routeRequest);
@@ -3389,6 +3612,7 @@ else if (section == "components")
         routeError = null;
         routeYamlPreview = null;
         componentRoutes = await RouteService.GetRoutesAsync(componentId);
+        shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(componentId);
         await LoadRouteUptimes();
     }
 
@@ -3417,7 +3641,8 @@ else if (section == "components")
                 TlsMode = routeTlsMode == "Manual" ? TlsMode.Manual : TlsMode.ClusterIssuer,
                 ClusterIssuerName = routeTlsMode == "ClusterIssuer" ? routeIssuerName.Trim() : null,
                 TlsCertificate = routeTlsMode == "Manual" ? routeTlsCert : null,
-                TlsPrivateKey = routeTlsMode == "Manual" && !string.IsNullOrWhiteSpace(routeTlsKey) ? routeTlsKey : null
+                TlsPrivateKey = routeTlsMode == "Manual" && !string.IsNullOrWhiteSpace(routeTlsKey) ? routeTlsKey : null,
+                RequestTimeoutSeconds = routeTimeoutSeconds
             };
 
             await RouteService.AddRouteAsync(componentId, request);
@@ -3427,10 +3652,149 @@ else if (section == "components")
             routeHostname = "";
             routeServiceName = "";
             routeServicePort = 80;
+            routeTimeoutSeconds = ExternalRouteService.DefaultRequestTimeoutSeconds;
             routeTlsCert = "";
             routeTlsKey = "";
 
             componentRoutes = await RouteService.GetRoutesAsync(componentId);
+            shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(componentId);
+            await LifecycleService.ApplyExternalRoutesAsync(componentId);
+        }
+        catch (InvalidOperationException ex)
+        {
+            routeError = ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// Persists an edited request timeout and re-applies the route — the new value only takes
+    /// effect once the regenerated HTTPRoute reaches the cluster.
+    /// </summary>
+    // ── Session affinity ──
+    //
+    // Header and query-parameter affinity need a name to hash on, and the service refuses to
+    // save them without one. Choosing the mode therefore parks it here until the name is typed:
+    // the name cannot be typed before the mode is chosen, so rejecting the mode change outright
+    // would leave no order in which the operator could set it.
+    private readonly Dictionary<Guid, SessionAffinityMode> pendingAffinityMode = [];
+
+    /// <summary>
+    /// Session affinity is an Istio DestinationRule setting. A Traefik gateway never reads one,
+    /// so offering the control there would be offering a switch wired to nothing.
+    /// </summary>
+    private bool IsIstioGateway =>
+        ExternalRouteService.ResolveGatewayClass(components ?? []) == "istio";
+
+    private SessionAffinityMode EffectiveAffinity(ExternalRoute route) =>
+        pendingAffinityMode.TryGetValue(route.Id, out SessionAffinityMode pending) ? pending : route.SessionAffinity;
+
+    private static string AffinityKeyPlaceholder(SessionAffinityMode mode) => mode switch
+    {
+        SessionAffinityMode.Cookie => ExternalRouteService.DefaultAffinityCookieName,
+        SessionAffinityMode.Header => "x-tenant-id",
+        _ => "parameter"
+    };
+
+    private static bool NeedsAffinityKey(SessionAffinityMode mode) =>
+        mode is SessionAffinityMode.Header or SessionAffinityMode.QueryParameter;
+
+    private async Task SaveRouteAffinityMode(ExternalRoute route, Guid componentId, string? raw)
+    {
+        routeError = null;
+
+        if (!Enum.TryParse(raw, out SessionAffinityMode mode) || mode == EffectiveAffinity(route))
+        {
+            return;
+        }
+
+        if (NeedsAffinityKey(mode) && string.IsNullOrWhiteSpace(route.SessionAffinityKey))
+        {
+            pendingAffinityMode[route.Id] = mode;
+            return;
+        }
+
+        pendingAffinityMode.Remove(route.Id);
+        await SaveRouteAffinity(route, componentId, mode, route.SessionAffinityKey, route.SessionAffinityTtlSeconds);
+    }
+
+    private async Task SaveRouteAffinityKey(ExternalRoute route, Guid componentId, string? raw)
+    {
+        routeError = null;
+
+        SessionAffinityMode mode = EffectiveAffinity(route);
+        string? key = string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
+
+        if (key == route.SessionAffinityKey && mode == route.SessionAffinity)
+        {
+            return;
+        }
+
+        if (NeedsAffinityKey(mode) && key is null)
+        {
+            routeError = ExternalRouteService.ValidateSessionAffinity(mode, key);
+            return;
+        }
+
+        pendingAffinityMode.Remove(route.Id);
+        await SaveRouteAffinity(route, componentId, mode, key, route.SessionAffinityTtlSeconds);
+    }
+
+    private async Task SaveRouteAffinityTtl(ExternalRoute route, Guid componentId, string? raw)
+    {
+        routeError = null;
+
+        int? ttl = string.IsNullOrWhiteSpace(raw) ? null : int.TryParse(raw, out int parsed) ? parsed : -1;
+        if (ttl == route.SessionAffinityTtlSeconds)
+        {
+            return;
+        }
+
+        if (ttl is < 0)
+        {
+            routeError = "Affinity cookie lifetime must be 0 or a positive number of seconds.";
+            return;
+        }
+
+        await SaveRouteAffinity(route, componentId, EffectiveAffinity(route), route.SessionAffinityKey, ttl);
+    }
+
+    private async Task SaveRouteAffinity(
+        ExternalRoute route, Guid componentId, SessionAffinityMode mode, string? key, int? ttl)
+    {
+        try
+        {
+            await RouteService.UpdateRouteSessionAffinityAsync(route.Id, mode, key, ttl);
+            componentRoutes = await RouteService.GetRoutesAsync(componentId);
+            // Re-apply: the DestinationRule carrying the affinity is written by the route apply,
+            // so without this the table would show a setting the cluster does not have.
+            await LifecycleService.ApplyExternalRoutesAsync(componentId);
+        }
+        catch (InvalidOperationException ex)
+        {
+            routeError = ex.Message;
+        }
+    }
+
+    private async Task SaveRouteTimeout(ExternalRoute route, Guid componentId, string? raw)
+    {
+        routeError = null;
+
+        if (!int.TryParse(raw, out int seconds) || seconds < 0)
+        {
+            routeError = "Timeout must be 0 or a positive number of seconds.";
+            return;
+        }
+
+        if (seconds == (route.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds))
+        {
+            return;
+        }
+
+        try
+        {
+            await RouteService.UpdateRouteTimeoutAsync(route.Id, seconds);
+            componentRoutes = await RouteService.GetRoutesAsync(componentId);
+            shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(componentId);
             await LifecycleService.ApplyExternalRoutesAsync(componentId);
         }
         catch (InvalidOperationException ex)
@@ -3443,6 +3807,7 @@ else if (section == "components")
     {
         await RouteService.DeleteRouteAsync(routeId);
         componentRoutes = await RouteService.GetRoutesAsync(componentId);
+        shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(componentId);
         routeYamlPreview = null;
     }
 

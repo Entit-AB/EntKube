@@ -16,20 +16,59 @@ public static class OtlpIngest
 
     public sealed record Result(IResult? Error, JsonDocument? Doc, Guid TenantId, Guid ClusterId);
 
+    // A misconfigured collector retries every few seconds forever, so the rejection can't be logged per
+    // request. Throttle to one line per minute per (reason, caller) — enough to make a silent 401/503 show
+    // up in the app log while a flood stays a trickle.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> LastRejectLog = new();
+    private static readonly TimeSpan RejectLogInterval = TimeSpan.FromMinutes(1);
+
+    private static void LogRejection(ILogger logger, HttpContext ctx, string reason)
+    {
+        string caller = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        string key = $"{reason}|{caller}";
+        DateTime now = DateTime.UtcNow;
+
+        // The caller is a (possibly forwarded) client address, so the key space is attacker-influenced.
+        // Drop the whole table rather than let it grow without bound; at worst one extra line is logged.
+        if (LastRejectLog.Count > 512) LastRejectLog.Clear();
+
+        DateTime last = LastRejectLog.GetOrAdd(key, DateTime.MinValue);
+        if (now - last < RejectLogInterval) return;
+        LastRejectLog[key] = now;
+
+        logger.LogWarning(
+            "Rejected OTLP ingest from {Caller} on {Path}: {Reason}. Further identical rejections are "
+            + "suppressed for {Interval}.", caller, ctx.Request.Path.Value, reason, RejectLogInterval);
+    }
+
     public static async Task<Result> ReadAsync(
         HttpContext ctx, ITelemetryIngest telemetry, IngestTokenService tokens, IngestRateLimiter rateLimiter,
         ILogger logger, CancellationToken ct)
     {
         if (!telemetry.IsEnabled)
+        {
+            LogRejection(logger, ctx, "telemetry ingest is disabled");
             return new Result(Results.StatusCode(StatusCodes.Status503ServiceUnavailable), null, default, default);
+        }
 
         string? token = IngestTokenService.ExtractToken(ctx.Request);
         if (!tokens.TryValidate(token, out Guid tenantId, out Guid clusterId))
+        {
+            // Nothing here reaches the collector's operator, and an unauthenticated push is otherwise
+            // indistinguishable from no push at all — which is exactly how a placeholder token presents.
+            LogRejection(logger, ctx, token is null
+                ? "no ingest token presented (Authorization: Bearer or X-EntKube-Ingest-Key)"
+                : "ingest token is invalid or was signed with a different key — re-copy it from the "
+                  + "tenant's Logs tab into the collector's \"Ingest Token\" field");
             return new Result(Results.Unauthorized(), null, default, default);
+        }
 
         // Per-cluster backpressure: 429 (retryable) so a flood can't overwhelm the shared store.
         if (!rateLimiter.TryAcquire(clusterId))
+        {
+            LogRejection(logger, ctx, $"rate limit exceeded for cluster {clusterId}");
             return new Result(Results.StatusCode(StatusCodes.Status429TooManyRequests), null, default, default);
+        }
 
         // The otlphttp exporter gzip-compresses by default.
         Stream body = ctx.Request.Body;

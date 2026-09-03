@@ -10,34 +10,6 @@ using System.IO;
 namespace EntKube.Web.Services;
 
 /// <summary>
-/// A simple result type for Kubernetes operations. Operations can fail for
-/// many reasons (no kubeconfig, cluster unreachable, pod not found), so we
-/// use Result rather than exceptions for expected failures.
-/// </summary>
-public class KubernetesOperationResult
-{
-    public bool IsSuccess { get; init; }
-    public string? Error { get; init; }
-
-    public static KubernetesOperationResult Success() => new() { IsSuccess = true };
-    public static KubernetesOperationResult Failure(string error) => new() { IsSuccess = false, Error = error };
-}
-
-/// <summary>
-/// Result type with a data payload for operations that return information
-/// (e.g. pod lists, log content).
-/// </summary>
-public class KubernetesOperationResult<T>
-{
-    public bool IsSuccess { get; init; }
-    public T? Data { get; init; }
-    public string? Error { get; init; }
-
-    public static KubernetesOperationResult<T> Success(T data) => new() { IsSuccess = true, Data = data };
-    public static KubernetesOperationResult<T> Failure(string error) => new() { IsSuccess = false, Error = error };
-}
-
-/// <summary>
 /// A snapshot of a Kubernetes pod's state — name, status, container count,
 /// restarts, age. Rendered in the portal's deployment detail view.
 /// </summary>
@@ -67,7 +39,12 @@ public class ContainerInfo
 }
 
 /// A Kubernetes Service port entry (name optional, port number, protocol).
-public record KubeServicePort(string? Name, int Port, string Protocol);
+/// <summary>
+/// A port on a Kubernetes Service. <paramref name="AppProtocol"/> carries the Service's
+/// appProtocol field — with the port name it is how we tell a TLS-serving port from a
+/// plaintext one when configuring how the gateway connects to the backend.
+/// </summary>
+public record KubeServicePort(string? Name, int Port, string Protocol, string? AppProtocol = null);
 
 /// <summary>A Kubernetes Service with its exposed ports.</summary>
 public record KubeServiceInfo(string Name, string Type, string? ClusterIP, List<KubeServicePort> Ports);
@@ -96,7 +73,11 @@ public class KubernetesOperationsService(
     AuditService auditService,
     KyvernoPolicyService kyvernoPolicyService,
     IClusterChangeGate gate,
-    ILogger<KubernetesOperationsService> logger)
+    EntKube.Web.Services.Rollouts.IRolloutStarter rollouts,
+    ILogger<KubernetesOperationsService> logger,
+    // Optional: used only to read the client certificate for outbound mTLS. Absent in unit tests,
+    // which construct this service without a vault.
+    VaultService? vault = null)
 {
     /// <summary>
     /// Requires operator acknowledgment (interactive scopes only) for a mutating cluster op that
@@ -162,6 +143,107 @@ public class KubernetesOperationsService(
             logger.LogWarning(ex,
                 "Failed to apply Kyverno policies to namespace {Namespace} for deployment {DeploymentId}",
                 deployment.Namespace, deployment.Id);
+        }
+    }
+
+    /// <summary>
+    /// Re-applies the external routes EntKube owns for a deployment, immediately after a Helm
+    /// release has landed. A chart upgrade replaces every Deployment and Service in the namespace
+    /// at once, and we have repeatedly seen the gateway come out the other side with no virtual
+    /// host for the app's hostname — TLS still terminates, but Envoy answers a bare 404 for the
+    /// whole domain until an operator re-applies the route by hand from the External Access panel.
+    /// Nothing on the deploy path deletes the HTTPRoute, so this is not us undoing our own work;
+    /// re-applying is simply the known-good remedy, and it should not need a human.
+    ///
+    /// Re-applying also refreshes the per-backend DestinationRules, which are generated from the
+    /// live Service ports at apply time. If the new chart version changed a Service's ports, the
+    /// old rule would otherwise sit there stale until someone noticed the 503s.
+    ///
+    /// Ownership does not move: the route still comes from EntKube's database and is still applied
+    /// by EntKube. Best-effort, exactly like the Kyverno step above — the release is already
+    /// installed by the time we get here, so a route failure is logged and never fails the deploy.
+    ///
+    /// Returns a short note for the operator-facing output, or null if there was nothing to do.
+    /// </summary>
+    protected virtual async Task<string?> RefreshDeploymentRoutesAsync(AppDeployment deployment, CancellationToken ct)
+    {
+        try
+        {
+            // First, work out which routes to refresh. We want every route that belongs to this
+            // deployment, is switched on, and is one EntKube actually manages — an observed-only
+            // route (imported, owned by ArgoCD or Flux) is somebody else's to apply, and quietly
+            // taking it over here would be exactly the ownership violation we are trying to avoid.
+            List<(Guid Id, string Hostname)> candidates;
+
+            using (ApplicationDbContext db = dbFactory.CreateDbContext())
+            {
+                candidates = (await db.AppDeploymentRoutes
+                        .Where(r => r.AppDeploymentId == deployment.Id
+                                 && r.IsEnabled
+                                 && r.AppRoute.IsManaged)
+                        .OrderBy(r => r.PathPrefix)
+                        .Select(r => new { r.Id, r.AppRoute.Hostname })
+                        .ToListAsync(ct))
+                    .Select(r => (r.Id, r.Hostname))
+                    .ToList();
+            }
+
+            // Now collapse them down to one route per hostname. A single apply rebuilds *every*
+            // rule on the hostname's HTTPRoute — it queries all the enabled routes sharing that
+            // hostname itself — so calling it once per route would redo identical work and churn
+            // the Gateway N times over. The path ordering above just makes the pick deterministic.
+            List<(Guid Id, string Hostname)> perHostname = candidates
+                .GroupBy(r => r.Hostname, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .ToList();
+
+            // A deployment with no managed routes is the common case for internal-only apps.
+            // There is nothing to say and nothing to warn about; we just leave.
+            if (perHostname.Count == 0)
+                return null;
+
+            // Apply each hostname in turn. A failure here is information for the operator, not a
+            // reason to stop — the remaining hostnames are independent and still deserve a try.
+            List<string> refreshed = [];
+            int failed = 0;
+
+            foreach ((Guid routeId, string hostname) in perHostname)
+            {
+                KubernetesOperationResult<string> routeResult = await ApplyDeploymentRouteAsync(routeId, ct);
+
+                if (routeResult.IsSuccess)
+                {
+                    refreshed.Add(hostname);
+                    logger.LogInformation(
+                        "Refreshed route {Hostname} after Helm release for deployment {DeploymentId}",
+                        hostname, deployment.Id);
+                }
+                else
+                {
+                    failed++;
+                    logger.LogWarning(
+                        "Route refresh for {Hostname} after Helm release for deployment {DeploymentId} failed: {Error}",
+                        hostname, deployment.Id, routeResult.Error);
+                }
+            }
+
+            // Finally, hand back a one-line summary so the operator watching the deploy output can
+            // see that the routes were reconciled — and can see it when one of them was not.
+            string note = refreshed.Count > 0
+                ? $"Refreshed {refreshed.Count} route(s): {string.Join(", ", refreshed)}"
+                : "No routes were refreshed";
+
+            return failed > 0 ? $"{note} ({failed} route refresh(es) failed — see logs)" : note;
+        }
+        catch (Exception ex)
+        {
+            // The Helm release has already succeeded. Whatever went wrong reconciling routes —
+            // an unreachable cluster, a cancelled acknowledgment — must not turn a good deploy
+            // into a failed one. We record it and let the caller report success.
+            logger.LogWarning(ex,
+                "Failed to refresh routes after Helm release for deployment {DeploymentId}",
+                deployment.Id);
+            return null;
         }
     }
 
@@ -1005,17 +1087,9 @@ public class KubernetesOperationsService(
 
         // Prepend a Namespace manifest so the namespace is created automatically
         // if it doesn't exist yet — mirrors Helm's --create-namespace behaviour.
-        // Strip any leading "---" document marker from individual manifests — some
-        // Git-managed files start with "---" and the split preserves it, which would
-        // produce a double "---\n---" separator in the combined output.
-        string nsManifest = $"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {deployment.Namespace}";
-        string combined = nsManifest + "\n---\n" + string.Join("\n---\n", manifests.Select(m =>
-        {
-            string content = m.YamlContent.TrimStart();
-            return content.StartsWith("---", StringComparison.Ordinal)
-                ? content["---".Length..].TrimStart('\n', '\r')
-                : content;
-        }));
+        // Shared with drift detection so the two can never render different bytes.
+        string combined = EntKube.Web.Services.Upgrades.DeploymentManifestComposer.Combine(
+            deployment.Namespace, manifests);
 
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-manifest-{Guid.NewGuid()}.yaml");
@@ -1064,6 +1138,21 @@ public class KubernetesOperationsService(
                     logger.LogWarning(ex, "Prune after apply failed for deployment {DeploymentId}", deploymentId);
                     output += $"\n\nWarning: pruning of removed resources failed: {ex.Message}";
                 }
+
+                // Open a rollout watch when the deployment has one configured. Deliberately
+                // fire-and-observe: the verdict arrives minutes later from the background
+                // watcher, because blocking this call — and therefore any CI job driving it —
+                // for a ten-minute analysis window would make the feature unusable in exactly
+                // the pipelines it exists to protect. A failure to open the watch must never
+                // fail an apply that already succeeded.
+                try
+                {
+                    await rollouts.OpenAsync(deploymentId, performedBy, DateTime.UtcNow, ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Could not open rollout watch for deployment {DeploymentId}", deploymentId);
+                }
             }
             else
             {
@@ -1088,12 +1177,16 @@ public class KubernetesOperationsService(
     /// Applies the HTTPRoute (and Certificate if ClusterIssuer) for an AppDeploymentRoute
     /// to its cluster using "kubectl apply". Idempotent.
     /// </summary>
-    public async Task<KubernetesOperationResult<string>> ApplyDeploymentRouteAsync(
+    public virtual async Task<KubernetesOperationResult<string>> ApplyDeploymentRouteAsync(
         Guid deploymentRouteId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         AppDeploymentRoute? dr = await db.AppDeploymentRoutes
+            // The trust anchor decides which Gateway listener the HTTPRoute names as its parent,
+            // so it has to be loaded before any manifest is generated from this route.
+            .Include(r => r.AppRoute)
+                .ThenInclude(ar => ar.ClientCaBundle)
             .Include(r => r.AppRoute)
                 .ThenInclude(ar => ar.DeploymentRoutes)
                     .ThenInclude(sibDr => sibDr.AppDeployment)
@@ -1138,10 +1231,11 @@ public class KubernetesOperationsService(
             .ThenBy(r => r.PathPrefix)
             .ToListAsync(ct);
 
-        // For Istio clusters: apply a PERMISSIVE PeerAuthentication in every backend namespace.
-        // Without it, Istio's ingress gateway uses mTLS when connecting to backend pods. If those
-        // pods have no Istio sidecar injected, the TLS handshake fails → "remote connection failure".
-        // PERMISSIVE allows both mTLS (sidecar present) and plaintext (no sidecar) so both work.
+        // For Istio clusters: apply the namespace's mesh mTLS posture in every backend namespace.
+        // The default is PERMISSIVE, because Istio's ingress gateway uses mTLS when connecting to
+        // backend pods and a pod with no sidecar cannot complete that handshake — PERMISSIVE lets
+        // both kinds work. A namespace an operator has moved to STRICT keeps STRICT here: this
+        // apply runs on every route change, so hardcoding PERMISSIVE would quietly undo it.
         // Apply to ALL namespaces involved — not just the primary — so cross-namespace backends work too.
         List<ClusterComponent> clusterComponents = await db.ClusterComponents
             .Where(c => c.ClusterId == clusterId)
@@ -1154,18 +1248,16 @@ public class KubernetesOperationsService(
                 .Select(r => r.AppDeployment?.Namespace)
                 .Where(n => n != null)
                 .Distinct()!;
+
+            Dictionary<string, MeshMtlsMode> namespaceModes = await db.MeshMtlsPolicies
+                .Where(mp => mp.ClusterId == clusterId)
+                .ToDictionaryAsync(mp => mp.Namespace, mp => mp.Mode, ct);
+
             foreach (string backendNs in backendNamespaces)
             {
-                string peerAuthYaml =
-                    $"apiVersion: security.istio.io/v1beta1\n" +
-                    $"kind: PeerAuthentication\n" +
-                    $"metadata:\n" +
-                    $"  name: entkube-permissive\n" +
-                    $"  namespace: {backendNs}\n" +
-                    $"spec:\n" +
-                    $"  mtls:\n" +
-                    $"    mode: PERMISSIVE\n";
-                // Ignore errors — cluster may already have PERMISSIVE policy or not need one.
+                MeshMtlsMode mode = namespaceModes.GetValueOrDefault(backendNs, MeshMtlsMode.Permissive);
+                string peerAuthYaml = MeshMtlsService.BuildPeerAuthenticationYaml(backendNs, mode);
+                // Ignore errors — cluster may already have the policy or not need one.
                 await ApplyRawYamlAsync(kubeconfig, peerAuthYaml, ct);
             }
 
@@ -1174,21 +1266,35 @@ public class KubernetesOperationsService(
             // non-root namespace is only guaranteed to affect traffic originating from that
             // namespace, not from gateway pods in istio-system. The FQDN host uniquely
             // identifies the target service regardless of where the rule is stored.
-            foreach (AppDeploymentRoute enabledRoute in enabledRoutes)
+            // Grouped by backend Service: there is one DestinationRule per Service, so several
+            // paths on the same Service must agree on one document rather than each applying
+            // its own and the last one landing.
+            IEnumerable<IGrouping<(string Namespace, string Service), AppDeploymentRoute>> byService = enabledRoutes
+                .GroupBy(r => (
+                    Namespace: r.AppDeployment?.Namespace ?? dr.AppDeployment.Namespace,
+                    Service: r.ServiceName));
+
+            foreach (IGrouping<(string Namespace, string Service), AppDeploymentRoute> group in byService)
             {
-                string svc = enabledRoute.ServiceName;
-                string svcNs = enabledRoute.AppDeployment?.Namespace ?? dr.AppDeployment.Namespace;
-                string destinationRuleYaml =
-                    $"apiVersion: networking.istio.io/v1beta1\n" +
-                    $"kind: DestinationRule\n" +
-                    $"metadata:\n" +
-                    $"  name: entkube-disable-mtls-{svc}\n" +
-                    $"  namespace: {gwNamespace}\n" +
-                    $"spec:\n" +
-                    $"  host: {svc}.{svcNs}.svc.cluster.local\n" +
-                    $"  trafficPolicy:\n" +
-                    $"    tls:\n" +
-                    $"      mode: DISABLE\n";
+                string svc = group.Key.Service;
+                string svcNs = group.Key.Namespace;
+
+                // Read the live Service so TLS-serving ports keep TLS. A service-wide DISABLE
+                // would push plaintext into them and the backend would drop the connection.
+                // An empty list (service missing, API unreachable) yields exactly the
+                // service-wide rule this call site has always applied.
+                List<KubeServicePort> ports = await GetServicePortsAsync(kubeconfig, svcNs, svc, ct);
+
+                // Under STRICT the backend refuses the plaintext hop this rule normally sets up,
+                // so the gateway originates mesh mTLS instead. Same resource name either way:
+                // the rule is rewritten in place rather than left behind contradicting the policy.
+                string backendTlsMode = MeshMtlsService.BackendTlsMode(
+                    namespaceModes.GetValueOrDefault(svcNs, MeshMtlsMode.Permissive));
+
+                string destinationRuleYaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+                    svc, svcNs, gwNamespace, ports, alwaysEmit: true, serviceWideTlsMode: backendTlsMode,
+                    sessionAffinity: SessionAffinitySpec.Merge(group.Select(SessionAffinitySpec.From)));
+
                 await ApplyRawYamlAsync(kubeconfig, destinationRuleYaml, ct);
             }
         }
@@ -1276,6 +1382,10 @@ public class KubernetesOperationsService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         AppDeploymentRoute? dr = await db.AppDeploymentRoutes
+            // The trust anchor decides which Gateway listener the HTTPRoute names as its parent,
+            // so it has to be loaded before any manifest is generated from this route.
+            .Include(r => r.AppRoute)
+                .ThenInclude(ar => ar.ClientCaBundle)
             .Include(r => r.AppRoute)
                 .ThenInclude(ar => ar.DeploymentRoutes)
                     .ThenInclude(sibDr => sibDr.AppDeployment)
@@ -1372,7 +1482,16 @@ public class KubernetesOperationsService(
             .SelectMany(c => c.ExternalRoutes.Select(r => { r.Component = c; return r; }))
             .ToList();
 
+        // ClientCaBundle is Included because the Gateway generator refuses to emit a route that
+        // requires a client certificate without its trust anchor loaded — an unloaded navigation
+        // would otherwise render as "no mTLS" and quietly stop authenticating clients.
         List<AppRoute> appRoutes = await db.AppRoutes
+            .Include(r => r.ClientCaBundle!)
+                .ThenInclude(b => b.Certificates)
+            // DeploymentRoutes carry the namespaces the HTTPRoutes live in, which the listeners'
+            // namespace selector has to admit before the Gateway starts filtering on it.
+            .Include(r => r.DeploymentRoutes)
+                .ThenInclude(dr => dr.AppDeployment)
             .Where(r => r.IsEnabled && r.IsManaged && r.DeploymentRoutes.Any(dr =>
                 dr.IsEnabled && dr.AppDeployment.ClusterId == clusterId))
             .ToListAsync(ct);
@@ -1381,8 +1500,377 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Success("No routes to apply.");
 
         string gatewayClass = ExternalRouteService.ResolveGatewayClass(cluster.Components);
+
+        // Traefik has no Gateway API client-certificate validation (traefik#11975): its only knob
+        // is a cluster-wide default TLSOption. Applying the Gateway anyway would leave the mTLS
+        // listener serving without ever asking for a certificate, so refuse instead.
+        if (gatewayClass != "istio" && appRoutes.Any(r => r is { IsEnabled: true, RequireClientCertificate: true }))
+        {
+            return KubernetesOperationResult<string>.Failure(
+                "Client-certificate authentication requires an Istio ingress gateway. Traefik does not implement " +
+                "Gateway API frontend TLS validation, so the routes requiring a client certificate on this cluster " +
+                "cannot be enforced.");
+        }
+        // Label first, apply second. The listeners admit routes by namespace label, so a Gateway
+        // that lands before the labels do detaches every route on the cluster for as long as the
+        // gap lasts — the ordering here is the difference between a policy change and an outage.
+        await LabelRouteNamespacesAsync(kubeconfig, externalRoutes, appRoutes, clusterId, ct);
+
         string yaml = ExternalRouteService.GenerateGatewayYaml(gatewayName, gatewayNamespace, externalRoutes, appRoutes, gatewayClass: gatewayClass);
-        return await ApplyRawYamlAsync(kubeconfig, yaml, ct);
+        KubernetesOperationResult<string> applyResult = await ApplyRawYamlAsync(kubeconfig, yaml, ct);
+        if (!applyResult.IsSuccess) return applyResult;
+
+        // A listener on a port the gateway Service doesn't publish is invisible from outside: the
+        // Gateway reports Programmed, the route looks applied, and every mTLS client times out.
+        // The gateway's Service is Helm-managed (the Gateway binds to it via spec.addresses), so
+        // it does not grow a port just because a listener appeared — an existing install needs
+        // `helm upgrade` with the mTLS port added to service.ports. Say so instead of returning
+        // a bare success.
+        MtlsService.MtlsClusterPlan mtlsPlan = MtlsService.BuildPlan(appRoutes, gatewayNamespace);
+        if (mtlsPlan.BundlesByPort.Count == 0) return applyResult;
+
+        // Verify the client-certificate config survived the API server. Gateway API added
+        // spec.tls.frontend in v1.5; against an older CRD the field is not rejected, it is pruned —
+        // kubectl reports success, the Gateway programs cleanly, and nothing ever asks a client for
+        // a certificate. Reading it back is the only way to tell those two outcomes apart.
+        if (!await GatewayHasFrontendTlsAsync(kubeconfig, gatewayNamespace, gatewayName, ct))
+        {
+            return KubernetesOperationResult<string>.Failure(
+                $"The Gateway was applied but its client-certificate configuration was dropped by the cluster. " +
+                $"Gateway API v1.5 or newer is required for spec.tls.frontend — an older CRD prunes the field " +
+                $"silently, leaving the mTLS listener serving without ever requesting a certificate. Upgrade the " +
+                $"Gateway API CRDs component, and note that Istio only implements this from 1.28.");
+        }
+
+        List<KubeServicePort> servicePorts = await GetServicePortsAsync(kubeconfig, gatewayNamespace, gatewayName, ct);
+        List<int> unexposed = mtlsPlan.BundlesByPort.Keys
+            .Where(port => servicePorts.Count > 0 && servicePorts.All(sp => sp.Port != port))
+            .OrderBy(p => p)
+            .ToList();
+
+        List<string> notes = [.. mtlsPlan.Warnings];
+        if (unexposed.Count > 0)
+        {
+            notes.Add(
+                $"Gateway Service {gatewayNamespace}/{gatewayName} does not publish port(s) " +
+                $"{string.Join(", ", unexposed)}. The mTLS listener is configured but unreachable until the port " +
+                $"is added to the ingress gateway's service.ports (helm upgrade) — see the Istio Gateway component.");
+        }
+
+        return notes.Count > 0
+            ? KubernetesOperationResult<string>.Success($"{applyResult.Data}\n\n{string.Join("\n", notes)}")
+            : applyResult;
+    }
+
+    /// <summary>
+    /// Reads a Gateway back and reports whether <c>spec.tls.frontend</c> is present.
+    ///
+    /// Returns true when the check cannot be performed at all (API unreachable, Gateway not yet
+    /// visible): an unreadable cluster is not evidence that the field was pruned, and failing the
+    /// apply on a transient read would be worse than the problem being detected.
+    /// </summary>
+    private static async Task<bool> GatewayHasFrontendTlsAsync(
+        string kubeconfig, string ns, string name, CancellationToken ct)
+    {
+        try
+        {
+            using Kubernetes client = CreateClient(kubeconfig);
+
+            object raw = await client.CustomObjects.GetNamespacedCustomObjectAsync(
+                "gateway.networking.k8s.io", "v1", ns, "gateways", name, cancellationToken: ct);
+
+            using JsonDocument doc = JsonDocument.Parse(JsonSerializer.Serialize(raw));
+
+            return doc.RootElement.TryGetProperty("spec", out JsonElement spec)
+                && spec.TryGetProperty("tls", out JsonElement tls)
+                && tls.TryGetProperty("frontend", out _);
+        }
+        catch (Exception)
+        {
+            return true;
+        }
+    }
+
+    // ──────── Outbound mTLS (client certificates to partner APIs) ────────
+
+    /// <summary>
+    /// Applies an outbound mTLS credential: the Secret holding the client certificate in every
+    /// namespace the app is deployed to, plus — for mesh-originated credentials — the ServiceEntry
+    /// registering the partner and the DestinationRule that makes the sidecar present the
+    /// certificate.
+    ///
+    /// Applied per namespace because the Secret must live beside the workload that uses it: Istio's
+    /// SDS reads <c>credentialName</c> from the workload's own namespace, so a single copy
+    /// somewhere central would never be found.
+    /// </summary>
+    public async Task<KubernetesOperationResult<string>> ApplyOutboundMtlsAsync(
+        Guid credentialId, CancellationToken ct = default)
+    {
+        if (vault is null)
+            return KubernetesOperationResult<string>.Failure("Vault is unavailable in this context.");
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        OutboundMtlsCredential? credential = await db.OutboundMtlsCredentials
+            .FirstOrDefaultAsync(c => c.Id == credentialId, ct);
+
+        if (credential is null)
+            return KubernetesOperationResult<string>.Failure("Credential not found.");
+
+        CertificateBundle? bundle = await vault.GetCertificateBundleByIdAsync(credential.VaultSecretId, ct);
+        if (bundle is null || !bundle.HasCertificate || !bundle.HasPrivateKey)
+            return KubernetesOperationResult<string>.Failure(
+                "The vault certificate for this credential is missing its certificate or private key.");
+
+        List<AppDeployment> deployments = await db.AppDeployments
+            .Include(d => d.Cluster)
+                .ThenInclude(c => c.Components)
+            .Where(d => d.AppId == credential.AppId
+                     && (credential.EnvironmentId == null || d.EnvironmentId == credential.EnvironmentId))
+            .ToListAsync(ct);
+
+        if (deployments.Count == 0)
+            return KubernetesOperationResult<string>.Failure(
+                "This app has no deployment in the selected scope, so there is no namespace to place the certificate in.");
+
+        List<string> applied = [];
+        List<string> notes = [];
+
+        // One namespace can host several deployments of the same app; the resources are identical,
+        // so apply once per namespace rather than once per deployment.
+        foreach (IGrouping<(Guid ClusterId, string Namespace), AppDeployment> group in
+                 deployments.GroupBy(d => (d.ClusterId, d.Namespace)))
+        {
+            AppDeployment first = group.First();
+
+            if (string.IsNullOrWhiteSpace(first.Cluster?.Kubeconfig))
+            {
+                notes.Add($"{first.Cluster?.Name ?? "cluster"}: no kubeconfig configured, skipped.");
+                continue;
+            }
+
+            bool hasMesh = ExternalRouteService.ResolveGatewayClass(first.Cluster.Components) == "istio";
+
+            // Falling back to the Secret alone is better than applying mesh resources that nothing
+            // reads — but it changes who performs the handshake, so it is said out loud.
+            OutboundMtlsCredential effective = credential;
+            if (credential.Mode == OutboundMtlsMode.MeshOriginated && !hasMesh)
+            {
+                effective = new OutboundMtlsCredential
+                {
+                    Id = credential.Id,
+                    TenantId = credential.TenantId,
+                    AppId = credential.AppId,
+                    EnvironmentId = credential.EnvironmentId,
+                    Name = credential.Name,
+                    Host = credential.Host,
+                    Port = credential.Port,
+                    VaultSecretId = credential.VaultSecretId,
+                    Mode = OutboundMtlsMode.SecretOnly,
+                    WorkloadSelectorJson = credential.WorkloadSelectorJson
+                };
+
+                notes.Add(
+                    $"{first.Cluster.Name}: no Istio mesh, so only the Secret was created — the application has to " +
+                    $"mount it and perform mTLS itself.");
+            }
+
+            string manifest = OutboundMtlsService.BuildManifest(effective, bundle, first.Namespace);
+            KubernetesOperationResult<string> result = await ApplyRawYamlAsync(first.Cluster.Kubeconfig, manifest, ct);
+
+            if (!result.IsSuccess)
+                return KubernetesOperationResult<string>.Failure(
+                    $"Failed to apply in {first.Cluster.Name}/{first.Namespace}: {result.Error}");
+
+            applied.Add($"{first.Cluster.Name}/{first.Namespace}");
+        }
+
+        if (applied.Count == 0)
+            return KubernetesOperationResult<string>.Failure(
+                $"Nothing was applied. {string.Join(" ", notes)}".Trim());
+
+        credential.AppliedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        string summary =
+            $"Client certificate applied to {string.Join(", ", applied)}. " +
+            $"The app must call {OutboundMtlsService.CallHint(credential)}.";
+
+        return KubernetesOperationResult<string>.Success(
+            notes.Count > 0 ? $"{summary}\n\n{string.Join("\n", notes)}" : summary);
+    }
+
+    // ──────── Service-to-service mTLS (mesh) ────────
+
+    /// <summary>
+    /// Reads a namespace's mesh membership: whether it runs in ambient mode, and which pods carry
+    /// an Istio sidecar. Used to decide whether STRICT can be applied without cutting traffic off.
+    /// </summary>
+    public async Task<MeshReadiness> GetMeshReadinessAsync(
+        string kubeconfig, string ns, CancellationToken ct = default)
+    {
+        using Kubernetes client = CreateClient(kubeconfig);
+
+        V1Namespace namespaceObj = await client.CoreV1.ReadNamespaceAsync(ns, cancellationToken: ct);
+        bool isAmbient = namespaceObj.Metadata?.Labels is { } labels
+            && labels.TryGetValue(MeshMtlsService.AmbientLabelKey, out string? dataplane)
+            && string.Equals(dataplane, "ambient", StringComparison.OrdinalIgnoreCase);
+
+        V1PodList pods = await client.CoreV1.ListNamespacedPodAsync(ns, cancellationToken: ct);
+
+        List<MeshPodStatus> statuses = (pods.Items ?? [])
+            // Completed pods (Jobs, init containers of a finished run) are not serving traffic, so
+            // their lack of a sidecar says nothing about whether STRICT is safe.
+            .Where(p => p.Status?.Phase is not ("Succeeded" or "Failed"))
+            .Select(p => new MeshPodStatus(
+                p.Metadata?.Name ?? "(unnamed)",
+                (p.Spec?.Containers ?? []).Any(c =>
+                    string.Equals(c.Name, MeshMtlsService.SidecarContainerName, StringComparison.Ordinal))))
+            .ToList();
+
+        return MeshMtlsService.EvaluateReadiness(isAmbient, statuses);
+    }
+
+    /// <summary>
+    /// Mesh readiness for a namespace, resolving the cluster's kubeconfig itself so callers (the
+    /// UI included) never have to handle it.
+    /// </summary>
+    public async Task<KubernetesOperationResult<MeshReadiness>> GetMeshReadinessAsync(
+        Guid clusterId, string ns, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        KubernetesCluster? cluster = await db.KubernetesClusters
+            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+
+        if (cluster is null)
+            return KubernetesOperationResult<MeshReadiness>.Failure("Cluster not found.");
+
+        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            return KubernetesOperationResult<MeshReadiness>.Failure(
+                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
+
+        try
+        {
+            return KubernetesOperationResult<MeshReadiness>.Success(
+                await GetMeshReadinessAsync(cluster.Kubeconfig, ns, ct));
+        }
+        catch (Exception ex)
+        {
+            return KubernetesOperationResult<MeshReadiness>.Failure(
+                $"Could not read namespace '{ns}': {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Applies a namespace's mesh mTLS posture: the PeerAuthentication itself, plus the gateway's
+    /// DestinationRule for every backend service published out of that namespace.
+    ///
+    /// Both halves must move together. The PeerAuthentication decides what the pod accepts; the
+    /// DestinationRule decides what the gateway sends. Applying only the first under STRICT leaves
+    /// the gateway sending plaintext into a namespace that has just started refusing it, which
+    /// takes every published route in the namespace down.
+    ///
+    /// STRICT is refused unless every pod in the namespace is in the mesh — that check is the
+    /// difference between a policy change and an outage.
+    /// </summary>
+    public async Task<KubernetesOperationResult<string>> ApplyMeshMtlsAsync(
+        Guid clusterId, string ns, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        KubernetesCluster? cluster = await db.KubernetesClusters
+            .Include(c => c.Components)
+            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+
+        if (cluster is null)
+            return KubernetesOperationResult<string>.Failure("Cluster not found.");
+
+        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            return KubernetesOperationResult<string>.Failure(
+                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
+
+        if (ExternalRouteService.ResolveGatewayClass(cluster.Components) != "istio")
+            return KubernetesOperationResult<string>.Failure(
+                "Service-to-service mTLS requires an Istio service mesh on this cluster. PeerAuthentication is " +
+                "an Istio resource — there is no equivalent on a cluster running Traefik alone.");
+
+        string kubeconfig = cluster.Kubeconfig;
+
+        MeshMtlsPolicy? policy = await db.MeshMtlsPolicies
+            .FirstOrDefaultAsync(p => p.ClusterId == clusterId && p.Namespace == ns, ct);
+
+        MeshMtlsMode mode = policy?.Mode ?? MeshMtlsMode.Permissive;
+
+        if (mode == MeshMtlsMode.Strict)
+        {
+            MeshReadiness readiness;
+            try
+            {
+                readiness = await GetMeshReadinessAsync(kubeconfig, ns, ct);
+            }
+            catch (Exception ex)
+            {
+                // Not being able to see the namespace is not evidence that STRICT is safe.
+                return KubernetesOperationResult<string>.Failure(
+                    $"Could not read namespace '{ns}' to check mesh membership, so STRICT was not applied: {ex.Message}");
+            }
+
+            if (!readiness.IsReady)
+            {
+                return KubernetesOperationResult<string>.Failure(
+                    $"{readiness.PodsOutsideMesh.Count} of {readiness.TotalPods} pods in '{ns}' have no Istio sidecar " +
+                    $"and the namespace is not in ambient mode: {string.Join(", ", readiness.PodsOutsideMesh.Take(10))}" +
+                    (readiness.PodsOutsideMesh.Count > 10 ? ", …" : "") +
+                    ". STRICT would refuse their traffic. Enable sidecar injection (or ambient) on the namespace and " +
+                    "restart these workloads first.");
+            }
+        }
+
+        string peerAuthYaml = MeshMtlsService.BuildPeerAuthenticationYaml(ns, mode);
+        KubernetesOperationResult<string> peerAuthResult = await ApplyRawYamlAsync(kubeconfig, peerAuthYaml, ct);
+        if (!peerAuthResult.IsSuccess) return peerAuthResult;
+
+        // Move the gateway's side of the hop to match.
+        (_, string gwNamespace) = ExternalRouteService.ResolveGateway(cluster.Components);
+        string backendTlsMode = MeshMtlsService.BackendTlsMode(mode);
+
+        // The routes, not just their service names: this rewrites the same DestinationRules the
+        // route apply writes, so it has to carry their session affinity forward. Selecting only
+        // the names would rewrite each rule without its loadBalancer block and quietly drop
+        // affinity from every published service in the namespace.
+        List<AppDeploymentRoute> nsRoutes = await db.AppDeploymentRoutes
+            .Where(r => r.IsEnabled
+                     && r.AppDeployment.ClusterId == clusterId
+                     && r.AppDeployment.Namespace == ns)
+            .OrderBy(r => r.PathPrefix)
+            .ToListAsync(ct);
+
+        List<IGrouping<string, AppDeploymentRoute>> services = nsRoutes
+            .GroupBy(r => r.ServiceName)
+            .ToList();
+
+        foreach (IGrouping<string, AppDeploymentRoute> group in services)
+        {
+            string svc = group.Key;
+            List<KubeServicePort> ports = await GetServicePortsAsync(kubeconfig, ns, svc, ct);
+            string ruleYaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+                svc, ns, gwNamespace, ports, alwaysEmit: true, serviceWideTlsMode: backendTlsMode,
+                sessionAffinity: SessionAffinitySpec.Merge(group.Select(SessionAffinitySpec.From)));
+            await ApplyRawYamlAsync(kubeconfig, ruleYaml, ct);
+        }
+
+        if (policy is not null)
+        {
+            policy.AppliedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+        }
+
+        string summary = mode == MeshMtlsMode.Strict
+            ? $"'{ns}' now accepts mTLS only. {services.Count} published service(s) switched to mesh identity."
+            : $"'{ns}' accepts both mTLS and plaintext. {services.Count} published service(s) updated.";
+
+        return KubernetesOperationResult<string>.Success(summary);
     }
 
     // ──────── Raw L4 (TCP/UDP) routes (dedicated Istio L4 gateway) ────────
@@ -1736,6 +2224,69 @@ public class KubernetesOperationsService(
         }
     }
 
+    /// <summary>
+    /// Stamps <see cref="ExternalRouteService.RouteNamespaceLabel"/> on every namespace holding an
+    /// HTTPRoute for this cluster's Gateway, so the listeners' namespace selector admits them.
+    ///
+    /// Uses <c>kubectl label --overwrite</c> rather than an applied Namespace manifest: labelling
+    /// is purely additive, while applying a two-line Namespace object can strip labels a previous
+    /// apply owned — and these namespaces belong to customer applications, not to EntKube.
+    ///
+    /// Failures are logged, not raised. A namespace that cannot be labelled is one hostname that
+    /// keeps serving from a Gateway that already works; aborting the whole reconcile over it would
+    /// hold back the other listeners for no gain.
+    /// </summary>
+    private async Task LabelRouteNamespacesAsync(
+        string kubeconfig,
+        IEnumerable<ExternalRoute> externalRoutes,
+        IEnumerable<AppRoute> appRoutes,
+        Guid clusterId,
+        CancellationToken ct)
+    {
+        HashSet<string> namespaces = [
+            .. externalRoutes
+                .Select(r => r.Component?.Namespace)
+                .Where(ns => !string.IsNullOrWhiteSpace(ns))
+                .Select(ns => ns!),
+            .. appRoutes
+                .SelectMany(r => r.DeploymentRoutes)
+                .Where(dr => dr.IsEnabled && dr.AppDeployment?.ClusterId == clusterId)
+                .Select(dr => dr.AppDeployment?.Namespace)
+                .Where(ns => !string.IsNullOrWhiteSpace(ns))
+                .Select(ns => ns!),
+        ];
+
+        if (namespaces.Count == 0) return;
+
+        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
+
+        try
+        {
+            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+
+            foreach (string ns in namespaces)
+            {
+                HelmExecutionResult result = await RunCliAsync(
+                    "kubectl",
+                    $"label namespace {ns} " +
+                    $"{ExternalRouteService.RouteNamespaceLabel}={ExternalRouteService.RouteNamespaceLabelValue} " +
+                    $"--overwrite --kubeconfig {tempKubeconfig}",
+                    ct);
+
+                if (!result.Success)
+                {
+                    logger.LogWarning(
+                        "Could not label namespace {Namespace} for gateway route attachment: {Output}",
+                        ns, result.Output);
+                }
+            }
+        }
+        finally
+        {
+            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+        }
+    }
+
     private async Task<KubernetesOperationResult<string>> ApplyRawYamlAsync(
         string kubeconfig, string yaml, CancellationToken ct)
     {
@@ -1882,6 +2433,10 @@ public class KubernetesOperationsService(
 
             HelmExecutionResult result = await RunCliAsync("helm", string.Join(" ", args), ct);
 
+            // Anything the post-install steps want to tell the operator gets appended to Helm's
+            // own output at the end, so the deploy log reads as one story.
+            string? routeNote = null;
+
             if (result.Success)
             {
                 logger.LogInformation(
@@ -1893,6 +2448,11 @@ public class KubernetesOperationsService(
 
                 // Ensure the (possibly brand-new) namespace inherits the environment's Kyverno policies.
                 await ApplyKyvernoPoliciesAsync(deployment, ct);
+
+                // The release has just swapped out every workload and Service in the namespace,
+                // which is precisely when the gateway is prone to losing this app's virtual host.
+                // Re-apply the routes EntKube owns so the operator never has to do it by hand.
+                routeNote = await RefreshDeploymentRoutesAsync(deployment, ct);
             }
             else
             {
@@ -1902,7 +2462,8 @@ public class KubernetesOperationsService(
             }
 
             return result.Success
-                ? KubernetesOperationResult<string>.Success(result.Output)
+                ? KubernetesOperationResult<string>.Success(
+                    string.IsNullOrWhiteSpace(routeNote) ? result.Output : $"{result.Output}\n{routeNote}")
                 : KubernetesOperationResult<string>.Failure(result.Output);
         }
         finally
@@ -2801,7 +3362,7 @@ public class KubernetesOperationsService(
                     svc.Spec?.Type ?? "ClusterIP",
                     svc.Spec?.ClusterIP,
                     (svc.Spec?.Ports ?? [])
-                        .Select(p => new KubeServicePort(p.Name, p.Port, p.Protocol ?? "TCP"))
+                        .Select(p => new KubeServicePort(p.Name, p.Port, p.Protocol ?? "TCP", p.AppProtocol))
                         .ToList()))
                 .OrderBy(s => s.Name)
                 .ToList();
@@ -2860,6 +3421,31 @@ public class KubernetesOperationsService(
     /// Creates a Kubernetes client from a raw kubeconfig YAML string.
     /// The kubeconfig is parsed in-memory — never written to disk.
     /// </summary>
+    /// <summary>
+    /// Reads one Service's ports straight from the cluster, for deciding how the gateway should
+    /// connect to each of them. Returns an empty list when the service can't be read — callers
+    /// must treat that as "nothing known about the ports", never as "no TLS ports".
+    /// </summary>
+    private async Task<List<KubeServicePort>> GetServicePortsAsync(
+        string kubeconfig, string ns, string serviceName, CancellationToken ct)
+    {
+        try
+        {
+            using Kubernetes client = CreateClient(kubeconfig);
+            V1Service svc = await client.CoreV1.ReadNamespacedServiceAsync(serviceName, ns, cancellationToken: ct);
+
+            return (svc.Spec?.Ports ?? [])
+                .Select(p => new KubeServicePort(p.Name, p.Port, p.Protocol ?? "TCP", p.AppProtocol))
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not read service {Service} in {Namespace} for backend TLS detection",
+                serviceName, ns);
+            return [];
+        }
+    }
+
     private static Kubernetes CreateClient(string kubeconfig)
     {
         using MemoryStream stream = new(System.Text.Encoding.UTF8.GetBytes(kubeconfig));
@@ -2923,7 +3509,7 @@ public class KubernetesOperationsService(
             return new HelmExecutionResult
             {
                 Success = false,
-                Output = $"Failed to run {program}: {ex.Message}"
+                Output = HelmExecutionResult.DescribeLaunchFailure(program, ex)
             };
         }
     }

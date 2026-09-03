@@ -97,6 +97,62 @@ EntKube/
     └── EntKube.Web.Tests/    # Test project
 ```
 
+## Installing
+
+### The desktop installer (recommended)
+
+`entkube-installer` is a small desktop app that installs the management plane onto a server over SSH.
+Point it at the server, answer the same questions the command-line installer asks, and watch it
+write the configuration, pull the images and start the stack. It can also install the client-side
+tools (CLI, MCP server, egress agent, Terraform provider) onto your own machine afterwards.
+
+```bash
+scripts/release.sh gui --rid osx-arm64      # or linux-x64, win-x64, osx-x64
+
+open "artifacts/gui/Release/osx-arm64/EntKube Installer.app"   # macOS
+./artifacts/gui/Release/linux-x64/entkube-installer            # Linux
+artifacts\gui\Release\win-x64\entkube-installer.exe            # Windows
+```
+
+Building needs the .NET 10 SDK, and Go for the bundled Terraform provider. Move the whole output
+directory if you copy it elsewhere — the `tools/` folder beside the app holds the client binaries.
+
+It performs exactly the install the command-line installer performs — the same code, pointed at an
+SSH connection instead of the local shell — so a server built by either is the same server.
+
+See **[docs/installing.md](docs/installing.md)**.
+
+### The command-line installer
+
+`entkube-install` is a single self-contained binary that stands up the management plane on a server:
+it checks the host, asks a handful of questions, writes `docker-compose.yml` / `Caddyfile` / `.env`,
+pulls the images and starts everything.
+
+```bash
+scripts/release.sh installer --rid linux-x64
+scp artifacts/installer/Release/linux-x64/entkube-install server:/tmp/
+ssh server 'sudo /tmp/entkube-install --directory /opt/entkube'
+```
+
+It is a terminal wizard, so it works over SSH — which is how servers are usually reached. It is also
+safe to re-run: an existing `.env` is read first, every answer defaults to what is already there, and
+the vault root key and database password are reused rather than regenerated. Re-running is the
+supported way to change a setting or move to a newer image.
+
+Scripted installs use `--non-interactive`, which asks nothing and takes every answer from a flag:
+
+```bash
+entkube-install --non-interactive --directory /opt/entkube \
+  --domain entkube.example.com --acme-email ops@example.com --seed-admin ops@example.com
+```
+
+See **[docs/installing.md](docs/installing.md)** for the full flag list, the scripted form, and what
+it checks before writing anything. Use this one when you are already on the server, or scripting.
+
+### Installing by hand
+
+The installer is not required; the sections below are the reference for doing it yourself.
+
 ## Docker
 
 ### Pulling the image
@@ -105,25 +161,39 @@ The published image lives at `entit.azurecr.io/entkube`. **`entit.azurecr.io` is
 
 ### Building your own image (optional)
 
-> **Apple Silicon (M-series) Mac:** servers are typically `linux/amd64`. Use `docker buildx` to cross-compile and push in one step — the `--push` flag is required because multi-platform images cannot be loaded into the local Docker daemon.
+> **Multi-architecture:** the published image is built for `linux/amd64` and `linux/arm64`, so it runs on Intel/AMD servers and on Graviton, Ampere or Hetzner ARM alike. If you build your own, build both — the `--push` flag is required because a multi-platform image cannot be loaded into the local Docker daemon.
 
 ```bash
 # One-time setup
 docker buildx create --use --name multiarch
 
-# Build for amd64 and push directly to the registry
-docker buildx build --platform linux/amd64 \
+# Build both architectures and push directly to the registry
+docker buildx build --platform linux/amd64,linux/arm64 --provenance=false \
   -t entit.azurecr.io/entkube:latest \
   --push .
 
 # Tag a versioned release
-docker buildx build --platform linux/amd64 \
+docker buildx build --platform linux/amd64,linux/arm64 --provenance=false \
   -t entit.azurecr.io/entkube:latest \
   -t entit.azurecr.io/entkube:1.0.0 \
   --push .
 ```
 
+`--provenance=false` matters: buildx otherwise adds a manifest entry with platform `unknown/unknown`, which several container runtimes report as a platform mismatch rather than ignoring.
+
 Replace `entit.azurecr.io/entkube` with your own registry and image path if you are not pushing to the public one.
+
+### Building your own image with the release script
+
+`scripts/release.sh` builds every EntKube artifact and is the shorter form of the buildx commands
+above:
+
+```bash
+scripts/release.sh web --push                                    # both architectures, as CI builds it
+scripts/release.sh web --platforms linux/amd64 --push            # one, if you only need it
+```
+
+See [docs/releasing.md](docs/releasing.md).
 
 ### Run with Docker Compose
 

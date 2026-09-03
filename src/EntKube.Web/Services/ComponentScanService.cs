@@ -707,12 +707,23 @@ public class ComponentScanService(
 
                     string? serviceName = null;
                     int servicePort = 80;
+                    int? requestTimeoutSeconds = null;
 
                     if (spec.TryGetProperty("rules", out JsonElement rules)
                         && rules.ValueKind == JsonValueKind.Array
                         && rules.GetArrayLength() > 0)
                     {
                         JsonElement firstRule = rules[0];
+
+                        // Keep whatever timeout the live route already carries. Adopting a
+                        // streaming route must not silently impose the platform default the
+                        // first time EntKube re-applies it.
+                        if (firstRule.TryGetProperty("timeouts", out JsonElement timeouts)
+                            && timeouts.TryGetProperty("request", out JsonElement requestTimeout)
+                            && requestTimeout.GetString() is string rawTimeout)
+                        {
+                            requestTimeoutSeconds = DeploymentImportService.ParseGatewayDurationSeconds(rawTimeout);
+                        }
 
                         if (firstRule.TryGetProperty("backendRefs", out JsonElement backendRefs)
                             && backendRefs.ValueKind == JsonValueKind.Array
@@ -753,6 +764,7 @@ public class ComponentScanService(
                         ClusterIssuerName = "letsencrypt-prod",
                         GatewayName = gatewayName,
                         GatewayNamespace = gatewayNamespace,
+                        RequestTimeoutSeconds = requestTimeoutSeconds,
                         CreatedAt = DateTime.UtcNow
                     };
 

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using YamlDotNet.Serialization;
@@ -86,9 +87,8 @@ public class ConnectivityGraphService(
                 Source = ConnectivitySource.Declared
             };
         }
-        graph.ExposedPorts = ports.Values
-            .OrderBy(p => p.ServiceName).ThenBy(p => p.Port)
-            .ToList();
+        // ExposedPorts is finalised at the end of this method: routes are parsed first
+        // so the live-cluster fallback below knows which Services it needs to resolve.
 
         // ── Ingress (who reaches this app) — inferred from routes ──
         // L7 HTTP/TLS routes.
@@ -96,10 +96,38 @@ public class ConnectivityGraphService(
             from r in db.AppDeploymentRoutes.AsNoTracking()
             join ar in db.AppRoutes.AsNoTracking() on r.AppRouteId equals ar.Id
             where deploymentIds.Contains(r.AppDeploymentId)
-            select new { ar.Hostname, r.ServiceName, r.ServicePort, r.PathPrefix, r.IsEnabled })
+            select new
+            {
+                r.AppDeploymentId,
+                ar.Hostname,
+                r.ServiceName,
+                r.ServicePort,
+                r.CanaryServiceName,
+                r.PathPrefix,
+                r.IsEnabled
+            })
             .ToListAsync(ct);
+
+        // Service names the routes point at, per deployment — the live-cluster
+        // fallback resolves exactly these when no Service manifest declares them.
+        Dictionary<Guid, HashSet<string>> routedServices = new();
+        void NoteRoutedService(Guid depId, string? svcName)
+        {
+            if (string.IsNullOrWhiteSpace(svcName))
+            {
+                return;
+            }
+            if (!routedServices.TryGetValue(depId, out HashSet<string>? names))
+            {
+                names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                routedServices[depId] = names;
+            }
+            names.Add(svcName.Trim());
+        }
         foreach (var r in l7Routes)
         {
+            NoteRoutedService(r.AppDeploymentId, r.ServiceName);
+            NoteRoutedService(r.AppDeploymentId, r.CanaryServiceName);
             graph.Ingress.Add(new ConnectivityEdge
             {
                 PeerLabel = r.Hostname,
@@ -122,6 +150,7 @@ public class ConnectivityGraphService(
             .ToListAsync(ct);
         foreach (AppL4Route r in l4Routes)
         {
+            NoteRoutedService(r.AppDeploymentId, r.ServiceName);
             graph.Ingress.Add(new ConnectivityEdge
             {
                 PeerLabel = $"Port {r.ExternalPort}/{r.Protocol.ToString().ToLowerInvariant()}",
@@ -287,7 +316,200 @@ public class ConnectivityGraphService(
             });
         }
 
+        // ── Exposed ports, part two: resolve routed Services from the live cluster ──
+        // Manifests are only one way an app gets a Service: Helm charts, Manual
+        // deployments and Git-synced trees all create Services that were never
+        // stored as a DeploymentManifest row. Without this the graph would claim a
+        // route has no backend while the Service is running perfectly well.
+        await MergeLiveServicePortsAsync(db, graph, deployments, routedServices, ports, ct);
+
+        graph.ExposedPorts = ports.Values
+            .OrderBy(p => p.ServiceName).ThenBy(p => p.Port)
+            .ToList();
+
         return graph;
+    }
+
+    /// <summary>
+    /// Fill in exposed ports for Services a route points at that no manifest (and no
+    /// declared port) accounts for, by reading them from the cluster. Only the routed
+    /// Service names are adopted — pulling in every Service in the namespace would
+    /// attribute other apps' ports to this one and widen generated policy.
+    /// Best-effort: an unreachable cluster sets <see cref="ConnectivityGraph.LiveLookupFailed"/>
+    /// rather than throwing.
+    /// </summary>
+    private async Task MergeLiveServicePortsAsync(
+        ApplicationDbContext db,
+        ConnectivityGraph graph,
+        List<AppDeployment> deployments,
+        Dictionary<Guid, HashSet<string>> routedServices,
+        Dictionary<string, ServicePortNode> ports,
+        CancellationToken ct)
+    {
+        if (routedServices.Count == 0 || deployments.Count == 0)
+        {
+            return;
+        }
+
+        // The namespace the app actually runs in — an AppEnvironment lock overrides
+        // whatever the deployment row says, the same way the policy generator resolves it.
+        Guid appId = deployments[0].AppId;
+        Guid envId = deployments[0].EnvironmentId;
+        string? lockedNs = await db.AppEnvironments
+            .AsNoTracking()
+            .Where(ae => ae.AppId == appId && ae.EnvironmentId == envId)
+            .Select(ae => ae.Namespace)
+            .FirstOrDefaultAsync(ct);
+
+        // Group the still-unresolved names by the (cluster, namespace) we'd look them up in.
+        Dictionary<(Guid ClusterId, string Namespace), HashSet<string>> lookups = new();
+        foreach (AppDeployment dep in deployments)
+        {
+            if (!routedServices.TryGetValue(dep.Id, out HashSet<string>? names))
+            {
+                continue;
+            }
+            string ns = string.IsNullOrWhiteSpace(lockedNs) ? dep.Namespace : lockedNs!;
+            if (string.IsNullOrWhiteSpace(ns) || dep.ClusterId == Guid.Empty)
+            {
+                continue;
+            }
+
+            // Anything a manifest or a declared port already covers needs no cluster call.
+            HashSet<string> missing = names
+                .Where(n => !ports.Values.Any(p => string.Equals(p.ServiceName, n, StringComparison.OrdinalIgnoreCase)))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (missing.Count == 0)
+            {
+                continue;
+            }
+
+            if (!lookups.TryGetValue((dep.ClusterId, ns), out HashSet<string>? bucket))
+            {
+                bucket = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                lookups[(dep.ClusterId, ns)] = bucket;
+            }
+            bucket.UnionWith(missing);
+        }
+
+        if (lookups.Count == 0)
+        {
+            return;
+        }
+
+        List<Guid> clusterIds = lookups.Keys.Select(k => k.ClusterId).Distinct().ToList();
+        Dictionary<Guid, KubernetesCluster> clusters = await db.KubernetesClusters
+            .Where(c => clusterIds.Contains(c.Id))
+            .ToDictionaryAsync(c => c.Id, ct);
+
+        foreach (((Guid clusterId, string ns), HashSet<string> wanted) in lookups)
+        {
+            if (!clusters.TryGetValue(clusterId, out KubernetesCluster? cluster)
+                || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            {
+                graph.LiveLookupFailed = true;
+                continue;
+            }
+
+            try
+            {
+                string json = await k8sFactory.GetJsonAsync("services", ns, cluster.Kubeconfig, ct: ct);
+                foreach (ServicePortNode node in ParseLiveServicePorts(json, ns, wanted))
+                {
+                    ports.TryAdd($"{node.Namespace}/{node.ServiceName}:{node.Port}/{node.Protocol}", node);
+                }
+            }
+            catch (Exception ex)
+            {
+                graph.LiveLookupFailed = true;
+                logger.LogDebug(ex, "Could not read live Services in {Cluster}/{Namespace} for the connectivity graph",
+                    cluster.Name, ns);
+            }
+        }
+    }
+
+    /// <summary>Pull the wanted Services' ports out of a <c>kubectl get services -o json</c> payload.</summary>
+    private List<ServicePortNode> ParseLiveServicePorts(string json, string ns, HashSet<string> wanted)
+    {
+        List<ServicePortNode> result = [];
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return result;
+        }
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("items", out JsonElement items) || items.ValueKind != JsonValueKind.Array)
+            {
+                return result;
+            }
+
+            foreach (JsonElement item in items.EnumerateArray())
+            {
+                string? name = item.TryGetProperty("metadata", out JsonElement meta)
+                    && meta.TryGetProperty("name", out JsonElement nameEl)
+                        ? nameEl.GetString()
+                        : null;
+                if (name is null || !wanted.Contains(name))
+                {
+                    continue;
+                }
+                if (!item.TryGetProperty("spec", out JsonElement spec))
+                {
+                    continue;
+                }
+
+                Dictionary<string, string>? selector = null;
+                if (spec.TryGetProperty("selector", out JsonElement sel) && sel.ValueKind == JsonValueKind.Object)
+                {
+                    selector = sel.EnumerateObject()
+                        .Where(p => p.Value.ValueKind == JsonValueKind.String)
+                        .ToDictionary(p => p.Name, p => p.Value.GetString()!);
+                }
+
+                if (!spec.TryGetProperty("ports", out JsonElement portsEl) || portsEl.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (JsonElement port in portsEl.EnumerateArray())
+                {
+                    if (!port.TryGetProperty("port", out JsonElement portNum) || !portNum.TryGetInt32(out int portValue))
+                    {
+                        continue;
+                    }
+                    string? portName = port.TryGetProperty("name", out JsonElement pn) ? pn.GetString() : null;
+                    string protocol = (port.TryGetProperty("protocol", out JsonElement pr) ? pr.GetString() : null)
+                        ?.ToUpperInvariant() ?? "TCP";
+                    string? appProtocol = port.TryGetProperty("appProtocol", out JsonElement ap) ? ap.GetString() : null;
+                    int? targetPort = port.TryGetProperty("targetPort", out JsonElement tp) && tp.ValueKind == JsonValueKind.Number
+                        && tp.TryGetInt32(out int tpv)
+                            ? tpv
+                            : null;
+
+                    result.Add(new ServicePortNode
+                    {
+                        ServiceName = name,
+                        Namespace = ns,
+                        Port = portValue,
+                        TargetPort = targetPort,
+                        Protocol = protocol,
+                        PortName = portName,
+                        AppProtocol = appProtocol ?? InferAppProtocol(portName),
+                        Selector = selector,
+                        Source = ConnectivitySource.Inferred,
+                        FromCluster = true
+                    });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not parse live Service list for namespace {Namespace}", ns);
+        }
+
+        return result;
     }
 
     // ── Pre-apply analyzer ────────────────────────────────────────────────────
@@ -336,45 +558,47 @@ public class ConnectivityGraphService(
             .ToList();
 
         // ── 1) Route targets a Service/port that isn't exposed ──
-        if (routeTargets.Count > 0 && graph.ExposedPorts.Count == 0)
+        // A Service the graph knows about came from a manifest, a declared port, or
+        // the live cluster (Helm/Manual/Git deployments only have the last of those).
+        // Only when the cluster could not be consulted either do we say "unknown"
+        // instead of "broken" — otherwise a healthy Helm app reads as broken.
+        foreach (ConnectivityEdge e in routeTargets)
         {
-            findings.Add(new ConnectivityFinding(FindingSeverity.Warning, "Broken dependency",
-                "Route targets can't be verified",
-                "Routes are configured but no Service manifests were found in this environment, so their backends can't be validated.",
-                "Attach the Service manifest(s) to a deployment in this environment."));
-        }
-        else
-        {
-            foreach (ConnectivityEdge e in routeTargets)
+            string[] parts = e.Target!.Split(':');
+            string svc = parts[0];
+            _ = int.TryParse(parts.ElementAtOrDefault(1), out int port);
+            bool exact = graph.ExposedPorts.Any(p => string.Equals(p.ServiceName, svc, StringComparison.OrdinalIgnoreCase) && p.Port == port);
+            if (exact)
             {
-                string[] parts = e.Target!.Split(':');
-                string svc = parts[0];
-                _ = int.TryParse(parts.ElementAtOrDefault(1), out int port);
-                bool exact = graph.ExposedPorts.Any(p => string.Equals(p.ServiceName, svc, StringComparison.OrdinalIgnoreCase) && p.Port == port);
-                if (exact)
-                {
-                    continue;
-                }
+                continue;
+            }
 
-                List<int> svcPorts = graph.ExposedPorts
-                    .Where(p => string.Equals(p.ServiceName, svc, StringComparison.OrdinalIgnoreCase))
-                    .Select(p => p.Port).ToList();
-                if (svcPorts.Count > 0)
-                {
-                    findings.Add(new ConnectivityFinding(FindingSeverity.Error, "Broken dependency",
-                        $"Route port mismatch → {e.Target}",
-                        $"The route “{e.PeerLabel}” sends traffic to {svc}:{port}, but that Service only exposes port(s) {string.Join(", ", svcPorts)}. Requests will fail.",
-                        $"Point the route at an exposed port ({string.Join(", ", svcPorts)}), or add port {port} to the Service.",
-                        e.PeerLabel));
-                }
-                else
-                {
-                    findings.Add(new ConnectivityFinding(FindingSeverity.Error, "Broken dependency",
-                        $"Route backend not exposed → {e.Target}",
-                        $"The route “{e.PeerLabel}” targets a Service “{svc}” that is not exposed in this environment. Requests will 503.",
-                        $"Add a Service named “{svc}” exposing port {port}, or fix the route’s target service.",
-                        e.PeerLabel));
-                }
+            List<int> svcPorts = graph.ExposedPorts
+                .Where(p => string.Equals(p.ServiceName, svc, StringComparison.OrdinalIgnoreCase))
+                .Select(p => p.Port).ToList();
+            if (svcPorts.Count > 0)
+            {
+                findings.Add(new ConnectivityFinding(FindingSeverity.Error, "Broken dependency",
+                    $"Route port mismatch → {e.Target}",
+                    $"The route “{e.PeerLabel}” sends traffic to {svc}:{port}, but that Service only exposes port(s) {string.Join(", ", svcPorts)}. Requests will fail.",
+                    $"Point the route at an exposed port ({string.Join(", ", svcPorts)}), or add port {port} to the Service.",
+                    e.PeerLabel));
+            }
+            else if (graph.LiveLookupFailed)
+            {
+                findings.Add(new ConnectivityFinding(FindingSeverity.Warning, "Broken dependency",
+                    $"Route target can't be verified → {e.Target}",
+                    $"No Service manifest in this environment declares “{svc}”, and the cluster couldn't be queried to check whether it exists (missing kubeconfig or unreachable API server).",
+                    "Check the cluster's kubeconfig, or attach the Service manifest to a deployment in this environment.",
+                    e.PeerLabel));
+            }
+            else
+            {
+                findings.Add(new ConnectivityFinding(FindingSeverity.Error, "Broken dependency",
+                    $"Route backend not exposed → {e.Target}",
+                    $"The route “{e.PeerLabel}” targets a Service “{svc}” that does not exist in this environment (not in any manifest, and not found in the cluster). Requests will 503.",
+                    $"Add a Service named “{svc}” exposing port {port}, or fix the route’s target service.",
+                    e.PeerLabel));
             }
         }
 
@@ -1355,6 +1579,13 @@ public class ConnectivityGraph
     /// <summary>What this app reaches outside the cluster (internet).</summary>
     public List<ConnectivityEdge> ExternalEgress { get; set; } = [];
 
+    /// <summary>
+    /// True when a routed Service could not be resolved from any manifest AND the
+    /// cluster couldn't be queried to check (no kubeconfig, unreachable API). The
+    /// analyzer says "couldn't check" rather than "doesn't exist" in that case.
+    /// </summary>
+    public bool LiveLookupFailed { get; set; }
+
     public bool IsEmpty =>
         ExposedPorts.Count == 0 && Ingress.Count == 0 &&
         InternalEgress.Count == 0 && ExternalEgress.Count == 0;
@@ -1375,6 +1606,9 @@ public class ServicePortNode
     public Dictionary<string, string>? Selector { get; set; }
 
     public ConnectivitySource Source { get; set; }
+
+    /// <summary>True when this port was read from the live cluster rather than from a stored manifest.</summary>
+    public bool FromCluster { get; set; }
 }
 
 /// <summary>The generated enforcement set (NetworkPolicy + Istio ServiceEntry) for a single target.</summary>

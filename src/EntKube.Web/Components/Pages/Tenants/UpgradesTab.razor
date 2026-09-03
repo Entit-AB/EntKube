@@ -1,0 +1,654 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Upgrades
+@using Microsoft.EntityFrameworkCore
+@inject ComponentUpgradeService UpgradeService
+@inject ComponentUpgradeRunner UpgradeRunner
+@inject ReleaseVolumeGuard VolumeGuard
+@inject NodeManagementService NodeService
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+@* ═══════════════════════════════════════════════════════════════════
+   Fleet upgrade planner — "what is out of date across this tenant?"
+
+   Chart currency comes from the repositories' own index.yaml (no cluster
+   access, cached for an hour), while the Kubernetes support check reads
+   kubelet versions live and is therefore loaded on demand rather than on
+   first render.
+
+   Each finding is actionable here: the Upgrade button pins the component to
+   the published version and runs the same apply the cluster page does, via
+   ComponentUpgradeRunner. Before it starts, ReleaseVolumeGuard reports any
+   workload that cannot be replaced in place — on a cluster with no
+   ReadWriteMany storage those have to be scaled to zero first, which is
+   downtime, so the dialog names them and asks.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3 mt-4">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span><i class="bi bi-arrow-up-circle me-2 text-primary"></i><strong>Component upgrades</strong></span>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="ReloadAsync" disabled="@loading">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+        </button>
+    </div>
+    <div class="card-body pt-3">
+        <p class="text-muted small mb-3">
+            Installed chart versions compared against what each Helm repository publishes.
+            Pre-release versions are only offered to releases already running one.
+        </p>
+
+        @if (loading)
+        {
+            <div class="text-center py-4"><span class="spinner-border spinner-border-sm text-primary"></span></div>
+        }
+        else if (loadError is not null)
+        {
+            <div class="alert alert-danger mb-0">Failed to load: @loadError</div>
+        }
+        else if (report is null || report.Components.Count == 0)
+        {
+            <p class="text-muted small mb-0">
+                No installed Helm components found for this tenant. Components appear here once they
+                are installed from the catalog or adopted by a cluster scan.
+            </p>
+        }
+        else
+        {
+            <div class="row g-2 mb-3">
+                @SummaryCard("Updates available", report.UpgradeCount, "text-primary", "bi-arrow-up-circle")
+                @SummaryCard("Major behind", report.MajorCount, "text-warning", "bi-exclamation-triangle")
+                @SummaryCard("Deprecated", report.DeprecatedCount, "text-danger", "bi-slash-circle")
+                @SummaryCard("Unknown", report.UnknownCount, "text-muted", "bi-question-circle")
+            </div>
+
+            <div class="row g-2 align-items-end mb-3">
+                <div class="col-md-3">
+                    <label class="form-label small mb-1">Cluster</label>
+                    <select class="form-select form-select-sm" @bind="clusterFilter">
+                        <option value="">All clusters</option>
+                        @foreach (string name in report.Components.Select(c => c.ClusterName).Distinct().Order())
+                        {
+                            <option value="@name">@name</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small mb-1">Status</label>
+                    <select class="form-select form-select-sm" @bind="statusFilter">
+                        <option value="actionable">Needs attention</option>
+                        <option value="all">All components</option>
+                        <option value="major">Major behind only</option>
+                        <option value="unknown">Unknown only</option>
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small mb-1">Search</label>
+                    <input class="form-control form-control-sm" placeholder="Component or chart name" @bind="search" @bind:event="oninput" />
+                </div>
+            </div>
+
+            @if (Filtered().Count == 0)
+            {
+                <p class="text-muted small mb-0">Nothing matches the current filters — everything here is up to date.</p>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead>
+                            <tr class="text-muted small">
+                                <th>Component</th>
+                                <th>Cluster</th>
+                                <th>Installed</th>
+                                <th>Latest</th>
+                                <th>Status</th>
+                                <th>Published</th>
+                                <th class="text-end">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (ComponentUpgrade c in Filtered())
+                            {
+                                <tr>
+                                    <td>
+                                        <div class="fw-medium">@c.DisplayName</div>
+                                        <div class="text-muted small">
+                                            @c.ChartName
+                                            @if (c.Category is not null)
+                                            {
+                                                <span class="ms-1">· @c.Category</span>
+                                            }
+                                        </div>
+                                        @if (c.CatalogPinStale)
+                                        {
+                                            <span class="badge bg-light text-muted border mt-1"
+                                                  title="The version EntKube's catalog recommends is itself behind upstream. Upgrading past it is safe but untested by us.">
+                                                catalog pin @c.CatalogPinnedVersion is behind
+                                            </span>
+                                        }
+                                    </td>
+                                    <td class="small">@c.ClusterName</td>
+                                    <td><code class="small">@(c.InstalledVersion ?? "—")</code></td>
+                                    <td>
+                                        @if (c.LatestVersion is not null)
+                                        {
+                                            <code class="small">@c.LatestVersion</code>
+                                            @if (c.VersionsBehind > 1)
+                                            {
+                                                <span class="text-muted small ms-1">(@c.VersionsBehind behind)</span>
+                                            }
+                                        }
+                                        else
+                                        {
+                                            <span class="text-muted small">—</span>
+                                        }
+                                    </td>
+                                    <td>
+                                        <span class="badge @StatusClass(c)">@StatusText(c)</span>
+                                        @if (c.Note is not null)
+                                        {
+                                            <i class="bi bi-info-circle text-muted ms-1 small" title="@c.Note"></i>
+                                        }
+                                    </td>
+                                    <td class="small text-muted">
+                                        @(c.LatestReleasedAt?.ToString("yyyy-MM-dd") ?? "—")
+                                    </td>
+                                    <td class="text-end text-nowrap">
+                                        @if (c.IsActionable && c.LatestVersion is not null)
+                                        {
+                                            <button class="btn btn-sm btn-primary me-1"
+                                                    @onclick="() => BeginUpgrade(c)"
+                                                    disabled="@(running is not null)"
+                                                    title="@($"Upgrade {c.DisplayName} to {c.LatestVersion} on {c.ClusterName}")">
+                                                <i class="bi bi-arrow-up-circle me-1"></i>Upgrade
+                                            </button>
+                                        }
+                                        <a class="btn btn-sm btn-outline-secondary"
+                                           href="@ClusterLink(c.ClusterId)"
+                                           title="Open this cluster to review the component's configuration">
+                                            Open
+                                        </a>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        }
+    </div>
+</div>
+
+<div class="card shadow-sm mb-3">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span><i class="bi bi-hdd-network me-2 text-primary"></i><strong>Kubernetes support status</strong></span>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadKubernetesStatusAsync" disabled="@k8sLoading">
+            <i class="bi bi-arrow-clockwise me-1"></i>@(k8sChecked ? "Refresh" : "Check clusters")
+        </button>
+    </div>
+    <div class="card-body pt-3">
+        <p class="text-muted small mb-3">
+            Each cluster's kubelet version against the upstream support window. This reads the clusters
+            live, so it runs on demand rather than with every page load.
+        </p>
+
+        @if (k8sLoading)
+        {
+            <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div>
+        }
+        else if (!k8sChecked)
+        {
+            <p class="text-muted small mb-0">Not checked yet.</p>
+        }
+        else if (k8sRows.Count == 0)
+        {
+            <p class="text-muted small mb-0">No registered clusters for this tenant.</p>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead>
+                        <tr class="text-muted small">
+                            <th>Cluster</th>
+                            <th>Version</th>
+                            <th>Support</th>
+                            <th>End of life</th>
+                            <th>Behind</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (ClusterVersionRow row in k8sRows)
+                        {
+                            <tr>
+                                <td class="fw-medium">@row.ClusterName</td>
+                                <td>
+                                    <code class="small">@(row.ReportedVersion ?? "—")</code>
+                                    @if (row.Error is not null)
+                                    {
+                                        <i class="bi bi-exclamation-circle text-warning ms-1 small" title="@row.Error"></i>
+                                    }
+                                </td>
+                                <td><span class="badge @SupportClass(row.Status.State)">@SupportText(row.Status.State)</span></td>
+                                <td class="small text-muted">
+                                    @if (row.Status.EndOfLife is DateOnly eol)
+                                    {
+                                        @eol.ToString("yyyy-MM-dd")
+                                        <span class="ms-1">(@DaysText(row.Status.DaysRemaining))</span>
+                                    }
+                                    else
+                                    {
+                                        <span>—</span>
+                                    }
+                                </td>
+                                <td class="small text-muted">
+                                    @(row.Status.MinorsBehind is int b && b > 0 ? $"{b} minor{(b == 1 ? "" : "s")}" : "—")
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+</div>
+
+@* ── Upgrade dialog: preflight, then run ──
+   The preflight is the acknowledgment for the whole operation. It names every workload
+   that will be taken to zero replicas, because on a cluster with no ReadWriteMany storage
+   that is the only way an upgrade can complete — and it is real downtime. *@
+@if (target is not null)
+{
+    <div class="modal fade show d-block" tabindex="-1" style="background: rgba(0,0,0,0.4);">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header py-2">
+                    <h6 class="modal-title mb-0">
+                        <i class="bi bi-arrow-up-circle me-2 text-primary"></i>
+                        Upgrade @target.DisplayName on @target.ClusterName
+                    </h6>
+                    <button type="button" class="btn-close" @onclick="CloseDialog" disabled="@(running is not null)"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="d-flex align-items-center gap-2 mb-3">
+                        <code>@(target.InstalledVersion ?? "—")</code>
+                        <i class="bi bi-arrow-right text-muted"></i>
+                        <code class="fw-semibold">@target.LatestVersion</code>
+                        <span class="badge @StatusClass(target) ms-1">@StatusText(target)</span>
+                    </div>
+
+                    @if (outcome is null)
+                    {
+                        @if (preflighting)
+                        {
+                            <div class="d-flex align-items-center gap-2 text-muted small">
+                                <span class="spinner-border spinner-border-sm"></span>
+                                Checking whether this release can be rolled in place…
+                            </div>
+                        }
+                        else if (preflight is null)
+                        {
+                            <p class="text-muted small mb-0">Preparing…</p>
+                        }
+                        else
+                        {
+                            @if (preflight.Error is not null)
+                            {
+                                <div class="alert alert-warning py-2 small">
+                                    The volume check could not run: @preflight.Error<br />
+                                    The upgrade can still be started, but it may stall if a workload cannot
+                                    release its volume.
+                                </div>
+                            }
+
+                            @if (preflight.RequiresScaleDown)
+                            {
+                                <div class="alert alert-warning py-2 mb-2">
+                                    <div class="fw-semibold mb-1">
+                                        <i class="bi bi-exclamation-triangle me-1"></i>This upgrade needs downtime
+                                    </div>
+                                    <p class="small mb-2">
+                                        @DescribeBlocked() cannot be replaced in place: the volume@(preflight.Blocked.Sum(b => b.Claims.Count) == 1 ? "" : "s") below
+                                        can only be mounted by one node at a time, so a rolling update would leave the new
+                                        pod waiting on a volume the old pod still holds. EntKube scales the workload to zero,
+                                        waits for the volume to detach, upgrades, then scales it back up —
+                                        @preflight.ReplicasAffected replica(s) are offline in between.
+                                    </p>
+                                    <ul class="small mb-0 ps-3">
+                                        @foreach (BlockedWorkload w in preflight.Blocked)
+                                        {
+                                            <li>
+                                                <code>Deployment/@w.Name</code>
+                                                <span class="text-muted">
+                                                    — @w.Replicas replica(s), holds @string.Join(", ", w.Claims)
+                                                </span>
+                                            </li>
+                                        }
+                                    </ul>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="alert alert-success py-2 small mb-2">
+                                    <i class="bi bi-check-circle me-1"></i>
+                                    No workload in this release is blocked by an exclusive volume — Helm can roll it
+                                    in place with no planned downtime.
+                                </div>
+                            }
+
+                            @foreach (string warning in preflight.Warnings)
+                            {
+                                <div class="small text-muted"><i class="bi bi-info-circle me-1"></i>@warning</div>
+                            }
+                        }
+                    }
+                    else
+                    {
+                        <div class="alert @(outcome.Success ? "alert-success" : "alert-danger") py-2 small">
+                            @(outcome.Success
+                                ? $"{target.DisplayName} is now on {outcome.AppliedVersion}."
+                                : outcome.Error ?? "The upgrade failed.")
+                        </div>
+                    }
+
+                    @if (running is not null && outcome is null)
+                    {
+                        <div class="d-flex align-items-center gap-2 text-muted small mt-2">
+                            <span class="spinner-border spinner-border-sm"></span>
+                            Upgrading — this runs Helm with --wait and can take several minutes.
+                        </div>
+                    }
+
+                    @if (!string.IsNullOrWhiteSpace(outcome?.Output))
+                    {
+                        <pre class="bg-dark text-light rounded p-2 small mt-3 mb-0"
+                             style="max-height: 22rem; overflow: auto; white-space: pre-wrap;">@outcome!.Output</pre>
+                    }
+                </div>
+                <div class="modal-footer py-2">
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="CloseDialog" disabled="@(running is not null)">
+                        @(outcome is null ? "Cancel" : "Close")
+                    </button>
+                    @if (outcome is null)
+                    {
+                        <button class="btn btn-sm @(preflight?.RequiresScaleDown == true ? "btn-warning" : "btn-primary")"
+                                @onclick="RunUpgradeAsync"
+                                disabled="@(preflighting || running is not null)">
+                            @if (running is not null)
+                            {
+                                <span class="spinner-border spinner-border-sm me-1"></span>
+                            }
+                            @(preflight?.RequiresScaleDown == true
+                                ? $"Upgrade with downtime"
+                                : $"Upgrade to {target.LatestVersion}")
+                        </button>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    /// <summary>Tenant slug, used to build deep links back into the cluster view.</summary>
+    [Parameter] public string? TenantSlug { get; set; }
+
+    private UpgradeReport? report;
+    private bool loading = true;
+    private string? loadError;
+
+    private string clusterFilter = "";
+    private string statusFilter = "actionable";
+    private string search = "";
+
+    // ── Upgrade dialog state ──
+    private ComponentUpgrade? target;
+    private VolumePreflight? preflight;
+    private bool preflighting;
+    private Guid? running;
+    private ComponentUpgradeOutcome? outcome;
+
+    private sealed record ClusterVersionRow(
+        string ClusterName, string? ReportedVersion, KubernetesVersionStatus Status, string? Error);
+
+    private List<ClusterVersionRow> k8sRows = [];
+    private bool k8sLoading;
+    private bool k8sChecked;
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        loading = true;
+        loadError = null;
+        try
+        {
+            report = await UpgradeService.GetTenantReportAsync(TenantId, DateTime.UtcNow);
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private List<ComponentUpgrade> Filtered()
+    {
+        if (report is null) return [];
+
+        IEnumerable<ComponentUpgrade> rows = report.Components;
+
+        rows = statusFilter switch
+        {
+            "all" => rows,
+            "major" => rows.Where(c => c.Status == UpgradeStatus.UpgradeAvailable && c.Lag == VersionLag.Major),
+            "unknown" => rows.Where(c => c.Status == UpgradeStatus.Unknown),
+            _ => rows.Where(c => c.IsActionable),
+        };
+
+        if (!string.IsNullOrWhiteSpace(clusterFilter))
+        {
+            rows = rows.Where(c => c.ClusterName == clusterFilter);
+        }
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            string term = search.Trim();
+            rows = rows.Where(c =>
+                c.DisplayName.Contains(term, StringComparison.OrdinalIgnoreCase)
+                || c.ComponentName.Contains(term, StringComparison.OrdinalIgnoreCase)
+                || (c.ChartName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false));
+        }
+
+        return [.. rows];
+    }
+
+    private async Task LoadKubernetesStatusAsync()
+    {
+        k8sLoading = true;
+        try
+        {
+            await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+            var clusters = await db.KubernetesClusters
+                .AsNoTracking()
+                .Where(c => c.TenantId == TenantId)
+                .Select(c => new { c.Id, c.Name })
+                .OrderBy(c => c.Name)
+                .ToListAsync();
+
+            DateOnly today = DateOnly.FromDateTime(DateTime.UtcNow);
+            List<ClusterVersionRow> rows = [];
+
+            foreach (var cluster in clusters)
+            {
+                KubernetesOperationResult<List<NodeInfo>> result;
+                try
+                {
+                    result = await NodeService.GetNodesAsync(cluster.Id);
+                }
+                catch (Exception ex)
+                {
+                    // One unreachable cluster must not hide the support status of the others.
+                    rows.Add(new ClusterVersionRow(cluster.Name, null,
+                        KubernetesReleaseCalendar.Classify(null, today), ex.Message));
+                    continue;
+                }
+
+                if (!result.IsSuccess || result.Data is null || result.Data.Count == 0)
+                {
+                    rows.Add(new ClusterVersionRow(cluster.Name, null,
+                        KubernetesReleaseCalendar.Classify(null, today),
+                        result.Error ?? "No nodes returned."));
+                    continue;
+                }
+
+                // Report the OLDEST kubelet on the cluster: support ends when the least
+                // current node stops receiving patches, not when the newest one does.
+                string? oldest = result.Data
+                    .Select(n => n.KubeletVersion)
+                    .Where(v => !string.IsNullOrWhiteSpace(v))
+                    .OrderBy(v => SemVer.Parse(v))
+                    .FirstOrDefault();
+
+                rows.Add(new ClusterVersionRow(
+                    cluster.Name, oldest, KubernetesReleaseCalendar.Classify(oldest, today), null));
+            }
+
+            k8sRows = rows;
+            k8sChecked = true;
+        }
+        finally
+        {
+            k8sLoading = false;
+        }
+    }
+
+    /// <summary>
+    /// Opens the upgrade dialog and inspects the release while the operator reads it, so the
+    /// downtime warning is on screen before anything is confirmed.
+    /// </summary>
+    private async Task BeginUpgrade(ComponentUpgrade component)
+    {
+        target = component;
+        preflight = null;
+        outcome = null;
+        preflighting = true;
+        StateHasChanged();
+
+        try
+        {
+            preflight = await VolumeGuard.InspectAsync(component.ComponentId);
+        }
+        catch (Exception ex)
+        {
+            preflight = VolumePreflight.Failure(ex.Message);
+        }
+        finally
+        {
+            preflighting = false;
+        }
+    }
+
+    private async Task RunUpgradeAsync()
+    {
+        if (target is null) return;
+
+        running = target.ComponentId;
+        StateHasChanged();
+
+        try
+        {
+            outcome = await UpgradeRunner.UpgradeAsync(new ComponentUpgradeRequest
+            {
+                TenantId = TenantId,
+                ComponentId = target.ComponentId,
+                TargetChartVersion = target.LatestVersion,
+                // The dialog listed every workload that goes offline; confirming it is the consent.
+                AllowScaleDown = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            outcome = ComponentUpgradeOutcome.Refused(ex.Message);
+        }
+        finally
+        {
+            running = null;
+        }
+
+        // The report is derived from the recorded chart version, so it is stale the moment
+        // an upgrade lands.
+        await ReloadAsync();
+    }
+
+    private void CloseDialog()
+    {
+        target = null;
+        preflight = null;
+        outcome = null;
+    }
+
+    private string DescribeBlocked() => preflight?.Blocked.Count == 1
+        ? $"Deployment/{preflight.Blocked[0].Name}"
+        : $"{preflight?.Blocked.Count ?? 0} workloads in this release";
+
+    private string ClusterLink(Guid clusterId) =>
+        TenantSlug is null ? "#" : $"/tenants/{TenantSlug}?cluster={clusterId}";
+
+    private static RenderFragment SummaryCard(string label, int value, string textClass, string icon) =>
+        @<div class="col-6 col-md-3">
+            <div class="border rounded p-2 h-100">
+                <div class="text-muted small"><i class="bi @icon me-1"></i>@label</div>
+                <div class="fs-4 fw-semibold @textClass">@value</div>
+            </div>
+        </div>;
+
+    private static string StatusText(ComponentUpgrade c) => c.Status switch
+    {
+        UpgradeStatus.UpgradeAvailable => c.Lag switch
+        {
+            VersionLag.Major => "Major behind",
+            VersionLag.Minor => "Minor behind",
+            _ => "Patch behind",
+        },
+        UpgradeStatus.Deprecated => "Deprecated",
+        UpgradeStatus.UpToDate => "Up to date",
+        _ => "Unknown",
+    };
+
+    private static string StatusClass(ComponentUpgrade c) => c.Status switch
+    {
+        UpgradeStatus.UpgradeAvailable => c.Lag == VersionLag.Major ? "bg-warning text-dark" : "bg-info text-dark",
+        UpgradeStatus.Deprecated => "bg-danger",
+        UpgradeStatus.UpToDate => "bg-success",
+        _ => "bg-secondary",
+    };
+
+    private static string SupportText(KubernetesSupportState state) => state switch
+    {
+        KubernetesSupportState.EndOfLife => "End of life",
+        KubernetesSupportState.NearingEndOfLife => "Nearing EOL",
+        KubernetesSupportState.Supported => "Supported",
+        _ => "Unknown",
+    };
+
+    private static string SupportClass(KubernetesSupportState state) => state switch
+    {
+        KubernetesSupportState.EndOfLife => "bg-danger",
+        KubernetesSupportState.NearingEndOfLife => "bg-warning text-dark",
+        KubernetesSupportState.Supported => "bg-success",
+        _ => "bg-secondary",
+    };
+
+    private static string DaysText(int? days) => days switch
+    {
+        null => "unknown",
+        < 0 => $"{-days.Value} d ago",
+        _ => $"in {days.Value} d",
+    };
+}

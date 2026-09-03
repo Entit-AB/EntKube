@@ -1,0 +1,442 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Cost
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.EntityFrameworkCore
+@inject CostReportService CostService
+@inject CostRateService RateService
+@inject CostScanCache ScanCache
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject AuthenticationStateProvider AuthState
+
+@* ═══════════════════════════════════════════════════════════════════
+   Cost & chargeback — what the fleet costs at current run rate, and
+   who is consuming it.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3 mt-4">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span><i class="bi bi-cash-coin me-2 text-primary"></i><strong>Cost run rate</strong></span>
+        <div class="d-flex align-items-center gap-2">
+            @if (report is not null)
+            {
+                <span class="text-muted small">As of @report.GeneratedAt.ToString("yyyy-MM-dd HH:mm") UTC</span>
+            }
+            <button class="btn btn-sm btn-outline-secondary" @onclick="RecalculateAsync" disabled="@calculating">
+                @if (calculating)
+                {
+                    <span class="spinner-border spinner-border-sm me-1"></span>
+                    <span>Calculating…</span>
+                }
+                else
+                {
+                    <i class="bi bi-arrow-clockwise me-1"></i>
+                    <span>Recalculate</span>
+                }
+            </button>
+        </div>
+    </div>
+    <div class="card-body pt-3">
+        <p class="text-muted small mb-3">
+            What the fleet costs <strong>at the current rate of consumption</strong>, projected over a
+            730-hour month. This is a run rate, not a historical bill — it reflects what is reserved
+            right now, so it moves when workloads are scaled or redeployed.
+        </p>
+
+        @if (error is not null)
+        {
+            <div class="alert alert-danger py-2">@error</div>
+        }
+
+        @if (report is null)
+        {
+            <div class="alert alert-light border mb-0">
+                <i class="bi bi-info-circle me-1"></i>
+                No cost calculation has run yet. It refreshes hourly, or
+                <a href="#" @onclick:preventDefault @onclick="RecalculateAsync">calculate now</a>.
+                Each cluster needs a price sheet below before it can be costed.
+            </div>
+        }
+        else
+        {
+            @if (report.Warnings.Count > 0)
+            {
+                <div class="alert alert-warning py-2">
+                    <div class="fw-semibold small mb-1">
+                        <i class="bi bi-exclamation-triangle me-1"></i>These clusters are not in the total
+                    </div>
+                    <ul class="small mb-0 ps-3">
+                        @foreach (string warning in report.Warnings)
+                        {
+                            <li>@warning</li>
+                        }
+                    </ul>
+                </div>
+            }
+
+            <div class="row g-2 mb-3">
+                <div class="col-6 col-md-3">
+                    <div class="border rounded p-2 h-100">
+                        <div class="text-muted small"><i class="bi bi-calendar-month me-1"></i>Monthly</div>
+                        <div class="fs-4 fw-semibold">@Money(report.TotalMonthlyCost)</div>
+                    </div>
+                </div>
+                <div class="col-6 col-md-3">
+                    <div class="border rounded p-2 h-100">
+                        <div class="text-muted small"><i class="bi bi-clock me-1"></i>Hourly</div>
+                        <div class="fs-4 fw-semibold">@Money(report.TotalHourlyCost, 4)</div>
+                    </div>
+                </div>
+                <div class="col-6 col-md-3">
+                    <div class="border rounded p-2 h-100">
+                        <div class="text-muted small"><i class="bi bi-people me-1"></i>Billable to customers</div>
+                        <div class="fs-4 fw-semibold text-success">
+                            @Money(report.TotalMonthlyCost - report.UnattributedMonthlyCost)
+                        </div>
+                    </div>
+                </div>
+                <div class="col-6 col-md-3">
+                    <div class="border rounded p-2 h-100">
+                        <div class="text-muted small" title="Namespaces EntKube does not map to a customer — platform components, ingress, monitoring.">
+                            <i class="bi bi-hdd-stack me-1"></i>Platform overhead
+                        </div>
+                        <div class="fs-4 fw-semibold text-muted">@Money(report.UnattributedMonthlyCost)</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <h6 class="small text-muted fw-semibold">By customer</h6>
+                    @if (report.ByCustomer.Count == 0)
+                    {
+                        <p class="text-muted small">No namespace is attributed to a customer yet.</p>
+                    }
+                    else
+                    {
+                        <table class="table table-sm mb-0">
+                            <tbody>
+                                @foreach ((Guid _, string name, decimal monthly) in report.ByCustomer)
+                                {
+                                    <tr>
+                                        <td class="small">@name</td>
+                                        <td class="text-end small fw-medium">@Money(monthly)</td>
+                                        <td style="width:40%">
+                                            <div class="progress" style="height:6px">
+                                                <div class="progress-bar" style="width:@Percent(monthly, report.TotalMonthlyCost)%"></div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                </div>
+                <div class="col-md-6">
+                    <h6 class="small text-muted fw-semibold">By environment</h6>
+                    @if (report.ByEnvironment.Count == 0)
+                    {
+                        <p class="text-muted small">No environment attribution available.</p>
+                    }
+                    else
+                    {
+                        <table class="table table-sm mb-0">
+                            <tbody>
+                                @foreach ((string env, decimal monthly) in report.ByEnvironment)
+                                {
+                                    <tr>
+                                        <td class="small">@env</td>
+                                        <td class="text-end small fw-medium">@Money(monthly)</td>
+                                        <td style="width:40%">
+                                            <div class="progress" style="height:6px">
+                                                <div class="progress-bar bg-info" style="width:@Percent(monthly, report.TotalMonthlyCost)%"></div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                </div>
+            </div>
+
+            <h6 class="small text-muted fw-semibold mt-4">By namespace</h6>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead>
+                        <tr class="text-muted small">
+                            <th>Namespace</th>
+                            <th>Cluster</th>
+                            <th>Owner</th>
+                            <th class="text-end">CPU</th>
+                            <th class="text-end">Memory</th>
+                            <th class="text-end">Storage</th>
+                            <th class="text-end" title="Load balancers and public IPs this namespace provisioned. Charged directly rather than shared.">Network</th>
+                            <th class="text-end">Overhead</th>
+                            <th class="text-end">Monthly</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (NamespaceCost row in report.Namespaces.Take(100))
+                        {
+                            <tr>
+                                <td><code class="small">@row.Namespace</code></td>
+                                <td class="small text-muted">@row.ClusterName</td>
+                                <td class="small">
+                                    @if (row.IsUnattributed)
+                                    {
+                                        <span class="text-muted fst-italic">platform</span>
+                                    }
+                                    else
+                                    {
+                                        @row.CustomerName
+                                        @if (row.AppName is not null)
+                                        {
+                                            <div class="text-muted">@row.AppName</div>
+                                        }
+                                    }
+                                </td>
+                                <td class="text-end small text-muted">
+                                    @row.CpuCores.ToString("N2") <span class="ms-1">@Money(row.CpuMonthlyCost)</span>
+                                </td>
+                                <td class="text-end small text-muted">
+                                    @row.MemoryGiB.ToString("N1") Gi <span class="ms-1">@Money(row.MemoryMonthlyCost)</span>
+                                </td>
+                                <td class="text-end small text-muted">
+                                    @row.StorageGiB.ToString("N0") Gi <span class="ms-1">@Money(row.StorageMonthlyCost)</span>
+                                </td>
+                                <td class="text-end small text-muted">
+                                    @if (row.LoadBalancers > 0 || row.PublicIps > 0)
+                                    {
+                                        <span>@row.LoadBalancers LB</span>
+                                        <span class="ms-1">@Money(row.NetworkMonthlyCost)</span>
+                                    }
+                                    else
+                                    {
+                                        <span>—</span>
+                                    }
+                                </td>
+                                <td class="text-end small text-muted">@Money(row.OverheadMonthlyCost)</td>
+                                <td class="text-end fw-semibold">@Money(row.TotalMonthlyCost)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+                @if (report.Namespaces.Count > 100)
+                {
+                    <p class="small text-muted mt-2 mb-0">
+                        Showing the 100 most expensive of @report.Namespaces.Count namespaces.
+                    </p>
+                }
+            </div>
+        }
+    </div>
+</div>
+
+<div class="card shadow-sm mb-3">
+    <div class="card-header bg-white py-2">
+        <span><i class="bi bi-tags me-2 text-primary"></i><strong>Price sheets</strong></span>
+    </div>
+    <div class="card-body pt-3">
+        <p class="text-muted small mb-3">
+            What capacity costs on each cluster. Where a cluster mixes node types these are
+            blended rates — EntKube does not model node pools, so the figures are as precise
+            as the rates you enter and no more.
+        </p>
+
+        @if (clusters.Count == 0)
+        {
+            <p class="text-muted small mb-0">No clusters registered.</p>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead>
+                        <tr class="text-muted small">
+                            <th>Cluster</th>
+                            <th>CPU / core-hour</th>
+                            <th>Memory / GiB-hour</th>
+                            <th>Storage / GiB-month</th>
+                            <th title="Cost of one cloud load balancer per month. Every Service of type LoadBalancer provisions one.">Load balancer / month</th>
+                            <th title="Cost of one public IPv4 address per month.">Public IP / month</th>
+                            <th>Fixed monthly</th>
+                            <th>Currency</th>
+                            <th>Basis</th>
+                            <th class="text-end">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach ((Guid clusterId, string clusterName) in clusters)
+                        {
+                            RateForm form = FormFor(clusterId);
+                            <tr>
+                                <td class="fw-medium small">@clusterName</td>
+                                <td><input type="number" step="0.0001" class="form-control form-control-sm" style="width:8rem" @bind="form.Cpu" /></td>
+                                <td><input type="number" step="0.0001" class="form-control form-control-sm" style="width:8rem" @bind="form.Memory" /></td>
+                                <td><input type="number" step="0.001" class="form-control form-control-sm" style="width:8rem" @bind="form.Storage" /></td>
+                                <td><input type="number" step="1" class="form-control form-control-sm" style="width:8rem" @bind="form.LoadBalancer" /></td>
+                                <td><input type="number" step="1" class="form-control form-control-sm" style="width:8rem" @bind="form.PublicIp" /></td>
+                                <td><input type="number" step="1" class="form-control form-control-sm" style="width:8rem" @bind="form.Overhead" /></td>
+                                <td><input class="form-control form-control-sm" style="width:5rem" maxlength="3" @bind="form.Currency" /></td>
+                                <td>
+                                    <select class="form-select form-select-sm" style="width:9rem" @bind="form.Basis">
+                                        <option value="requests">Requests</option>
+                                        <option value="usage">Actual usage</option>
+                                    </select>
+                                </td>
+                                <td class="text-end">
+                                    <button class="btn btn-sm btn-outline-primary" @onclick="() => SaveRateAsync(clusterId, form)">
+                                        Save
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="alert alert-light border small mt-3">
+                <strong>Where these numbers come from.</strong> EntKube does not ship any provider's
+                price list. Published prices change, and a stale rate baked into the product would
+                quietly produce a wrong invoice — so the rates are yours to enter from your contract.
+                <br />
+                The units match how OpenStack providers such as
+                <a href="https://cleura.com/sv/prislista/#public-cloud-prislista" target="_blank" rel="noopener">Cleura</a>
+                bill: per vCPU-hour, per GB RAM-hour, per GB storage, and per load balancer and public
+                IPv4 address per month. Enter them in that provider's currency — nothing is converted.
+                Most published cloud prices <strong>exclude VAT</strong>; if yours do, so does everything
+                shown here.
+                <br />
+                Not modelled: egress traffic, object storage and DNS zones. Egress cannot be attributed
+                to a namespace without network accounting EntKube does not collect, so it is left out
+                rather than guessed at — put it in the fixed monthly cost if you want it in the total.
+            </div>
+
+            <div class="alert alert-light border small mb-0">
+                <strong>Requests vs actual usage.</strong> Charging on <em>requests</em> bills what the
+                scheduler reserves — which is what a customer genuinely denies to everyone else, and
+                the defensible basis for a chargeback. Charging on <em>actual usage</em> lets a team
+                that over-requests push the cost of their own waste onto their neighbours. Storage is
+                always billed on provisioned capacity either way.
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private CostReport? report;
+    private bool calculating;
+    private string? error;
+
+    private List<(Guid Id, string Name)> clusters = [];
+    private readonly Dictionary<Guid, RateForm> forms = [];
+
+    /// <summary>Editable price-sheet state, kept per cluster so several can be edited before saving.</summary>
+    private sealed class RateForm
+    {
+        public decimal Cpu { get; set; }
+        public decimal Memory { get; set; }
+        public decimal Storage { get; set; }
+        public decimal LoadBalancer { get; set; }
+        public decimal PublicIp { get; set; }
+        public decimal Overhead { get; set; }
+        public string Currency { get; set; } = "USD";
+        public string Basis { get; set; } = "requests";
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        report = ScanCache.Get(TenantId);
+        await LoadRatesAsync();
+    }
+
+    private async Task LoadRatesAsync()
+    {
+        await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+        clusters = await db.KubernetesClusters
+            .AsNoTracking()
+            .Where(c => c.TenantId == TenantId)
+            .OrderBy(c => c.Name)
+            .Select(c => new ValueTuple<Guid, string>(c.Id, c.Name))
+            .ToListAsync();
+
+        forms.Clear();
+        foreach (ClusterCostRate rate in await RateService.ListAsync(TenantId))
+        {
+            forms[rate.ClusterId] = new RateForm
+            {
+                Cpu = rate.CpuCoreHourCost,
+                Memory = rate.MemoryGiBHourCost,
+                Storage = rate.StorageGiBMonthCost,
+                LoadBalancer = rate.LoadBalancerMonthlyCost,
+                PublicIp = rate.PublicIpMonthlyCost,
+                Overhead = rate.ClusterMonthlyOverhead,
+                Currency = rate.Currency,
+                Basis = rate.ChargeOnRequests ? "requests" : "usage",
+            };
+        }
+    }
+
+    private RateForm FormFor(Guid clusterId)
+    {
+        if (!forms.TryGetValue(clusterId, out RateForm? form))
+        {
+            form = new RateForm();
+            forms[clusterId] = form;
+        }
+
+        return form;
+    }
+
+    private async Task SaveRateAsync(Guid clusterId, RateForm form)
+    {
+        error = null;
+        try
+        {
+            await RateService.SaveAsync(TenantId, clusterId, new ClusterCostRate
+            {
+                CpuCoreHourCost = form.Cpu,
+                MemoryGiBHourCost = form.Memory,
+                StorageGiBMonthCost = form.Storage,
+                LoadBalancerMonthlyCost = form.LoadBalancer,
+                PublicIpMonthlyCost = form.PublicIp,
+                ClusterMonthlyOverhead = form.Overhead,
+                Currency = form.Currency,
+                ChargeOnRequests = form.Basis == "requests",
+            },
+            updatedBy: (await AuthState.GetAuthenticationStateAsync()).User.Identity?.Name);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+    }
+
+    private async Task RecalculateAsync()
+    {
+        calculating = true;
+        error = null;
+        try
+        {
+            report = await CostService.GetTenantReportAsync(TenantId, DateTime.UtcNow);
+            ScanCache.Set(TenantId, report);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            calculating = false;
+        }
+    }
+
+    private string Money(decimal value, int decimals = 2) =>
+        $"{value.ToString($"N{decimals}")} {report?.Currency ?? "USD"}";
+
+    private static int Percent(decimal part, decimal whole) =>
+        whole <= 0m ? 0 : (int)Math.Round(part / whole * 100m);
+}

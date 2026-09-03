@@ -1,5 +1,16 @@
 name: Build and Deploy
 
+# The management-plane image, built for linux/amd64 AND linux/arm64.
+#
+# Both architectures, because this image is no longer pulled only by one known server: entkube-install
+# and the desktop installer put it on whatever host an operator has, and arm64 servers — Graviton,
+# Ampere, Hetzner ARM — are ordinary now. An amd64-only image fails their pull with
+#
+#   no matching manifest for linux/arm64/v8 in the manifest list entries
+#
+# which reads like a registry fault and is not one: it means the manifest list holds no entry for the
+# puller's architecture. See docs/releasing.md.
+
 on:
   push:
     branches: [main]
@@ -10,14 +21,97 @@ env:
   IMAGE: entit.azurecr.io/entkube
 
 jobs:
-  build-and-push:
-    name: Build and push image
+  # Each architecture builds on a runner of that architecture and pushes BY DIGEST — no tag.
+  #
+  # Native runners rather than QEMU: this Dockerfile installs a .NET workload and runs a full
+  # publish, and emulating that for arm64 on an amd64 runner turns a few minutes into the better part
+  # of an hour. arm64 hosted runners are free for public repositories, which this one is.
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Both legs run to completion even when one fails, so a failure shows whether it is one
+      # architecture or the build itself.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive an artifact-safe platform name
+        run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # push-by-digest: publish the layers and get a digest back without claiming a tag. A tag
+          # can only point at one image, so two jobs pushing the same tag would race and the loser's
+          # work would be silently discarded. The manifest list that gives them a shared tag is
+          # assembled in `merge`, once both digests exist.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # No provenance attestation. Buildx otherwise adds a manifest entry with platform
+          # "unknown/unknown", which several container runtimes report as a platform mismatch rather
+          # than ignoring — the exact class of failure this change exists to remove.
+          provenance: false
+          # Scoped per architecture. One shared cache would have each build evicting the other's
+          # layers on every run, which costs more than it saves.
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+
+      # Digests travel as artifacts rather than as job outputs. A matrix job's outputs are a single
+      # shared map written by every leg, so the last leg to finish wins and blanks the other's key —
+      # which would leave `merge` building a one-architecture manifest from a blank reference.
+      - name: Record the digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - name: Upload the digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Combines the digests into one manifest list and gives it the tags. This is what makes
+  # `docker pull entkube:latest` resolve to the right architecture for whoever pulls it.
+  merge:
+    name: Publish the manifest list
+    needs: build
     runs-on: ubuntu-latest
     outputs:
       image-tag: ${{ steps.meta.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Download the digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -38,20 +132,40 @@ jobs:
             type=sha,prefix=,format=short
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create the manifest list
+        working-directory: /tmp/digests
+        run: |
+          # SC2046 is disabled deliberately: the word splitting is the point. Both substitutions
+          # expand to several separate arguments — "-t tagA -t tagB" and one image@digest per file —
+          # and quoting either would pass the whole thing as a single argument instead.
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+        env:
+          IMAGE: ${{ env.IMAGE }}
+
+      # The failure this guards against is remote and late: the image pulls fine on the machine that
+      # built it, and then fails on someone's server with a message that names neither cause. Cheap
+      # to assert here, expensive to discover in an install.
+      - name: Verify both architectures are present
+        run: |
+          present=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" \
+            --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')
+          echo "manifest carries: $present"
+          for want in linux/amd64 linux/arm64; do
+            case "$present" in
+              *"$want"*) ;;
+              *) echo "::error::the published manifest has no $want entry"; exit 1 ;;
+            esac
+          done
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          VERSION: ${{ steps.meta.outputs.version }}
 
   deploy:
     name: Deploy to server
-    needs: build-and-push
+    needs: merge
     runs-on: ubuntu-latest
 
     steps:

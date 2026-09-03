@@ -2,63 +2,309 @@
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject PrometheusService PrometheusService
+@inject RabbitMQService RabbitMQService
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
+
+@* ═══════════════════════════════════════════════════════════════════════════
+   RabbitMQMonitoringPanel — per-broker performance and health.
+
+   Two independent sources, because neither covers the whole picture:
+     • Prometheus, for cluster-wide throughput and per-node resource headroom.
+     • rabbitmqctl, for per-queue depth — the Prometheus plugin aggregates the
+       per-queue series away on its default endpoint, and adopted brokers have
+       no Prometheus wiring at all.
+   Either can be unavailable without blanking the other.
+   ═══════════════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex align-items-center gap-2 mb-2">
+    <div class="ms-auto d-flex align-items-center gap-2">
+        <select class="form-select form-select-sm" style="width:auto"
+                @bind="rangeMinutes" @bind:after="LoadAsync">
+            <option value="30">Last 30 min</option>
+            <option value="180">Last 3 hours</option>
+            <option value="720">Last 12 hours</option>
+            <option value="1440">Last 24 hours</option>
+        </select>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync" disabled="@isLoading">
+            <span class="bi bi-arrow-clockwise"></span> Refresh
+        </button>
+    </div>
+</div>
 
 @if (isLoading)
 {
-    <div class="text-muted small text-center py-2">
+    <div class="text-muted small text-center py-3">
         <span class="bi bi-hourglass-split me-1"></span> Loading RabbitMQ metrics…
     </div>
 }
-else if (summaries.Count == 0)
+else if (loadError is not null)
+{
+    <div class="alert alert-warning py-2 small">
+        <span class="bi bi-exclamation-triangle me-1"></span>
+        Could not load RabbitMQ brokers: @loadError
+    </div>
+}
+else if (brokers.Count == 0)
 {
     <div class="text-muted small text-center py-3">
-        <span class="bi bi-bar-chart me-1"></span>
-        No RabbitMQ clusters found, or Prometheus metrics are unavailable for this cluster.
+        <span class="bi bi-bar-chart me-1"></span> No RabbitMQ brokers are registered on this cluster.
     </div>
 }
 else
 {
-    @foreach (RabbitMQMetricsSummary summary in summaries)
+    @foreach (BrokerView b in brokers)
     {
-        bool hasBacklog = summary.UnackedMessages > 0 || summary.ReadyMessages > 100;
-        <div class="card mb-3 border-@(hasBacklog ? "warning" : "success")">
-            <div class="card-header py-2 d-flex align-items-center gap-2">
+        RabbitMQMetricsSummary? m = b.Metrics;
+
+        <div class="card mb-3">
+            <div class="card-header py-2 d-flex align-items-center gap-2 flex-wrap">
                 <span class="bi bi-collection-fill text-success"></span>
-                <strong>@summary.ClusterName</strong>
-                @if (hasBacklog)
+                <strong>@b.Name</strong>
+
+                @if (m is not null && m.HasData)
                 {
-                    <span class="badge bg-warning text-dark ms-1">Backlog</span>
+                    @foreach (string w in Warnings(m))
+                    {
+                        <span class="badge bg-warning text-dark">@w</span>
+                    }
+                    @if (Warnings(m).Count == 0)
+                    {
+                        <span class="badge bg-success-subtle text-success-emphasis">Healthy</span>
+                    }
                 }
-                <span class="ms-auto text-muted small">@summary.QueriedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+
+                <span class="ms-auto text-muted small">
+                    @if (m is not null) { @m.QueriedAt.ToLocalTime().ToString("HH:mm:ss") }
+                </span>
             </div>
+
             <div class="card-body py-2">
-                <div class="row g-3 mb-2">
-                    <div class="col-auto">
-                        <div class="small text-muted">Connections</div>
-                        <div class="fw-semibold">@summary.Connections</div>
+
+                @if (b.Error is not null)
+                {
+                    <div class="alert alert-warning py-2 small mb-3">
+                        <span class="bi bi-exclamation-triangle me-1"></span>
+                        Prometheus query failed: @b.Error
                     </div>
-                    <div class="col-auto">
-                        <div class="small text-muted">Channels</div>
-                        <div class="fw-semibold">@summary.Channels</div>
+                }
+
+                @if (m is null || !m.HasData)
+                {
+                    <div class="alert alert-secondary py-2 small mb-3">
+                        <div class="fw-semibold mb-1">
+                            <span class="bi bi-question-circle me-1"></span>
+                            Prometheus holds no metrics for this broker.
+                        </div>
+                        <div class="text-muted">
+                            RabbitMQ exposes its Prometheus plugin on port 15692, but nothing scrapes it
+                            until a ServiceMonitor exists.
+                        </div>
+                        <div class="mt-2 d-flex gap-2 flex-wrap">
+                            @if (b.IsOperatorManaged)
+                            {
+                                <button class="btn btn-sm btn-primary"
+                                        @onclick="() => EnableScrapeAsync(b)" disabled="@b.Busy">
+                                    <span class="bi bi-toggles me-1"></span> Enable metrics
+                                </button>
+                            }
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @onclick="() => DiagnoseAsync(b)" disabled="@b.Busy">
+                                <span class="bi bi-stethoscope me-1"></span> Why is this empty?
+                            </button>
+                        </div>
+
+                        @if (b.ScrapeJustEnabled)
+                        {
+                            <div class="alert alert-success py-2 small mt-2 mb-0">
+                                <span class="bi bi-check-circle me-1"></span>
+                                ServiceMonitor created. Prometheus picks it up and completes a first
+                                scrape within about a minute — use Refresh above once it has.
+                            </div>
+                        }
+
+                        @if (b.Diagnosis is not null)
+                        {
+                            <ul class="mt-2 mb-1 ps-3">
+                                @foreach (string f in b.Diagnosis.Findings)
+                                {
+                                    <li>@f</li>
+                                }
+                            </ul>
+                            @if (b.Diagnosis.Remedy is not null)
+                            {
+                                <pre class="small bg-body-secondary p-2 rounded mb-0">@b.Diagnosis.Remedy</pre>
+                            }
+                        }
                     </div>
-                    <div class="col-auto">
-                        <div class="small text-muted">Ready Messages</div>
-                        <div class="fw-semibold @(summary.ReadyMessages > 1000 ? "text-warning" : "")">@summary.ReadyMessages.ToString("N0")</div>
+                }
+                else
+                {
+                    @* ── Throughput and depth ── *@
+                    <div class="row g-3 mb-3">
+                        @Tile("Nodes", m.Nodes.ToString("N0"))
+                        @Tile("Queues", m.Queues.ToString("N0"))
+                        @Tile("Connections", m.Connections.ToString("N0"))
+                        @Tile("Channels", m.Channels.ToString("N0"))
+                        @Tile("Consumers", m.Consumers.ToString("N0"),
+                              m.Consumers == 0 && m.ReadyMessages > 0 ? "text-danger" : null)
+                        @Tile("Ready", m.ReadyMessages.ToString("N0"),
+                              m.ReadyMessages > 1000 ? "text-warning" : null)
+                        @Tile("Unacked", m.UnackedMessages.ToString("N0"),
+                              m.UnackedMessages > 0 ? "text-warning" : "text-success")
+                        @Tile("Depth", FormatBytes(m.MessageBytes))
                     </div>
-                    <div class="col-auto">
-                        <div class="small text-muted">Unacknowledged</div>
-                        <div class="fw-semibold @(summary.UnackedMessages > 0 ? "text-warning" : "text-success")">@summary.UnackedMessages.ToString("N0")</div>
+
+                    <div class="row g-3 mb-3">
+                        @Tile("Publish", $"{m.PublishRatePerSec:F1}/s")
+                        @Tile("Deliver", $"{m.DeliverRatePerSec:F1}/s")
+                        @Tile("Ack", $"{m.AckRatePerSec:F1}/s", m.AckLag ? "text-warning" : null)
+                        @Tile("Redeliver", $"{m.RedeliverRatePerSec:F2}/s",
+                              m.RedeliverRatePerSec > 0 ? "text-warning" : null)
+                        @Tile("Unroutable", $"{m.UnroutableRatePerSec:F2}/s",
+                              m.UnroutableRatePerSec > 0 ? "text-danger" : null)
+                        @Tile("Unconfirmed", m.UnconfirmedMessages.ToString("N0"),
+                              m.UnconfirmedMessages > 0 ? "text-warning" : null)
+                        @Tile("Conn. closed", $"{m.ConnectionsClosedPerSec:F2}/s",
+                              m.ConnectionsClosedPerSec > 0.5 ? "text-warning" : null)
+                        @Tile("Chan. closed", $"{m.ChannelsClosedPerSec:F2}/s",
+                              m.ChannelsClosedPerSec > 0.5 ? "text-warning" : null)
                     </div>
-                    <div class="col-auto">
-                        <div class="small text-muted">Publish rate</div>
-                        <div class="fw-semibold">@summary.PublishRatePerSec.ToString("F1")/s</div>
-                    </div>
-                    <div class="col-auto">
-                        <div class="small text-muted">Deliver rate</div>
-                        <div class="fw-semibold">@summary.DeliverRatePerSec.ToString("F1")/s</div>
-                    </div>
+
+                    @* ── Trends ── *@
+                    @if (b.Charts.Count > 0)
+                    {
+                        <div class="row g-3 mb-3">
+                            @foreach (ChartView c in b.Charts)
+                            {
+                                <div class="col-md-6 col-xl-3">
+                                    <MetricChart Title="@c.Title" DataPoints="c.Points"
+                                                 Color="@c.Color" Unit="@c.Unit" HeightPx="90" ShowAxes="true" />
+                                </div>
+                            }
+                        </div>
+                    }
+
+                    @* ── Per-node resource headroom ── *@
+                    @if (m.NodeMetrics.Count > 0)
+                    {
+                        <div class="small fw-semibold text-muted mb-1">Node resources</div>
+                        <div class="table-responsive mb-3">
+                            <table class="table table-sm align-middle mb-0">
+                                <thead>
+                                    <tr class="small text-muted">
+                                        <th>Node</th><th>Memory</th><th>Disk free</th>
+                                        <th>File descriptors</th><th>Sockets</th><th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (RabbitMQNodeMetrics n in m.NodeMetrics)
+                                    {
+                                        <tr>
+                                            <td class="font-monospace small">@n.Node</td>
+                                            <td>@Meter(n.MemoryUsedPercent,
+                                                       $"{FormatBytes((long)n.MemoryUsedBytes)} / {FormatBytes((long)n.MemoryLimitBytes)}")</td>
+                                            <td class="@(n.DiskAlarm ? "text-danger fw-semibold" : "")">
+                                                @FormatBytes((long)n.DiskFreeBytes)
+                                                <span class="text-muted small">
+                                                    (limit @FormatBytes((long)n.DiskFreeLimitBytes))
+                                                </span>
+                                            </td>
+                                            <td>@Meter(n.FdUsedPercent, $"{n.OpenFds:N0} / {n.MaxFds:N0}")</td>
+                                            <td>@Meter(n.SocketUsedPercent, $"{n.OpenSockets:N0} / {n.MaxSockets:N0}")</td>
+                                            <td>
+                                                @if (n.MemoryAlarm)
+                                                {
+                                                    <span class="badge bg-danger">Memory alarm</span>
+                                                }
+                                                @if (n.DiskAlarm)
+                                                {
+                                                    <span class="badge bg-danger">Disk alarm</span>
+                                                }
+                                                @if (!n.MemoryAlarm && !n.DiskAlarm && n.NearLimit)
+                                                {
+                                                    <span class="badge bg-warning text-dark">Near limit</span>
+                                                }
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                }
+
+                @* ── Per-queue depth (rabbitmqctl; independent of Prometheus) ── *@
+                <div class="d-flex align-items-center gap-2 mb-1">
+                    <span class="small fw-semibold text-muted">Queues by depth</span>
+                    @if (b.QueueError is null && b.Queues.Count > TopQueues)
+                    {
+                        <span class="text-muted small">(top @TopQueues of @b.Queues.Count)</span>
+                    }
                 </div>
+
+                @if (b.QueueError is not null)
+                {
+                    <div class="text-muted small">
+                        <span class="bi bi-exclamation-circle me-1"></span>
+                        Could not read queue depth from the broker: @b.QueueError
+                    </div>
+                }
+                else if (b.Queues.Count == 0)
+                {
+                    <div class="text-muted small">No queues on this broker.</div>
+                }
+                else
+                {
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                                <tr class="small text-muted">
+                                    <th>Queue</th><th>Vhost</th><th>Type</th>
+                                    <th class="text-end">Ready</th><th class="text-end">Unacked</th>
+                                    <th class="text-end">Total</th><th class="text-end">Bytes</th>
+                                    <th class="text-end">Consumers</th><th>State</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (RabbitMQQueueStats q in b.Queues.Take(TopQueues))
+                                {
+                                    <tr class="@(q.Stalled || q.InFlowControl ? "table-warning" : "")">
+                                        <td class="font-monospace small">@q.QueueName</td>
+                                        <td class="small text-muted">@q.Vhost</td>
+                                        <td class="small">@q.QueueType</td>
+                                        <td class="text-end">@q.MessagesReady.ToString("N0")</td>
+                                        <td class="text-end @(q.MessagesUnacknowledged > 0 ? "text-warning" : "")">
+                                            @q.MessagesUnacknowledged.ToString("N0")
+                                        </td>
+                                        <td class="text-end fw-semibold">@q.Messages.ToString("N0")</td>
+                                        <td class="text-end small text-muted">@FormatBytes(q.MessageBytes)</td>
+                                        <td class="text-end @(q.Stalled ? "text-danger fw-semibold" : "")">
+                                            @q.Consumers.ToString("N0")
+                                        </td>
+                                        <td>
+                                            @if (q.Stalled)
+                                            {
+                                                <span class="badge bg-danger" title="Messages queued with no consumer attached">
+                                                    No consumer
+                                                </span>
+                                            }
+                                            else if (q.InFlowControl)
+                                            {
+                                                <span class="badge bg-warning text-dark" title="The broker is throttling publishers to this queue">
+                                                    Flow
+                                                </span>
+                                            }
+                                            else if (!string.IsNullOrEmpty(q.State))
+                                            {
+                                                <span class="small text-muted">@q.State</span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
             </div>
         </div>
     }
@@ -67,36 +313,288 @@ else
 @code {
     [Parameter] public required Guid ClusterId { get; set; }
 
-    private List<RabbitMQMetricsSummary> summaries = [];
+    /// <summary>Set when the panel is scoped to one tenant's brokers; required for queue depth,
+    /// which is read through the tenant-scoped RabbitMQService.</summary>
+    [Parameter] public Guid? TenantId { get; set; }
+
+    private const int TopQueues = 15;
+
+    private List<BrokerView> brokers = [];
     private bool isLoading = true;
+    private string? loadError;
+    private int rangeMinutes = 180;
 
-    protected override async Task OnParametersSetAsync() => await LoadMetrics();
+    private sealed class BrokerView
+    {
+        public required Guid Id { get; init; }
+        public required string Name { get; init; }
+        public required Guid TenantId { get; init; }
+        public bool IsOperatorManaged { get; init; }
 
-    private async Task LoadMetrics()
+        public RabbitMQMetricsSummary? Metrics { get; set; }
+        public string? Error { get; set; }
+        public List<RabbitMQQueueStats> Queues { get; set; } = [];
+        public string? QueueError { get; set; }
+        public List<ChartView> Charts { get; set; } = [];
+        public ScrapeDiagnosis? Diagnosis { get; set; }
+        public bool Busy { get; set; }
+        public bool ScrapeJustEnabled { get; set; }
+    }
+
+    private sealed record ChartView(string Title, List<TimeSeriesDataPoint> Points, string Color, string? Unit);
+
+    private Guid loadedFor;
+
+    /// <summary>
+    /// Loads only when the panel is pointed at a different cluster. A load here execs rabbitmqctl
+    /// on every broker pod, so re-running it on each parent re-render would put real load on the
+    /// brokers; refreshing is left to the button and the range selector.
+    /// </summary>
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor == ClusterId) return;
+        loadedFor = ClusterId;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
     {
         isLoading = true;
+        loadError = null;
         StateHasChanged();
 
-        List<string> rabbitNames;
-        using (ApplicationDbContext db = DbFactory.CreateDbContext())
+        try
         {
-            rabbitNames = await db.RabbitMQClusters
-                .Where(c => c.KubernetesClusterId == ClusterId)
-                .Select(c => c.Name)
-                .ToListAsync();
+            // Inside the try: the cluster lookup decrypts each kubeconfig through the vault, so a
+            // database or vault failure throws here. Escaping this method would reach the Blazor
+            // dispatcher and tear down the circuit, and would leave isLoading stuck true.
+            List<RabbitMQCluster> clusters;
+            using (ApplicationDbContext db = DbFactory.CreateDbContext())
+            {
+                clusters = await db.RabbitMQClusters
+                    .Where(c => c.KubernetesClusterId == ClusterId
+                                && (TenantId == null || c.TenantId == TenantId))
+                    .OrderBy(c => c.Name)
+                    .ToListAsync();
+            }
+
+            brokers = [.. clusters.Select(c => new BrokerView
+            {
+                Id = c.Id,
+                Name = c.Name,
+                TenantId = c.TenantId,
+                IsOperatorManaged = c.IsOperatorManaged,
+            })];
+
+            // Brokers are independent of one another, so load them together rather than in series.
+            await Task.WhenAll(brokers.Select(LoadBrokerAsync));
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task LoadBrokerAsync(BrokerView b)
+    {
+        // Both sources are started before either is awaited so they overlap, and each is caught
+        // separately: a broker that refuses rabbitmqctl should still show its Prometheus metrics,
+        // and vice versa. Nothing here may propagate — these run under one Task.WhenAll, and a
+        // single throwing broker would abandon the others and leave the panel spinning.
+        Task<KubernetesOperationResult<RabbitMQMetricsSummary>> metricsTask =
+            PrometheusService.GetRabbitMQMetricsAsync(ClusterId, b.Name);
+
+        // Queue depth comes off the broker itself, so it still works when Prometheus does not.
+        Task<List<RabbitMQQueueStats>> queuesTask = RabbitMQService.GetQueueStatsAsync(b.TenantId, b.Id);
+
+        try
+        {
+            KubernetesOperationResult<RabbitMQMetricsSummary> metrics = await metricsTask;
+            if (metrics.IsSuccess) b.Metrics = metrics.Data;
+            else b.Error = metrics.Error;
+        }
+        catch (Exception ex)
+        {
+            b.Error = ex.Message;
         }
 
-        List<RabbitMQMetricsSummary> results = [];
-        foreach (string name in rabbitNames)
+        try
         {
-            KubernetesOperationResult<RabbitMQMetricsSummary> result =
-                await PrometheusService.GetRabbitMQMetricsAsync(ClusterId, name);
-
-            if (result.IsSuccess && result.Data is not null)
-                results.Add(result.Data);
+            b.Queues = await queuesTask;
+        }
+        catch (Exception ex)
+        {
+            b.QueueError = ex.Message;
         }
 
-        summaries = results;
-        isLoading = false;
+        try
+        {
+            if (b.Metrics?.HasData == true)
+                b.Charts = await LoadChartsAsync(b);
+        }
+        catch (Exception ex)
+        {
+            b.Error ??= ex.Message;
+        }
+    }
+
+    private async Task<List<ChartView>> LoadChartsAsync(BrokerView b)
+    {
+        TimeSpan window = TimeSpan.FromMinutes(rangeMinutes);
+
+        // Reuses the panel's own query builder so the charts cannot drift from the tiles above
+        // them — in particular the identity-info join, without which every one of these is empty.
+        Dictionary<string, string> q = PrometheusService.BuildRabbitMQQueries(b.Name);
+
+        (string Title, string Query, string Color, string? Unit)[] specs =
+        [
+            ("Ready messages",  q["ready"],     "#0d6efd", null),
+            ("Unacked",         q["unacked"],   "#fd7e14", null),
+            ("Publish rate",    q["publish"],   "#198754", "/s"),
+            ("Deliver rate",    q["deliver"],   "#6f42c1", "/s"),
+        ];
+
+        List<PrometheusTimeSeries>[] series = await Task.WhenAll(specs.Select(async s =>
+        {
+            KubernetesOperationResult<List<PrometheusTimeSeries>> r =
+                await PrometheusService.GetMetricRangeAsync(ClusterId, s.Query, window);
+            return r.IsSuccess && r.Data is not null ? r.Data : [];
+        }));
+
+        List<ChartView> charts = [];
+        for (int i = 0; i < specs.Length; i++)
+        {
+            List<TimeSeriesDataPoint> points = series[i].FirstOrDefault()?.DataPoints ?? [];
+            if (points.Count >= 2)
+                charts.Add(new ChartView(specs[i].Title, points, specs[i].Color, specs[i].Unit));
+        }
+
+        return charts;
+    }
+
+    private async Task EnableScrapeAsync(BrokerView b)
+    {
+        b.Busy = true;
+        try
+        {
+            await RabbitMQService.EnableMetricsScrapeAsync(b.TenantId, b.Id);
+            b.Diagnosis = null;
+
+            // Prometheus has to notice the new ServiceMonitor and then complete a scrape before
+            // anything can be queried, so say so rather than reloading into the same empty state.
+            b.ScrapeJustEnabled = true;
+        }
+        catch (Exception ex)
+        {
+            b.Error = ex.Message;
+        }
+        finally
+        {
+            b.Busy = false;
+        }
+    }
+
+    private async Task DiagnoseAsync(BrokerView b)
+    {
+        b.Busy = true;
+        try
+        {
+            string ns;
+            using (ApplicationDbContext db = DbFactory.CreateDbContext())
+            {
+                ns = await db.RabbitMQClusters.Where(c => c.Id == b.Id)
+                        .Select(c => c.Namespace).FirstAsync();
+            }
+
+            KubernetesOperationResult<ScrapeDiagnosis> result =
+                await PrometheusService.DiagnoseServiceMonitorScrapeAsync(
+                    ClusterId, ns, b.Name,
+                    b.IsOperatorManaged
+                        ? "Use \"Enable metrics\" above — it creates the ServiceMonitor the operator does not."
+                        : "This broker was not installed by EntKube. Create a ServiceMonitor for its "
+                          + "metrics port by hand; RabbitMQ publishes one at rabbitmq/cluster-operator "
+                          + "under observability/prometheus/monitors.");
+
+            if (result.IsSuccess) b.Diagnosis = result.Data;
+            else b.Error = result.Error;
+        }
+        catch (Exception ex)
+        {
+            b.Error = ex.Message;
+        }
+        finally
+        {
+            b.Busy = false;
+        }
+    }
+
+    private static List<string> Warnings(RabbitMQMetricsSummary m)
+    {
+        List<string> w = [];
+        if (m.AnyNodeAlarm)             w.Add("Node alarm");
+        if (m.StalledBacklog)           w.Add("No consumers");
+        if (m.UnroutableRatePerSec > 0) w.Add("Unroutable messages");
+        if (m.AckLag)                   w.Add("Ack lag");
+        if (m.UnconfirmedMessages > 0)  w.Add("Unconfirmed");
+        if (m.ReadyMessages > 1000)     w.Add("Backlog");
+        return w;
+    }
+
+    private static RenderFragment Tile(string label, string value, string? valueClass = null) => builder =>
+    {
+        builder.OpenElement(0, "div");
+        builder.AddAttribute(1, "class", "col-auto");
+
+        builder.OpenElement(2, "div");
+        builder.AddAttribute(3, "class", "small text-muted");
+        builder.AddContent(4, label);
+        builder.CloseElement();
+
+        builder.OpenElement(5, "div");
+        builder.AddAttribute(6, "class", $"fw-semibold {valueClass}".TrimEnd());
+        builder.AddContent(7, value);
+        builder.CloseElement();
+
+        builder.CloseElement();
+    };
+
+    /// <summary>A usage bar plus its raw numbers, coloured by how close it is to the limit.</summary>
+    private static RenderFragment Meter(double percent, string caption) => builder =>
+    {
+        string colour = percent >= 100 ? "bg-danger" : percent >= 80 ? "bg-warning" : "bg-success";
+        double width = Math.Clamp(percent, 0, 100);
+
+        builder.OpenElement(0, "div");
+
+        builder.OpenElement(1, "div");
+        builder.AddAttribute(2, "class", "progress");
+        builder.AddAttribute(3, "style", "height:6px;width:110px;");
+
+        builder.OpenElement(4, "div");
+        builder.AddAttribute(5, "class", $"progress-bar {colour}");
+        builder.AddAttribute(6, "style", $"width:{width.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}%");
+        builder.CloseElement();
+
+        builder.CloseElement();
+
+        builder.OpenElement(7, "div");
+        builder.AddAttribute(8, "class", "small text-muted");
+        builder.AddContent(9, caption);
+        builder.CloseElement();
+
+        builder.CloseElement();
+    };
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        double value = bytes;
+        int unit = 0;
+        while (value >= 1024 && unit < units.Length - 1) { value /= 1024; unit++; }
+        return $"{value:0.#} {units[unit]}";
     }
 }

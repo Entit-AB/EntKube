@@ -16,24 +16,6 @@ public class LokiConfig
     public Guid? StorageLinkId { get; set; }
 }
 
-public class LokiLogStream
-{
-    public Dictionary<string, string> Labels { get; set; } = new();
-    public List<LokiLogEntry> Entries { get; set; } = [];
-}
-
-public class LokiLogEntry
-{
-    public DateTime Timestamp { get; set; }
-    public string Line { get; set; } = "";
-    public LogLevel DetectedLevel { get; set; } = LogLevel.None;
-
-    /// <summary>Trace id this line belongs to, if the app propagated trace context into its logs.</summary>
-    public string? TraceId { get; set; }
-}
-
-public enum LogLevel { None, Debug, Info, Warn, Error, Fatal }
-
 /// <summary>
 /// Queries Grafana Loki for logs via the Kubernetes API proxy endpoint,
 /// using the same pattern as PrometheusService. Detects Loki automatically
@@ -45,6 +27,7 @@ public enum LogLevel { None, Debug, Info, Warn, Error, Fatal }
 /// </summary>
 public class LokiService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    KubernetesProxyClientPool clientPool,
     ILogger<LokiService> logger,
     VaultService vaultService,
     StorageService storageService)
@@ -500,9 +483,9 @@ public class LokiService(
     {
         try
         {
-            using MemoryStream stream = new(Encoding.UTF8.GetBytes(info.Kubeconfig));
-            KubernetesClientConfiguration k8sConfig = KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
-            using Kubernetes k8s = new(k8sConfig);
+            // Pooled per kubeconfig and never disposed here: building a client per query meant a fresh
+            // TLS handshake to the API server for every log page, histogram bucket and label lookup.
+            Kubernetes k8s = clientPool.Get(info.Kubeconfig);
 
             string baseUrl = await BuildLokiProxyBaseAsync(k8s, info, ct);
             logger.LogDebug("Loki proxy base {BaseUrl}", baseUrl);

@@ -40,10 +40,36 @@ public class AppRoute
     /// </summary>
     public bool IsManaged { get; set; } = true;
 
+    /// <summary>
+    /// Require a client certificate to reach this hostname (inbound mTLS). The route is then served
+    /// on the trust anchor's <see cref="ClientCaBundle.ListenerPort"/> <em>in addition to</em> 443:
+    /// client-certificate validation is a per-port property of the Gateway, so demanding a cert on
+    /// 443 would demand one from every other customer sharing that gateway.
+    ///
+    /// Plain 443 keeps working for this hostname unless <see cref="ClientCertificateOnly"/> is set.
+    /// </summary>
+    public bool RequireClientCertificate { get; set; }
+
+    /// <summary>
+    /// The CA that signs the client certificates accepted for this hostname. Required when
+    /// <see cref="RequireClientCertificate"/> is true.
+    /// </summary>
+    public Guid? ClientCaBundleId { get; set; }
+
+    /// <summary>
+    /// When true the hostname's plain 443 listener is dropped, so the app is reachable
+    /// <em>only</em> over mTLS. Off by default: turning it on breaks any client that has not
+    /// migrated to the mTLS port, so it is a deliberate second step.
+    /// </summary>
+    public bool ClientCertificateOnly { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation
     public App App { get; set; } = null!;
+
+    /// <summary>The trust anchor for inbound mTLS, when <see cref="RequireClientCertificate"/> is set.</summary>
+    public ClientCaBundle? ClientCaBundle { get; set; }
     public ICollection<AppDeploymentRoute> DeploymentRoutes { get; set; } = [];
 }
 
@@ -77,6 +103,68 @@ public class AppDeploymentRoute
     /// Null means the full path is forwarded as-is.
     /// </summary>
     public string? RewritePath { get; set; }
+
+    /// <summary>
+    /// Request timeout for this rule in the generated HTTPRoute (spec.rules[].timeouts). Null uses
+    /// the platform default (<see cref="Services.ExternalRouteService.DefaultRequestTimeoutSeconds"/>);
+    /// 0 emits no timeouts block, leaving the gateway to wait indefinitely.
+    ///
+    /// Only set 0 for paths carrying long-lived streams (websockets, SSE, chunked downloads):
+    /// Gateway API's request timeout bounds the whole exchange, so a finite value cuts a live
+    /// stream off mid-flight. Everything else wants a finite value so a wedged backend fails
+    /// fast instead of hanging the browser.
+    /// </summary>
+    public int? RequestTimeoutSeconds { get; set; }
+
+    /// <summary>
+    /// A second Kubernetes Service to send a share of traffic to — the canary side of a
+    /// weighted release. Null means all traffic goes to <see cref="ServiceName"/>.
+    ///
+    /// EntKube does not create this Service or the workload behind it. Synthesising a
+    /// canary workload means rewriting someone's manifests under a new name, and getting
+    /// that subtly wrong produces a canary that is not actually the thing being tested.
+    /// The operator declares what the canary is; EntKube owns the traffic split, which is
+    /// the part that needs a control plane.
+    /// </summary>
+    public string? CanaryServiceName { get; set; }
+
+    /// <summary>
+    /// Percentage of traffic sent to <see cref="CanaryServiceName"/>, 0–100. Zero (the
+    /// default) sends everything to the stable service and emits a single backend, so a
+    /// route with no canary is byte-identical to what it was before this field existed.
+    /// </summary>
+    public int CanaryWeight { get; set; }
+
+    /// <summary>Port on the canary service. Defaults to the stable service's port when unset.</summary>
+    public int? CanaryServicePort { get; set; }
+
+    /// <summary>
+    /// Pins a client to one backend pod for the life of its session. Rendered as
+    /// <c>loadBalancer.consistentHash</c> on the backend Service's DestinationRule, so it
+    /// applies to every route pointing at <see cref="ServiceName"/> — a Service, not a hostname, is what Istio
+    /// load balances.
+    ///
+    /// Istio-only: a Traefik gateway ignores DestinationRules entirely, and nothing is emitted
+    /// for it. Defaults to <see cref="SessionAffinityMode.None"/>, which generates exactly the
+    /// DestinationRule this field did not exist to change.
+    /// </summary>
+    public SessionAffinityMode SessionAffinity { get; set; } = SessionAffinityMode.None;
+
+    /// <summary>
+    /// The cookie name, header name, or query parameter the hash is taken from, depending on
+    /// <see cref="SessionAffinity"/>. Required for
+    /// <see cref="SessionAffinityMode.Header"/> and <see cref="SessionAffinityMode.QueryParameter"/>;
+    /// optional for <see cref="SessionAffinityMode.Cookie"/> (blank uses
+    /// <see cref="Services.ExternalRouteService.DefaultAffinityCookieName"/>); unused for
+    /// <see cref="SessionAffinityMode.SourceIp"/>.
+    /// </summary>
+    public string? SessionAffinityKey { get; set; }
+
+    /// <summary>
+    /// Lifetime of the affinity cookie in seconds. Null issues a session cookie, which expires
+    /// when the browser closes. Only meaningful for <see cref="SessionAffinityMode.Cookie"/>.
+    /// </summary>
+    public int? SessionAffinityTtlSeconds { get; set; }
 
     /// <summary>Gateway resource name resolved from the cluster's installed ingress controller.</summary>
     public string? GatewayName { get; set; }

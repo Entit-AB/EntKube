@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Services.Upgrades;
 
 namespace EntKube.Web.Services;
 
@@ -33,6 +34,8 @@ public enum AdvisorCategory
     Reliability,     // firing / unresolved incidents
     DataProtection,  // backups missing, failed, or stale
     Capacity,        // resources trending toward their ceiling (PVC fill, memory-vs-limit)
+    Maintenance,     // components behind upstream, Kubernetes versions nearing end-of-life
+    SupplyChain,     // vulnerable, unscanned or unsigned images running in the fleet
 }
 
 /// <summary>
@@ -138,7 +141,12 @@ public class OperationsAdvisorService(
     SecretExpiryService secretExpiry,
     IncidentCorrelationService correlation,
     ErrorBudgetService errorBudget,
-    AdvisorStateService stateService)
+    AdvisorStateService stateService,
+    EntKube.Web.Services.Upgrades.ComponentUpgradeService componentUpgrades,
+    EntKube.Web.Services.Upgrades.DriftScanCache driftCache,
+    EntKube.Web.Services.SupplyChain.SupplyChainScanCache supplyChainCache,
+    EntKube.Web.Services.Dr.DrScanCache drCache,
+    ILogger<OperationsAdvisorService> logger)
 {
     /// <summary>Overdue findings older than this, still unacknowledged, are escalated.</summary>
     private static readonly TimeSpan EscalateAfter = TimeSpan.FromDays(3);
@@ -155,6 +163,10 @@ public class OperationsAdvisorService(
         findings.AddRange(await BuildPostureFindingsAsync(tenantId, ct));
         findings.AddRange(await BuildCapacityFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildBlueprintFindingsAsync(tenantId, now, ct));
+        findings.AddRange(await BuildUpgradeFindingsAsync(tenantId, now, ct));
+        findings.AddRange(BuildDriftFindings(tenantId, now));
+        findings.AddRange(BuildSupplyChainFindings(tenantId, now));
+        findings.AddRange(BuildDrFindings(tenantId, now));
 
         var merged = await MergeStateAsync(tenantId, findings, now, ct);
 
@@ -979,6 +991,341 @@ public class OperationsAdvisorService(
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Turns the fleet upgrade report into advisor findings.
+    ///
+    /// Deliberately aggregated per cluster rather than one finding per component: a
+    /// ten-cluster fleet running thirty components each would otherwise bury every
+    /// other signal in the feed under routine patch drift. Only two things earn a
+    /// row of their own — a chart version the author has deprecated, and a cluster
+    /// carrying major-version-behind components — because those are the ones with a
+    /// real deadline behind them.
+    /// </summary>
+    private async Task<List<OperationsFinding>> BuildUpgradeFindingsAsync(
+        Guid tenantId, DateTime now, CancellationToken ct)
+    {
+        var result = new List<OperationsFinding>();
+
+        UpgradeReport report;
+        try
+        {
+            report = await componentUpgrades.GetTenantReportAsync(tenantId, now, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Chart repositories are third-party and off the critical path. Losing them must
+            // never take down the whole advisor feed, which carries expiry and incident
+            // findings an operator depends on.
+            logger.LogWarning(ex, "Upgrade findings skipped for tenant {TenantId}", tenantId);
+            return result;
+        }
+
+        foreach (ComponentUpgrade deprecated in report.Components.Where(c => c.Status == UpgradeStatus.Deprecated))
+        {
+            result.Add(new OperationsFinding
+            {
+                Id = $"chart-deprecated:{deprecated.ComponentId}",
+                Category = AdvisorCategory.Maintenance,
+                Severity = AdvisorSeverity.Warning,
+                Horizon = AdvisorHorizon.ThisWeek,
+                Title = $"{deprecated.DisplayName} runs a deprecated chart version",
+                Detail = $"Chart {deprecated.ChartName} {deprecated.InstalledVersion} is marked deprecated by its "
+                    + "author and will stop receiving fixes.",
+                ScopeLabel = $"Cluster: {deprecated.ClusterName}",
+                Remediation = "Move to a supported chart version, or replace the component.",
+                LinkSection = "upgrades",
+                ClusterId = deprecated.ClusterId,
+                Source = "upgrade",
+            });
+        }
+
+        foreach (IGrouping<Guid, ComponentUpgrade> cluster in report.Components
+            .Where(c => c.Status == UpgradeStatus.UpgradeAvailable)
+            .GroupBy(c => c.ClusterId))
+        {
+            List<ComponentUpgrade> upgrades = [.. cluster];
+            string clusterName = upgrades[0].ClusterName;
+
+            List<ComponentUpgrade> major = [.. upgrades.Where(u => u.Lag == VersionLag.Major)];
+            if (major.Count > 0)
+            {
+                result.Add(new OperationsFinding
+                {
+                    Id = $"chart-major:{cluster.Key}",
+                    Category = AdvisorCategory.Maintenance,
+                    Severity = AdvisorSeverity.Warning,
+                    Horizon = AdvisorHorizon.ThisWeek,
+                    Title = major.Count == 1
+                        ? $"{major[0].DisplayName} is a major version behind on “{clusterName}”"
+                        : $"{major.Count} components are a major version behind on “{clusterName}”",
+                    Detail = DescribeUpgrades(major),
+                    ScopeLabel = $"Cluster: {clusterName}",
+                    Remediation = "Review the upstream changelogs, then upgrade from the Upgrades tab.",
+                    LinkSection = "upgrades",
+                    ClusterId = cluster.Key,
+                    Source = "upgrade",
+                });
+            }
+
+            List<ComponentUpgrade> routine = [.. upgrades.Where(u => u.Lag != VersionLag.Major)];
+            if (routine.Count > 0)
+            {
+                result.Add(new OperationsFinding
+                {
+                    Id = $"chart-behind:{cluster.Key}",
+                    Category = AdvisorCategory.Maintenance,
+                    Severity = AdvisorSeverity.Info,
+                    Horizon = AdvisorHorizon.Later,
+                    Title = $"{routine.Count} component{(routine.Count == 1 ? " has" : "s have")} "
+                        + $"updates available on “{clusterName}”",
+                    Detail = DescribeUpgrades(routine),
+                    ScopeLabel = $"Cluster: {clusterName}",
+                    Remediation = "Apply the pending chart updates from the Upgrades tab.",
+                    LinkSection = "upgrades",
+                    ClusterId = cluster.Key,
+                    Source = "upgrade",
+                });
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Turns the last drift sweep into findings.
+    ///
+    /// Reads the cache and never triggers a sweep: a sweep forks a server-side dry-run
+    /// per managed deployment, and the advisor report is built on every page render.
+    /// A tenant with no completed sweep yet simply contributes nothing, rather than
+    /// making the whole feed wait on kubectl.
+    /// </summary>
+    private List<OperationsFinding> BuildDriftFindings(Guid tenantId, DateTime now)
+    {
+        var result = new List<OperationsFinding>();
+
+        DriftReport? report = driftCache.Get(tenantId);
+        if (report is null)
+        {
+            return result;
+        }
+
+        foreach (DriftResult drifted in report.Results.Where(r => r.State == DriftState.Drifted))
+        {
+            result.Add(new OperationsFinding
+            {
+                Id = $"drift:{drifted.DeploymentId}",
+                Category = AdvisorCategory.Maintenance,
+                Severity = AdvisorSeverity.Warning,
+                Horizon = AdvisorHorizon.ThisWeek,
+                Title = $"“{drifted.AppName} / {drifted.DeploymentName}” has drifted from its manifest",
+                Detail = $"{drifted.ChangedLines} changed line{(drifted.ChangedLines == 1 ? "" : "s")} between "
+                    + $"the desired manifest and live state in {drifted.Namespace}. "
+                    + "Someone changed this outside EntKube, and the next sync will overwrite it.",
+                ScopeLabel = drifted.EnvironmentName is null
+                    ? $"Cluster: {drifted.ClusterName}"
+                    : $"{drifted.EnvironmentName} · {drifted.ClusterName}",
+                TimingText = $"detected {DueText(report.GeneratedAt, now)}",
+                Remediation = "Review the diff, then re-apply to converge — or fold the change into the manifest.",
+                LinkSection = "drift",
+                ClusterId = drifted.ClusterId,
+                CustomerId = drifted.CustomerId,
+                CustomerName = drifted.CustomerName,
+                Source = "drift",
+            });
+        }
+
+        // Removed APIs are grouped per cluster: they share one deadline (that cluster's next
+        // control-plane upgrade), so they are one decision, not one per object.
+        foreach (IGrouping<Guid, DriftResult> cluster in report.Results
+            .Where(r => r.DeprecatedApis.Count > 0)
+            .GroupBy(r => r.ClusterId))
+        {
+            List<DeprecatedApiUsage> usages = [.. cluster.SelectMany(r => r.DeprecatedApis)];
+            string clusterName = cluster.First().ClusterName;
+            string earliest = usages
+                .Select(u => u.RemovedInMinor)
+                .OrderBy(v => SemVer.Parse(v))
+                .First();
+
+            result.Add(new OperationsFinding
+            {
+                Id = $"deprecated-api:{cluster.Key}",
+                Category = AdvisorCategory.Maintenance,
+                Severity = AdvisorSeverity.Warning,
+                Horizon = AdvisorHorizon.Later,
+                Title = $"{usages.Count} manifest object{(usages.Count == 1 ? " uses" : "s use")} "
+                    + $"a removed Kubernetes API on “{clusterName}”",
+                Detail = string.Join(", ", usages
+                    .Select(u => $"{u.Kind} {u.ApiVersion} → {u.ReplacedBy}")
+                    .Distinct()
+                    .Take(4)) + $". Earliest removal: Kubernetes {earliest}.",
+                ScopeLabel = $"Cluster: {clusterName}",
+                Remediation = "Update the manifests to the replacement API versions before upgrading the control plane.",
+                LinkSection = "drift",
+                ClusterId = cluster.Key,
+                Source = "drift",
+            });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Turns the last supply-chain sweep into findings. Reads the cache only, for the
+    /// same reason as drift: the sweep walks every cluster and registry.
+    ///
+    /// Grouped per cluster rather than per image. A base-image CVE typically lands in
+    /// every service at once, and thirty rows saying the same thing would bury the one
+    /// finding that is actually distinct.
+    /// </summary>
+    private List<OperationsFinding> BuildSupplyChainFindings(Guid tenantId, DateTime now)
+    {
+        var result = new List<OperationsFinding>();
+
+        EntKube.Web.Services.SupplyChain.SupplyChainReport? report = supplyChainCache.Get(tenantId);
+        if (report is null)
+        {
+            return result;
+        }
+
+        foreach (var cluster in report.Images
+            .Where(i => i.State == EntKube.Web.Services.SupplyChain.ImageScanState.Vulnerable)
+            .GroupBy(i => i.ClusterId))
+        {
+            var images = cluster.ToList();
+            int critical = images.Sum(i => i.CriticalCount);
+            int high = images.Sum(i => i.HighCount);
+            int fixable = images.Sum(i => i.FixableCount);
+            string clusterName = images[0].ClusterName;
+
+            result.Add(new OperationsFinding
+            {
+                Id = $"cve:{cluster.Key}",
+                Category = AdvisorCategory.SupplyChain,
+                // Critical CVEs in running images are a today problem; High alone can wait
+                // for the week's patching window.
+                Severity = critical > 0 ? AdvisorSeverity.Critical : AdvisorSeverity.Warning,
+                Horizon = critical > 0 ? AdvisorHorizon.Today : AdvisorHorizon.ThisWeek,
+                Title = $"{images.Count} running image{(images.Count == 1 ? "" : "s")} on “{clusterName}” "
+                    + $"carry {critical} critical and {high} high vulnerabilities",
+                Detail = string.Join(", ", images
+                    .OrderByDescending(i => i.CriticalCount)
+                    .Take(3)
+                    .Select(i => $"{i.Image} ({i.CriticalCount}C/{i.HighCount}H)"))
+                    + (fixable > 0 ? $". {fixable} have a fix available." : ". No fixes published yet."),
+                ScopeLabel = $"Cluster: {clusterName}",
+                Remediation = fixable > 0
+                    ? "Rebuild against patched base images and redeploy."
+                    : "Track upstream for fixes; consider mitigations in the meantime.",
+                LinkSection = "supply-chain",
+                ClusterId = cluster.Key,
+                Source = "supply-chain",
+            });
+        }
+
+        foreach (var cluster in report.Images
+            .Where(i => i.State == EntKube.Web.Services.SupplyChain.ImageScanState.Unscanned)
+            .GroupBy(i => i.ClusterId))
+        {
+            var images = cluster.ToList();
+            string clusterName = images[0].ClusterName;
+
+            result.Add(new OperationsFinding
+            {
+                Id = $"unscanned-images:{cluster.Key}",
+                Category = AdvisorCategory.SupplyChain,
+                Severity = AdvisorSeverity.Warning,
+                Horizon = AdvisorHorizon.Later,
+                Title = $"{images.Count} running image{(images.Count == 1 ? " has" : "s have")} "
+                    + $"no scan result on “{clusterName}”",
+                // An unscanned image is not a clean one — say so, because the natural
+                // reading of "no findings" is "no problems".
+                Detail = "These images are in a managed registry but have no completed scan, so their "
+                    + "vulnerability status is unknown — not clean.",
+                ScopeLabel = $"Cluster: {clusterName}",
+                Remediation = "Trigger a Harbor scan for these repositories, or enable scan-on-push.",
+                LinkSection = "supply-chain",
+                ClusterId = cluster.Key,
+                Source = "supply-chain",
+            });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Turns the last disaster-recovery sweep into findings.
+    ///
+    /// One finding per gap rather than aggregated per cluster: unlike patch drift, each
+    /// of these is a distinct decision — an unavailable bucket, a paused schedule and an
+    /// untested restore need three different actions from three different people.
+    /// </summary>
+    private List<OperationsFinding> BuildDrFindings(Guid tenantId, DateTime now)
+    {
+        var result = new List<OperationsFinding>();
+
+        IReadOnlyList<EntKube.Web.Services.Dr.ClusterDrStatus>? statuses = drCache.Get(tenantId);
+        if (statuses is null)
+        {
+            return result;
+        }
+
+        foreach (EntKube.Web.Services.Dr.ClusterDrStatus status in statuses)
+        {
+            foreach (EntKube.Web.Services.Dr.DrGap gap in
+                     EntKube.Web.Services.Dr.DrReadiness.Evaluate(status, now))
+            {
+                result.Add(new OperationsFinding
+                {
+                    Id = gap.Key,
+                    Category = AdvisorCategory.DataProtection,
+                    Severity = gap.Severity switch
+                    {
+                        EntKube.Web.Services.Dr.DrSeverity.Critical => AdvisorSeverity.Critical,
+                        EntKube.Web.Services.Dr.DrSeverity.Warning => AdvisorSeverity.Warning,
+                        _ => AdvisorSeverity.Info,
+                    },
+                    // A cluster with nothing to restore from is a today problem: the exposure
+                    // is total and every hour it persists is more data that cannot come back.
+                    Horizon = gap.Severity switch
+                    {
+                        EntKube.Web.Services.Dr.DrSeverity.Critical => AdvisorHorizon.Today,
+                        EntKube.Web.Services.Dr.DrSeverity.Warning => AdvisorHorizon.ThisWeek,
+                        _ => AdvisorHorizon.Later,
+                    },
+                    Title = gap.Title,
+                    Detail = gap.Detail,
+                    ScopeLabel = $"Cluster: {status.ClusterName}",
+                    Remediation = gap.Remediation,
+                    LinkSection = "disaster-recovery",
+                    ClusterId = status.ClusterId,
+                    Source = "dr",
+                });
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>Renders up to a handful of upgrades as "name 1.2.3 → 1.3.0", then a tail count.</summary>
+    private static string DescribeUpgrades(List<ComponentUpgrade> upgrades)
+    {
+        const int MaxListed = 4;
+
+        IEnumerable<string> listed = upgrades
+            .OrderBy(u => u.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .Take(MaxListed)
+            .Select(u => $"{u.DisplayName} {u.InstalledVersion} → {u.LatestVersion}");
+
+        string text = string.Join(", ", listed);
+        int remaining = upgrades.Count - MaxListed;
+        return remaining > 0 ? $"{text}, and {remaining} more." : $"{text}.";
     }
 
     private static string FmtHours(double hours)

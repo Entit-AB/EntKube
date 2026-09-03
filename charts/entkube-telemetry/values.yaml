@@ -1,0 +1,162 @@
+# EntKube in-cluster telemetry plane.
+#
+# Two workloads off one image:
+#   indexer — StatefulSet. Receives OTLP from the cluster's collector, owns the hot active index and the
+#             warm sealed segments on its PersistentVolume, seals to object storage.
+#   querier — Deployment (optional). Scales the read path out: searches sealed segments from object storage
+#             and merges the indexer's hot tier. Leave disabled until query load actually needs it — the
+#             indexer answers every query on its own.
+#
+# See docs/telemetry-in-cluster.md.
+
+image:
+  repository: entit.azurecr.io/entkube-telemetry
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+# The CLUSTER pulls the image, not EntKube — so EntKube's own registry credentials do not apply here.
+# For a private registry, create the Secret in the release namespace first and name it:
+#   kubectl create secret docker-registry entkube-registry -n monitoring \
+#     --docker-server=entit.azurecr.io --docker-username=... --docker-password=...
+# then: imagePullSecrets: [{ name: entkube-registry }]
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+node:
+  # REQUIRED. Which tenant's and cluster's telemetry this deployment owns. The pods refuse to start
+  # without them: a node that does not know who it is cannot safely store or serve anything.
+  tenantId: ""
+  clusterId: ""
+
+  # REQUIRED. Bearer token the OpenTelemetry Collector presents when writing.
+  ingestToken: ""
+  # REQUIRED. Bearer token the EntKube management plane presents when querying — and that the querier
+  # presents to the indexer.
+  queryToken: ""
+
+  # Use an existing Secret instead of having the chart create one from the values above. Must contain the
+  # keys Node__IngestToken and Node__QueryToken (and the object-storage keys, if used).
+  existingSecret: ""
+
+objectStorage:
+  # Where sealed segments live. Without a bucket the node seals to its own volume, which means sealed
+  # history dies with the volume — fine for a trial, not for anything you intend to keep.
+  bucket: ""
+  # S3-compatible endpoint, e.g. https://s3.example.com. Leave empty for real AWS S3 (uses region).
+  endpoint: ""
+  region: us-east-1
+  accessKey: ""
+  secretKey: ""
+  # Required for MinIO / Ceph RGW and most non-AWS implementations.
+  forcePathStyle: true
+
+telemetry:
+  # How long sealed segments are kept at all.
+  retentionDays: 90
+
+  # WARM tier: how long a sealed segment also stays on local disk, where a query reads it without touching
+  # object storage. Past this it is evicted and served cold. Nothing is lost — the archive is durable in
+  # the bucket for the full retentionDays.
+  warmRetentionDays: 3
+  # Hard ceiling on locally-held segment bytes, evicting least-recently-used first. The backstop for a
+  # burst that seals more than warmRetentionDays anticipated. 0 disables the size bound.
+  warmMaxBytes: 8589934592
+
+  # Most log VOLUME is DEBUG/INFO noise, so it ages out early while WARN+ keeps the full window.
+  tieredLogRetention: true
+  verboseLogRetentionDays: 14
+
+  # Raw spans are the largest signal by far. The per-trace SUMMARY index (which powers the trace list)
+  # keeps the full retentionDays regardless, so you keep "what traces happened" for 90 days and deep
+  # waterfalls for this window.
+  rawSpanRetentionDays: 30
+  # Head sampling for raw spans of uninteresting traces. Traces with any error, or any span at or above
+  # traceKeepMinDurationMs, are always kept. 100 = keep everything.
+  traceSampleRatePercent: 100
+  traceKeepMinDurationMs: 500
+
+  # Seal the active index once it reaches either threshold.
+  segmentMaxDocs: 1000000
+  segmentMaxAgeMinutes: 60
+  # zstd level for sealed archives (1-22). Sealing runs on the SAME pod that is ingesting, so this is a
+  # CPU budget as much as a compression setting: the high levels cost many times the CPU of the middle
+  # ones for a few percent of ratio, and spending that while a segment is being written is what turns a
+  # busy indexer into a throttled one. Raise it only if archive size genuinely dominates the cost.
+  archiveZstdLevel: 6
+
+indexer:
+  # The write path. Turn it off for a release that deploys ONLY query pods against an indexer installed by
+  # another release — otherwise that release stands up a second indexer of its own, which receives nothing
+  # (the collector ships to one endpoint) and holds an empty volume.
+  enabled: true
+  persistence:
+    # Sized for the warm tier plus the unsealed active index. Below warmMaxBytes and the size rule will be
+    # evicting constantly; well above it is wasted.
+    size: 20Gi
+    storageClass: ""
+  # ALWAYS set cpu explicitly, including the limit. A namespace LimitRange with a default CPU limit will
+  # otherwise supply one, and a value chosen for general workloads (1 core is a common default) throttles
+  # Lucene indexing hard enough that the health endpoints miss their probe deadlines — the kubelet then
+  # restarts a pod that is merely busy, which loses its unsealed segment and makes the next start busier.
+  # Leaving cpu unset is not "no limit"; it is "whatever the namespace decides", which is worse.
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+querier:
+  # Off by default: the indexer answers every query itself. Turn this on when query load starts competing
+  # with ingest, or when you want more read capacity than one pod.
+  enabled: false
+  # In-cluster URL of the indexer to federate with. Leave empty when indexer.enabled is true — the querier
+  # then points at the indexer in this same release. Set it when running query pods as a SEPARATE release
+  # (indexer.enabled=false), because the indexer's Service name is derived from the OTHER release's name
+  # and cannot be guessed from here.
+  indexerUrl: ""
+  replicas: 2
+  persistence:
+    # A read-through cache of cold segments. Set telemetry.warmMaxBytes below this.
+    size: 20Gi
+    storageClass: ""
+  # Set explicitly for the same reason as the indexer's — see the note there.
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Applied to both workloads. The node needs no elevated access — it neither reads the Kubernetes API nor
+# writes to the host.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

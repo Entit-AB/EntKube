@@ -150,7 +150,8 @@ public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory, Va
         await db.VpnTunnels.Where(v => v.TenantId == id).ExecuteDeleteAsync(ct);
         // Kyverno policies Restrict-ref Environment.
         await db.KyvernoPolicies.Where(k => k.TenantId == id).ExecuteDeleteAsync(ct);
-        // Customers → cascades git creds/policies that Restrict-ref Environment.
+        // Customers → cascades git creds/policies and environment memberships that
+        // Restrict-ref Environment.
         await db.Customers.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);
         // Clusters → cascades components, routes, incidents, managed DB clusters, and the
         // encrypted kubeconfig secrets. Nothing Restrict-refs Cluster any more at this point.
@@ -231,6 +232,10 @@ public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory, Va
             return false;
         }
 
+        // Customer memberships are held by a Restrict FK, and carry no data of their
+        // own, so they go with the environment rather than blocking its deletion.
+        await db.CustomerEnvironments.Where(ce => ce.EnvironmentId == id).ExecuteDeleteAsync(ct);
+
         db.Environments.Remove(environment);
         await db.SaveChangesAsync(ct);
         return true;
@@ -255,14 +260,83 @@ public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory, Va
         return await db.Customers.FindAsync([id], ct);
     }
 
-    public async Task<Customer> CreateCustomerAsync(Guid tenantId, string name, CancellationToken ct = default)
+    /// <summary>
+    /// Creates a customer. When <paramref name="environmentId"/> is given the customer
+    /// becomes a member of that environment only — it is not added to every environment
+    /// in the tenant. Pass null when creating from a tenant-wide list, and add the
+    /// customer to environments afterwards with <see cref="AddCustomerToEnvironmentAsync"/>.
+    /// </summary>
+    public async Task<Customer> CreateCustomerAsync(Guid tenantId, string name, Guid? environmentId = null, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         Customer customer = new() { Id = Guid.NewGuid(), TenantId = tenantId, Name = name };
         db.Customers.Add(customer);
+
+        if (environmentId is { } envId)
+        {
+            db.CustomerEnvironments.Add(new CustomerEnvironment { CustomerId = customer.Id, EnvironmentId = envId });
+        }
+
         await db.SaveChangesAsync(ct);
         return customer;
+    }
+
+    // --- Customer ↔ environment membership ---
+
+    /// <summary>
+    /// All customer/environment memberships in a tenant, as (CustomerId, EnvironmentId) pairs.
+    /// </summary>
+    public async Task<List<CustomerEnvironment>> GetCustomerEnvironmentsAsync(Guid tenantId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.CustomerEnvironments
+            .Where(ce => ce.Customer.TenantId == tenantId)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Adds a customer to an environment. Idempotent — an existing membership is left alone.
+    /// </summary>
+    public async Task<bool> AddCustomerToEnvironmentAsync(Guid customerId, Guid environmentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        bool exists = await db.CustomerEnvironments
+            .AnyAsync(ce => ce.CustomerId == customerId && ce.EnvironmentId == environmentId, ct);
+
+        if (exists)
+        {
+            return false;
+        }
+
+        db.CustomerEnvironments.Add(new CustomerEnvironment { CustomerId = customerId, EnvironmentId = environmentId });
+        await db.SaveChangesAsync(ct);
+        return true;
+    }
+
+    /// <summary>
+    /// Removes a customer from an environment. Refuses while the customer still has apps
+    /// deployed there — dropping the membership would hide those apps from the tree.
+    /// </summary>
+    public async Task<bool> RemoveCustomerFromEnvironmentAsync(Guid customerId, Guid environmentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        bool hasApps = await db.AppEnvironments
+            .AnyAsync(ae => ae.EnvironmentId == environmentId && ae.App.CustomerId == customerId, ct);
+
+        if (hasApps)
+        {
+            return false;
+        }
+
+        await db.CustomerEnvironments
+            .Where(ce => ce.CustomerId == customerId && ce.EnvironmentId == environmentId)
+            .ExecuteDeleteAsync(ct);
+
+        return true;
     }
 
     public async Task<bool> DeleteCustomerAsync(Guid id, CancellationToken ct = default)
@@ -348,6 +422,19 @@ public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory, Va
         if (!exists)
         {
             db.AppEnvironments.Add(new AppEnvironment { AppId = appId, EnvironmentId = environmentId });
+
+            // Deploying an app into an environment implies its customer belongs there —
+            // otherwise the app would have nowhere to hang in the tenant tree.
+            Guid customerId = await db.Apps.Where(a => a.Id == appId).Select(a => a.CustomerId).FirstAsync(ct);
+
+            bool member = await db.CustomerEnvironments
+                .AnyAsync(ce => ce.CustomerId == customerId && ce.EnvironmentId == environmentId, ct);
+
+            if (!member)
+            {
+                db.CustomerEnvironments.Add(new CustomerEnvironment { CustomerId = customerId, EnvironmentId = environmentId });
+            }
+
             await db.SaveChangesAsync(ct);
         }
     }

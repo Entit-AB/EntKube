@@ -58,7 +58,7 @@ public class ComponentLifecycleServiceTests : IDisposable
         byte[] testRootKey = Convert.FromBase64String("dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
         VaultEncryptionService encryption = new(testRootKey);
         vaultService = new VaultService(dbFactory, encryption);
-        sut = new ComponentLifecycleService(dbFactory, vaultService, TestServices.BuildKeycloak(dbFactory, vaultService));
+        sut = TestServices.BuildLifecycle(dbFactory, vaultService);
     }
 
     public void Dispose()
@@ -487,9 +487,134 @@ public class ComponentLifecycleServiceTests : IDisposable
 
         HelmCommand command = await sut.GetInstallCommandAsync(component.Id);
 
-        // Assert — no secret injection means original YAML is preserved.
+        // Assert — no secret injection. The operator's own values survive untouched; the document
+        // is no longer byte-identical because catalog defaults this component never had are filled
+        // in on the way to Helm (see ComponentLifecycleService.FillMissingCatalogDefaults), but
+        // nothing the operator set is rewritten and no credential appears.
 
-        command.ValuesYaml.Should().Be("grafana:\n  enabled: true\n");
+        command.ValuesYaml.Should().Contain("grafana:\n  enabled: true");
+        command.ValuesYaml.Should().NotContain("adminPassword");
         command.HasValues.Should().BeTrue();
+    }
+
+    // ──────── ManifestUrl components track the catalog's URL ────────
+
+    [Fact]
+    public async Task GetInstallCommandAsync_ManifestUrl_AppliesTheCatalogUrlNotTheRegisteredOne()
+    {
+        // For a ManifestUrl component the URL *is* the version — these are release assets pinned
+        // to a tag. Applying the stored one means the component reinstalls whatever version it was
+        // registered at, for ever, while reporting success: "upgrade the CRDs" quietly reapplies
+        // the old CRDs. There is no version field to bump instead; Helm components have
+        // HelmChartVersion, this path has nothing.
+        ComponentRegistration registration = new()
+        {
+            Name = "gateway-api-crds",
+            ComponentType = "ManifestUrl",
+            Namespace = "gateway-system",
+            // The URL this component would have been registered with a few releases ago.
+            HelmRepoUrl = "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/experimental-install.yaml",
+            HelmChartName = "",
+            ReleaseName = "gateway-api-crds"
+        };
+
+        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, registration);
+
+        HelmCommand command = await sut.GetInstallCommandAsync(component.Id);
+
+        string catalogUrl = ComponentCatalog.Entries.Single(e => e.Key == "gateway-api-crds").HelmRepoUrl;
+
+        command.ManifestUrl.Should().Be(catalogUrl);
+        command.ManifestUrl.Should().NotContain("v1.2.1");
+    }
+
+    // ──────── UpdateConfigurationAsync — Helm identity fields ────────
+
+    private async Task<ClusterComponent> RegisterAsync(string name = "prom", string ns = "monitoring") =>
+        await sut.RegisterComponentAsync(clusterId, new ComponentRegistration
+        {
+            Name = name,
+            ComponentType = "HelmChart",
+            Namespace = ns,
+            HelmRepoUrl = "https://prometheus-community.github.io/helm-charts",
+            HelmChartName = "kube-prometheus-stack",
+            HelmChartVersion = "65.1.0",
+            ReleaseName = name,
+        });
+
+    [Fact]
+    public async Task UpdateConfigurationAsync_PersistsChartNameNamespaceAndReleaseName()
+    {
+        // These were editable in the UI but had no parameter here, so the edits were dropped
+        // on the floor and reappeared as the old values on the next load.
+        ClusterComponent component = await RegisterAsync();
+
+        await sut.UpdateConfigurationAsync(
+            component.Id, helmValues: null,
+            componentNamespace: "observability", releaseName: "prom-stack", chartName: "prometheus");
+
+        ClusterComponent reloaded = await db.ClusterComponents.AsNoTracking()
+            .FirstAsync(c => c.Id == component.Id);
+        reloaded.Namespace.Should().Be("observability");
+        reloaded.ReleaseName.Should().Be("prom-stack");
+        reloaded.HelmChartName.Should().Be("prometheus");
+    }
+
+    [Fact]
+    public async Task UpdateConfigurationAsync_RefusesToMoveAnInstalledRelease()
+    {
+        // Helm keys a release on (namespace, name). Repointing them would strand the running
+        // release rather than move it, so the change is refused while the component is installed.
+        ClusterComponent component = await RegisterAsync();
+        await sut.PrepareInstallAsync(component.Id);
+        await sut.MarkInstallResultAsync(component.Id, true);
+
+        Func<Task> moveNamespace = () => sut.UpdateConfigurationAsync(
+            component.Id, helmValues: null, componentNamespace: "elsewhere");
+        Func<Task> renameRelease = () => sut.UpdateConfigurationAsync(
+            component.Id, helmValues: null, releaseName: "renamed");
+
+        await moveNamespace.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Uninstall it first*");
+        await renameRelease.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Uninstall it first*");
+
+        ClusterComponent reloaded = await db.ClusterComponents.AsNoTracking()
+            .FirstAsync(c => c.Id == component.Id);
+        reloaded.Namespace.Should().Be("monitoring");
+        reloaded.ReleaseName.Should().Be("prom");
+    }
+
+    [Fact]
+    public async Task UpdateConfigurationAsync_AllowsEditingAnInstalledComponentThatKeepsItsIdentity()
+    {
+        // The config form posts every field on every save, so resending the unchanged namespace
+        // and release name must not trip the guard — only an actual move does.
+        ClusterComponent component = await RegisterAsync();
+        await sut.PrepareInstallAsync(component.Id);
+        await sut.MarkInstallResultAsync(component.Id, true);
+
+        await sut.UpdateConfigurationAsync(
+            component.Id, helmValues: "grafana:\n  enabled: false\n",
+            chartVersion: "66.0.0",
+            componentNamespace: "monitoring", releaseName: "prom", chartName: "kube-prometheus-stack");
+
+        ClusterComponent reloaded = await db.ClusterComponents.AsNoTracking()
+            .FirstAsync(c => c.Id == component.Id);
+        reloaded.HelmChartVersion.Should().Be("66.0.0");
+        reloaded.HelmValues.Should().Contain("enabled: false");
+    }
+
+    [Fact]
+    public async Task UpdateConfigurationAsync_TreatsOmittedFieldsAsNoChange()
+    {
+        ClusterComponent component = await RegisterAsync();
+
+        await sut.UpdateConfigurationAsync(component.Id, helmValues: "replicas: 2\n");
+
+        ClusterComponent reloaded = await db.ClusterComponents.AsNoTracking()
+            .FirstAsync(c => c.Id == component.Id);
+        reloaded.HelmValues.Should().Be("replicas: 2\n");
+        reloaded.Namespace.Should().Be("monitoring");
+        reloaded.ReleaseName.Should().Be("prom");
+        reloaded.HelmChartName.Should().Be("kube-prometheus-stack");
     }
 }

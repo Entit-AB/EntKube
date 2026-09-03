@@ -625,6 +625,11 @@ public class DeploymentImportService(
                     }
                 }
 
+                if (rule["timeouts"]?["request"]?.GetValue<string>() is string requestTimeout)
+                {
+                    parsed.RequestTimeoutSeconds = ParseGatewayDurationSeconds(requestTimeout);
+                }
+
                 if (rule["backendRefs"] is JsonArray backends && backends.Count > 0 && backends[0] is JsonObject backend)
                 {
                     parsed.ServiceName = backend["name"]?.GetValue<string>();
@@ -679,10 +684,46 @@ public class DeploymentImportService(
                     PathPrefix = r.PathPrefix,
                     ServiceName = r.ServiceName,
                     ServicePort = r.ServicePort,
-                    RewritePath = r.RewritePath
+                    RewritePath = r.RewritePath,
+                    RequestTimeoutSeconds = r.RequestTimeoutSeconds
                 }).ToList()
             });
         }
+    }
+
+    /// <summary>
+    /// Parses a Gateway API Duration ("0s", "30s", "1m", "1m30s", "500ms") into whole seconds.
+    /// Returns null for anything unrecognised so the imported route falls back to the platform
+    /// default rather than inventing a timeout. Sub-second values round up to 1s — EntKube's
+    /// per-route field has second granularity, and rounding down to 0 would mean "no timeout".
+    /// </summary>
+    public static int? ParseGatewayDurationSeconds(string duration)
+    {
+        System.Text.RegularExpressions.MatchCollection parts =
+            System.Text.RegularExpressions.Regex.Matches(duration.Trim(), @"(\d+)(ms|h|m|s)");
+        if (parts.Count == 0)
+        {
+            return null;
+        }
+
+        double seconds = 0;
+        foreach (System.Text.RegularExpressions.Match part in parts)
+        {
+            if (!int.TryParse(part.Groups[1].Value, out int value))
+            {
+                return null;
+            }
+
+            seconds += part.Groups[2].Value switch
+            {
+                "h" => value * 3600.0,
+                "m" => value * 60.0,
+                "s" => value,
+                _ => value / 1000.0
+            };
+        }
+
+        return seconds > 0 ? (int)Math.Ceiling(seconds) : 0;
     }
 
     private static DockerRegistryType InferRegistryType(string server)
@@ -787,6 +828,20 @@ public class DeploymentImportService(
                     EnvironmentId = request.EnvironmentId,
                     Namespace = preview.PrimaryNamespace
                 });
+
+                // Importing into an environment makes the app's customer a member of it,
+                // otherwise the imported app has no home in the tenant tree.
+                bool member = await db.CustomerEnvironments
+                    .AnyAsync(ce => ce.CustomerId == app.CustomerId && ce.EnvironmentId == request.EnvironmentId, ct);
+
+                if (!member)
+                {
+                    db.CustomerEnvironments.Add(new CustomerEnvironment
+                    {
+                        CustomerId = app.CustomerId,
+                        EnvironmentId = request.EnvironmentId
+                    });
+                }
             }
             else
             {
@@ -981,7 +1036,8 @@ public class DeploymentImportService(
                                 ServiceName = rule.ServiceName ?? "",
                                 ServicePort = rule.ServicePort,
                                 PathPrefix = rule.PathPrefix,
-                                RewritePath = rule.RewritePath
+                                RewritePath = rule.RewritePath,
+                                RequestTimeoutSeconds = rule.RequestTimeoutSeconds
                             }, ct);
                             result.RouteRuleCount++;
                         }

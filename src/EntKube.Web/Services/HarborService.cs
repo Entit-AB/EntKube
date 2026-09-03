@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -18,6 +19,15 @@ public class DetectedHarbor
     public Guid ComponentId => Component.Id;
     public string DisplayName => Component.Name;
     public string? ClusterDisplayName => Component.Cluster.Name;
+}
+
+/// <summary>Result of checking the stored Harbor admin credentials against the live instance.</summary>
+public class HarborCredentialCheck
+{
+    public bool Authenticated { get; set; }
+    public bool IsSysAdmin { get; set; }
+    public string? Username { get; set; }
+    public string Message { get; set; } = "";
 }
 
 public class HarborProjectInfo
@@ -49,6 +59,51 @@ public class HarborArtifactInfo
     public long SizeBytes { get; set; }
     public string? MediaType { get; set; }
     public DateTime PushedAt { get; set; }
+
+    /// <summary>Trivy scan summary, when Harbor has scanned this artifact. Null when never scanned.</summary>
+    public HarborScanOverview? ScanOverview { get; set; }
+}
+
+/// <summary>Trivy's summary for one artifact, as Harbor reports it on the artifact listing.</summary>
+public class HarborScanOverview
+{
+    /// <summary>"Success", "Running", "Error", "Queued" — anything but Success means counts are provisional.</summary>
+    public string ScanStatus { get; set; } = "";
+
+    /// <summary>Highest severity found ("Critical", "High", …), or "None".</summary>
+    public string Severity { get; set; } = "None";
+
+    public int Critical { get; set; }
+    public int High { get; set; }
+    public int Medium { get; set; }
+    public int Low { get; set; }
+    public int Unknown { get; set; }
+
+    /// <summary>Total findings, as reported by Harbor rather than summed locally.</summary>
+    public int Total { get; set; }
+
+    /// <summary>How many findings have a fix available — the actionable subset.</summary>
+    public int Fixable { get; set; }
+
+    public DateTime? CompletedAt { get; set; }
+
+    /// <summary>True when Harbor has a completed scan for this artifact.</summary>
+    public bool IsScanned => string.Equals(ScanStatus, "Success", StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>A single CVE found in an artifact.</summary>
+public class HarborVulnerability
+{
+    public string Id { get; set; } = "";
+    public string Package { get; set; } = "";
+    public string Version { get; set; } = "";
+    public string? FixVersion { get; set; }
+    public string Severity { get; set; } = "Unknown";
+    public string? Description { get; set; }
+    public List<string> Links { get; set; } = [];
+
+    /// <summary>True when upstream has published a fixed version — i.e. upgrading resolves it.</summary>
+    public bool IsFixable => !string.IsNullOrWhiteSpace(FixVersion);
 }
 
 public class HarborRobotInfo
@@ -450,13 +505,88 @@ public class HarborService(
         return BuildHarborClient(config.RegistryUrl, config.AdminUsername, password);
     }
 
-    private static async Task ThrowIfErrorAsync(HttpResponseMessage response, CancellationToken ct)
+    /// <summary>
+    /// Turns a failed Harbor response into an actionable exception.
+    ///
+    /// Harbor serves its public surface (system info, public projects) to anonymous callers and
+    /// answers 401 — never 403 — for everything that needs an account. So when the stored password
+    /// is wrong, the registry looks half-alive: the overview and project list render fine while
+    /// registries, replication, robot accounts and webhooks all fail. The 401 branch below names
+    /// that cause rather than leaving the caller with a bare status code.
+    /// </summary>
+    private static async Task ThrowIfErrorAsync(
+        HttpResponseMessage response, CancellationToken ct, HarborComponentConfig? config = null)
     {
-        if (!response.IsSuccessStatusCode)
+        if (response.IsSuccessStatusCode)
         {
-            string detail = await response.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException($"Harbor API error ({response.StatusCode}): {detail}");
+            return;
         }
+
+        string detail = await response.Content.ReadAsStringAsync(ct);
+        string user = string.IsNullOrWhiteSpace(config?.AdminUsername) ? "admin" : config!.AdminUsername;
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            throw new InvalidOperationException(
+                $"Harbor rejected the stored credentials for \"{user}\" (401 Unauthorized). The admin "
+                + "password held in the vault no longer matches Harbor's own admin password — the Helm "
+                + "chart only seeds harborAdminPassword when Harbor's database is first bootstrapped, so "
+                + "a password changed inside Harbor, or rotated here after the install, never reaches it. "
+                + "Re-enter Harbor's current admin password on the component's configuration form and use "
+                + "\"Test credentials\" to confirm.");
+        }
+
+        if (response.StatusCode == HttpStatusCode.Forbidden)
+        {
+            throw new InvalidOperationException(
+                $"Harbor authenticated \"{user}\" but refused this operation (403 Forbidden) — the account "
+                + $"is not a Harbor system administrator. {detail}");
+        }
+
+        throw new InvalidOperationException(
+            $"Harbor API error ({(int)response.StatusCode} {response.StatusCode}): {detail}");
+    }
+
+    /// <summary>
+    /// Checks the stored admin credentials against Harbor's /users/current endpoint, which requires a
+    /// real session. Reports both whether the password works and whether the account carries the
+    /// system-administrator flag that registries, replication and robot accounts require.
+    /// </summary>
+    public async Task<HarborCredentialCheck> VerifyCredentialsAsync(
+        Guid tenantId, HarborComponentConfig config, CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+        HttpResponseMessage response = await http.GetAsync("/api/v2.0/users/current", ct);
+
+        string user = string.IsNullOrWhiteSpace(config.AdminUsername) ? "admin" : config.AdminUsername;
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            return new HarborCredentialCheck
+            {
+                Authenticated = false,
+                Message = $"Harbor rejected the stored password for \"{user}\". Enter Harbor's current "
+                    + "admin password on the component's configuration form — the vault copy has drifted "
+                    + "from what Harbor actually holds."
+            };
+        }
+
+        await ThrowIfErrorAsync(response, ct, config);
+
+        JsonNode? json = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
+        string? username = json?["username"]?.GetValue<string>();
+        bool sysAdmin = json?["sysadmin_flag"]?.GetValue<bool>() ?? false;
+
+        return new HarborCredentialCheck
+        {
+            Authenticated = true,
+            IsSysAdmin = sysAdmin,
+            Username = username,
+            Message = sysAdmin
+                ? $"Authenticated as \"{username}\" (system administrator)."
+                : $"Authenticated as \"{username}\", but the account is not a Harbor system "
+                    + "administrator, so registries, replication and robot accounts stay unavailable."
+        };
     }
 
     // ── System Info ───────────────────────────────────────────────────────────
@@ -466,7 +596,7 @@ public class HarborService(
     {
         using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
         HttpResponseMessage response = await http.GetAsync("/api/v2.0/systeminfo", ct);
-        response.EnsureSuccessStatusCode();
+        await ThrowIfErrorAsync(response, ct, config);
 
         JsonNode? json = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
         return new HarborSystemInfo
@@ -485,7 +615,7 @@ public class HarborService(
     {
         using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
         HttpResponseMessage response = await http.GetAsync("/api/v2.0/projects?page_size=100", ct);
-        response.EnsureSuccessStatusCode();
+        await ThrowIfErrorAsync(response, ct, config);
 
         JsonArray? projects = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsArray();
         if (projects is null) return [];
@@ -546,7 +676,7 @@ public class HarborService(
         using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
         HttpResponseMessage response = await http.GetAsync(
             $"/api/v2.0/projects/{projectName}/repositories?page_size=100", ct);
-        response.EnsureSuccessStatusCode();
+        await ThrowIfErrorAsync(response, ct, config);
 
         JsonArray? repos = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsArray();
         if (repos is null) return [];
@@ -568,8 +698,9 @@ public class HarborService(
         using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
         string repoEncoded = Uri.EscapeDataString(repositoryName);
         HttpResponseMessage response = await http.GetAsync(
-            $"/api/v2.0/projects/{projectName}/repositories/{repoEncoded}/artifacts?with_tag=true&page_size=50", ct);
-        response.EnsureSuccessStatusCode();
+            $"/api/v2.0/projects/{projectName}/repositories/{repoEncoded}/artifacts"
+            + "?with_tag=true&with_scan_overview=true&page_size=50", ct);
+        await ThrowIfErrorAsync(response, ct, config);
 
         JsonArray? artifacts = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsArray();
         if (artifacts is null) return [];
@@ -587,9 +718,84 @@ public class HarborService(
                 Tags = tags,
                 SizeBytes = a?["size"]?.GetValue<long>() ?? 0,
                 MediaType = a?["media_type"]?.GetValue<string>(),
-                PushedAt = a?["push_time"]?.GetValue<DateTime>() ?? DateTime.MinValue
+                PushedAt = a?["push_time"]?.GetValue<DateTime>() ?? DateTime.MinValue,
+                ScanOverview = ParseScanOverview(a?["scan_overview"])
             };
         }).OrderByDescending(a => a.PushedAt).ToList();
+    }
+
+    /// <summary>
+    /// Reads Harbor's scan_overview. The object is keyed by the scanner's report media
+    /// type (e.g. "application/vnd.security.vulnerability.report; v=1.1"), which changes
+    /// between Harbor and Trivy versions — so take whichever single entry is present
+    /// rather than hard-coding a key that will silently stop matching after an upgrade.
+    /// </summary>
+    private static HarborScanOverview? ParseScanOverview(JsonNode? scanOverview)
+    {
+        JsonObject? root = scanOverview?.AsObject();
+        if (root is null || root.Count == 0) return null;
+
+        JsonNode? report = root.First().Value;
+        if (report is null) return null;
+
+        JsonNode? summary = report["summary"];
+        JsonNode? bySeverity = summary?["summary"];
+
+        return new HarborScanOverview
+        {
+            ScanStatus = report["scan_status"]?.GetValue<string>() ?? "",
+            Severity = report["severity"]?.GetValue<string>() ?? "None",
+            Total = summary?["total"]?.GetValue<int>() ?? 0,
+            Fixable = summary?["fixable"]?.GetValue<int>() ?? 0,
+            Critical = bySeverity?["Critical"]?.GetValue<int>() ?? 0,
+            High = bySeverity?["High"]?.GetValue<int>() ?? 0,
+            Medium = bySeverity?["Medium"]?.GetValue<int>() ?? 0,
+            Low = bySeverity?["Low"]?.GetValue<int>() ?? 0,
+            Unknown = bySeverity?["Unknown"]?.GetValue<int>() ?? 0,
+            CompletedAt = report["end_time"]?.GetValue<DateTime?>(),
+        };
+    }
+
+    /// <summary>
+    /// Fetches the full CVE list for one artifact. <paramref name="reference"/> is a digest
+    /// or a tag. Returns an empty list when the artifact has never been scanned — an
+    /// unscanned image is not a clean one, so callers must check
+    /// <see cref="HarborScanOverview.IsScanned"/> rather than reading empty as safe.
+    /// </summary>
+    public async Task<List<HarborVulnerability>> GetVulnerabilitiesAsync(
+        Guid tenantId, HarborComponentConfig config,
+        string projectName, string repositoryName, string reference, CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+        string repoEncoded = Uri.EscapeDataString(repositoryName);
+
+        HttpResponseMessage response = await http.GetAsync(
+            $"/api/v2.0/projects/{projectName}/repositories/{repoEncoded}"
+            + $"/artifacts/{reference}/additions/vulnerabilities", ct);
+
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return [];
+        }
+
+        await ThrowIfErrorAsync(response, ct, config);
+
+        JsonObject? root = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsObject();
+        if (root is null || root.Count == 0) return [];
+
+        JsonArray? vulnerabilities = root.First().Value?["vulnerabilities"]?.AsArray();
+        if (vulnerabilities is null) return [];
+
+        return [.. vulnerabilities.Select(v => new HarborVulnerability
+        {
+            Id = v?["id"]?.GetValue<string>() ?? "",
+            Package = v?["package"]?.GetValue<string>() ?? "",
+            Version = v?["version"]?.GetValue<string>() ?? "",
+            FixVersion = v?["fix_version"]?.GetValue<string>(),
+            Severity = v?["severity"]?.GetValue<string>() ?? "Unknown",
+            Description = v?["description"]?.GetValue<string>(),
+            Links = v?["links"]?.AsArray().Select(l => l?.GetValue<string>() ?? "").Where(l => l != "").ToList() ?? [],
+        })];
     }
 
     // ── Robot Accounts ────────────────────────────────────────────────────────
@@ -599,7 +805,7 @@ public class HarborService(
     {
         using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
         HttpResponseMessage response = await http.GetAsync("/api/v2.0/robots?page_size=100", ct);
-        response.EnsureSuccessStatusCode();
+        await ThrowIfErrorAsync(response, ct, config);
 
         JsonArray? robots = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsArray();
         if (robots is null) return [];
@@ -725,7 +931,7 @@ public class HarborService(
     {
         using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
         HttpResponseMessage response = await http.GetAsync("/api/v2.0/registries?page_size=100", ct);
-        response.EnsureSuccessStatusCode();
+        await ThrowIfErrorAsync(response, ct, config);
 
         JsonArray? arr = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsArray();
         if (arr is null) return [];
@@ -812,7 +1018,7 @@ public class HarborService(
     {
         using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
         HttpResponseMessage response = await http.GetAsync("/api/v2.0/replication/policies?page_size=100", ct);
-        response.EnsureSuccessStatusCode();
+        await ThrowIfErrorAsync(response, ct, config);
 
         JsonArray? arr = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsArray();
         if (arr is null) return [];
@@ -909,7 +1115,7 @@ public class HarborService(
         using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
         HttpResponseMessage response = await http.GetAsync(
             $"/api/v2.0/projects/{projectName}/webhook/policies", ct);
-        response.EnsureSuccessStatusCode();
+        await ThrowIfErrorAsync(response, ct, config);
 
         JsonArray? arr = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsArray();
         if (arr is null) return [];

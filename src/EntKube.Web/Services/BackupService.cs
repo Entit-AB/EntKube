@@ -124,6 +124,7 @@ public class BackupService(
             GroupMemberships = await db.GroupMemberships.AsNoTracking().ToListAsync(),
             Environments = await db.Environments.AsNoTracking().ToListAsync(),
             Customers = await db.Customers.AsNoTracking().ToListAsync(),
+            CustomerEnvironments = await db.CustomerEnvironments.AsNoTracking().ToListAsync(),
             CustomerAccesses = await db.CustomerAccesses.AsNoTracking().ToListAsync(),
             Apps = await db.Apps.AsNoTracking().ToListAsync(),
             AppEnvironments = await db.AppEnvironments.AsNoTracking().ToListAsync(),
@@ -307,6 +308,7 @@ public class BackupService(
             await InsertEntities(db, db.GroupMemberships, bundle.GroupMemberships);
             await InsertEntities(db, db.Environments, bundle.Environments);
             await InsertEntities(db, db.Customers, bundle.Customers);
+            await InsertEntities(db, db.CustomerEnvironments, bundle.CustomerEnvironments);
             await InsertEntities(db, db.CustomerAccesses, bundle.CustomerAccesses);
 
             // Config that depends only on Tenant / Environment / Customer (no App or Cluster FKs).

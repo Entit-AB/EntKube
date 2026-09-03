@@ -1,0 +1,29 @@
+EntKube telemetry plane installed as {{ include "entkube-telemetry.fullname" . }}.
+
+Point the cluster's OpenTelemetry Collector at the indexer:
+
+  exporters:
+    otlphttp/entkube:
+      endpoint: http://{{ include "entkube-telemetry.indexerName" . }}.{{ .Release.Namespace }}:{{ .Values.service.port }}/ingest/otlp
+      encoding: json
+      headers:
+        Authorization: "Bearer <node.ingestToken>"
+
+The management plane reads telemetry from
+  {{ if .Values.querier.enabled -}}
+  http://{{ include "entkube-telemetry.querierName" . }}.{{ .Release.Namespace }}:{{ .Values.service.port }}
+  {{- else -}}
+  http://{{ include "entkube-telemetry.indexerName" . }}.{{ .Release.Namespace }}:{{ .Values.service.port }}
+  {{- end }}
+using node.queryToken.
+
+{{ if not .Values.objectStorage.bucket }}
+WARNING: no object storage is configured, so sealed segments are written to the indexer's own volume.
+They will be lost if that volume is lost, and the querier cannot read them. Set objectStorage.bucket
+before you rely on this for anything you intend to keep.
+{{ end }}
+{{- if and .Values.querier.enabled (gt (.Values.telemetry.warmMaxBytes | int64) 0) }}
+Check that telemetry.warmMaxBytes ({{ .Values.telemetry.warmMaxBytes }}) fits inside
+querier.persistence.size ({{ .Values.querier.persistence.size }}) — the cache is bounded by the former,
+not the latter, so a volume smaller than the ceiling fills before eviction starts.
+{{- end }}

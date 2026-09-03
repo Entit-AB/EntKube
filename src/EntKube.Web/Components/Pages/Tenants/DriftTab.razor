@@ -1,0 +1,598 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Adoption
+@using EntKube.Web.Services.Upgrades
+@using Microsoft.AspNetCore.Components.Authorization
+@inject DriftDetectionService DriftService
+@inject DriftScanCache DriftCache
+@inject KubernetesOperationsService K8sOps
+@inject DriftAdoptionService Adoption
+@inject AuthenticationStateProvider AuthState
+
+@* ═══════════════════════════════════════════════════════════════════
+   Configuration drift — managed manifests vs live cluster state.
+
+   Shows the last background sweep by default; a rescan is explicit because
+   each one costs a server-side dry-run per managed deployment.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3 mt-4">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span><i class="bi bi-shuffle me-2 text-primary"></i><strong>Configuration drift</strong></span>
+        <div class="d-flex align-items-center gap-2">
+            @if (report is not null)
+            {
+                <span class="text-muted small">Swept @report.GeneratedAt.ToString("yyyy-MM-dd HH:mm") UTC</span>
+            }
+            <button class="btn btn-sm btn-outline-secondary" @onclick="RescanAsync" disabled="@scanning">
+                @if (scanning)
+                {
+                    <span class="spinner-border spinner-border-sm me-1"></span>
+                    <span>Scanning…</span>
+                }
+                else
+                {
+                    <i class="bi bi-arrow-clockwise me-1"></i>
+                    <span>Rescan now</span>
+                }
+            </button>
+        </div>
+    </div>
+    <div class="card-body pt-3">
+        <p class="text-muted small mb-3">
+            Compares each managed deployment's manifests against live cluster state with a server-side
+            dry-run — the same comparison shown before an apply. Drift means someone changed the cluster
+            outside EntKube, and the next sync will overwrite it. Helm-based deployments are excluded:
+            Helm owns their reconciliation.
+        </p>
+        <p class="text-muted small mb-3">
+            <strong>Overwrite</strong> re-applies the stored manifests, discarding whatever was changed
+            out of band — you will see the diff and confirm before anything is written. If the change was
+            deliberate, fold it into the deployment's manifests instead; overwriting it here means it will
+            be lost again on the next sync.
+        </p>
+
+        @if (scanError is not null)
+        {
+            <div class="alert alert-danger">Scan failed: @scanError</div>
+        }
+
+        @if (actionMessage is not null)
+        {
+            <div class="alert py-2 small @(actionOk ? "alert-success" : "alert-danger")">@actionMessage</div>
+        }
+
+        @if (report is null)
+        {
+            <div class="alert alert-light border mb-0">
+                <i class="bi bi-info-circle me-1"></i>
+                No sweep has completed yet. The background scan runs every two hours, or you can
+                <a href="#" @onclick:preventDefault @onclick="RescanAsync">scan now</a>.
+            </div>
+        }
+        else if (report.Results.Count == 0)
+        {
+            <p class="text-muted small mb-0">
+                No managed manifest deployments in this tenant. Drift tracking covers Manual, YAML and
+                Git-YAML deployments that EntKube manages.
+            </p>
+        }
+        else
+        {
+            <div class="row g-2 mb-3">
+                @SummaryCard("Drifted", report.DriftedCount, "text-warning", "bi-shuffle")
+                @SummaryCard("In sync", report.InSyncCount, "text-success", "bi-check2-circle")
+                @SummaryCard("Unknown", report.UnknownCount, "text-muted", "bi-question-circle")
+                @SummaryCard("Removed APIs", report.AllDeprecatedApis.Count(), "text-danger", "bi-exclamation-octagon")
+            </div>
+
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead>
+                        <tr class="text-muted small">
+                            <th style="width:2rem"></th>
+                            <th>Deployment</th>
+                            <th>Scope</th>
+                            <th>Namespace</th>
+                            <th>State</th>
+                            <th>Changes</th>
+                            <th class="text-end">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (DriftResult r in report.Results)
+                        {
+                            <tr>
+                                <td>
+                                    @if (r.State == DriftState.Drifted && r.DiffText is not null)
+                                    {
+                                        <button class="btn btn-sm btn-link p-0" @onclick="() => Toggle(r.DeploymentId)"
+                                                title="Show the diff">
+                                            <i class="bi @(expanded.Contains(r.DeploymentId) ? "bi-chevron-down" : "bi-chevron-right")"></i>
+                                        </button>
+                                    }
+                                </td>
+                                <td>
+                                    <div class="fw-medium">@r.AppName / @r.DeploymentName</div>
+                                    @if (r.DeprecatedApis.Count > 0)
+                                    {
+                                        <span class="badge bg-danger-subtle text-danger border border-danger-subtle mt-1"
+                                              title="@string.Join(", ", r.DeprecatedApis.Select(u => $"{u.Kind} {u.ApiVersion} → {u.ReplacedBy} (removed in {u.RemovedInMinor})"))">
+                                            @r.DeprecatedApis.Count removed API@(r.DeprecatedApis.Count == 1 ? "" : "s")
+                                        </span>
+                                    }
+                                </td>
+                                <td class="small text-muted">
+                                    @(r.EnvironmentName ?? "—") · @r.ClusterName
+                                    @if (r.CustomerName is not null)
+                                    {
+                                        <div>@r.CustomerName</div>
+                                    }
+                                </td>
+                                <td class="small"><code>@r.Namespace</code></td>
+                                <td>
+                                    <span class="badge @StateClass(r.State)">@StateText(r.State)</span>
+                                    @if (r.Note is not null)
+                                    {
+                                        <i class="bi bi-info-circle text-muted ms-1 small" title="@r.Note"></i>
+                                    }
+                                </td>
+                                <td class="small text-muted">
+                                    @(r.State == DriftState.Drifted ? $"{r.ChangedLines} line{(r.ChangedLines == 1 ? "" : "s")}" : "—")
+                                </td>
+                                <td class="text-end" style="white-space: nowrap;">
+                                    <button class="btn btn-sm btn-outline-secondary py-0 me-1"
+                                            title="Re-run the comparison for this deployment only"
+                                            disabled="@(busyDeploymentId is not null)"
+                                            @onclick="() => RecheckAsync(r)">
+                                        @if (busyDeploymentId == r.DeploymentId && busyAction == "recheck")
+                                        {
+                                            <span class="spinner-border spinner-border-sm"></span>
+                                        }
+                                        else
+                                        {
+                                            <i class="bi bi-arrow-repeat"></i>
+                                        }
+                                    </button>
+                                    @if (r.State == DriftState.Drifted)
+                                    {
+                                        <button class="btn btn-sm btn-warning py-0"
+                                                title="Re-apply the stored manifests, overwriting the out-of-band changes. You will see the diff and confirm before anything is written."
+                                                disabled="@(busyDeploymentId is not null)"
+                                                @onclick="() => ConvergeAsync(r)">
+                                            @if (busyDeploymentId == r.DeploymentId && busyAction == "converge")
+                                            {
+                                                <span class="spinner-border spinner-border-sm me-1"></span>
+                                            }
+                                            Overwrite
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-primary py-0 ms-1"
+                                                title="Keep the cluster as it is and pull the change back into the stored manifests, so the next sync stops reverting it. You review each resource first."
+                                                disabled="@(busyDeploymentId is not null)"
+                                                @onclick="() => OpenAdoptionAsync(r)">
+                                            @if (busyDeploymentId == r.DeploymentId && busyAction == "adopt")
+                                            {
+                                                <span class="spinner-border spinner-border-sm me-1"></span>
+                                            }
+                                            Adopt
+                                        </button>
+                                    }
+                                </td>
+                            </tr>
+
+                            @if (expanded.Contains(r.DeploymentId) && r.DiffText is not null)
+                            {
+                                <tr>
+                                    <td colspan="7" class="bg-light">
+                                        <pre class="small mb-0" style="max-height:24rem;overflow:auto"><code>@r.DiffText</code></pre>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+</div>
+
+@if (proposal is not null && adoptionRow is not null)
+{
+    <div class="card shadow-sm mb-3 border-primary">
+        <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+            <span>
+                <i class="bi bi-box-arrow-in-down me-2 text-primary"></i>
+                <strong>Adopt live state — @adoptionRow.AppName / @adoptionRow.DeploymentName</strong>
+            </span>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="CloseAdoption">Close</button>
+        </div>
+        <div class="card-body pt-3">
+            <p class="text-muted small mb-3">
+                This changes the <strong>stored manifests</strong> to match what is running. The cluster is
+                not touched. Use it when the out-of-band change was the right one and should stop being
+                reverted on every sync.
+            </p>
+
+            @if (proposal.Error is not null)
+            {
+                <div class="alert alert-danger mb-0">@proposal.Error</div>
+            }
+            else
+            {
+                @if (proposal.ChangedCount == 0)
+                {
+                    <div class="alert alert-light border">
+                        Nothing to adopt — every stored manifest already matches the cluster. The drift may
+                        be in a resource EntKube does not manage, or it may have been converged already.
+                    </div>
+                }
+
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead>
+                            <tr class="text-muted small">
+                                <th style="width:2.5rem"></th>
+                                <th>Resource</th>
+                                <th>Status</th>
+                                <th>Notes</th>
+                                <th style="width:2.5rem"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (AdoptionEntry entry in proposal.Entries)
+                            {
+                                <tr>
+                                    <td>
+                                        @if (entry.IsSelectable)
+                                        {
+                                            <input class="form-check-input" type="checkbox"
+                                                   checked="@selectedManifests.Contains(entry.ManifestId)"
+                                                   @onchange="e => ToggleEntry(entry, (bool)e.Value!)" />
+                                        }
+                                    </td>
+                                    <td class="small"><code>@entry.Kind/@entry.Name</code></td>
+                                    <td><span class="badge @AdoptionClass(entry.Status)">@AdoptionText(entry.Status)</span></td>
+                                    <td class="small text-muted">
+                                        @foreach (string note in entry.Notes)
+                                        {
+                                            <div>@note</div>
+                                        }
+                                    </td>
+                                    <td>
+                                        @if (entry.ProposedYaml is not null)
+                                        {
+                                            <button class="btn btn-sm btn-link p-0"
+                                                    title="Show what would be stored"
+                                                    @onclick="() => ToggleProposed(entry.ManifestId)">
+                                                <i class="bi @(expandedProposals.Contains(entry.ManifestId) ? "bi-chevron-down" : "bi-chevron-right")"></i>
+                                            </button>
+                                        }
+                                    </td>
+                                </tr>
+
+                                @if (expandedProposals.Contains(entry.ManifestId) && entry.ProposedYaml is not null)
+                                {
+                                    <tr>
+                                        <td colspan="5" class="bg-light">
+                                            <div class="row g-2">
+                                                <div class="col-md-6">
+                                                    <div class="small text-muted mb-1">Stored now</div>
+                                                    <pre class="small mb-0" style="max-height:20rem;overflow:auto"><code>@entry.CurrentYaml</code></pre>
+                                                </div>
+                                                <div class="col-md-6">
+                                                    <div class="small text-muted mb-1">Would be stored</div>
+                                                    <pre class="small mb-0" style="max-height:20rem;overflow:auto"><code>@entry.ProposedYaml</code></pre>
+                                                </div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                            }
+                        </tbody>
+                    </table>
+                </div>
+
+                @if (proposal.RefusedCount > 0)
+                {
+                    <div class="alert alert-warning py-2 small mt-3 mb-0">
+                        <i class="bi bi-exclamation-triangle me-1"></i>
+                        @proposal.RefusedCount resource(s) cannot be adopted and are left untouched — their
+                        stored manifests stay exactly as they are, so nothing is lost and nothing is pruned.
+                    </div>
+                }
+
+                <div class="d-flex align-items-center gap-2 mt-3">
+                    <button class="btn btn-sm btn-primary"
+                            disabled="@(selectedManifests.Count == 0 || adopting)"
+                            @onclick="ConfirmAdoptionAsync">
+                        @if (adopting)
+                        {
+                            <span class="spinner-border spinner-border-sm me-1"></span>
+                        }
+                        Replace @selectedManifests.Count manifest(s)
+                    </button>
+                    <span class="text-muted small">
+                        There is no manifest history to undo this with — check the comparison first.
+                    </span>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private DriftReport? report;
+    private bool scanning;
+    private string? scanError;
+    private readonly HashSet<Guid> expanded = [];
+
+    protected override void OnInitialized() => report = DriftCache.Get(TenantId);
+
+    private void Toggle(Guid deploymentId)
+    {
+        if (!expanded.Add(deploymentId))
+        {
+            expanded.Remove(deploymentId);
+        }
+    }
+
+    private AdoptionProposal? proposal;
+    private DriftResult? adoptionRow;
+    private readonly HashSet<Guid> selectedManifests = [];
+    private readonly HashSet<Guid> expandedProposals = [];
+    private bool adopting;
+
+    /// <summary>
+    /// Builds the proposal and shows it. Nothing is written here — this reads live state
+    /// and compares, so an operator can decide with the two versions side by side.
+    /// </summary>
+    private async Task OpenAdoptionAsync(DriftResult row)
+    {
+        busyDeploymentId = row.DeploymentId;
+        busyAction = "adopt";
+        actionMessage = null;
+        selectedManifests.Clear();
+        expandedProposals.Clear();
+
+        try
+        {
+            proposal = await Adoption.BuildProposalAsync(TenantId, row.DeploymentId);
+            adoptionRow = row;
+
+            // Changed entries start selected — they are the reason the operator opened this.
+            // Everything else is not selectable at all, so nothing can be adopted by accident.
+            foreach (AdoptionEntry entry in proposal.Entries.Where(e => e.IsSelectable))
+            {
+                selectedManifests.Add(entry.ManifestId);
+            }
+        }
+        catch (Exception ex)
+        {
+            actionOk = false;
+            actionMessage = ex.Message;
+        }
+        finally
+        {
+            busyDeploymentId = null;
+            busyAction = null;
+        }
+    }
+
+    private void CloseAdoption()
+    {
+        proposal = null;
+        adoptionRow = null;
+        selectedManifests.Clear();
+        expandedProposals.Clear();
+    }
+
+    private void ToggleEntry(AdoptionEntry entry, bool selected)
+    {
+        if (selected) selectedManifests.Add(entry.ManifestId);
+        else selectedManifests.Remove(entry.ManifestId);
+    }
+
+    private void ToggleProposed(Guid manifestId)
+    {
+        if (!expandedProposals.Add(manifestId)) expandedProposals.Remove(manifestId);
+    }
+
+    private async Task ConfirmAdoptionAsync()
+    {
+        if (proposal is null || adoptionRow is null) return;
+
+        adopting = true;
+        try
+        {
+            AuthenticationState auth = await AuthState.GetAuthenticationStateAsync();
+
+            (int adopted, string message) = await Adoption.AdoptAsync(
+                TenantId, proposal.DeploymentId, [.. selectedManifests], auth.User.Identity?.Name);
+
+            actionOk = adopted > 0;
+            actionMessage = message;
+
+            if (adopted > 0)
+            {
+                // The manifests now match the cluster, so the row should say so. Re-checking
+                // proves it rather than assuming it — if something else drifted meanwhile,
+                // the operator sees that instead of a false all-clear.
+                await RefreshRowAsync(proposal.DeploymentId);
+                CloseAdoption();
+            }
+        }
+        catch (Exception ex)
+        {
+            actionOk = false;
+            actionMessage = ex.Message;
+        }
+        finally
+        {
+            adopting = false;
+        }
+    }
+
+    private static string AdoptionText(AdoptionStatus status) => status switch
+    {
+        AdoptionStatus.Changed => "Differs",
+        AdoptionStatus.Refused => "Cannot adopt",
+        AdoptionStatus.MissingFromCluster => "Not on cluster",
+        AdoptionStatus.Unreadable => "Unreadable",
+        _ => "Matches",
+    };
+
+    private static string AdoptionClass(AdoptionStatus status) => status switch
+    {
+        AdoptionStatus.Changed => "bg-warning text-dark",
+        AdoptionStatus.Refused => "bg-danger",
+        AdoptionStatus.MissingFromCluster => "bg-secondary",
+        AdoptionStatus.Unreadable => "bg-secondary",
+        _ => "bg-success",
+    };
+
+    /// <summary>Deployment currently being acted on, so a second click cannot race the first.</summary>
+    private Guid? busyDeploymentId;
+    private string? busyAction;
+    private string? actionMessage;
+    private bool actionOk;
+
+    /// <summary>
+    /// Re-applies the stored manifests, overwriting the out-of-band change.
+    ///
+    /// Goes through the ordinary apply path rather than a drift-specific one, so the
+    /// cluster change gate shows the operator a server-side dry-run diff and waits for
+    /// acknowledgment. That matters more here than anywhere else in the product: this is
+    /// the one button whose entire purpose is to discard somebody else's change.
+    /// </summary>
+    private async Task ConvergeAsync(DriftResult row)
+    {
+        busyDeploymentId = row.DeploymentId;
+        busyAction = "converge";
+        actionMessage = null;
+
+        try
+        {
+            AuthenticationState auth = await AuthState.GetAuthenticationStateAsync();
+
+            KubernetesOperationResult<string> result = await K8sOps.ApplyYamlDeploymentAsync(
+                row.DeploymentId, performedBy: auth.User.Identity?.Name);
+
+            actionOk = result.IsSuccess;
+            actionMessage = result.IsSuccess
+                ? $"Re-applied “{row.AppName} / {row.DeploymentName}”. Re-checking…"
+                : $"Could not re-apply “{row.DeploymentName}”: {result.Error}";
+
+            // Only re-check when the apply succeeded. Re-checking after a failure would
+            // report the same drift again and read as if the button had done nothing.
+            if (result.IsSuccess)
+            {
+                await RefreshRowAsync(row.DeploymentId);
+                actionMessage = $"Re-applied “{row.AppName} / {row.DeploymentName}”.";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The operator cancelled at the acknowledgment dialog. That is a decision, not
+            // a failure, so say so plainly rather than showing an error.
+            actionOk = true;
+            actionMessage = "Cancelled — nothing was changed on the cluster.";
+        }
+        catch (Exception ex)
+        {
+            actionOk = false;
+            actionMessage = ex.Message;
+        }
+        finally
+        {
+            busyDeploymentId = null;
+            busyAction = null;
+        }
+    }
+
+    /// <summary>Re-runs the comparison for one deployment, without re-walking the fleet.</summary>
+    private async Task RecheckAsync(DriftResult row)
+    {
+        busyDeploymentId = row.DeploymentId;
+        busyAction = "recheck";
+        actionMessage = null;
+
+        try
+        {
+            await RefreshRowAsync(row.DeploymentId);
+        }
+        catch (Exception ex)
+        {
+            actionOk = false;
+            actionMessage = ex.Message;
+        }
+        finally
+        {
+            busyDeploymentId = null;
+            busyAction = null;
+        }
+    }
+
+    /// <summary>
+    /// Re-measures one deployment and updates just its row, in the view and in the shared
+    /// cache the advisor reads — so a converged deployment stops being reported as drifted
+    /// straight away rather than at the next two-hourly sweep.
+    /// </summary>
+    private async Task RefreshRowAsync(Guid deploymentId)
+    {
+        DriftResult? updated = await DriftService.GetDeploymentDriftAsync(
+            TenantId, deploymentId, DateTime.UtcNow);
+
+        if (updated is null)
+        {
+            return;
+        }
+
+        DriftCache.Replace(TenantId, updated);
+        report = DriftCache.Get(TenantId);
+    }
+
+    private async Task RescanAsync()
+    {
+        scanning = true;
+        scanError = null;
+        try
+        {
+            report = await DriftService.GetTenantDriftAsync(TenantId, DateTime.UtcNow);
+            // Publish the fresh sweep so the advisor feed reflects it too, rather than
+            // continuing to report findings from a sweep the operator just superseded.
+            DriftCache.Set(TenantId, report);
+        }
+        catch (Exception ex)
+        {
+            scanError = ex.Message;
+        }
+        finally
+        {
+            scanning = false;
+        }
+    }
+
+    private static RenderFragment SummaryCard(string label, int value, string textClass, string icon) =>
+        @<div class="col-6 col-md-3">
+            <div class="border rounded p-2 h-100">
+                <div class="text-muted small"><i class="bi @icon me-1"></i>@label</div>
+                <div class="fs-4 fw-semibold @textClass">@value</div>
+            </div>
+        </div>;
+
+    private static string StateText(DriftState state) => state switch
+    {
+        DriftState.Drifted => "Drifted",
+        DriftState.InSync => "In sync",
+        _ => "Unknown",
+    };
+
+    private static string StateClass(DriftState state) => state switch
+    {
+        DriftState.Drifted => "bg-warning text-dark",
+        DriftState.InSync => "bg-success",
+        _ => "bg-secondary",
+    };
+}

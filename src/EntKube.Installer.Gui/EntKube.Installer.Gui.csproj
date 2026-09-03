@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>EntKube.Installer.Gui</RootNamespace>
+    <AssemblyName>entkube-installer</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- WinExe suppresses the console window on Windows. On macOS and Linux it behaves exactly like
+         Exe, so this is the right setting for all three rather than a Windows-specific one. -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+
+    <!-- Compiled bindings by default: a mistyped binding path becomes a build error instead of a
+         control that silently renders nothing. That matters more than usual here, because an
+         installer is not something you notice is subtly wrong until someone is standing in front of
+         a server with it. -->
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.1" />
+    <!-- Avalonia.Diagnostics is deliberately absent: it has not been published for the 12.x line
+         (latest is 11.3.20) and it is a development inspector, not something the installer needs. -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../EntKube.Installer.Core/EntKube.Installer.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -73,6 +73,15 @@ public class MongoService(
 
         StorageLink? storageLink = null;
 
+        // A schedule without a bucket produces no CronJob at all, so the cluster would come up
+        // advertising a backup schedule that can never run. Refuse it at the source instead.
+        if (!string.IsNullOrWhiteSpace(backupSchedule) && !storageLinkId.HasValue)
+        {
+            throw new InvalidOperationException(
+                "Assign backup storage (an S3 bucket) to schedule backups — " +
+                "the scheduled job has nowhere to upload the dump.");
+        }
+
         if (storageLinkId.HasValue)
         {
             storageLink = await db.StorageLinks
@@ -246,7 +255,17 @@ public class MongoService(
             .FirstOrDefaultAsync(c => c.Id == mongoClusterId && c.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("MongoDB cluster not found.");
 
-        mongo.BackupSchedule = string.IsNullOrWhiteSpace(schedule) ? null : schedule.Trim();
+        string? normalizedSchedule = string.IsNullOrWhiteSpace(schedule) ? null : schedule.Trim();
+
+        // The scheduled backup is a CronJob that dumps and uploads to S3. With no bucket there
+        // is nowhere to upload, so no CronJob is created — storing the schedule anyway left the
+        // UI showing a schedule that could never fire, which reads as "backups are broken".
+        if (normalizedSchedule is not null && mongo.StorageLink is null)
+            throw new InvalidOperationException(
+                "Assign backup storage (an S3 bucket) to this cluster before scheduling backups — " +
+                "the scheduled job has nowhere to upload the dump.");
+
+        mongo.BackupSchedule = normalizedSchedule;
         mongo.RetentionDays = retentionDays;
         mongo.MaxBackups = maxBackups > 0 ? maxBackups : 20;
         await db.SaveChangesAsync(ct);
@@ -255,6 +274,13 @@ public class MongoService(
 
         if (!string.IsNullOrWhiteSpace(mongo.BackupSchedule) && mongo.StorageLink is not null && s3SecretName is not null)
         {
+            // The bucket may have been assigned after the cluster was created, in which case the
+            // credentials Secret the CronJob mounts does not exist yet and every run would fail
+            // to start its upload container.
+            await EnsureStorageSecretsInK8sAsync(
+                tenantId, mongo.StorageLink, s3SecretName, mongo.Namespace,
+                mongo.KubernetesCluster.Kubeconfig!, ct);
+
             string cronManifest = BuildScheduledBackupCronJobManifest(mongo, mongo.StorageLink, s3SecretName);
             await k8sFactory.ApplyManifestAsync(cronManifest, mongo.KubernetesCluster.Kubeconfig!, ct);
         }
@@ -271,6 +297,101 @@ public class MongoService(
                 // CronJob may not exist yet — ignore.
             }
         }
+    }
+
+    /// <summary>
+    /// Reads the scheduled-backup CronJob as it exists on the cluster, so a configured schedule
+    /// can be checked against reality instead of assumed. A stored schedule only means EntKube
+    /// intends one — the CronJob is what actually fires.
+    /// </summary>
+    public async Task<MongoScheduledBackupStatus> GetScheduledBackupStatusAsync(
+        Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        MongoCluster mongo = await db.MongoClusters
+            .Include(c => c.KubernetesCluster)
+            .Include(c => c.StorageLink)
+            .FirstOrDefaultAsync(c => c.Id == mongoClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("MongoDB cluster not found.");
+
+        if (string.IsNullOrWhiteSpace(mongo.BackupSchedule))
+            return new MongoScheduledBackupStatus { Problem = "No backup schedule configured." };
+
+        if (mongo.StorageLink is null)
+            return new MongoScheduledBackupStatus
+            {
+                Problem = "No backup storage assigned, so no CronJob was created — a scheduled dump " +
+                          "has nowhere to upload. Assign an S3 bucket, then save the schedule again."
+            };
+
+        if (string.IsNullOrWhiteSpace(mongo.KubernetesCluster.Kubeconfig))
+            return new MongoScheduledBackupStatus { Problem = "Cluster has no kubeconfig configured." };
+
+        string cronJobName = $"{mongo.Name}-scheduled-backup";
+
+        try
+        {
+            string json = await k8sFactory.GetJsonAsync(
+                "cronjob", mongo.Namespace, mongo.KubernetesCluster.Kubeconfig, ct: ct);
+
+            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("items", out System.Text.Json.JsonElement items))
+                return new MongoScheduledBackupStatus { Problem = "Could not read CronJobs from the namespace." };
+
+            foreach (System.Text.Json.JsonElement item in items.EnumerateArray())
+            {
+                string? name = item.GetProperty("metadata").TryGetProperty("name", out System.Text.Json.JsonElement n)
+                    ? n.GetString() : null;
+                if (name != cronJobName) continue;
+
+                System.Text.Json.JsonElement spec = item.GetProperty("spec");
+                bool suspended = spec.TryGetProperty("suspend", out System.Text.Json.JsonElement susp)
+                                 && susp.ValueKind == System.Text.Json.JsonValueKind.True;
+
+                DateTime? lastSchedule = ReadTime(item, "status", "lastScheduleTime");
+                DateTime? lastSuccess  = ReadTime(item, "status", "lastSuccessfulTime");
+
+                int active = 0;
+                if (item.TryGetProperty("status", out System.Text.Json.JsonElement status)
+                    && status.TryGetProperty("active", out System.Text.Json.JsonElement act)
+                    && act.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    active = act.GetArrayLength();
+
+                return new MongoScheduledBackupStatus
+                {
+                    Exists = true,
+                    AppliedSchedule = spec.TryGetProperty("schedule", out System.Text.Json.JsonElement sch) ? sch.GetString() : null,
+                    Suspended = suspended,
+                    LastScheduleTime = lastSchedule,
+                    LastSuccessfulTime = lastSuccess,
+                    ActiveJobs = active,
+                    Problem = suspended
+                        ? "The CronJob is suspended, so it will not fire until it is resumed."
+                        : lastSchedule is null
+                            ? "The CronJob exists but has not fired yet — it runs at the next matching time."
+                            : null
+                };
+            }
+
+            return new MongoScheduledBackupStatus
+            {
+                Problem = $"No CronJob named '{cronJobName}' in namespace {mongo.Namespace}. " +
+                          "Save the backup settings again to create it."
+            };
+        }
+        catch (Exception ex)
+        {
+            return new MongoScheduledBackupStatus { Problem = $"Could not read the CronJob: {ex.Message}" };
+        }
+    }
+
+    private static DateTime? ReadTime(System.Text.Json.JsonElement root, string section, string field)
+    {
+        if (!root.TryGetProperty(section, out System.Text.Json.JsonElement obj)) return null;
+        if (!obj.TryGetProperty(field, out System.Text.Json.JsonElement value)) return null;
+        return DateTime.TryParse(value.GetString(), null,
+            System.Globalization.DateTimeStyles.RoundtripKind, out DateTime parsed) ? parsed : null;
     }
 
     /// <summary>
@@ -2904,7 +3025,12 @@ public class MongoService(
         sb.AppendLine($"        entkube.io/mongo-cluster: {mongo.Name}");
         sb.AppendLine("    spec:");
         sb.AppendLine("      backoffLimit: 0");
-        sb.AppendLine("      ttlSecondsAfterFinished: 86400");
+        // Backup history is reconstructed by scanning these Jobs, and that scan only runs when
+        // someone opens the database page. At the previous 24 h TTL a nightly run that nobody
+        // looked at within a day was garbage-collected before it was ever recorded — so a
+        // schedule that was firing correctly still showed no backups. A week of retained Jobs
+        // is a handful of tiny objects; CleanupOldBackupsAsync prunes beyond MaxBackups anyway.
+        sb.AppendLine("      ttlSecondsAfterFinished: 604800");
         sb.AppendLine("      template:");
         sb.AppendLine("        spec:");
         sb.AppendLine("          restartPolicy: Never");
@@ -3312,4 +3438,27 @@ public class MongoPodInfo
     public string? Node { get; set; }
     public DateTime? StartTime { get; set; }
     public int Restarts { get; set; }
+}
+
+/// <summary>
+/// What the scheduled-backup CronJob looks like on the cluster right now — as opposed to the
+/// schedule EntKube has stored, which only records the intent.
+/// </summary>
+public class MongoScheduledBackupStatus
+{
+    /// <summary>True when a CronJob for this cluster exists in the namespace.</summary>
+    public bool Exists { get; init; }
+
+    /// <summary>The schedule the CronJob actually carries (5-field cron, as Kubernetes requires).</summary>
+    public string? AppliedSchedule { get; init; }
+
+    public bool Suspended { get; init; }
+    public DateTime? LastScheduleTime { get; init; }
+    public DateTime? LastSuccessfulTime { get; init; }
+    public int ActiveJobs { get; init; }
+
+    /// <summary>Why backups are not running, in plain words. Null when everything checks out.</summary>
+    public string? Problem { get; init; }
+
+    public bool IsHealthy => Exists && !Suspended && Problem is null;
 }

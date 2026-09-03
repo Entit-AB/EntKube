@@ -1,0 +1,114 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services.Cost
+@inject CostScanCache ScanCache
+
+@* Customer-facing consumption and cost. Reads the cached tenant report and shows
+   ONLY this customer's rows — a customer must never see another's figures, nor the
+   tenant's platform overhead. *@
+
+@if (report is null)
+{
+    <div class="text-muted small">
+        Consumption figures are not available yet. They are recalculated hourly.
+    </div>
+}
+else if (rows.Count == 0)
+{
+    <div class="text-muted small">No consumption recorded for your workloads yet.</div>
+}
+else
+{
+    <div class="row g-3 mb-3">
+        <div class="col-6 col-md-4">
+            <div class="card shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Monthly run rate</div>
+                    <div class="display-6 fw-semibold">@Money(TotalMonthly)</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-md-4">
+            <div class="card shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">CPU reserved</div>
+                    <div class="display-6 fw-semibold">@rows.Sum(r => r.CpuCores).ToString("N1")</div>
+                    <div class="text-muted small">cores</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-md-4">
+            <div class="card shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Memory reserved</div>
+                    <div class="display-6 fw-semibold">@rows.Sum(r => r.MemoryGiB).ToString("N0")</div>
+                    <div class="text-muted small">GiB</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0">
+            <thead>
+                <tr class="text-muted small">
+                    <th>Application</th>
+                    <th>Environment</th>
+                    <th class="text-end">CPU</th>
+                    <th class="text-end">Memory</th>
+                    <th class="text-end">Storage</th>
+                    <th class="text-end">Monthly</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (NamespaceCost row in rows)
+                {
+                    <tr>
+                        <td class="small">@(row.AppName ?? row.Namespace)</td>
+                        <td class="small text-muted">@(row.EnvironmentName ?? "—")</td>
+                        <td class="text-end small text-muted">@row.CpuCores.ToString("N2")</td>
+                        <td class="text-end small text-muted">@row.MemoryGiB.ToString("N1") Gi</td>
+                        <td class="text-end small text-muted">@row.StorageGiB.ToString("N0") Gi</td>
+                        <td class="text-end fw-semibold">@Money(row.TotalMonthlyCost)</td>
+                    </tr>
+                }
+            </tbody>
+            <tfoot>
+                <tr>
+                    <td colspan="5" class="text-end fw-semibold">Total</td>
+                    <td class="text-end fw-semibold">@Money(TotalMonthly)</td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+
+    <p class="text-muted small mt-3 mb-0">
+        Figures are a <strong>run rate</strong>: what your current reservations project to over a
+        730-hour month, as of @report.GeneratedAt.ToString("yyyy-MM-dd HH:mm") UTC. They change when
+        workloads are scaled or redeployed, and are not a final invoice.
+    </p>
+}
+
+@code {
+    [Parameter] public required Customer Customer { get; set; }
+
+    private CostReport? report;
+    private List<NamespaceCost> rows = [];
+
+    protected override void OnParametersSet()
+    {
+        report = ScanCache.Get(Customer.TenantId);
+
+        // Filter to this customer only. Unattributed platform namespaces are excluded
+        // as well as other customers': the tenant's shared overhead is not this
+        // customer's line item to see.
+        rows = report is null
+            ? []
+            : [.. report.Namespaces
+                .Where(n => n.CustomerId == Customer.Id)
+                .OrderByDescending(n => n.TotalMonthlyCost)];
+    }
+
+    private decimal TotalMonthly => rows.Sum(r => r.TotalMonthlyCost);
+
+    private string Money(decimal value) => $"{value:N2} {report?.Currency ?? ""}".Trim();
+}

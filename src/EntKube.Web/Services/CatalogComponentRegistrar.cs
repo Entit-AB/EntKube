@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Services.Telemetry;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -26,7 +27,12 @@ public class CatalogComponentRegistrar(
     LokiService lokiService,
     MimirService mimirService,
     TempoService tempoService,
-    ExternalRouteService routeService)
+    EntKube.Web.Services.Dr.VeleroService veleroService,
+    EntKubeTelemetryService entKubeTelemetryService,
+    ExternalRouteService routeService,
+    IngestTokenService ingestTokens,
+    IConfiguration configuration,
+    ILogger<CatalogComponentRegistrar> logger)
 {
     /// <summary>
     /// Registers (or, if already present, re-configures) the given catalog entry on a
@@ -62,6 +68,22 @@ public class CatalogComponentRegistrar(
         // ToRegistration sets to the catalog key.
         ClusterComponent? current = existing.FirstOrDefault(c => c.Name == entry.Key);
 
+        // The telemetry collector's ingest URL + token are derivable from the control plane, and a
+        // collector installed without them looks healthy while dropping every batch. Fill them in rather
+        // than leaving REPLACE_WITH_* placeholders for a blueprint (which has no operator to type them).
+        Dictionary<string, string> values = new(formValues);
+        // Prefer the cluster's own indexer when it has one — a collector installed after the telemetry
+        // components should ship to them, not back across the WAN.
+        string? indexerUrl = await entKubeTelemetryService.GetInClusterIndexerUrlAsync(clusterId);
+        string? inClusterIngest = indexerUrl is null ? null : indexerUrl + "/ingest/otlp";
+        TelemetryIngestDefaults.ApplyTo(entry, values, clusterId, tenantId, ingestTokens, configuration, inClusterIngest);
+
+        // The query component federates from the indexer's Service, whose name carries that indexer's
+        // release name — so it cannot come from a catalog literal without being wrong for any release the
+        // operator names differently, including the default one.
+        EntKubeTelemetryService.ApplyIndexerUrlDefault(entry, values, indexerUrl);
+        formValues = values;
+
         string mergedValues = MergeFormValues(entry, formValues, existing);
         string? helmValues = string.IsNullOrWhiteSpace(mergedValues) ? null : mergedValues;
 
@@ -94,6 +116,9 @@ public class CatalogComponentRegistrar(
         await SaveLokiConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveMimirConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveTempoConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
+        await SaveVeleroConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
+        await SaveEntKubeTelemetryConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
+        await SaveWgEasyConfigIfNeededAsync(component.Id, formValues, entry);
 
         return component;
     }
@@ -335,6 +360,39 @@ public class CatalogComponentRegistrar(
         }
     }
 
+    /// <summary>
+    /// Points Velero at the selected storage link. Bucket, endpoint, region and credentials
+    /// all come from there, so a blueprint that installs Velero needs only the link id —
+    /// the same single source the UI install path uses.
+    /// </summary>
+    private async Task SaveVeleroConfigIfNeededAsync(
+        Guid tenantId, Guid componentId, IReadOnlyDictionary<string, string> fieldValues, CatalogEntry catalogEntry)
+    {
+        if (catalogEntry.Key != "velero") return;
+        if (TryGetStorageLink(fieldValues, out Guid storageLinkId))
+        {
+            await veleroService.WriteStorageHelmValuesAsync(tenantId, componentId, storageLinkId);
+        }
+    }
+
+    /// <summary>
+    /// Fills in what an operator cannot reasonably supply for the in-cluster telemetry components: the
+    /// tenant/cluster identity the node refuses to start without, both bearer tokens, and the bucket.
+    /// The ingest token is deliberately the cluster's existing collector token, so repointing the
+    /// collector at the in-cluster indexer is only an endpoint change.
+    /// </summary>
+    private async Task SaveEntKubeTelemetryConfigIfNeededAsync(
+        Guid tenantId, Guid componentId, IReadOnlyDictionary<string, string> fieldValues, CatalogEntry catalogEntry)
+    {
+        if (catalogEntry.Key is not (EntKubeTelemetryService.IndexerKey or EntKubeTelemetryService.QuerierKey)) return;
+
+        await entKubeTelemetryService.ConfigureIdentityAsync(tenantId, componentId);
+        if (TryGetStorageLink(fieldValues, out Guid storageLinkId))
+        {
+            await entKubeTelemetryService.WriteStorageHelmValuesAsync(tenantId, componentId, storageLinkId);
+        }
+    }
+
     private static bool TryGetStorageLink(IReadOnlyDictionary<string, string> fieldValues, out Guid storageLinkId)
     {
         storageLinkId = Guid.Empty;
@@ -344,13 +402,58 @@ public class CatalogComponentRegistrar(
     }
 
     /// <summary>
-    /// Creates an HTTPRoute + Certificate for the component's public hostname if one
-    /// doesn't already exist. Shared by the Keycloak and Harbor config paths — the
-    /// only difference is the backing service name derived from the release name.
+    /// Registers the wg-easy web UI as an ExternalRoute.
+    ///
+    /// The component used to ship its own HTTPRoute in its manifest, which meant the Gateway
+    /// generator never saw the hostname: no HTTPS listener, no certificate, and a route that
+    /// could only attach to the port-80 listener. A VPN admin UI served over cleartext.
+    /// Registering it here puts it through the same path as every other exposed service.
+    ///
+    /// Skipped when the operator entered a bare IP rather than a hostname — WireGuard itself is
+    /// happy with an IP, but an HTTPRoute hostname must be a DNS name and no CA will issue for
+    /// an address. Registering it anyway would produce a route that silently matches nothing.
     /// </summary>
+    private async Task SaveWgEasyConfigIfNeededAsync(
+        Guid componentId, IReadOnlyDictionary<string, string> fieldValues, CatalogEntry catalogEntry)
+    {
+        if (catalogEntry.Key != "wg-easy") return;
+
+        if (!fieldValues.TryGetValue("wg-host", out string? host) || string.IsNullOrWhiteSpace(host))
+        {
+            return;
+        }
+
+        host = host.Trim();
+
+        if (System.Net.IPAddress.TryParse(host, out _))
+        {
+            logger.LogInformation(
+                "wg-easy public host {Host} is an IP address, so the web UI is not exposed through the " +
+                "gateway. Enter a DNS hostname to publish it over HTTPS.", host);
+            return;
+        }
+
+        await EnsureRouteAsync(
+            componentId, fieldValues, host,
+            serviceName: "wg-easy-svc",
+            servicePort: WgEasyUiPort);
+    }
+
+    /// <summary>Port the wg-easy chart serves its web UI on (WireGuard itself is UDP 51820).</summary>
+    private const int WgEasyUiPort = 51821;
+
+    /// <summary>
+    /// Creates an HTTPRoute + Certificate for the component's public hostname if one
+    /// doesn't already exist. Shared by the Keycloak, Harbor and wg-easy config paths.
+    /// </summary>
+    /// <param name="serviceName">
+    /// Backing Service. Null derives it from the release name, which is what Harbor and Keycloak
+    /// need; components whose Service name is fixed by their chart pass it explicitly.
+    /// </param>
     private async Task EnsureRouteAsync(
         Guid componentId, IReadOnlyDictionary<string, string> fieldValues, string hostname,
-        string fallbackReleaseName, bool isKeycloak)
+        string? fallbackReleaseName = null, bool isKeycloak = false,
+        string? serviceName = null, int servicePort = 80)
     {
         List<ExternalRoute> existing = await routeService.GetRoutesAsync(componentId);
         if (existing.Any(r => r.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase)))
@@ -365,21 +468,25 @@ public class CatalogComponentRegistrar(
         bool isManual = string.Equals(tlsMode, "Manual", StringComparison.Ordinal);
 
         ClusterComponent? comp = await GetComponentAsync(componentId);
-        string releaseName = comp?.ReleaseName ?? comp?.Name ?? fallbackReleaseName;
+        string releaseName = comp?.ReleaseName ?? comp?.Name ?? fallbackReleaseName ?? "";
 
         // keycloakx chart exposes {releaseName}-keycloakx-http; Harbor exposes the release name directly.
-        string serviceName = isKeycloak ? $"{releaseName}-keycloakx-http" : releaseName;
+        string resolvedService = serviceName
+            ?? (isKeycloak ? $"{releaseName}-keycloakx-http" : releaseName);
 
         ExternalRouteRequest routeRequest = new()
         {
             Hostname = hostname,
-            ServiceName = serviceName,
-            ServicePort = 80,
+            ServiceName = resolvedService,
+            ServicePort = servicePort,
             PathPrefix = "/",
             TlsMode = isManual ? TlsMode.Manual : TlsMode.ClusterIssuer,
             ClusterIssuerName = isManual ? null : issuerName,
             TlsCertificate = isManual ? tlsCert : null,
-            TlsPrivateKey = isManual && !string.IsNullOrWhiteSpace(tlsKey) ? tlsKey : null
+            TlsPrivateKey = isManual && !string.IsNullOrWhiteSpace(tlsKey) ? tlsKey : null,
+            // Harbor serves image pushes/pulls over this route; a single layer can run for
+            // minutes, so it gets the registry budget instead of the default request timeout.
+            RequestTimeoutSeconds = isKeycloak ? null : ExternalRouteService.RegistryRequestTimeoutSeconds
         };
 
         await routeService.AddRouteAsync(componentId, routeRequest);

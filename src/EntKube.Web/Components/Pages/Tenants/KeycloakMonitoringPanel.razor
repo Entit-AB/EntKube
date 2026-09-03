@@ -1,0 +1,366 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject PrometheusService PrometheusService
+
+@* ═══════════════════════════════════════════════════════════════════════════
+   KeycloakMonitoringPanel — request throughput, latency, JVM and database-pool
+   health for one Keycloak instance.
+
+   Keycloak serves Quarkus/Micrometer metrics on its management interface
+   (port 9000). Those series carry no Keycloak-specific identity label, so
+   everything here is scoped by the namespace the release was installed into.
+   ═══════════════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex align-items-center gap-2 mb-2">
+    <div class="ms-auto d-flex align-items-center gap-2">
+        <select class="form-select form-select-sm" style="width:auto"
+                @bind="rangeMinutes" @bind:after="LoadAsync">
+            <option value="30">Last 30 min</option>
+            <option value="180">Last 3 hours</option>
+            <option value="720">Last 12 hours</option>
+            <option value="1440">Last 24 hours</option>
+        </select>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync" disabled="@isLoading">
+            <span class="bi bi-arrow-clockwise"></span> Refresh
+        </button>
+    </div>
+</div>
+
+@if (isLoading)
+{
+    <div class="text-muted small text-center py-3">
+        <span class="bi bi-hourglass-split me-1"></span> Loading Keycloak metrics…
+    </div>
+}
+else if (error is not null)
+{
+    <div class="alert alert-warning py-2 small">
+        <span class="bi bi-exclamation-triangle me-1"></span> Prometheus query failed: @error
+    </div>
+}
+else if (metrics is null || !metrics.HasData)
+{
+    <div class="alert alert-secondary py-2 small">
+        <div class="fw-semibold mb-1">
+            <span class="bi bi-question-circle me-1"></span>
+            Prometheus holds no metrics for this Keycloak instance.
+        </div>
+        <div class="text-muted">
+            Keycloak serves metrics on its management port (9000), but the Helm chart leaves its
+            ServiceMonitor switched off, so nothing scrapes them.
+        </div>
+        <div class="mt-2">
+            <button class="btn btn-sm btn-outline-secondary" @onclick="DiagnoseAsync" disabled="@busy">
+                <span class="bi bi-stethoscope me-1"></span> Why is this empty?
+            </button>
+        </div>
+
+        @if (diagnosis is not null)
+        {
+            <ul class="mt-2 mb-1 ps-3">
+                @foreach (string f in diagnosis.Findings)
+                {
+                    <li>@f</li>
+                }
+            </ul>
+            @if (diagnosis.Remedy is not null)
+            {
+                <pre class="small bg-body-secondary p-2 rounded mb-0">@diagnosis.Remedy</pre>
+            }
+        }
+    </div>
+}
+else
+{
+    <div class="card mb-3">
+        <div class="card-header py-2 d-flex align-items-center gap-2 flex-wrap">
+            <span class="bi bi-shield-lock text-primary"></span>
+            <strong>@metrics.InstanceName</strong>
+            <span class="text-muted small font-monospace">@metrics.Namespace</span>
+
+            @foreach (string w in Warnings(metrics))
+            {
+                <span class="badge bg-warning text-dark">@w</span>
+            }
+            @if (Warnings(metrics).Count == 0)
+            {
+                <span class="badge bg-success-subtle text-success-emphasis">Healthy</span>
+            }
+
+            <span class="ms-auto text-muted small">@metrics.QueriedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+        </div>
+
+        <div class="card-body py-2">
+
+            @* ── HTTP ── *@
+            <div class="small fw-semibold text-muted mb-1">Requests</div>
+            <div class="row g-3 mb-3">
+                @Tile("Throughput", $"{metrics.RequestsPerSec:F1}/s")
+                @Tile("Avg latency", $"{metrics.AvgLatencyMs:F0} ms",
+                      metrics.AvgLatencyMs > 500 ? "text-warning" : null)
+                @Tile("In flight", metrics.ActiveRequests.ToString("N0"))
+                @Tile("5xx", $"{metrics.ServerErrorsPerSec:F2}/s",
+                      metrics.ServerErrorsPerSec > 0 ? "text-danger" : "text-success")
+                @Tile("5xx share", $"{metrics.ServerErrorPercent:F1}%",
+                      metrics.ServerErrorPercent >= 1 ? "text-danger" : null)
+                @Tile("4xx", $"{metrics.ClientErrorsPerSec:F2}/s")
+            </div>
+
+            @* ── JVM ── *@
+            <div class="small fw-semibold text-muted mb-1">JVM</div>
+            <div class="row g-3 mb-3">
+                @Tile("Heap used", FormatBytes((long)metrics.HeapUsedBytes),
+                      metrics.HeapUsedPercent >= 90 ? "text-warning" : null)
+                @Tile("Heap committed", FormatBytes((long)metrics.HeapCommittedBytes))
+                @Tile("Heap usage", $"{metrics.HeapUsedPercent:F0}%",
+                      metrics.HeapUsedPercent >= 90 ? "text-warning" : null)
+                @Tile("GC pause", $"{metrics.GcPauseSecondsPerSec * 1000:F0} ms/s",
+                      metrics.GcPauseSecondsPerSec >= 0.1 ? "text-warning" : null)
+                @Tile("GC overhead", $"{metrics.GcOverheadPercent:F1}%",
+                      metrics.GcOverheadPercent >= 10 ? "text-warning" : null)
+            </div>
+
+            @* ── Database pool ── *@
+            <div class="small fw-semibold text-muted mb-1">Database connection pool</div>
+            <div class="row g-3 mb-3">
+                @Tile("Active", metrics.DbActiveConnections.ToString("N0"))
+                @Tile("Available", metrics.DbAvailableConnections.ToString("N0"),
+                      metrics.DbAvailableConnections == 0 ? "text-warning" : null)
+                @Tile("Peak used", metrics.DbMaxUsedConnections.ToString("N0"))
+                @Tile("Waiting threads", metrics.DbAwaitingThreads.ToString("N0"),
+                      metrics.DbAwaitingThreads > 0 ? "text-danger" : "text-success")
+                @Tile("Avg wait", $"{metrics.DbBlockingTimeAvgMs:F1} ms",
+                      metrics.DbBlockingTimeAvgMs > 10 ? "text-warning" : null)
+            </div>
+
+            @* ── Authentication activity ── *@
+            <div class="small fw-semibold text-muted mb-1">Authentication</div>
+            @if (!metrics.HasUserEventMetrics)
+            {
+                <div class="alert alert-secondary py-2 small mb-3">
+                    <div class="mb-1">
+                        Login and token metrics are not being collected — Keycloak keeps user event
+                        metrics off by default.
+                    </div>
+                    <div class="text-muted mb-1">
+                        Turn them on in the component's values (Cluster → Components → keycloak →
+                        Values), then Save &amp; Apply. Requires Keycloak 26.2 or newer:
+                    </div>
+                    <pre class="small bg-body-secondary p-2 rounded mb-0">args:
+  - start
+  - --event-metrics-user-enabled=true</pre>
+                </div>
+            }
+            else
+            {
+                <div class="row g-3 mb-3">
+                    @Tile("Logins", $"{metrics.LoginsPerSec:F2}/s")
+                    @Tile("Login errors", $"{metrics.LoginErrorsPerSec:F2}/s",
+                          metrics.LoginErrorsPerSec > 0 ? "text-warning" : "text-success")
+                    @Tile("Failure rate", $"{metrics.LoginErrorPercent:F1}%",
+                          metrics.LoginErrorPercent >= 20 ? "text-danger" : null)
+                    @Tile("Token refresh", $"{metrics.TokenRefreshPerSec:F2}/s")
+                    @Tile("Registrations", $"{metrics.RegistrationsPerSec:F2}/s")
+                </div>
+
+                @if (metrics.TopErrors.Count > 0)
+                {
+                    <div class="table-responsive mb-3">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                                <tr class="small text-muted">
+                                    <th>Realm</th><th>Event</th><th>Error</th><th class="text-end">Rate</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (KeycloakEventBreakdown e in metrics.TopErrors)
+                                {
+                                    <tr>
+                                        <td class="small">@e.Realm</td>
+                                        <td class="small font-monospace">@e.Event</td>
+                                        <td class="small font-monospace text-danger">@e.Error</td>
+                                        <td class="text-end">@e.RatePerSec.ToString("F3")/s</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            }
+
+            @* ── Trends ── *@
+            @if (charts.Count > 0)
+            {
+                <div class="small fw-semibold text-muted mb-1">Trends</div>
+                <div class="row g-3">
+                    @foreach (ChartView c in charts)
+                    {
+                        <div class="col-md-6 col-xl-3">
+                            <MetricChart Title="@c.Title" DataPoints="c.Points"
+                                         Color="@c.Color" Unit="@c.Unit" HeightPx="90" ShowAxes="true" />
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    /// <summary>The Kubernetes cluster whose Prometheus is queried.</summary>
+    [Parameter] public required Guid ClusterId { get; set; }
+
+    /// <summary>Namespace the Keycloak release runs in — the only thing that scopes its series.</summary>
+    [Parameter] public required string Namespace { get; set; }
+
+    [Parameter] public string InstanceName { get; set; } = "Keycloak";
+
+    private KeycloakMetricsSummary? metrics;
+    private string? error;
+    private ScrapeDiagnosis? diagnosis;
+    private List<ChartView> charts = [];
+    private bool isLoading = true;
+    private bool busy;
+    private int rangeMinutes = 180;
+
+    private sealed record ChartView(string Title, List<TimeSeriesDataPoint> Points, string Color, string? Unit);
+
+    private string? loadedFor;
+
+    /// <summary>
+    /// Loads only when pointed at a different instance. A load issues around two dozen Prometheus
+    /// queries, so repeating it on every parent re-render would be wasteful; refreshing is left to
+    /// the button and the range selector.
+    /// </summary>
+    protected override async Task OnParametersSetAsync()
+    {
+        string key = $"{ClusterId}/{Namespace}";
+        if (loadedFor == key) return;
+        loadedFor = key;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        isLoading = true;
+        error = null;
+        StateHasChanged();
+
+        try
+        {
+            KubernetesOperationResult<KeycloakMetricsSummary> result =
+                await PrometheusService.GetKeycloakMetricsAsync(ClusterId, InstanceName, Namespace);
+
+            if (result.IsSuccess) metrics = result.Data;
+            else error = result.Error;
+
+            charts = metrics?.HasData == true ? await LoadChartsAsync() : [];
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task<List<ChartView>> LoadChartsAsync()
+    {
+        TimeSpan window = TimeSpan.FromMinutes(rangeMinutes);
+
+        // Reuses the panel's own query builder so the charts cannot drift from the tiles above.
+        Dictionary<string, string> q = PrometheusService.BuildKeycloakQueries(Namespace);
+
+        (string Title, string Query, string Color, string? Unit)[] specs =
+        [
+            ("Requests",     q["requests"],              "#0d6efd", "/s"),
+            ("5xx errors",   q["errors5xx"],             "#dc3545", "/s"),
+            ("Avg latency",  $"({q["latency"]}) * 1000", "#fd7e14", "ms"),
+            ("Heap used",    q["heapUsed"],              "#6f42c1", "B"),
+        ];
+
+        List<PrometheusTimeSeries>[] series = await Task.WhenAll(specs.Select(async s =>
+        {
+            KubernetesOperationResult<List<PrometheusTimeSeries>> r =
+                await PrometheusService.GetMetricRangeAsync(ClusterId, s.Query, window);
+            return r.IsSuccess && r.Data is not null ? r.Data : [];
+        }));
+
+        List<ChartView> result = [];
+        for (int i = 0; i < specs.Length; i++)
+        {
+            List<TimeSeriesDataPoint> points = series[i].FirstOrDefault()?.DataPoints ?? [];
+            if (points.Count >= 2)
+                result.Add(new ChartView(specs[i].Title, points, specs[i].Color, specs[i].Unit));
+        }
+
+        return result;
+    }
+
+    private async Task DiagnoseAsync()
+    {
+        busy = true;
+        try
+        {
+            KubernetesOperationResult<ScrapeDiagnosis> result =
+                await PrometheusService.DiagnoseServiceMonitorScrapeAsync(
+                    ClusterId, Namespace, "keycloak",
+                    "Set serviceMonitor.enabled to true in the component's values "
+                    + "(Cluster → Components → keycloak → Values), then Save & Apply.");
+
+            if (result.IsSuccess) diagnosis = result.Data;
+            else error = result.Error;
+        }
+        catch (Exception ex)
+        {
+            // The diagnosis resolves the cluster's kubeconfig through the vault before its own
+            // error handling begins, so a database or vault failure surfaces here. Unhandled, it
+            // would reach the Blazor dispatcher and tear down the circuit.
+            error = ex.Message;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private static List<string> Warnings(KeycloakMetricsSummary m)
+    {
+        List<string> w = [];
+        if (m.ServerErrorPercent >= 1)  w.Add("5xx errors");
+        if (m.DbPoolSaturated)          w.Add("DB pool saturated");
+        if (m.HeapPressure)             w.Add("Heap pressure");
+        if (m.AvgLatencyMs > 500)       w.Add("Slow responses");
+        if (m.HasUserEventMetrics && m.LoginErrorPercent >= 20) w.Add("Login failures");
+        return w;
+    }
+
+    private static RenderFragment Tile(string label, string value, string? valueClass = null) => builder =>
+    {
+        builder.OpenElement(0, "div");
+        builder.AddAttribute(1, "class", "col-auto");
+
+        builder.OpenElement(2, "div");
+        builder.AddAttribute(3, "class", "small text-muted");
+        builder.AddContent(4, label);
+        builder.CloseElement();
+
+        builder.OpenElement(5, "div");
+        builder.AddAttribute(6, "class", $"fw-semibold {valueClass}".TrimEnd());
+        builder.AddContent(7, value);
+        builder.CloseElement();
+
+        builder.CloseElement();
+    };
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        double value = bytes;
+        int unit = 0;
+        while (value >= 1024 && unit < units.Length - 1) { value /= 1024; unit++; }
+        return $"{value:0.#} {units[unit]}";
+    }
+}

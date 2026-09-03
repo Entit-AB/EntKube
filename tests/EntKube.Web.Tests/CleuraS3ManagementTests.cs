@@ -1,8 +1,10 @@
 using EntKube.Web.Data;
 using EntKube.Web.Services;
+using EntKube.Web.Services.Agents;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 
 namespace EntKube.Web.Tests;
@@ -47,9 +49,15 @@ public class CleuraS3ManagementTests : IDisposable
         VaultEncryptionService encryption = new(TestRootKey);
         vaultService = new VaultService(dbFactory, encryption);
         httpFactory = new Mock<IHttpClientFactory>();
-        OpenStackS3Service openStackS3 = new(vaultService, httpFactory.Object, new OpenStackKeystoneClient(httpFactory.Object));
-        StorageLinkClientFactory storageClientFactory = new(vaultService, dbFactory);
-        sut = new StorageService(dbFactory, vaultService, openStackS3, new Mock<IKubernetesClientFactory>().Object, storageClientFactory);
+        AgentRegistry agentRegistry = new(dbFactory, NullLogger<AgentRegistry>.Instance);
+        OpenStackHttpFactory osHttpFactory = new(httpFactory.Object, agentRegistry);
+        Mock<IKubernetesClientFactory> k8sMock = new();
+        ClusterEgressRelay egressRelay = new(k8sMock.Object, NullLogger<ClusterEgressRelay>.Instance);
+        ClusterEgressTunnel egressTunnel = new(NullLogger<ClusterEgressTunnel>.Instance);
+        OpenStackKeystoneClient keystone = new(osHttpFactory, vaultService, egressTunnel, dbFactory);
+        OpenStackS3Service openStackS3 = new(vaultService, osHttpFactory, keystone);
+        StorageLinkClientFactory storageClientFactory = new(vaultService, dbFactory, osHttpFactory, keystone);
+        sut = new StorageService(dbFactory, vaultService, openStackS3, keystone, egressRelay, egressTunnel, agentRegistry, k8sMock.Object, storageClientFactory);
     }
 
     public void Dispose()

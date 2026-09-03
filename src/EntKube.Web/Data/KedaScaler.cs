@@ -6,18 +6,27 @@ public enum KedaScalerKind
     ScaledObject = 0,
 
     /// <summary>Raw KEDA YAML authored by the user — a ScaledObject or a ScaledJob.</summary>
-    Custom = 1
+    Custom = 1,
+
+    /// <summary>
+    /// A native autoscaling/v2 HorizontalPodAutoscaler on CPU and/or memory utilization.
+    /// Needs only metrics-server — no KEDA controller on the cluster.
+    /// </summary>
+    Hpa = 2
 }
 
 /// <summary>
-/// A KEDA autoscaler defined for an app in a specific environment. When applied,
-/// EntKube renders a keda.sh/v1alpha1 ScaledObject (or, for Custom, the user's raw
-/// YAML — e.g. a ScaledJob) into the app's namespace on every cluster the app is
-/// deployed to in that environment.
+/// An autoscaler defined for an app in a specific environment. When applied, EntKube renders
+/// a keda.sh/v1alpha1 ScaledObject, an autoscaling/v2 HorizontalPodAutoscaler, or (for Custom)
+/// the user's raw YAML — e.g. a ScaledJob — into the app's namespace on every cluster the app
+/// is deployed to in that environment.
 ///
-/// Scoped per (App, Environment). Name is unique within that scope and is used as
-/// the Kubernetes resource name. Requires the KEDA component to be installed on the
-/// target cluster (see ComponentCatalog "keda").
+/// The type predates native HPA support and keeps its name (and table) so both autoscaler
+/// families share one CRUD/apply/copy pipeline; <see cref="Kind"/> decides what is rendered.
+/// Only the KEDA kinds require the KEDA component on the target cluster (ComponentCatalog "keda").
+///
+/// Scoped per (App, Environment). Name is unique within that scope and is used as the
+/// Kubernetes resource name.
 /// </summary>
 public class KedaScaler
 {
@@ -57,6 +66,22 @@ public class KedaScaler
     /// prometheus, kafka, rabbitmq, azure-queue, cron, …).
     /// </summary>
     public string? TriggersYaml { get; set; }
+
+    // ── HPA structured fields (Kind == Hpa) ──
+    // Reuses ScaleTargetKind/ScaleTargetName and Min/MaxReplicaCount above; an HPA's
+    // minReplicas must be at least 1 (scale-to-zero is a KEDA/alpha-gate capability).
+
+    /// <summary>Target average CPU utilization, as a percentage of the pod's CPU request. Null disables the CPU metric.</summary>
+    public int? TargetCpuUtilization { get; set; }
+
+    /// <summary>Target average memory utilization, as a percentage of the pod's memory request. Null disables the memory metric.</summary>
+    public int? TargetMemoryUtilization { get; set; }
+
+    /// <summary>
+    /// Optional spec.behavior block as YAML (scaleUp/scaleDown stabilization windows and
+    /// policies). Spliced verbatim under spec.behavior; omitted when blank.
+    /// </summary>
+    public string? BehaviorYaml { get; set; }
 
     // ── Custom (Kind == Custom) ──
 

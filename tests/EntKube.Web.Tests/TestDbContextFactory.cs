@@ -1,6 +1,7 @@
 using System.Net.Http;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -27,6 +28,41 @@ public static class TestServices
         IHttpClientFactory httpFactory = new Mock<IHttpClientFactory>().Object;
         CnpgService cnpgService = new(dbFactory, vaultService, k8sFactory);
         return new KeycloakService(dbFactory, vaultService, httpFactory, cnpgService, k8sFactory);
+    }
+
+    /// <summary>A 32-byte base64 key — enough for the vault encryption service and to derive ingest tokens.</summary>
+    public const string TestRootKeyBase64 = "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=";
+
+    /// <summary>
+    /// In-memory configuration carrying the keys the services under test read. Pass
+    /// <paramref name="publicIngestUrl"/> to make the telemetry collector's ingest URL derivable.
+    /// </summary>
+    public static IConfiguration TestConfiguration(string? publicIngestUrl = null)
+    {
+        Dictionary<string, string?> values = new() { ["Vault:RootKey"] = TestRootKeyBase64 };
+
+        if (publicIngestUrl is not null)
+        {
+            values["Telemetry:PublicIngestUrl"] = publicIngestUrl;
+        }
+
+        return new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+    }
+
+    /// <summary>
+    /// Builds a ComponentLifecycleService with its telemetry-ingest dependencies satisfied from an
+    /// in-memory configuration, for tests that do not drive collector behaviour.
+    /// </summary>
+    public static ComponentLifecycleService BuildLifecycle(
+        IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService,
+        string? publicIngestUrl = null)
+    {
+        IConfiguration config = TestConfiguration(publicIngestUrl);
+        IngestTokenService tokens = new(config);
+        return new ComponentLifecycleService(
+            dbFactory, vaultService, BuildKeycloak(dbFactory, vaultService),
+            tokens, new EntKubeTelemetryService(dbFactory, vaultService, tokens, config), config,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ComponentLifecycleService>.Instance);
     }
 }
 

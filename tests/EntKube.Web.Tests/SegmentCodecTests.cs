@@ -22,6 +22,7 @@ public sealed class SegmentCodecTests : IDisposable
     private readonly SqliteConnection _connection;
     private readonly ApplicationDbContext _context;
     private readonly TestDbContextFactory _factory;
+    private readonly ISegmentCatalog _catalog;
     private readonly ClusterTenantResolver _resolver;
     private readonly Guid _tenantId = Guid.NewGuid();
     private readonly Guid _clusterId = Guid.NewGuid();
@@ -50,6 +51,7 @@ public sealed class SegmentCodecTests : IDisposable
         _context.SaveChanges();
 
         _factory = new TestDbContextFactory(_connection);
+        _catalog = new EfSegmentCatalog(_factory);
         _resolver = new ClusterTenantResolver(_factory);
     }
 
@@ -62,7 +64,7 @@ public sealed class SegmentCodecTests : IDisposable
         var options = new SegmentEngineOptions { DataPath = _dataPath };
         var store = new LocalSegmentBlobStore(blobsDir);
         var reg = new SegmentManagerRegistry<LogSegmentManager>(tid =>
-            new LogSegmentManager(tid, _factory, store, options, NullLogger<LogSegmentManager>.Instance));
+            new LogSegmentManager(tid, _catalog, store, options, NullLogger<LogSegmentManager>.Instance));
         _registries.Add(reg);
         return (reg.For(_tenantId), reg);
     }

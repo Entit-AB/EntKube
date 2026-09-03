@@ -2,16 +2,10 @@
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject PrometheusService PrometheusService
+@inject CnpgService CnpgService
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 
-@if (summaries.Count == 0 && !isLoading)
-{
-    <div class="text-muted small text-center py-3">
-        <span class="bi bi-bar-chart me-1"></span>
-        No CNPG clusters found, or Prometheus is not available for this cluster.
-    </div>
-}
-else if (isLoading)
+@if (isLoading)
 {
     <div class="text-muted small text-center py-2">
         <span class="bi bi-hourglass-split me-1"></span> Loading database metrics…
@@ -19,6 +13,28 @@ else if (isLoading)
 }
 else
 {
+    @if (errors.Count > 0)
+    {
+        <div class="alert alert-warning py-2 small">
+            <i class="bi bi-exclamation-triangle me-1"></i>
+            <strong>Could not read metrics from Prometheus.</strong>
+            <ul class="mb-0 mt-1 ps-3">
+                @foreach (string err in errors)
+                {
+                    <li>@err</li>
+                }
+            </ul>
+        </div>
+    }
+
+    @if (summaries.Count == 0 && errors.Count == 0)
+    {
+        <div class="text-muted small text-center py-3">
+            <span class="bi bi-bar-chart me-1"></span>
+            No CNPG clusters on this Kubernetes cluster.
+        </div>
+    }
+
     @foreach (CnpgMetricsSummary summary in summaries)
     {
         <div class="card mb-3">
@@ -28,6 +44,80 @@ else
                 <span class="ms-auto text-muted small">@summary.QueriedAt.ToLocalTime().ToString("HH:mm:ss")</span>
             </div>
             <div class="card-body py-2">
+                @if (!summary.HasData)
+                {
+                    @* All-zero tiles look exactly like a healthy idle database, so say plainly
+                       that nothing is being scraped rather than showing zeros as if measured. *@
+                    <div class="alert alert-info py-2 small mb-0">
+                        <div>
+                            <i class="bi bi-info-circle me-1"></i>
+                            <strong>Prometheus has no metrics for this database.</strong>
+                            CNPG only publishes them when its Cluster resource asks for a PodMonitor.
+                            Databases created before EntKube set that need their spec pushed again:
+                        </div>
+                        <div class="d-flex align-items-center gap-2 mt-2">
+                            <button class="btn btn-sm btn-primary" disabled="@(reapplying is not null)"
+                                    @onclick="() => ReapplySpec(summary.ClusterName)">
+                                @if (reapplying == summary.ClusterName)
+                                {
+                                    <span class="spinner-border spinner-border-sm me-1"></span>
+                                }
+                                else
+                                {
+                                    <i class="bi bi-arrow-repeat me-1"></i>
+                                }
+                                Enable metrics for @summary.ClusterName
+                            </button>
+                            <span class="text-muted">
+                                Re-applies this database's Cluster resource — you'll see the exact change before it lands.
+                            </span>
+                        </div>
+                        @if (reapplyMessages.TryGetValue(summary.ClusterName, out (bool Ok, string Text) msg))
+                        {
+                            <div class="mt-2 @(msg.Ok ? "text-success" : "text-danger")">
+                                <i class="bi @(msg.Ok ? "bi-check-circle" : "bi-x-circle") me-1"></i>@msg.Text
+                            </div>
+                        }
+                        <div class="mt-2">
+                            <button class="btn btn-sm btn-outline-secondary" disabled="@(diagnosing is not null)"
+                                    @onclick="() => Diagnose(summary.ClusterName)">
+                                @if (diagnosing == summary.ClusterName)
+                                {
+                                    <span class="spinner-border spinner-border-sm me-1"></span>
+                                }
+                                else
+                                {
+                                    <i class="bi bi-binoculars me-1"></i>
+                                }
+                                Why is it empty?
+                            </button>
+                            <span class="text-muted ms-2">Compares the database's PodMonitor with what Prometheus selects.</span>
+                        </div>
+
+                        @if (diagnoses.TryGetValue(summary.ClusterName, out CnpgScrapeDiagnosis? diag))
+                        {
+                            <div class="mt-2 border-top pt-2">
+                                @foreach (string finding in diag.Findings)
+                                {
+                                    <div class="@(diag.SelectorAcceptsPodMonitor ? "text-success" : "text-warning-emphasis")">
+                                        <i class="bi @(diag.SelectorAcceptsPodMonitor ? "bi-check-circle" : "bi-exclamation-triangle") me-1"></i>@finding
+                                    </div>
+                                }
+                                @if (diag.Remedy is not null)
+                                {
+                                    <pre class="small bg-body-secondary p-2 rounded mt-2 mb-0"
+                                         style="white-space:pre-wrap;">@diag.Remedy</pre>
+                                }
+                            </div>
+                        }
+                        else if (diagnoseErrors.TryGetValue(summary.ClusterName, out string? diagErr))
+                        {
+                            <div class="text-danger mt-2"><i class="bi bi-x-circle me-1"></i>@diagErr</div>
+                        }
+                    </div>
+                }
+                else
+                {
                 <div class="row g-3 mb-3">
                     <div class="col-auto">
                         <div class="small text-muted">Replication Lag</div>
@@ -60,6 +150,7 @@ else
                         </tbody>
                     </table>
                 }
+                }
             </div>
         </div>
     }
@@ -69,7 +160,19 @@ else
     [Parameter] public required Guid ClusterId { get; set; }
 
     private List<CnpgMetricsSummary> summaries = [];
+    private List<string> errors = [];
     private bool isLoading = true;
+
+    /// <summary>The CNPG rows behind the summaries, so a name can be turned back into an id.</summary>
+    private sealed record CnpgRef(Guid Id, Guid TenantId, string Name, string Namespace);
+    private List<CnpgRef> cnpgClusters = [];
+
+    private string? reapplying;
+    private readonly Dictionary<string, (bool Ok, string Text)> reapplyMessages = [];
+
+    private string? diagnosing;
+    private readonly Dictionary<string, CnpgScrapeDiagnosis> diagnoses = [];
+    private readonly Dictionary<string, string> diagnoseErrors = [];
 
     protected override async Task OnParametersSetAsync() => await LoadMetrics();
 
@@ -78,16 +181,18 @@ else
         isLoading = true;
         StateHasChanged();
 
-        List<string> cnpgNames;
         using (ApplicationDbContext db = DbFactory.CreateDbContext())
         {
-            cnpgNames = await db.CnpgClusters
+            cnpgClusters = await db.CnpgClusters
                 .Where(c => c.KubernetesClusterId == ClusterId)
-                .Select(c => c.Name)
+                .Select(c => new CnpgRef(c.Id, c.TenantId, c.Name, c.Namespace))
                 .ToListAsync();
         }
 
+        List<string> cnpgNames = cnpgClusters.Select(c => c.Name).ToList();
+
         List<CnpgMetricsSummary> results = [];
+        List<string> failures = [];
         foreach (string name in cnpgNames)
         {
             KubernetesOperationResult<CnpgMetricsSummary> result =
@@ -95,9 +200,79 @@ else
 
             if (result.IsSuccess && result.Data is not null)
                 results.Add(result.Data);
+            else
+                // Swallowing this made an unreachable Prometheus indistinguishable from a
+                // cluster with no databases — both rendered the same empty placeholder.
+                failures.Add($"{name}: {result.Error}");
         }
 
         summaries = results;
+        errors = failures;
         isLoading = false;
+    }
+
+    /// <summary>
+    /// Reads both halves of the scrape path from the cluster and reports which one is missing,
+    /// so the remaining step is stated rather than guessed at.
+    /// </summary>
+    private async Task Diagnose(string cnpgName)
+    {
+        CnpgRef? target = cnpgClusters.FirstOrDefault(c => c.Name == cnpgName);
+        if (target is null) return;
+
+        diagnosing = cnpgName;
+        diagnoses.Remove(cnpgName);
+        diagnoseErrors.Remove(cnpgName);
+        StateHasChanged();
+        try
+        {
+            KubernetesOperationResult<CnpgScrapeDiagnosis> result =
+                await PrometheusService.DiagnoseCnpgScrapeAsync(ClusterId, cnpgName, target.Namespace);
+
+            if (result.IsSuccess && result.Data is not null)
+                diagnoses[cnpgName] = result.Data;
+            else
+                diagnoseErrors[cnpgName] = result.Error ?? "Diagnosis failed.";
+        }
+        catch (Exception ex)
+        {
+            diagnoseErrors[cnpgName] = ex.Message;
+        }
+        finally
+        {
+            diagnosing = null;
+        }
+    }
+
+    /// <summary>
+    /// Pushes the database's Cluster resource again so it gains the PodMonitor opt-in. The change
+    /// gate shows the dry-run diff first, so this cannot alter anything unseen.
+    /// </summary>
+    private async Task ReapplySpec(string cnpgName)
+    {
+        CnpgRef? target = cnpgClusters.FirstOrDefault(c => c.Name == cnpgName);
+        if (target is null) return;
+
+        reapplying = cnpgName;
+        reapplyMessages.Remove(cnpgName);
+        StateHasChanged();
+        try
+        {
+            await CnpgService.ReapplyClusterSpecAsync(target.TenantId, target.Id);
+            reapplyMessages[cnpgName] = (true,
+                "Cluster resource applied. Prometheus needs a scrape cycle (about a minute) before metrics appear — then refresh.");
+        }
+        catch (OperationCanceledException)
+        {
+            reapplyMessages[cnpgName] = (false, "Cancelled — nothing was changed.");
+        }
+        catch (Exception ex)
+        {
+            reapplyMessages[cnpgName] = (false, ex.Message);
+        }
+        finally
+        {
+            reapplying = null;
+        }
     }
 }

@@ -363,7 +363,11 @@ public class HeadscaleService(
             ServicePort = 80,
             PathPrefix = "/",
             TlsMode = TlsMode.ClusterIssuer,
-            ClusterIssuerName = clusterIssuer
+            ClusterIssuerName = clusterIssuer,
+            // No request timeout: the ts2021 control-plane connection is a long-lived HTTP
+            // upgrade that stays open for the life of the node. Gateway API's request timeout
+            // bounds the whole exchange, so any finite value would drop every node periodically.
+            RequestTimeoutSeconds = 0
         };
 
         await externalRouteService.AddRouteAsync(componentId, req, ct);

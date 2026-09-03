@@ -1,0 +1,324 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Rollouts
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject AuthenticationStateProvider AuthState
+
+@* ═══════════════════════════════════════════════════════════════════
+   Progressive delivery — release watches, their verdicts, and the
+   per-deployment policy that decides what happens on a bad release.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3 mt-4">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span><i class="bi bi-rocket-takeoff me-2 text-primary"></i><strong>Recent releases</strong></span>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="ReloadAsync" disabled="@loading">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+        </button>
+    </div>
+    <div class="card-body pt-3">
+        <p class="text-muted small mb-3">
+            When a deployment with a rollout policy is applied, EntKube watches it for the configured
+            window and judges it against its own telemetry — then promotes, alerts, or rolls back.
+        </p>
+
+        @if (loading)
+        {
+            <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div>
+        }
+        else if (rollouts.Count == 0)
+        {
+            <p class="text-muted small mb-0">
+                No releases have been watched yet. Enable a policy on a deployment below, then apply it.
+            </p>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead>
+                        <tr class="text-muted small">
+                            <th>Deployment</th>
+                            <th>Started</th>
+                            <th>Status</th>
+                            <th>Verdict</th>
+                            <th>Triggered by</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (RolloutRow row in rollouts)
+                        {
+                            <tr>
+                                <td>
+                                    <div class="fw-medium small">@row.AppName / @row.DeploymentName</div>
+                                    <div class="text-muted small">@row.EnvironmentName · @row.ClusterName</div>
+                                </td>
+                                <td class="small text-muted">@row.StartedAt.ToString("MM-dd HH:mm")</td>
+                                <td><span class="badge @StatusClass(row.Status)">@StatusText(row.Status)</span></td>
+                                <td class="small">@(row.Verdict ?? "—")</td>
+                                <td class="small text-muted">@(row.TriggeredBy ?? "—")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+</div>
+
+<div class="card shadow-sm mb-3">
+    <div class="card-header bg-white py-2">
+        <span><i class="bi bi-sliders me-2 text-primary"></i><strong>Rollout policies</strong></span>
+    </div>
+    <div class="card-body pt-3">
+        <div class="alert alert-light border small mb-3">
+            <strong>A signal that cannot be measured is never a pass.</strong> If a threshold is set but
+            its signal is missing — no traces, no metrics — the release is reported as
+            <em>inconclusive</em>, not healthy. An inconclusive release is never rolled back
+            automatically: rolling back production on no evidence would be worse than the risk it
+            avoids.
+            <br /><br />
+            Outcomes that need a person are sent to this tenant's notification channels: a failed
+            rollback and an automatic rollback as <em>critical</em>, a failed analysis as
+            <em>warning</em>, an unverifiable release as <em>info</em>. Promoted releases notify
+            nothing — a channel that fires on every successful deploy gets muted, and the rollback
+            notification would be muted with it.
+        </div>
+
+        @if (deployments.Count == 0)
+        {
+            <p class="text-muted small mb-0">No managed deployments in this tenant.</p>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead>
+                        <tr class="text-muted small">
+                            <th>Deployment</th>
+                            <th>Watch</th>
+                            <th>Window</th>
+                            <th>Max error rate</th>
+                            <th>Max p95</th>
+                            <th>Max restarts</th>
+                            <th>Telemetry service</th>
+                            <th>On failure</th>
+                            <th class="text-end"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (DeploymentRow d in deployments)
+                        {
+                            PolicyForm form = FormFor(d.Id);
+                            <tr>
+                                <td>
+                                    <div class="fw-medium small">@d.AppName / @d.Name</div>
+                                    <div class="text-muted small">@d.EnvironmentName</div>
+                                </td>
+                                <td>
+                                    <div class="form-check form-switch mb-0">
+                                        <input class="form-check-input" type="checkbox" @bind="form.Enabled" />
+                                    </div>
+                                </td>
+                                <td><input type="number" min="1" class="form-control form-control-sm" style="width:5rem" @bind="form.WindowMinutes" /></td>
+                                <td><input type="number" step="0.5" class="form-control form-control-sm" style="width:5.5rem" placeholder="off" @bind="form.MaxErrorRate" /></td>
+                                <td><input type="number" step="10" class="form-control form-control-sm" style="width:6rem" placeholder="off" @bind="form.MaxLatency" /></td>
+                                <td><input type="number" min="0" class="form-control form-control-sm" style="width:5rem" placeholder="off" @bind="form.MaxRestarts" /></td>
+                                <td>
+                                    <input class="form-control form-control-sm font-monospace" style="width:10rem"
+                                           placeholder="service name" @bind="form.TelemetryService"
+                                           title="Service name in the trace store. Without it, error rate and latency cannot be measured." />
+                                </td>
+                                <td>
+                                    <select class="form-select form-select-sm" style="width:9rem" @bind="form.OnFailure">
+                                        <option value="alert">Notify only</option>
+                                        <option value="rollback">Roll back</option>
+                                    </select>
+                                </td>
+                                <td class="text-end">
+                                    <button class="btn btn-sm btn-outline-primary" @onclick="() => SaveAsync(d.Id, form)">Save</button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            @if (saveMessage is not null)
+            {
+                <div class="small mt-2 @(saveOk ? "text-success" : "text-danger")">@saveMessage</div>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private sealed record RolloutRow(
+        string AppName, string DeploymentName, string EnvironmentName, string ClusterName,
+        DateTime StartedAt, DeploymentRolloutStatus Status, string? Verdict, string? TriggeredBy);
+
+    private sealed record DeploymentRow(Guid Id, string Name, string AppName, string EnvironmentName);
+
+    private sealed class PolicyForm
+    {
+        public bool Enabled { get; set; }
+        public int WindowMinutes { get; set; } = 10;
+        public double? MaxErrorRate { get; set; } = 5;
+        public double? MaxLatency { get; set; }
+        public int? MaxRestarts { get; set; } = 3;
+        public string? TelemetryService { get; set; }
+        public string OnFailure { get; set; } = "alert";
+    }
+
+    private List<RolloutRow> rollouts = [];
+    private List<DeploymentRow> deployments = [];
+    private readonly Dictionary<Guid, PolicyForm> forms = [];
+    private bool loading = true;
+    private string? saveMessage;
+    private bool saveOk;
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        loading = true;
+        try
+        {
+            await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+
+            rollouts = await db.DeploymentRollouts
+                .AsNoTracking()
+                .Where(r => r.Deployment.App.Customer.TenantId == TenantId)
+                .OrderByDescending(r => r.StartedAt)
+                .Take(50)
+                .Select(r => new RolloutRow(
+                    r.Deployment.App.Name,
+                    r.Deployment.Name,
+                    r.Deployment.Environment.Name,
+                    r.Deployment.Cluster.Name,
+                    r.StartedAt,
+                    r.Status,
+                    r.Verdict,
+                    r.TriggeredBy))
+                .ToListAsync();
+
+            deployments = await db.AppDeployments
+                .AsNoTracking()
+                .Where(d => d.App.Customer.TenantId == TenantId && d.IsManaged)
+                .OrderBy(d => d.App.Name).ThenBy(d => d.Name)
+                .Select(d => new DeploymentRow(d.Id, d.Name, d.App.Name, d.Environment.Name))
+                .ToListAsync();
+
+            forms.Clear();
+            foreach (RolloutPolicy policy in await db.RolloutPolicies
+                .AsNoTracking()
+                .Where(p => p.Deployment.App.Customer.TenantId == TenantId)
+                .ToListAsync())
+            {
+                forms[policy.DeploymentId] = new PolicyForm
+                {
+                    Enabled = policy.IsEnabled,
+                    WindowMinutes = policy.AnalysisWindowMinutes,
+                    MaxErrorRate = policy.MaxErrorRatePercent,
+                    MaxLatency = policy.MaxLatencyP95Ms,
+                    MaxRestarts = policy.MaxRestarts,
+                    TelemetryService = policy.TelemetryServiceName,
+                    OnFailure = policy.OnFailure == RolloutFailureAction.Rollback ? "rollback" : "alert",
+                };
+            }
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private PolicyForm FormFor(Guid deploymentId)
+    {
+        if (!forms.TryGetValue(deploymentId, out PolicyForm? form))
+        {
+            form = new PolicyForm();
+            forms[deploymentId] = form;
+        }
+
+        return form;
+    }
+
+    private async Task SaveAsync(Guid deploymentId, PolicyForm form)
+    {
+        saveMessage = null;
+        try
+        {
+            await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+
+            // Scoped through the tenant so a crafted deployment id cannot write a policy
+            // onto another tenant's workload.
+            bool owned = await db.AppDeployments
+                .AnyAsync(d => d.Id == deploymentId && d.App.Customer.TenantId == TenantId);
+
+            if (!owned)
+            {
+                saveOk = false;
+                saveMessage = "That deployment does not belong to this tenant.";
+                return;
+            }
+
+            RolloutPolicy? policy = await db.RolloutPolicies
+                .FirstOrDefaultAsync(p => p.DeploymentId == deploymentId);
+
+            if (policy is null)
+            {
+                policy = new RolloutPolicy { Id = Guid.NewGuid(), DeploymentId = deploymentId };
+                db.RolloutPolicies.Add(policy);
+            }
+
+            policy.IsEnabled = form.Enabled;
+            policy.AnalysisWindowMinutes = Math.Max(1, form.WindowMinutes);
+            policy.MaxErrorRatePercent = form.MaxErrorRate;
+            policy.MaxLatencyP95Ms = form.MaxLatency;
+            policy.MaxRestarts = form.MaxRestarts;
+            policy.TelemetryServiceName = string.IsNullOrWhiteSpace(form.TelemetryService)
+                ? null : form.TelemetryService.Trim();
+            policy.OnFailure = form.OnFailure == "rollback"
+                ? RolloutFailureAction.Rollback : RolloutFailureAction.Alert;
+            policy.UpdatedAt = DateTime.UtcNow;
+            policy.UpdatedBy = (await AuthState.GetAuthenticationStateAsync()).User.Identity?.Name;
+
+            await db.SaveChangesAsync();
+
+            saveOk = true;
+            saveMessage = "Policy saved.";
+        }
+        catch (Exception ex)
+        {
+            saveOk = false;
+            saveMessage = ex.Message;
+        }
+    }
+
+    private static string StatusText(DeploymentRolloutStatus status) => status switch
+    {
+        DeploymentRolloutStatus.Watching => "Watching",
+        DeploymentRolloutStatus.Promoted => "Promoted",
+        DeploymentRolloutStatus.RolledBack => "Rolled back",
+        DeploymentRolloutStatus.Alerted => "Failed (alerted)",
+        DeploymentRolloutStatus.Inconclusive => "Inconclusive",
+        DeploymentRolloutStatus.RollbackFailed => "Rollback failed",
+        _ => "Superseded",
+    };
+
+    private static string StatusClass(DeploymentRolloutStatus status) => status switch
+    {
+        DeploymentRolloutStatus.Watching => "bg-info text-dark",
+        DeploymentRolloutStatus.Promoted => "bg-success",
+        DeploymentRolloutStatus.RolledBack => "bg-warning text-dark",
+        DeploymentRolloutStatus.Alerted => "bg-warning text-dark",
+        DeploymentRolloutStatus.Inconclusive => "bg-secondary",
+        DeploymentRolloutStatus.RollbackFailed => "bg-danger",
+        _ => "bg-light text-dark border",
+    };
+}

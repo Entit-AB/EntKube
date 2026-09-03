@@ -57,8 +57,7 @@ public class ComponentCatalogTests : IDisposable
         byte[] testRootKey = Convert.FromBase64String("dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
         VaultEncryptionService encryption = new(testRootKey);
         VaultService vaultService = new(dbFactory, encryption);
-        lifecycleService = new ComponentLifecycleService(
-            dbFactory, vaultService, TestServices.BuildKeycloak(dbFactory, vaultService));
+        lifecycleService = TestServices.BuildLifecycle(dbFactory, vaultService);
     }
 
     public void Dispose()
@@ -109,6 +108,46 @@ public class ComponentCatalogTests : IDisposable
 
         List<string> keys = ComponentCatalog.Entries.Select(e => e.Key).ToList();
         keys.Should().OnlyHaveUniqueItems();
+    }
+
+    [Fact]
+    public void OtelEbpf_ExposesResourceFieldsForBothWorkloads()
+    {
+        // The eBPF chart ships `resources: {}` for the agent DaemonSet AND for the k8sCache
+        // Deployment, so without these fields both run BestEffort with no way to bound them from
+        // the UI — which is how the agent ends up quietly pressing against a limit it never set.
+        CatalogEntry entry = ComponentCatalog.GetByKey("otel-ebpf")!;
+
+        string[] expected =
+        [
+            "resources.requests.cpu", "resources.requests.memory",
+            "resources.limits.cpu", "resources.limits.memory",
+            "k8sCache.resources.requests.cpu", "k8sCache.resources.requests.memory",
+            "k8sCache.resources.limits.cpu", "k8sCache.resources.limits.memory",
+        ];
+
+        entry.FormFields.Select(f => f.YamlPath).Should().Contain(expected);
+        entry.FormFields.Where(f => expected.Contains(f.YamlPath))
+            .Should().OnlyContain(f => !string.IsNullOrWhiteSpace(f.DefaultValue),
+                "a blank default would merge nothing and leave the workload BestEffort");
+    }
+
+    [Fact]
+    public void OtelEbpf_ResourceFieldsMergeOntoTheChartsResourcePaths()
+    {
+        // Guards the dotted paths against a chart rename: a wrong path merges silently into a key
+        // Helm ignores, so the values look edited while the pod keeps running unbounded.
+        CatalogEntry entry = ComponentCatalog.GetByKey("otel-ebpf")!;
+        Dictionary<string, string> values = entry.FormFields
+            .Where(f => f.DefaultValue is { Length: > 0 })
+            .ToDictionary(f => f.Key, f => f.DefaultValue!);
+
+        string merged = CatalogComponentRegistrar.MergeFormValues(entry, values, []);
+
+        YamlFormMerger.ExtractValue(merged, "resources.limits.memory").Should().Be("1Gi");
+        YamlFormMerger.ExtractValue(merged, "resources.requests.cpu").Should().Be("100m");
+        YamlFormMerger.ExtractValue(merged, "k8sCache.resources.limits.memory").Should().Be("512Mi");
+        YamlFormMerger.ExtractValue(merged, "k8sCache.resources.requests.cpu").Should().Be("50m");
     }
 
     // ──────── Lookup ────────
@@ -422,5 +461,40 @@ public class ComponentCatalogTests : IDisposable
     {
         ComponentCatalog.ResolveForComponent("istio-gw-external", "gateway")?.Key.Should().Be("istio");
         ComponentCatalog.ResolveForComponent("istio-gw-internal", "gateway")?.Key.Should().Be("istio-internal");
+    }
+
+    [Fact]
+    public void KubePrometheusStack_ScrapesMonitorsCreatedByOtherOperators()
+    {
+        // The chart defaults these to true, which restricts Prometheus to the PodMonitors and
+        // ServiceMonitors carrying its own Helm release label. Operator-created ones — a CNPG
+        // database's PodMonitor, for instance — are then never scraped, and the database
+        // monitoring panel has nothing to show.
+        CatalogEntry? entry = ComponentCatalog.GetByKey("kube-prometheus-stack");
+
+        entry.Should().NotBeNull();
+        entry!.DefaultValues.Should().Contain("podMonitorSelectorNilUsesHelmValues: false");
+        entry.DefaultValues.Should().Contain("serviceMonitorSelectorNilUsesHelmValues: false");
+    }
+
+    [Fact]
+    public void AllCatalogDefaultValuesAreParseableYaml()
+    {
+        // A stray indent in one of these raw string literals only surfaces as a failed helm
+        // install against a real cluster, so parse them all here instead. Entries carrying
+        // %%PLACEHOLDER%% tokens are templates that are substituted at apply time — a bare '%'
+        // opens a YAML directive, so stand in a value first and check the structure around it.
+        foreach (CatalogEntry entry in ComponentCatalog.Entries.Where(e => !string.IsNullOrWhiteSpace(e.DefaultValues)))
+        {
+            string yamlText = System.Text.RegularExpressions.Regex.Replace(
+                entry.DefaultValues!, "%%[A-Z0-9_]+%%", "placeholder");
+
+            Action parse = () =>
+            {
+                YamlDotNet.RepresentationModel.YamlStream yaml = [];
+                yaml.Load(new StringReader(yamlText));
+            };
+            parse.Should().NotThrow($"'{entry.Key}' default values must be valid YAML");
+        }
     }
 }

@@ -266,6 +266,61 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("AlertRoutingRules");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ApiToken", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("DisplayPrefix")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime?>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("LastUsedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Scopes")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique();
+
+                    b.ToTable("ApiTokens");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.App", b =>
                 {
                     b.Property<Guid>("Id")
@@ -516,6 +571,15 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid>("AppRouteId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("CanaryServiceName")
+                        .HasColumnType("text");
+
+                    b.Property<int?>("CanaryServicePort")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("CanaryWeight")
+                        .HasColumnType("integer");
+
                     b.Property<DateTime?>("ClusterAppliedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -547,6 +611,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
+                    b.Property<int?>("RequestTimeoutSeconds")
+                        .HasColumnType("integer");
+
                     b.Property<string>("RewritePath")
                         .HasColumnType("text");
 
@@ -556,6 +623,18 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasColumnType("character varying(200)");
 
                     b.Property<int>("ServicePort")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("SessionAffinity")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("SessionAffinityKey")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int?>("SessionAffinityTtlSeconds")
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
@@ -809,6 +888,12 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid>("AppId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("ClientCaBundleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("ClientCertificateOnly")
+                        .HasColumnType("boolean");
+
                     b.Property<string>("ClusterIssuerName")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
@@ -829,6 +914,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasColumnType("boolean")
                         .HasDefaultValue(true);
 
+                    b.Property<bool>("RequireClientCertificate")
+                        .HasColumnType("boolean");
+
                     b.Property<string>("TlsCertificate")
                         .HasColumnType("text");
 
@@ -843,6 +931,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasKey("Id");
 
                     b.HasIndex("AppId");
+
+                    b.HasIndex("ClientCaBundleId");
 
                     b.ToTable("AppRoutes");
                 });
@@ -1481,6 +1571,82 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("CertificateDistributions");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ClientCaBundle", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<int>("ListenerPort")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(8443);
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("ClientCaBundles");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ClientCaCertificate", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("BundleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Fingerprint")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Pem")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Subject")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BundleId");
+
+                    b.ToTable("ClientCaCertificates");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1575,6 +1741,62 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .IsUnique();
 
                     b.ToTable("ClusterComponents");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ClusterCostRate", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("ChargeOnRequests")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("ClusterMonthlyOverhead")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
+
+                    b.Property<decimal>("CpuCoreHourCost")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<decimal>("LoadBalancerMonthlyCost")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
+
+                    b.Property<decimal>("MemoryGiBHourCost")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<decimal>("PublicIpMonthlyCost")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
+
+                    b.Property<decimal>("StorageGiBMonthCost")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterId")
+                        .IsUnique();
+
+                    b.ToTable("ClusterCostRates");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterServer", b =>
@@ -1922,6 +2144,24 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("CustomerAccesses");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.CustomerEnvironment", b =>
+                {
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("EnvironmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("LinkedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("CustomerId", "EnvironmentId");
+
+                    b.HasIndex("EnvironmentId");
+
+                    b.ToTable("CustomerEnvironments");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.CustomerGitCredential", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2263,6 +2503,47 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("DeploymentResources");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.DeploymentRollout", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("DecideAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("DeploymentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("FinishedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("SignalsJson")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("StartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("TriggeredBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("Verdict")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Status");
+
+                    b.HasIndex("DeploymentId", "StartedAt");
+
+                    b.ToTable("DeploymentRollouts");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.DockerRegistryCredential", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2338,6 +2619,48 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("DockerRegistryCredentials");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.EgressAgent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("LastRemoteAddress")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("LastSeenAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ReportedAllowlist")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("EgressAgents");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2411,6 +2734,42 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("ExternalDependencies");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ExternalGroupMapping", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("ExternalGroup")
+                        .IsRequired()
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<Guid>("RoleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RoleId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("ExternalGroup", "TenantId")
+                        .IsUnique();
+
+                    b.ToTable("ExternalGroupMappings");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ExternalRoute", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2454,11 +2813,26 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
+                    b.Property<int?>("RequestTimeoutSeconds")
+                        .HasColumnType("integer");
+
                     b.Property<string>("ServiceName")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
                     b.Property<int>("ServicePort")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("SessionAffinity")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("SessionAffinityKey")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int?>("SessionAffinityTtlSeconds")
                         .HasColumnType("integer");
 
                     b.Property<string>("TlsCertificate")
@@ -2998,6 +3372,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid>("AppId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("BehaviorYaml")
+                        .HasColumnType("text");
+
                     b.Property<int?>("CooldownPeriod")
                         .HasColumnType("integer");
 
@@ -3036,6 +3413,12 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<string>("ScaleTargetName")
                         .HasColumnType("text");
+
+                    b.Property<int?>("TargetCpuUtilization")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("TargetMemoryUtilization")
+                        .HasColumnType("integer");
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uuid");
@@ -3389,6 +3772,45 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("TenantId", "StartsAt");
 
                     b.ToTable("MaintenanceWindows");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.MeshMtlsPolicy", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("AppliedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterId", "Namespace")
+                        .IsUnique();
+
+                    b.ToTable("MeshMtlsPolicies");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MessagingBinding", b =>
@@ -4134,7 +4556,22 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<string>("ProjectName")
                         .HasColumnType("text");
 
+                    b.Property<string>("ProxyUrl")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProxyUsername")
+                        .HasColumnType("text");
+
                     b.Property<string>("Region")
+                        .HasColumnType("text");
+
+                    b.Property<Guid?>("RouteViaAgentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("RouteViaClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("S3Endpoint")
                         .HasColumnType("text");
 
                     b.Property<Guid>("TenantId")
@@ -4151,6 +4588,64 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("TenantId");
 
                     b.ToTable("OpenStackConnections");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OutboundMtlsCredential", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("AppliedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("EnvironmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int>("Port")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(443);
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("VaultSecretId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("WorkloadSelectorJson")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("OutboundMtlsCredentials");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQBackup", b =>
@@ -4513,6 +5008,64 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("ClusterId", "Kind", "SnapshotAt");
 
                     b.ToTable("ResourceUsageSnapshots");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.RolloutPolicy", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AnalysisWindowMinutes")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("DeploymentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<double?>("MaxErrorBudgetBurnRate")
+                        .HasColumnType("double precision");
+
+                    b.Property<double?>("MaxErrorRatePercent")
+                        .HasColumnType("double precision");
+
+                    b.Property<double?>("MaxLatencyP95Ms")
+                        .HasColumnType("double precision");
+
+                    b.Property<int?>("MaxRestarts")
+                        .HasColumnType("integer");
+
+                    b.Property<double?>("MinReadyFraction")
+                        .HasColumnType("double precision");
+
+                    b.Property<int>("OnFailure")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("OnInconclusive")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("TelemetryServiceName")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<int>("WarmupMinutes")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DeploymentId")
+                        .IsUnique();
+
+                    b.ToTable("RolloutPolicies");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RumSite", b =>
@@ -5576,6 +6129,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ApiToken", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.App", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Customer", "Customer")
@@ -5847,7 +6411,14 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("EntKube.Web.Data.ClientCaBundle", "ClientCaBundle")
+                        .WithMany("Routes")
+                        .HasForeignKey("ClientCaBundleId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.Navigation("App");
+
+                    b.Navigation("ClientCaBundle");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppServicePort", b =>
@@ -5986,6 +6557,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("RedisCluster");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ClientCaCertificate", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ClientCaBundle", "Bundle")
+                        .WithMany("Certificates")
+                        .HasForeignKey("BundleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Bundle");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
@@ -6001,6 +6583,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                 {
                     b.HasOne("EntKube.Web.Data.KubernetesCluster", "Cluster")
                         .WithMany("Components")
+                        .HasForeignKey("ClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Cluster");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ClusterCostRate", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KubernetesCluster", "Cluster")
+                        .WithMany()
                         .HasForeignKey("ClusterId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
@@ -6121,6 +6714,25 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Customer");
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CustomerEnvironment", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany("CustomerEnvironments")
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Environment", "Environment")
+                        .WithMany("CustomerEnvironments")
+                        .HasForeignKey("EnvironmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Environment");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CustomerGitCredential", b =>
@@ -6252,6 +6864,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("ParentResource");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.DeploymentRollout", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.AppDeployment", "Deployment")
+                        .WithMany()
+                        .HasForeignKey("DeploymentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Deployment");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.DockerRegistryCredential", b =>
                 {
                     b.HasOne("EntKube.Web.Data.App", "App")
@@ -6284,6 +6907,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Vault");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.EgressAgent", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
@@ -6312,6 +6946,25 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("App");
 
                     b.Navigation("Environment");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ExternalGroupMapping", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.TenantRole", "Role")
+                        .WithMany()
+                        .HasForeignKey("RoleId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Role");
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ExternalRoute", b =>
@@ -7066,6 +7719,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.RolloutPolicy", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.AppDeployment", "Deployment")
+                        .WithMany()
+                        .HasForeignKey("DeploymentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Deployment");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.SecretExpiryNotification", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
@@ -7593,6 +8257,13 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Sources");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ClientCaBundle", b =>
+                {
+                    b.Navigation("Certificates");
+
+                    b.Navigation("Routes");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
                 {
                     b.Navigation("Steps");
@@ -7625,6 +8296,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
                 {
                     b.Navigation("Apps");
 
+                    b.Navigation("CustomerEnvironments");
+
                     b.Navigation("GitCredentials");
 
                     b.Navigation("GitRepoPolicies");
@@ -7638,6 +8311,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>
                 {
                     b.Navigation("AppEnvironments");
+
+                    b.Navigation("CustomerEnvironments");
 
                     b.Navigation("KubernetesClusters");
                 });

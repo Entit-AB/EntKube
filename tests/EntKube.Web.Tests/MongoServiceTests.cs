@@ -366,4 +366,170 @@ public class MongoServiceTests : IDisposable
             It.Is<string>(m => m.Contains("kind: Job") && m.Contains("mongodump")),
             It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.AtLeastOnce);
     }
+
+    // ──────── Scheduled backups ────────
+
+    [Fact]
+    public async Task UpdateBackupSettingsAsync_RefusesAScheduleWithNowhereToUpload()
+    {
+        // A schedule with no bucket produced no CronJob, yet was stored and displayed — the
+        // cluster showed a backup schedule that could never fire.
+        (Tenant tenant, KubernetesCluster cluster, StorageLink _) = await SeedTenantWithClusterAsync();
+
+        MongoCluster mongo = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = cluster.Id,
+            Name = "no-bucket",
+            Namespace = "databases",
+            Members = 3,
+            StorageSize = "10Gi",
+            MongoVersion = "8.0.4",
+        };
+        db.MongoClusters.Add(mongo);
+        await db.SaveChangesAsync();
+
+        Func<Task> act = () => sut.UpdateBackupSettingsAsync(tenant.Id, mongo.Id, "0 2 * * *", 30, 20);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*backup storage*");
+
+        MongoCluster reloaded = await db.MongoClusters.AsNoTracking().FirstAsync(c => c.Id == mongo.Id);
+        reloaded.BackupSchedule.Should().BeNull("a schedule that cannot run must not be recorded");
+    }
+
+    [Fact]
+    public async Task CreateClusterAsync_RefusesAScheduleWithoutBackupStorage()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink _) = await SeedTenantWithClusterAsync();
+
+        Func<Task> act = () => sut.CreateClusterAsync(
+            tenant.Id, cluster.Id, "no-bucket", "databases", 3, "10Gi",
+            storageLinkId: null, backupSchedule: "0 2 * * *");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*backup storage*");
+    }
+
+    [Fact]
+    public async Task UpdateBackupSettingsAsync_AppliesACronJobWithAFiveFieldSchedule()
+    {
+        // Kubernetes CronJobs reject the 6-field (seconds) form that CNPG accepts, so the
+        // leading field is dropped — a schedule copied from a database backup still works.
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        MongoCluster mongo = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = cluster.Id,
+            Name = "sched-mongo",
+            Namespace = "databases",
+            Members = 3,
+            StorageSize = "10Gi",
+            MongoVersion = "8.0.4",
+            StorageLinkId = storageLink.Id,
+        };
+        db.MongoClusters.Add(mongo);
+        await db.SaveChangesAsync();
+
+        List<string> applied = [];
+        k8sFactory.Setup(f => f.ApplyManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((manifest, _, _) => applied.Add(manifest))
+            .Returns(Task.CompletedTask);
+
+        await sut.UpdateBackupSettingsAsync(tenant.Id, mongo.Id, "0 0 2 * * *", 30, 20);
+
+        string cronJob = applied.First(m => m.Contains("kind: CronJob"));
+        cronJob.Should().Contain("schedule: \"0 2 * * *\"");
+        cronJob.Should().Contain("name: sched-mongo-scheduled-backup");
+        // Finished Jobs are the only record of a run until someone opens the page, so they must
+        // outlive a nightly schedule by more than a day.
+        cronJob.Should().Contain("ttlSecondsAfterFinished: 604800");
+        // The S3 credentials Secret must exist too, or every run fails to start its uploader.
+        applied.Should().Contain(m => m.Contains("kind: Secret") && m.Contains("sched-mongo-s3-credentials"));
+    }
+
+    [Fact]
+    public async Task GetScheduledBackupStatusAsync_ReportsTheCronJobItFinds()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        MongoCluster mongo = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = cluster.Id,
+            Name = "sched-mongo",
+            Namespace = "databases",
+            Members = 3,
+            StorageSize = "10Gi",
+            MongoVersion = "8.0.4",
+            StorageLinkId = storageLink.Id,
+            BackupSchedule = "0 2 * * *",
+        };
+        db.MongoClusters.Add(mongo);
+        await db.SaveChangesAsync();
+
+        k8sFactory.Setup(f => f.GetJsonAsync(
+                "cronjob", "databases", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""
+                {"items":[{"metadata":{"name":"sched-mongo-scheduled-backup"},
+                  "spec":{"schedule":"0 2 * * *"},
+                  "status":{"lastScheduleTime":"2026-08-17T02:00:00Z",
+                            "lastSuccessfulTime":"2026-08-17T02:04:00Z"}}]}
+                """);
+
+        MongoScheduledBackupStatus status = await sut.GetScheduledBackupStatusAsync(tenant.Id, mongo.Id);
+
+        status.Exists.Should().BeTrue();
+        status.AppliedSchedule.Should().Be("0 2 * * *");
+        status.LastScheduleTime.Should().Be(new DateTime(2026, 8, 17, 2, 0, 0, DateTimeKind.Utc));
+        status.LastSuccessfulTime.Should().NotBeNull();
+        status.Problem.Should().BeNull();
+        status.IsHealthy.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task GetScheduledBackupStatusAsync_SaysSoWhenTheCronJobIsMissingOrSuspended()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        MongoCluster mongo = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = cluster.Id,
+            Name = "sched-mongo",
+            Namespace = "databases",
+            Members = 3,
+            StorageSize = "10Gi",
+            MongoVersion = "8.0.4",
+            StorageLinkId = storageLink.Id,
+            BackupSchedule = "0 2 * * *",
+        };
+        db.MongoClusters.Add(mongo);
+        await db.SaveChangesAsync();
+
+        k8sFactory.Setup(f => f.GetJsonAsync(
+                "cronjob", "databases", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""{"items":[]}""");
+
+        MongoScheduledBackupStatus missing = await sut.GetScheduledBackupStatusAsync(tenant.Id, mongo.Id);
+        missing.Exists.Should().BeFalse();
+        missing.Problem.Should().Contain("No CronJob");
+
+        k8sFactory.Setup(f => f.GetJsonAsync(
+                "cronjob", "databases", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""
+                {"items":[{"metadata":{"name":"sched-mongo-scheduled-backup"},
+                  "spec":{"schedule":"0 2 * * *","suspend":true},"status":{}}]}
+                """);
+
+        MongoScheduledBackupStatus suspended = await sut.GetScheduledBackupStatusAsync(tenant.Id, mongo.Id);
+        suspended.Exists.Should().BeTrue();
+        suspended.Suspended.Should().BeTrue();
+        suspended.Problem.Should().Contain("suspended");
+        suspended.IsHealthy.Should().BeFalse();
+    }
 }

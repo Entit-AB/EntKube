@@ -124,8 +124,8 @@ else
                     @if (graph.ExposedPorts.Count == 0)
                     {
                         <div class="text-muted small p-2">
-                            No exposed ports found. If this app has a Service, make sure its manifest is
-                            attached to a deployment in this environment.
+                            No exposed ports found. Services are read from attached manifests, declared
+                            ports, and — for routed Services — from the cluster itself.
                         </div>
                     }
                     else
@@ -147,7 +147,14 @@ else
                                         <div class="small text-muted ms-4">→ container :@tp @(p.PortName is null ? "" : $"({p.PortName})")</div>
                                     }
                                 </div>
-                                @SourceBadge(p.Source)
+                                <span class="text-nowrap">
+                                    @if (p.FromCluster)
+                                    {
+                                        <span class="badge bg-success-subtle text-success-emphasis border me-1"
+                                              title="Read from the live cluster — no manifest declares this Service">Live</span>
+                                    }
+                                    @SourceBadge(p.Source)
+                                </span>
                             </div>
                         }
                     }
@@ -488,6 +495,15 @@ else
             </div>
         }
     </div>
+
+    @* Who may call the app is decided above; whether those calls must prove their identity is here. *@
+    @if (TenantId is { } tenantId)
+    {
+        <MeshMtlsPanel AppId="AppId" EnvironmentId="EnvironmentId" TenantId="tenantId" />
+
+        @* Egress is declared above; this is the client certificate that authenticates it. *@
+        <OutboundMtlsPanel AppId="AppId" TenantId="tenantId" EnvironmentId="EnvironmentId" />
+    }
 
     <div class="text-muted small mt-3">
         <i class="bi bi-lightbulb me-1"></i>

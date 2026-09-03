@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using MimeKit;
 using EntKube.Web.Data;
 
+using EntKube.Web.Services.Outbound;
 namespace EntKube.Web.Services;
 
 public class NotificationService(
@@ -14,6 +15,33 @@ public class NotificationService(
     IConfiguration configuration,
     ILogger<NotificationService> logger)
 {
+    /// <summary>
+    /// Refuses to dial a destination a tenant user should not be able to reach through us.
+    ///
+    /// EntKube's management plane can reach every managed cluster, its own loopback and —
+    /// on a cloud instance — the link-local metadata service that hands out credentials.
+    /// Notification URLs are supplied by tenant users, who are not trusted with that
+    /// network position, so every operator-supplied destination is validated before the
+    /// request is made. Set Notifications:AllowPrivateWebhookTargets to allow an internal
+    /// receiver; it is instance-wide on purpose, because the tenant is not the party who
+    /// gets to make that call.
+    /// </summary>
+    private async Task<bool> IsDestinationAllowedAsync(string? url, string channelType, CancellationToken ct)
+    {
+        bool allowPrivate = configuration.GetValue("Notifications:AllowPrivateWebhookTargets", false);
+
+        OutboundUrlVerdict verdict = await OutboundUrlGuard.ValidateAsync(url, allowPrivate, ct);
+        if (verdict.IsAllowed)
+        {
+            return true;
+        }
+
+        logger.LogWarning(
+            "Refused to deliver a {ChannelType} notification: {Reason}", channelType, verdict.Reason);
+
+        return false;
+    }
+
     public async Task SendAsync(
         AlertIncident incident,
         NotificationChannel channel,
@@ -388,6 +416,11 @@ public class NotificationService(
                       $"Time: {message.Timestamp:u}\n" +
                       $"{(string.IsNullOrEmpty(message.Summary) ? "" : message.Summary)}";
 
+        if (!await IsDestinationAllowedAsync(webhookUrl, "Slack", ct))
+        {
+            return false;
+        }
+
         string body = JsonSerializer.Serialize(new { text });
         using HttpClient http = httpClientFactory.CreateClient("Notifications");
         using StringContent content = new(body, Encoding.UTF8, "application/json");
@@ -505,6 +538,11 @@ public class NotificationService(
             }
         };
 
+        if (!await IsDestinationAllowedAsync(webhookUrl, "Teams", ct))
+        {
+            return false;
+        }
+
         string body = JsonSerializer.Serialize(card);
         using HttpClient http = httpClientFactory.CreateClient("Notifications");
         using StringContent content = new(body, Encoding.UTF8, "application/json");
@@ -608,12 +646,34 @@ public class NotificationService(
             status = message.StatusLabel
         };
 
+        if (!await IsDestinationAllowedAsync(url, "Webhook", ct))
+        {
+            return false;
+        }
+
         using HttpClient http = httpClientFactory.CreateClient("Notifications");
         if (!string.IsNullOrEmpty(token))
             http.DefaultRequestHeaders.Authorization =
                 new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
 
-        using StringContent content = new(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+        string body = JsonSerializer.Serialize(payload);
+        using StringContent content = new(body, Encoding.UTF8, "application/json");
+
+        // Sign the body when the channel carries a secret. A bearer token proves the sender
+        // knew a secret but says nothing about the body; an HMAC proves both, and webhook
+        // URLs leak through logs and copy-paste often enough for that to matter.
+        string? secret = config.RootElement.TryGetProperty("secret", out JsonElement s)
+            ? s.GetString()
+            : null;
+
+        if (!string.IsNullOrWhiteSpace(secret))
+        {
+            long timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            content.Headers.Add(WebhookSigner.TimestampHeader, timestamp.ToString());
+            content.Headers.Add(WebhookSigner.SignatureHeader, WebhookSigner.Sign(secret, timestamp, body));
+            content.Headers.Add(WebhookSigner.EventHeader, isFiring ? "alert.firing" : "alert.resolved");
+        }
+
         HttpResponseMessage response = await http.PostAsync(url, content, ct);
         return response.IsSuccessStatusCode;
     }

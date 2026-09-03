@@ -78,6 +78,17 @@ services:
       DatabaseProvider: Postgres
       ConnectionStrings__DefaultConnection: "Host=postgres;Port=5432;Database=entkube;Username=entkube;Password=${POSTGRES_PASSWORD:-changeme}"
 
+      # --- Container registry (for EntKube-published components installed into managed clusters) ---
+      # One credential, two consumers:
+      #   1. EntKube pulls the Helm chart  — helm runs in THIS container and logs in with these.
+      #   2. The managed cluster pulls the image — EntKube creates a dockerconfigjson Secret in the
+      #      release namespace from these, because the cluster's kubelet does the pull and EntKube's
+      #      own session does not reach it.
+      # The key is the registry host with dots replaced by underscores.
+      # Leave unset if the images are public — nothing is created and pulls happen anonymously.
+      Helm__Registries__entit_azurecr_io__Username: "${REGISTRY_USERNAME:-}"
+      Helm__Registries__entit_azurecr_io__Password: "${REGISTRY_PASSWORD:-}"
+
       # --- Telemetry (self-built Lucene/S3 segment engine — logs / traces / RUM) ---
       # Base URL clusters use to reach this server. The app appends /ingest/otlp to
       # build the collector's Ingest URL. Must be externally reachable from clusters.
@@ -121,6 +132,27 @@ services:
       # --- Auth ---
       # Set to false after the first admin account is created.
       Auth__AllowRegistration: "true"
+
+      # --- Single sign-on (OIDC) ---
+      # Entirely optional. With OIDC__ENABLED unset or false no OIDC scheme is
+      # registered at all and the login page is unchanged, so leaving this alone
+      # costs nothing. See docs/sso.md.
+      #
+      # Register https://${DOMAIN}/signin-oidc as the redirect URI with your provider.
+      Oidc__Enabled: "${OIDC_ENABLED:-false}"
+      Oidc__Authority: "${OIDC_AUTHORITY:-}"
+      Oidc__ClientId: "${OIDC_CLIENT_ID:-}"
+      Oidc__ClientSecret: "${OIDC_CLIENT_SECRET:-}"
+      Oidc__DisplayName: "${OIDC_DISPLAY_NAME:-Single sign-on}"
+      # Claim carrying group membership. Providers disagree: Keycloak "groups",
+      # Entra "groups" (object ids) or "roles", Okta configurable.
+      Oidc__GroupsClaim: "${OIDC_GROUPS_CLAIM:-groups}"
+      # Extra scope beyond openid/profile/email. Configuration arrays are indexed,
+      # hence the __0 — add __1, __2 for more.
+      Oidc__Scopes__0: "${OIDC_SCOPE:-groups}"
+      # false (default) refuses a user whose groups map to no tenant. A
+      # directory-wide SSO app should not let your whole directory create accounts.
+      Oidc__AllowUsersWithoutMappedGroups: "${OIDC_ALLOW_UNMAPPED:-false}"
 
       # --- Temporary: log all HTTP requests so we can see 404s ---
       Logging__LogLevel__Microsoft__AspNetCore__Hosting__Diagnostics: "Information"

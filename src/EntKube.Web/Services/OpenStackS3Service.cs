@@ -54,7 +54,7 @@ public class S3CorsRule
 /// - We use those credentials to call the S3 API and create the bucket
 /// - We store the credentials in the vault and return them
 /// </summary>
-public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory httpClientFactory, OpenStackKeystoneClient keystone)
+public class OpenStackS3Service(VaultService vaultService, OpenStackHttpFactory httpFactory, OpenStackKeystoneClient keystone)
 {
     /// <summary>
     /// Provisions a new S3 bucket on Cleura using the given OpenStack connection.
@@ -87,18 +87,18 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
 
         // Step 4: Determine the S3 endpoint from the region.
 
-        string endpoint = GetS3Endpoint(connection.Region ?? "Kna1");
+        string endpoint = ResolveS3Endpoint(connection, session);
 
         // Step 5: Create the bucket using the S3 API.
 
-        await CreateS3BucketAsync(endpoint, accessKey, secretKey, bucketName, connection.Region ?? "Kna1", ct);
+        await CreateS3BucketAsync(endpoint, accessKey, secretKey, bucketName, connection.Region ?? "Kna1", session.Egress, ct);
 
         // Step 6: Apply a default bucket policy that allows full CRUD on objects.
         // Without this, the bucket exists but object operations may be denied.
 
         string defaultPolicy = BuildDefaultBucketPolicy(bucketName);
 
-        using AmazonS3Client policyClient = CreateS3Client(endpoint, accessKey, secretKey, connection.Region ?? "Kna1");
+        using AmazonS3Client policyClient = CreateS3Client(endpoint, accessKey, secretKey, connection.Region ?? "Kna1", session.Egress);
 
         await policyClient.PutBucketPolicyAsync(new PutBucketPolicyRequest
         {
@@ -131,7 +131,7 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
 
         // GET <swift_endpoint>?format=json lists all containers owned by this project.
 
-        using HttpClient client = httpClientFactory.CreateClient();
+        using HttpClient client = httpFactory.CreateClient(session.Egress);
 
         string listUrl = swiftEndpoint.TrimEnd('/') + "?format=json";
 
@@ -180,10 +180,11 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
     /// <summary>
     /// Creates an S3 bucket using the AWS SDK against Cleura's S3-compatible endpoint.
     /// </summary>
-    private static async Task CreateS3BucketAsync(
-        string endpoint, string accessKey, string secretKey, string bucketName, string region, CancellationToken ct)
+    private async Task CreateS3BucketAsync(
+        string endpoint, string accessKey, string secretKey, string bucketName, string region,
+        ResolvedEgress? egress, CancellationToken ct)
     {
-        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region);
+        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region, egress);
 
         PutBucketRequest putRequest = new()
         {
@@ -197,12 +198,65 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
     /// Maps a Cleura region code to the S3 endpoint URL.
     /// Cleura exposes S3-compatible object storage at region-specific endpoints.
     /// </summary>
-    private static string GetS3Endpoint(string region)
+    /// <summary>
+    /// Works out the S3 endpoint for a connection, preferring what the cloud
+    /// actually says over anything derived from its region name.
+    ///
+    /// Order:
+    /// 1. An explicit endpoint on the connection, if the operator set one.
+    /// 2. The service catalog. Ceph RADOS Gateway serves the S3 and Swift APIs on
+    ///    the same host, and the catalog advertises the Swift path, so the origin
+    ///    of the <c>object-store</c> URL is the S3 endpoint.
+    /// 3. Only then the regional name pattern.
+    ///
+    /// The pattern used to be the only option, which produced a hostname that did
+    /// not exist for any region whose name is not a bare code — a DNS failure well
+    /// after authentication had already succeeded, which reads as a network fault
+    /// rather than the configuration mistake it is.
+    /// </summary>
+    public static string ResolveS3Endpoint(OpenStackConnection connection, KeystoneSession session)
     {
-        // Cleura/City Cloud S3 endpoint pattern (standard HTTPS port).
-        // Known regions: Kna1, Sto2, Fra1, Lon1, etc.
+        if (!string.IsNullOrWhiteSpace(connection.S3Endpoint))
+        {
+            return connection.S3Endpoint.TrimEnd('/');
+        }
 
-        return $"https://s3-{region.ToLowerInvariant()}.citycloud.com";
+        // Some clouds advertise the S3 API in its own right; prefer that when present.
+        foreach (string serviceType in (string[])["s3", "object-store"])
+        {
+            if (session.GetEndpoint(serviceType) is { Length: > 0 } url
+                && Uri.TryCreate(url, UriKind.Absolute, out Uri? parsed))
+            {
+                return parsed.GetLeftPart(UriPartial.Authority);
+            }
+        }
+
+        return GetS3Endpoint(connection.Region ?? "Kna1");
+    }
+
+    /// <summary>
+    /// Last-resort guess at a Cleura/City Cloud S3 endpoint from the region code,
+    /// used only when the service catalog advertises no object store. Correct for
+    /// bare region codes (Kna1, Sto2, Fra1) and wrong for anything else, which is
+    /// why the catalog is consulted first.
+    /// </summary>
+    public static string GetS3Endpoint(string region)
+        => $"https://s3-{region.ToLowerInvariant()}.citycloud.com";
+
+    /// <summary>
+    /// Every hostname this connection will be asked to reach, given a live
+    /// session: Keystone, everything in the service catalog, and the resolved S3
+    /// endpoint.
+    ///
+    /// Surfaced so an operator can see exactly what to put in an egress agent's
+    /// allowlist, rather than discovering each missing host one refused call at a
+    /// time.
+    /// </summary>
+    public static List<string> GetRequiredHosts(OpenStackConnection connection, KeystoneSession session)
+    {
+        List<string> urls = [connection.AuthUrl, ResolveS3Endpoint(connection, session), .. session.Endpoints.Values];
+
+        return ClusterEgressRelay.NormalizeHosts(urls);
     }
 
     /// <summary>
@@ -249,9 +303,10 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
     /// without needing to open a separate tool.
     /// </summary>
     public async Task<List<S3BucketInfo>> ListBucketsAsync(
-        string endpoint, string accessKey, string secretKey, string region, CancellationToken ct = default)
+        string endpoint, string accessKey, string secretKey, string region,
+        ResolvedEgress? egress, CancellationToken ct = default)
     {
-        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region);
+        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region, egress);
 
         ListBucketsResponse response = await s3Client.ListBucketsAsync(ct);
 
@@ -266,9 +321,10 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
     /// the StorageLink record (the caller handles that separately).
     /// </summary>
     public async Task DeleteBucketAsync(
-        string endpoint, string accessKey, string secretKey, string bucketName, string region, CancellationToken ct = default)
+        string endpoint, string accessKey, string secretKey, string bucketName, string region,
+        ResolvedEgress? egress, CancellationToken ct = default)
     {
-        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region);
+        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region, egress);
 
         // Empty the bucket first — S3 won't delete non-empty buckets.
         // We page through all objects and delete them in batches of up to 1000.
@@ -342,9 +398,10 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
     /// Returns null if no CORS configuration is set.
     /// </summary>
     public async Task<List<S3CorsRule>?> GetBucketCorsAsync(
-        string endpoint, string accessKey, string secretKey, string bucketName, string region, CancellationToken ct = default)
+        string endpoint, string accessKey, string secretKey, string bucketName, string region,
+        ResolvedEgress? egress, CancellationToken ct = default)
     {
-        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region);
+        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region, egress);
 
         try
         {
@@ -373,9 +430,9 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
     /// </summary>
     public async Task SetBucketCorsAsync(
         string endpoint, string accessKey, string secretKey, string bucketName, string region,
-        List<S3CorsRule> rules, CancellationToken ct = default)
+        List<S3CorsRule> rules, ResolvedEgress? egress, CancellationToken ct = default)
     {
-        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region);
+        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region, egress);
 
         if (rules.Count == 0)
         {
@@ -410,9 +467,10 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
     /// Gets the bucket policy as a JSON string. Returns null if no policy is set.
     /// </summary>
     public async Task<string?> GetBucketPolicyAsync(
-        string endpoint, string accessKey, string secretKey, string bucketName, string region, CancellationToken ct = default)
+        string endpoint, string accessKey, string secretKey, string bucketName, string region,
+        ResolvedEgress? egress, CancellationToken ct = default)
     {
-        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region);
+        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region, egress);
 
         try
         {
@@ -432,9 +490,9 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
     /// </summary>
     public async Task SetBucketPolicyAsync(
         string endpoint, string accessKey, string secretKey, string bucketName, string region,
-        string? policyJson, CancellationToken ct = default)
+        string? policyJson, ResolvedEgress? egress, CancellationToken ct = default)
     {
-        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region);
+        using AmazonS3Client s3Client = CreateS3Client(endpoint, accessKey, secretKey, region, egress);
 
         if (policyJson is null)
         {
@@ -568,9 +626,9 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
 
         // Verify the new credentials work by listing the bucket.
 
-        string endpoint = GetS3Endpoint(connection.Region ?? "Kna1");
+        string endpoint = ResolveS3Endpoint(connection, session);
 
-        using AmazonS3Client s3Client = CreateS3Client(endpoint, newAccessKey, newSecretKey, connection.Region ?? "Kna1");
+        using AmazonS3Client s3Client = CreateS3Client(endpoint, newAccessKey, newSecretKey, connection.Region ?? "Kna1", session.Egress);
 
         try
         {
@@ -591,7 +649,8 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
     /// <summary>
     /// Creates a configured AmazonS3Client for Cleura's S3-compatible endpoint.
     /// </summary>
-    private static AmazonS3Client CreateS3Client(string endpoint, string accessKey, string secretKey, string region)
+    private AmazonS3Client CreateS3Client(
+        string endpoint, string accessKey, string secretKey, string region, ResolvedEgress? egress)
     {
         if (string.IsNullOrEmpty(endpoint))
         {
@@ -609,6 +668,13 @@ public class OpenStackS3Service(VaultService vaultService, IHttpClientFactory ht
             Timeout = TimeSpan.FromSeconds(30),
             MaxErrorRetry = 1
         };
+
+        // Route S3 traffic over the connection's egress when it has one, so the
+        // object store sees an allowlisted source address.
+        if (httpFactory.CreateAwsHttpClientFactory(egress) is { } awsFactory)
+        {
+            config.HttpClientFactory = awsFactory;
+        }
 
         BasicAWSCredentials credentials = new(accessKey, secretKey);
         return new AmazonS3Client(credentials, config);

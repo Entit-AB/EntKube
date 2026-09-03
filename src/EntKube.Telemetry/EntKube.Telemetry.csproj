@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>EntKube.Telemetry</RootNamespace>
+  </PropertyGroup>
+
+  <!--
+    The telemetry segment engine, extracted from EntKube.Web so the same code can run in two places:
+    inside the management plane (as it does today) and inside a managed cluster as the
+    entkube-telemetry-indexer / entkube-telemetry-query components. See docs/telemetry-in-cluster.md.
+
+    This library must therefore stay free of ASP.NET, EF Core, and anything that assumes the management
+    plane's database. Its two seams to the outside are ISegmentCatalog (where the segment list lives) and
+    ISegmentBlobStore (where the sealed archives live); implementations of both are supplied by the host.
+  -->
+  <ItemGroup>
+    <Using Include="Microsoft.Extensions.Configuration" />
+    <Using Include="Microsoft.Extensions.Hosting" />
+    <Using Include="Microsoft.Extensions.Logging" />
+    <!-- The DTOs and result types the engine's query surfaces return still carry the EntKube.Web.*
+         namespaces even though they live in this assembly; see OperationResult.cs for why. -->
+    <Using Include="EntKube.Web.Data" />
+    <Using Include="EntKube.Web.Services" />
+    <!-- Telemetry's own severity enum collides by name with Microsoft.Extensions.Logging.LogLevel.
+         In EntKube.Web the engine's consumers sat in the same namespace as the type so it simply won;
+         here it arrives via a using, so the alias is needed to break the tie. Log *severity of an
+         ingested event* is what LogLevel means throughout this assembly. -->
+    <Using Include="EntKube.Web.Services.LogLevel" Alias="LogLevel" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="4.0.23.3" />
+    <PackageReference Include="Lucene.Net" Version="4.8.0-beta00017" />
+    <PackageReference Include="Lucene.Net.Analysis.Common" Version="4.8.0-beta00017" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.1" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,337 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:EntKube.Installer.Gui.ViewModels"
+        x:Class="EntKube.Installer.Gui.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="EntKube installer"
+        Width="880" Height="700"
+        MinWidth="720" MinHeight="560"
+        WindowStartupLocation="CenterScreen">
+
+  <Grid RowDefinitions="Auto,*,Auto">
+
+    <!-- Header -->
+    <Border Grid.Row="0" Padding="24,20,24,16"
+            Background="{DynamicResource SystemControlBackgroundListLowBrush}">
+      <StackPanel Spacing="2">
+        <TextBlock Classes="heading" Text="{Binding Title}" />
+        <TextBlock Classes="subheading" Margin="0" Text="{Binding Subtitle}" />
+      </StackPanel>
+    </Border>
+
+    <!-- Body -->
+    <ScrollViewer Grid.Row="1" Padding="24,16">
+      <StackPanel>
+
+        <!-- Error banner -->
+        <Border IsVisible="{Binding HasError}" Classes="card" Margin="0,0,0,12"
+                Background="#33B3541E">
+          <SelectableTextBlock Classes="warning" Text="{Binding Error}" />
+        </Border>
+
+        <!-- ── Step 1: target ── -->
+        <StackPanel IsVisible="{Binding IsTargetStep}">
+          <StackPanel Orientation="Horizontal" Spacing="16">
+            <RadioButton GroupName="Target" Content="A server over SSH"
+                         IsChecked="{Binding TargetStep.IsRemote, Mode=TwoWay}" />
+            <RadioButton GroupName="Target" Content="This machine"
+                         IsChecked="{Binding TargetStep.IsLocal, Mode=TwoWay}" />
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding TargetStep.IsRemote}">
+            <Grid ColumnDefinitions="*,120">
+              <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                <TextBlock Classes="label" Text="Host" />
+                <TextBox Text="{Binding TargetStep.Host, Mode=TwoWay}" Watermark="server.example.com" />
+              </StackPanel>
+              <StackPanel Grid.Column="1">
+                <TextBlock Classes="label" Text="Port" />
+                <TextBox Text="{Binding TargetStep.Port, Mode=TwoWay}" />
+              </StackPanel>
+            </Grid>
+
+            <TextBlock Classes="label" Text="Username" />
+            <TextBox Text="{Binding TargetStep.Username, Mode=TwoWay}" />
+
+            <TextBlock Classes="label" Text="Authentication" />
+            <StackPanel Orientation="Horizontal" Spacing="16">
+              <RadioButton GroupName="Auth" Content="Private key"
+                           IsChecked="{Binding TargetStep.UsePrivateKey, Mode=TwoWay}" />
+              <RadioButton GroupName="Auth" Content="Password"
+                           IsChecked="{Binding TargetStep.UsePassword, Mode=TwoWay}" />
+            </StackPanel>
+
+            <StackPanel IsVisible="{Binding TargetStep.UsePrivateKey}">
+              <TextBlock Classes="label" Text="Private key file" />
+              <Grid ColumnDefinitions="*,Auto">
+                <AutoCompleteBox Grid.Column="0"
+                                 Text="{Binding TargetStep.PrivateKeyPath, Mode=TwoWay}"
+                                 ItemsSource="{Binding TargetStep.DiscoveredKeys}"
+                                 Watermark="~/.ssh/id_ed25519" />
+                <Button Grid.Column="1" x:Name="BrowseKeyButton" Content="Browse…" Margin="8,0,0,0" />
+              </Grid>
+              <TextBlock Classes="label" Text="Key passphrase (if the key is encrypted)" />
+              <TextBox PasswordChar="•" Text="{Binding TargetStep.PrivateKeyPassphrase, Mode=TwoWay}" />
+            </StackPanel>
+
+            <StackPanel IsVisible="{Binding TargetStep.UsePassword}">
+              <TextBlock Classes="label" Text="Password" />
+              <TextBox PasswordChar="•" Text="{Binding TargetStep.Password, Mode=TwoWay}" />
+            </StackPanel>
+
+            <Border Classes="card">
+              <StackPanel>
+                <CheckBox Content="Run privileged commands with sudo"
+                          IsChecked="{Binding TargetStep.UseSudo, Mode=TwoWay}" />
+                <TextBlock Classes="hint"
+                           Text="Needed unless this user is root or already in the docker group. Installing into /opt also needs it." />
+                <StackPanel IsVisible="{Binding TargetStep.UseSudo}">
+                  <TextBlock Classes="label" Text="sudo password (leave empty if NOPASSWD)" />
+                  <TextBox PasswordChar="•" Text="{Binding TargetStep.SudoPassword, Mode=TwoWay}" />
+                  <TextBlock Classes="hint"
+                             Text="Sent on the command's stdin, never on its command line, so it is not visible in the server's process list." />
+                </StackPanel>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+
+          <TextBlock Classes="label" Text="Install directory" />
+          <TextBox Text="{Binding TargetStep.Directory, Mode=TwoWay}" />
+          <TextBlock Classes="hint"
+                     Text="Holds docker-compose.yml, Caddyfile and .env. Compose is run from here." />
+        </StackPanel>
+
+        <!-- ── Step 2: configuration ── -->
+        <StackPanel IsVisible="{Binding IsConfigureStep}">
+
+          <!-- What was found at the target. Shown for an adopted deployment because every answer
+               below was derived from it, and the operator should be able to check that reading
+               before it is acted on. -->
+          <Border Classes="card" Margin="0,0,0,4"
+                  IsVisible="{Binding ConfigureStep.HasDetectedSummary}">
+            <StackPanel>
+              <TextBlock Classes="label" Margin="0,0,0,6" Text="Found on the target" />
+              <SelectableTextBlock Text="{Binding ConfigureStep.DetectedSummary}"
+                                   TextWrapping="Wrap" FontSize="12" />
+            </StackPanel>
+          </Border>
+
+          <TextBlock Classes="warning" Margin="0,8,0,0" TextWrapping="Wrap"
+                     IsVisible="{Binding ConfigureStep.IsAdoption}"
+                     Text="Installing replaces docker-compose.yml and Caddyfile with generated ones (the previous versions are kept as .bak). Hand edits to those files will not survive — move them into a docker-compose.override.yml, which the installer never touches. Your .env is merged, not replaced: settings it does not manage are carried through." />
+
+          <TextBlock Classes="label" Margin="0,0,0,4" Text="How will this be reached?" />
+          <StackPanel Orientation="Horizontal" Spacing="16">
+            <RadioButton GroupName="Expose" Content="Public domain with HTTPS"
+                         IsChecked="{Binding ConfigureStep.PublicTls, Mode=TwoWay}" />
+            <RadioButton GroupName="Expose" Content="Local port, no TLS"
+                         IsChecked="{Binding ConfigureStep.LocalOnly, Mode=TwoWay}" />
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding ConfigureStep.PublicTls}">
+            <TextBlock Classes="label" Text="Domain" />
+            <TextBox Text="{Binding ConfigureStep.Domain, Mode=TwoWay}" Watermark="entkube.example.com" />
+            <TextBlock Classes="hint"
+                       Text="DNS must already resolve to the server: Let's Encrypt validates over HTTP on port 80, and issuance fails if it does not." />
+            <TextBlock Classes="label" Text="Let's Encrypt account email" />
+            <TextBox Text="{Binding ConfigureStep.AcmeEmail, Mode=TwoWay}" Watermark="ops@example.com" />
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding ConfigureStep.LocalOnly}">
+            <TextBlock Classes="label" Text="Port to publish" />
+            <TextBox Text="{Binding ConfigureStep.LocalPort, Mode=TwoWay}" Width="140" HorizontalAlignment="Left" />
+            <TextBlock Classes="warning" Margin="0,8,0,0"
+                       Text="No TLS. Sign-in credentials and session cookies travel in clear text — use this only on a trusted network, or behind a proxy you already run." />
+          </StackPanel>
+
+          <TextBlock Classes="label" Text="Database" />
+          <StackPanel Spacing="4">
+            <RadioButton GroupName="Db" IsChecked="{Binding ConfigureStep.IsBundledDatabase, Mode=TwoWay}"
+                         Content="Bundled PostgreSQL 17 — managed by this compose file" />
+            <RadioButton GroupName="Db" IsChecked="{Binding ConfigureStep.IsExternalDatabase, Mode=TwoWay}"
+                         Content="External PostgreSQL — you supply the connection string" />
+            <RadioButton GroupName="Db" IsChecked="{Binding ConfigureStep.IsSqlite, Mode=TwoWay}"
+                         Content="SQLite — evaluation only, single node" />
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding ConfigureStep.IsExternalDatabase}">
+            <TextBlock Classes="label" Text="Npgsql connection string" />
+            <TextBox Text="{Binding ConfigureStep.ConnectionString, Mode=TwoWay}"
+                     Watermark="Host=db.example.com;Port=5432;Database=entkube;Username=entkube;Password=…" />
+            <TextBlock Classes="hint"
+                       Text="The database must already exist. EntKube creates its own schema on first start, but not the database." />
+          </StackPanel>
+
+          <TextBlock Classes="label" Text="Telemetry storage" />
+          <StackPanel Spacing="4">
+            <RadioButton GroupName="Tel" IsChecked="{Binding ConfigureStep.IsLocalDisk, Mode=TwoWay}"
+                         Content="Local disk — works immediately, single node" />
+            <RadioButton GroupName="Tel" IsChecked="{Binding ConfigureStep.IsBundledMinio, Mode=TwoWay}"
+                         Content="Bundled MinIO — self-hosted object storage on the same host" />
+            <RadioButton GroupName="Tel" IsChecked="{Binding ConfigureStep.IsExternalS3, Mode=TwoWay}"
+                         Content="External S3 bucket — credentials stored in .env" />
+          </StackPanel>
+          <TextBlock Classes="hint"
+                     Text="In production, prefer registering an S3 StorageLink in the app afterwards: its credentials live in the vault rather than in a file on the server." />
+
+          <StackPanel IsVisible="{Binding ConfigureStep.IsExternalS3}">
+            <TextBlock Classes="label" Text="S3 endpoint" />
+            <TextBox Text="{Binding ConfigureStep.S3Endpoint, Mode=TwoWay}" Watermark="https://s3.eu-north-1.amazonaws.com" />
+            <Grid ColumnDefinitions="*,*">
+              <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                <TextBlock Classes="label" Text="Bucket" />
+                <TextBox Text="{Binding ConfigureStep.S3Bucket, Mode=TwoWay}" />
+              </StackPanel>
+              <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                <TextBlock Classes="label" Text="Region" />
+                <TextBox Text="{Binding ConfigureStep.S3Region, Mode=TwoWay}" />
+              </StackPanel>
+            </Grid>
+            <Grid ColumnDefinitions="*,*">
+              <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                <TextBlock Classes="label" Text="Access key" />
+                <TextBox Text="{Binding ConfigureStep.S3AccessKey, Mode=TwoWay}" />
+              </StackPanel>
+              <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                <TextBlock Classes="label" Text="Secret key" />
+                <TextBox PasswordChar="•" Text="{Binding ConfigureStep.S3SecretKey, Mode=TwoWay}" />
+              </StackPanel>
+            </Grid>
+          </StackPanel>
+
+          <TextBlock Classes="label" Text="Telemetry retention (days)" />
+          <TextBox Text="{Binding ConfigureStep.RetentionDays, Mode=TwoWay}" Width="140" HorizontalAlignment="Left" />
+
+          <Expander Header="Image and registry" Margin="0,16,0,0">
+            <StackPanel>
+              <Grid ColumnDefinitions="*,*">
+                <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                  <TextBlock Classes="label" Text="Registry" />
+                  <TextBox Text="{Binding ConfigureStep.Registry, Mode=TwoWay}" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                  <TextBlock Classes="label" Text="Image tag" />
+                  <TextBox Text="{Binding ConfigureStep.ImageTag, Mode=TwoWay}" />
+                </StackPanel>
+              </Grid>
+              <TextBlock Classes="hint"
+                         Text="entit.azurecr.io is public — pulls need no login. Note the published image is linux/amd64 only; an arm64 server needs a multi-architecture image built for your own registry." />
+              <Grid ColumnDefinitions="*,*">
+                <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                  <TextBlock Classes="label" Text="Registry username (private registries only)" />
+                  <TextBox Text="{Binding ConfigureStep.RegistryUsername, Mode=TwoWay}" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                  <TextBlock Classes="label" Text="Registry password" />
+                  <TextBox PasswordChar="•" Text="{Binding ConfigureStep.RegistryPassword, Mode=TwoWay}" />
+                </StackPanel>
+              </Grid>
+            </StackPanel>
+          </Expander>
+
+          <TextBlock Classes="label" Text="Administrator email (optional)" />
+          <TextBox Text="{Binding ConfigureStep.SeedAdminEmail, Mode=TwoWay}" Watermark="ops@example.com" />
+          <TextBlock Classes="hint"
+                     Text="Granted the Admin role on every startup — the way back in if the last admin account is lost. You still register the account itself in the web UI." />
+
+          <Border Classes="card" IsVisible="{Binding ConfigureStep.HasAdoptedDatabaseNote}"
+                  Background="#332D7D46">
+            <SelectableTextBlock TextWrapping="Wrap" Text="{Binding ConfigureStep.AdoptedDatabaseNote}" />
+          </Border>
+
+          <Border Classes="card">
+            <TextBlock TextWrapping="Wrap" Text="{Binding ConfigureStep.VaultKeyNote}" />
+          </Border>
+
+          <TextBlock Classes="warning" Margin="0,12,0,0"
+                     IsVisible="{Binding !ConfigureStep.IsValid}"
+                     Text="{Binding ConfigureStep.ValidationMessage}" />
+        </StackPanel>
+
+        <!-- ── Step 3: install log ── -->
+        <StackPanel IsVisible="{Binding IsInstallStep}">
+          <Border Classes="card" Margin="0" Padding="0">
+            <ScrollViewer Height="420" x:Name="LogScroller">
+              <ItemsControl ItemsSource="{Binding Log}" Margin="12">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:LogLineView">
+                    <SelectableTextBlock Text="{Binding Text}"
+                                         Foreground="{Binding Brush}"
+                                         FontFamily="monospace" FontSize="12"
+                                         TextWrapping="Wrap" />
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </Border>
+        </StackPanel>
+
+        <!-- ── Step 4: client tools ── -->
+        <StackPanel IsVisible="{Binding IsClientToolsStep}">
+          <TextBlock TextWrapping="Wrap" Text="{Binding ClientToolsStep.BundleStatus}" />
+
+          <ItemsControl ItemsSource="{Binding ClientToolsStep.Tools}" Margin="0,12,0,0">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:ClientToolChoice">
+                <Border Classes="card">
+                  <StackPanel>
+                    <CheckBox IsChecked="{Binding Selected, Mode=TwoWay}"
+                              IsEnabled="{Binding IsAvailable}"
+                              Content="{Binding Name}" />
+                    <TextBlock Classes="hint" Text="{Binding Summary}" />
+                    <TextBlock Classes="hint" Text="{Binding Availability}" />
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+
+          <TextBlock Classes="label" Text="Install into" />
+          <TextBox Text="{Binding ClientToolsStep.Directory, Mode=TwoWay}" />
+          <TextBlock Classes="warning" Margin="0,8,0,0"
+                     IsVisible="{Binding ClientToolsStep.HasPathWarning}"
+                     Text="{Binding ClientToolsStep.PathWarning}" />
+
+          <Button x:Name="InstallToolsButton" Content="Install selected tools"
+                  Classes="accent" Margin="0,16,0,0"
+                  IsEnabled="{Binding ClientToolsStep.AnyAvailable}" />
+
+          <ItemsControl ItemsSource="{Binding ClientToolsStep.Results}" Margin="0,12,0,0">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="x:String">
+                <SelectableTextBlock Text="{Binding}" FontFamily="monospace" FontSize="12" />
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+
+          <Border Classes="card" IsVisible="{Binding ClientToolsStep.HasNextSteps}">
+            <StackPanel>
+              <TextBlock Classes="label" Margin="0,0,0,8" Text="Still to do" />
+              <SelectableTextBlock Text="{Binding ClientToolsStep.NextSteps}"
+                                   FontFamily="monospace" FontSize="12" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+        </StackPanel>
+
+      </StackPanel>
+    </ScrollViewer>
+
+    <!-- Footer -->
+    <Border Grid.Row="2" Padding="24,14"
+            Background="{DynamicResource SystemControlBackgroundListLowBrush}">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+          <ProgressBar IsIndeterminate="True" Width="120" Height="4"
+                       IsVisible="{Binding Busy}" />
+          <TextBlock Text="{Binding Status}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+          <Button x:Name="BackButton" Content="Back" IsEnabled="{Binding CanGoBack}" />
+          <Button x:Name="PrimaryButton" Classes="accent"
+                  Content="{Binding PrimaryLabel}" IsEnabled="{Binding CanGoForward}" />
+        </StackPanel>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>

@@ -1,0 +1,23 @@
+apiVersion: v2
+name: entkube-telemetry
+description: >-
+  EntKube's in-cluster telemetry plane: an indexer that receives OTLP and owns the hot and warm tiers on a
+  PersistentVolume, and an optional querier that scales the read path out over object storage.
+type: application
+
+# Chart version — bump on every chart change.
+version: 0.3.0
+
+# Version of the entkube-telemetry image this chart is tested against. Used as the default image tag.
+appVersion: "0.3.0"
+
+keywords:
+  - logging
+  - tracing
+  - observability
+  - opentelemetry
+home: https://github.com/entit/entkube
+sources:
+  - https://github.com/entit/entkube
+maintainers:
+  - name: EntKube

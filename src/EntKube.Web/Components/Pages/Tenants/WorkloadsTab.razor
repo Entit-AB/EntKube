@@ -1,0 +1,509 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject WorkloadService WorkloadService
+@inject TenantService TenantService
+
+@* ═══════════════════════════════════════════════════════════════════
+   WorkloadsTab — read-only cluster workload browser. Lists Pods,
+   Deployments, ReplicaSets, StatefulSets and DaemonSets with their
+   live status, filterable by namespace, kind and free text.
+
+   The namespace filter is applied server-side (kubectl scopes the
+   query to that namespace); kind/search/problem filters are applied
+   client-side over the loaded snapshot so they feel instant.
+
+   Mounted two ways: with a ClusterId (cluster detail → Workloads) or
+   with a TenantId only (Operations → Workloads), which adds a cluster
+   picker over the tenant's registered clusters.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+@if (TenantId is not null && clusters.Count == 0 && !loading)
+{
+    <div class="text-center text-muted py-5">
+        <i class="bi bi-hdd-rack fs-3 d-block mb-2"></i>
+        No clusters registered for this tenant.
+    </div>
+}
+else if (snapshot is null && loading)
+{
+    <div class="text-center py-5 text-muted">
+        <div class="spinner-border spinner-border-sm me-2"></div>Loading workloads…
+    </div>
+}
+else if (snapshot is { IsSuccess: false })
+{
+    <div class="alert alert-warning d-flex align-items-center gap-2">
+        <i class="bi bi-exclamation-triangle-fill"></i>
+        <span>@snapshot.Error</span>
+        <button class="btn btn-sm btn-outline-secondary ms-auto" @onclick="LoadAsync">Retry</button>
+    </div>
+}
+else if (snapshot is not null)
+{
+    @* ── Summary strip ─────────────────────────────────────────── *@
+    <div class="row g-2 mb-3">
+        @foreach (WorkloadKind kind in AllKinds)
+        {
+            List<WorkloadView> ofKind = [.. Scoped.Where(w => w.Kind == kind)];
+            int unhealthy = ofKind.Count(IsProblem);
+
+            <div class="col-6 col-md">
+                <div class="card border-0 shadow-sm text-center p-3 h-100"
+                     role="button" @onclick="() => ToggleKind(kind)"
+                     title="@(kindFilter.Contains(kind) ? "Hide" : "Show only")  @KindLabel(kind)">
+                    <div class="fs-4 fw-bold @(unhealthy > 0 ? "text-danger" : "")">
+                        @ofKind.Count
+                        @if (unhealthy > 0)
+                        {
+                            <span class="fs-6 fw-normal">&nbsp;(@unhealthy)</span>
+                        }
+                    </div>
+                    <div class="text-muted small">
+                        @if (!kindFilter.Contains(kind))
+                        {
+                            <i class="bi bi-funnel-fill text-primary me-1" title="Filtered out"></i>
+                        }
+                        @KindLabel(kind)s
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+
+    @if (snapshot.Warnings.Count > 0)
+    {
+        <div class="alert alert-warning py-2 small">
+            <i class="bi bi-exclamation-triangle me-1"></i>
+            @string.Join(" · ", snapshot.Warnings)
+        </div>
+    }
+
+    @* ── Filter bar ────────────────────────────────────────────── *@
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+        @if (clusters.Count > 0)
+        {
+            <div class="input-group input-group-sm" style="width:14rem">
+                <span class="input-group-text"><i class="bi bi-hdd-rack"></i></span>
+                <select class="form-select" value="@ClusterId" @onchange="OnClusterChangedAsync"
+                        aria-label="Cluster">
+                    @foreach (KubernetesCluster c in clusters)
+                    {
+                        <option value="@c.Id">@c.Name</option>
+                    }
+                </select>
+            </div>
+        }
+
+        <div class="input-group input-group-sm" style="width:16rem">
+            <span class="input-group-text"><i class="bi bi-folder2"></i></span>
+            <select class="form-select" value="@selectedNamespace" @onchange="OnNamespaceChangedAsync"
+                    aria-label="Namespace">
+                <option value="">All namespaces</option>
+                @foreach (string ns in NamespaceOptions)
+                {
+                    <option value="@ns">@ns</option>
+                }
+            </select>
+        </div>
+
+        <div class="input-group input-group-sm" style="width:18rem">
+            <span class="input-group-text"><i class="bi bi-search"></i></span>
+            <input class="form-control" placeholder="Filter by name, node, image…"
+                   @bind="search" @bind:event="oninput" />
+            @if (!string.IsNullOrEmpty(search))
+            {
+                <button class="btn btn-outline-secondary" @onclick='() => search = ""' aria-label="Clear search">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            }
+        </div>
+
+        <div class="btn-group btn-group-sm" role="group" aria-label="Kind filter">
+            @foreach (WorkloadKind kind in AllKinds)
+            {
+                <button type="button"
+                        class="btn @(kindFilter.Contains(kind) ? "btn-primary" : "btn-outline-secondary")"
+                        @onclick="() => ToggleKind(kind)">
+                    @KindLabel(kind)
+                </button>
+            }
+        </div>
+
+        <div class="form-check form-switch mb-0 ms-1">
+            <input class="form-check-input" type="checkbox" role="switch" id="wl-problems"
+                   @bind="problemsOnly" />
+            <label class="form-check-label text-muted small" for="wl-problems">Problems only</label>
+        </div>
+
+        <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" role="switch" id="wl-inactive"
+                   @bind="showInactive" />
+            <label class="form-check-label text-muted small" for="wl-inactive"
+                   title="Old ReplicaSets kept for rollback and completed pods are hidden by default.">
+                Show inactive
+            </label>
+        </div>
+
+        <div class="ms-auto d-flex align-items-center gap-2">
+            <span class="text-muted small">
+                @Filtered.Count of @Scoped.Count shown
+            </span>
+            <AutoRefresh OnRefresh="RefreshQuietlyAsync" IntervalSeconds="15" Enabled="false"
+                         LastRefreshed="snapshot.FetchedAt" />
+        </div>
+    </div>
+
+    @* ── Workload table ────────────────────────────────────────── *@
+    @if (Filtered.Count == 0)
+    {
+        <div class="text-center text-muted py-5">
+            <i class="bi bi-inboxes fs-3 d-block mb-2"></i>
+            No workloads match the current filters.
+        </div>
+    }
+    else
+    {
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead>
+                    <tr class="text-muted small">
+                        <th style="width:2rem"></th>
+                        <th>Name</th>
+                        <th style="width:7rem">Kind</th>
+                        <th style="width:11rem">Namespace</th>
+                        <th style="width:11rem">Status</th>
+                        <th style="width:6rem" class="text-end">Ready</th>
+                        <th style="width:6rem" class="text-end">Restarts</th>
+                        <th style="width:6rem" class="text-end">Age</th>
+                        <th style="width:14rem">Node / Owner</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (WorkloadView w in Filtered)
+                    {
+                        bool expanded = expandedKey == RowKey(w);
+
+                        <tr style="cursor:pointer" @onclick="() => ToggleRow(w)">
+                            <td>
+                                <i class="bi @HealthIcon(w.Health) @HealthClass(w.Health)"
+                                   title="@w.Health"></i>
+                            </td>
+                            <td class="text-truncate" style="max-width:22rem" title="@w.Name">
+                                <span class="fw-semibold">@w.Name</span>
+                                @if (w.IsInactive)
+                                {
+                                    <span class="badge bg-secondary bg-opacity-10 text-secondary border ms-1">inactive</span>
+                                }
+                            </td>
+                            <td><span class="badge bg-light text-dark border">@KindLabel(w.Kind)</span></td>
+                            <td class="text-truncate" title="@w.Namespace">@w.Namespace</td>
+                            <td class="@HealthClass(w.Health)">@w.StatusText</td>
+                            <td class="text-end">@w.Ready/@w.Desired</td>
+                            <td class="text-end @(w.Restarts > 0 ? "text-warning fw-semibold" : "text-muted")">
+                                @(w.Kind == WorkloadKind.Pod ? w.Restarts.ToString() : "—")
+                            </td>
+                            <td class="text-end text-muted">@Age(w.CreatedAt)</td>
+                            <td class="text-truncate text-muted small"
+                                title="@(w.Node ?? OwnerText(w))">
+                                @(w.Node ?? OwnerText(w) ?? "—")
+                            </td>
+                        </tr>
+
+                        @if (expanded)
+                        {
+                            <tr class="bg-body-secondary">
+                                <td colspan="9" class="p-3">
+                                    <div class="row g-3">
+                                        <div class="col-md-5">
+                                            <table class="table table-sm table-borderless mb-0">
+                                                <tbody>
+                                                    <tr>
+                                                        <th class="text-muted fw-normal small" style="width:40%">Kind</th>
+                                                        <td class="small">@KindLabel(w.Kind)</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <th class="text-muted fw-normal small">Status</th>
+                                                        <td class="small @HealthClass(w.Health)">@w.StatusText</td>
+                                                    </tr>
+                                                    @if (w.Kind != WorkloadKind.Pod)
+                                                    {
+                                                        <tr>
+                                                            <th class="text-muted fw-normal small">Updated</th>
+                                                            <td class="small">@w.Updated/@w.Desired</td>
+                                                        </tr>
+                                                    }
+                                                    @if (w.Node is not null)
+                                                    {
+                                                        <tr>
+                                                            <th class="text-muted fw-normal small">Node</th>
+                                                            <td class="small">@w.Node</td>
+                                                        </tr>
+                                                    }
+                                                    @if (w.PodIP is not null)
+                                                    {
+                                                        <tr>
+                                                            <th class="text-muted fw-normal small">Pod IP</th>
+                                                            <td class="small"><code>@w.PodIP</code></td>
+                                                        </tr>
+                                                    }
+                                                    @if (OwnerText(w) is string owner)
+                                                    {
+                                                        <tr>
+                                                            <th class="text-muted fw-normal small">Owned by</th>
+                                                            <td class="small">@owner</td>
+                                                        </tr>
+                                                    }
+                                                    <tr>
+                                                        <th class="text-muted fw-normal small">Created</th>
+                                                        <td class="small">
+                                                            @(w.CreatedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "—")
+                                                        </td>
+                                                    </tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+
+                                        <div class="col-md-7">
+                                            @if (!string.IsNullOrWhiteSpace(w.Message))
+                                            {
+                                                <div class="alert alert-warning py-2 small mb-2">@w.Message</div>
+                                            }
+
+                                            @if (w.Containers.Count == 0)
+                                            {
+                                                <div class="text-muted small">No container information.</div>
+                                            }
+                                            else
+                                            {
+                                                <table class="table table-sm mb-0">
+                                                    <thead>
+                                                        <tr class="text-muted small">
+                                                            <th>Container</th>
+                                                            <th>Image</th>
+                                                            <th class="text-end">State</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        @foreach (WorkloadContainerView c in w.Containers)
+                                                        {
+                                                            <tr>
+                                                                <td class="small">
+                                                                    @if (w.Kind == WorkloadKind.Pod)
+                                                                    {
+                                                                        <i class="bi @(c.Ready ? "bi-circle-fill text-success" : "bi-circle text-muted") me-1"
+                                                                           style="font-size:.6rem"></i>
+                                                                    }
+                                                                    @c.Name
+                                                                    @if (c.Restarts > 0)
+                                                                    {
+                                                                        <span class="text-warning ms-1">↻@c.Restarts</span>
+                                                                    }
+                                                                </td>
+                                                                <td class="small text-truncate" style="max-width:22rem" title="@c.Image">
+                                                                    <code>@c.Image</code>
+                                                                </td>
+                                                                <td class="small text-end @(c.Reason is null ? "text-muted" : "text-danger")">
+                                                                    @(c.Reason ?? c.State)
+                                                                </td>
+                                                            </tr>
+                                                        }
+                                                    </tbody>
+                                                </table>
+                                            }
+                                        </div>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+
+@code {
+    /// <summary>Cluster to browse. Optional when <see cref="TenantId"/> is set — the picker chooses one.</summary>
+    [Parameter] public Guid ClusterId { get; set; }
+
+    /// <summary>Set instead of (or alongside) ClusterId to browse any of the tenant's clusters.</summary>
+    [Parameter] public Guid? TenantId { get; set; }
+
+    /// <summary>Namespace to preselect — lets callers deep-link into one namespace's workloads.</summary>
+    [Parameter] public string? InitialNamespace { get; set; }
+
+    private static readonly WorkloadKind[] AllKinds =
+    [
+        WorkloadKind.Pod, WorkloadKind.Deployment, WorkloadKind.ReplicaSet,
+        WorkloadKind.StatefulSet, WorkloadKind.DaemonSet
+    ];
+
+    private WorkloadSnapshot? snapshot;
+    private List<KubernetesCluster> clusters = [];
+    private bool loading;
+    private string selectedNamespace = "";
+    private string search = "";
+    private bool problemsOnly;
+    private bool showInactive;
+    private string? expandedKey;
+    private readonly HashSet<WorkloadKind> kindFilter = [.. AllKinds];
+
+    protected override async Task OnInitializedAsync()
+    {
+        selectedNamespace = InitialNamespace ?? "";
+
+        // Tenant mount: offer every registered cluster, defaulting to the current
+        // one (or the first) so the page has something to show immediately.
+        if (TenantId is Guid tenantId)
+        {
+            clusters = await TenantService.GetClustersAsync(tenantId);
+            if (!clusters.Any(c => c.Id == ClusterId))
+                ClusterId = clusters.FirstOrDefault()?.Id ?? Guid.Empty;
+        }
+
+        if (ClusterId != Guid.Empty)
+            await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        StateHasChanged();
+        try
+        {
+            snapshot = await WorkloadService.LoadAsync(ClusterId, selectedNamespace);
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task OnClusterChangedAsync(ChangeEventArgs e)
+    {
+        if (!Guid.TryParse(e.Value?.ToString(), out Guid clusterId)) return;
+
+        ClusterId = clusterId;
+        // Namespaces are per-cluster, so a cluster switch resets the namespace scope.
+        selectedNamespace = "";
+        expandedKey = null;
+        await LoadAsync();
+    }
+
+    // Reload without flipping the full-page spinner — used by auto-refresh.
+    private async Task RefreshQuietlyAsync() =>
+        snapshot = await WorkloadService.LoadAsync(ClusterId, selectedNamespace);
+
+    private async Task OnNamespaceChangedAsync(ChangeEventArgs e)
+    {
+        selectedNamespace = e.Value?.ToString() ?? "";
+        expandedKey = null;
+        await LoadAsync();
+    }
+
+    // ── Filtering ────────────────────────────────────────────────
+
+    /// <summary>Everything the current namespace scope returned — the denominator for the summary strip.</summary>
+    private IReadOnlyList<WorkloadView> Scoped => snapshot?.Workloads ?? [];
+
+    private List<WorkloadView> Filtered => [.. Scoped.Where(Matches)];
+
+    private bool Matches(WorkloadView w)
+    {
+        if (!kindFilter.Contains(w.Kind)) return false;
+        if (problemsOnly && !IsProblem(w)) return false;
+        if (!showInactive && IsHiddenWhenInactive(w)) return false;
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            string needle = search.Trim();
+            bool hit = w.Name.Contains(needle, StringComparison.OrdinalIgnoreCase)
+                || w.Namespace.Contains(needle, StringComparison.OrdinalIgnoreCase)
+                || (w.Node?.Contains(needle, StringComparison.OrdinalIgnoreCase) ?? false)
+                || (w.OwnerName?.Contains(needle, StringComparison.OrdinalIgnoreCase) ?? false)
+                || w.Images.Any(i => i.Contains(needle, StringComparison.OrdinalIgnoreCase));
+            if (!hit) return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Degraded/Missing is a fault; a deliberately scaled-down workload is not.</summary>
+    private static bool IsProblem(WorkloadView w) =>
+        w.Health is HealthStatus.Degraded or HealthStatus.Missing;
+
+    /// <summary>
+    /// Noise hidden unless "Show inactive" is on: superseded ReplicaSets kept for
+    /// rollback, and pods that ran to completion (Job/CronJob leftovers).
+    /// </summary>
+    private static bool IsHiddenWhenInactive(WorkloadView w) =>
+        w.IsInactive || (w.Kind == WorkloadKind.Pod && w.Health == HealthStatus.Suspended);
+
+    /// <summary>The cluster's namespaces, falling back to the ones seen in the data.</summary>
+    private List<string> NamespaceOptions
+    {
+        get
+        {
+            if (snapshot is null) return [];
+            if (snapshot.Namespaces.Count > 0) return [.. snapshot.Namespaces];
+            return [.. snapshot.Workloads.Select(w => w.Namespace).Distinct().OrderBy(n => n, StringComparer.Ordinal)];
+        }
+    }
+
+    private void ToggleKind(WorkloadKind kind)
+    {
+        if (!kindFilter.Remove(kind)) kindFilter.Add(kind);
+    }
+
+    private void ToggleRow(WorkloadView w) =>
+        expandedKey = expandedKey == RowKey(w) ? null : RowKey(w);
+
+    private static string RowKey(WorkloadView w) => $"{w.Kind}/{w.Namespace}/{w.Name}";
+
+    // ── Presentation helpers ─────────────────────────────────────
+
+    private static string KindLabel(WorkloadKind kind) => kind switch
+    {
+        WorkloadKind.Pod => "Pod",
+        WorkloadKind.Deployment => "Deployment",
+        WorkloadKind.ReplicaSet => "ReplicaSet",
+        WorkloadKind.StatefulSet => "StatefulSet",
+        WorkloadKind.DaemonSet => "DaemonSet",
+        _ => kind.ToString()
+    };
+
+    private static string HealthClass(HealthStatus h) => h switch
+    {
+        HealthStatus.Healthy => "text-success",
+        HealthStatus.Progressing => "text-info",
+        HealthStatus.Degraded => "text-danger",
+        HealthStatus.Missing => "text-danger",
+        HealthStatus.Suspended => "text-muted",
+        _ => "text-muted"
+    };
+
+    private static string HealthIcon(HealthStatus h) => h switch
+    {
+        HealthStatus.Healthy => "bi-circle-fill",
+        HealthStatus.Progressing => "bi-arrow-repeat",
+        HealthStatus.Degraded => "bi-exclamation-circle-fill",
+        HealthStatus.Missing => "bi-question-circle-fill",
+        HealthStatus.Suspended => "bi-pause-circle",
+        _ => "bi-circle"
+    };
+
+    private static string Age(DateTime? created)
+    {
+        if (created is null) return "—";
+
+        TimeSpan age = DateTime.UtcNow - created.Value;
+        if (age.TotalMinutes < 1) return "<1m";
+        if (age.TotalHours < 1) return $"{(int)age.TotalMinutes}m";
+        if (age.TotalDays < 1) return $"{(int)age.TotalHours}h";
+        if (age.TotalDays < 365) return $"{(int)age.TotalDays}d";
+        return $"{(int)(age.TotalDays / 365)}y";
+    }
+
+    private static string? OwnerText(WorkloadView w) =>
+        w.OwnerName is null ? null : $"{w.OwnerKind}/{w.OwnerName}";
+}

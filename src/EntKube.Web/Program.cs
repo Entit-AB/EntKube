@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
@@ -11,6 +12,7 @@ using EntKube.Web.Components;
 using EntKube.Web.Components.Account;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
+using EntKube.Web.Services.Agents;
 using EntKube.Web.Services.Telemetry;
 using StackExchange.Redis;
 
@@ -31,12 +33,70 @@ public class Program
         builder.Services.AddScoped<IdentityRedirectManager>();
         builder.Services.AddScoped<AuthenticationStateProvider, IdentityRevalidatingAuthenticationStateProvider>();
 
-        builder.Services.AddAuthentication(options =>
+        EntKube.Web.Services.Sso.OidcOptions oidcOptions = new();
+        builder.Configuration
+            .GetSection(EntKube.Web.Services.Sso.OidcOptions.SectionName)
+            .Bind(oidcOptions);
+        builder.Services.AddSingleton(oidcOptions);
+
+        Microsoft.AspNetCore.Authentication.AuthenticationBuilder authBuilder =
+            builder.Services.AddAuthentication(options =>
             {
                 options.DefaultScheme = IdentityConstants.ApplicationScheme;
                 options.DefaultSignInScheme = IdentityConstants.ExternalScheme;
-            })
-            .AddIdentityCookies();
+            });
+
+        // SSO is opt-in and entirely config-driven. With no usable Oidc section no scheme is
+        // registered at all, so the login page is unchanged rather than showing a button that
+        // leads to a half-configured provider.
+        if (oidcOptions.IsUsable)
+        {
+            authBuilder.AddOpenIdConnect(
+                EntKube.Web.Services.Sso.OidcOptions.Scheme, oidcOptions.DisplayName, options =>
+                {
+                    options.Authority = oidcOptions.Authority;
+                    options.ClientId = oidcOptions.ClientId;
+                    options.ClientSecret = oidcOptions.ClientSecret;
+                    options.RequireHttpsMetadata = oidcOptions.RequireHttpsMetadata;
+
+                    // Authorization code flow with PKCE. The implicit and hybrid flows are
+                    // deprecated and leak tokens through the browser's address bar.
+                    options.ResponseType = "code";
+                    options.UsePkce = true;
+                    options.SaveTokens = false;
+
+                    // Sign in to Identity's external scheme so the existing external-login
+                    // callback page handles account linking exactly as it does for any other
+                    // provider — no second, parallel sign-in path to keep correct.
+                    options.SignInScheme = IdentityConstants.ExternalScheme;
+
+                    options.Scope.Clear();
+                    options.Scope.Add("openid");
+                    options.Scope.Add("profile");
+                    options.Scope.Add("email");
+                    foreach (string scope in oidcOptions.Scopes)
+                    {
+                        if (!string.IsNullOrWhiteSpace(scope))
+                        {
+                            options.Scope.Add(scope.Trim());
+                        }
+                    }
+
+                    options.GetClaimsFromUserInfoEndpoint = true;
+                    options.MapInboundClaims = false;
+                    options.TokenValidationParameters.NameClaimType = "name";
+                    options.TokenValidationParameters.RoleClaimType = "role";
+
+                    // The groups claim must survive into the principal the callback page reads,
+                    // or the group sync has nothing to work from.
+                    options.ClaimActions.MapJsonKey(oidcOptions.GroupsClaim, oidcOptions.GroupsClaim);
+                    options.ClaimActions.MapJsonKey("email", "email");
+                });
+        }
+
+        authBuilder.AddIdentityCookies();
+
+        builder.Services.AddScoped<EntKube.Web.Services.Sso.ExternalGroupSync>();
 
         // The app runs behind the Caddy reverse proxy which terminates TLS. Honor the
         // X-Forwarded-Proto/For headers so the app knows the original request was HTTPS —
@@ -237,6 +297,16 @@ public class Program
         builder.Services.AddScoped<CustomerAccessService>();
         builder.Services.AddScoped<KubernetesOperationsService>();
         builder.Services.AddScoped<NodeManagementService>();
+        builder.Services.AddScoped<WorkloadService>();
+        // One long-lived Kubernetes client per cluster, shared by every service that reaches an in-cluster
+        // HTTP API through the API-server proxy (Prometheus, Loki, and the in-cluster telemetry querier).
+        // These used to build a client per call, so each query paid its own TLS handshake to the API
+        // server — a dozen per dashboard render. Singleton: the pool is shared across circuits.
+        builder.Services.AddSingleton<KubernetesProxyClientPool>();
+        // Short-lived PromQL cache with single-flight: a dashboard render asks the same question from
+        // several panels at once, and each one otherwise crosses the WAN on its own.
+        builder.Services.AddSingleton(new EntKube.Web.Services.Telemetry.PromQueryCache(
+            TimeSpan.FromSeconds(builder.Configuration.GetValue<int?>("Metrics:QueryCacheSeconds") ?? 10)));
         builder.Services.AddScoped<PrometheusService>();
         // Telemetry engine: the self-built Lucene/S3 segment engine is the sole backend for logs, traces,
         // and RUM. OTLP/RUM writes go through SegmentTelemetryStore (no per-request DB connection — the
@@ -256,10 +326,18 @@ public class Program
             TraceKeepMinDurationMs = builder.Configuration.GetValue<double?>("Telemetry:TraceKeepMinDurationMs") ?? 500,
             TieredLogRetention = builder.Configuration.GetValue<bool?>("Telemetry:TieredLogRetention") ?? true,
             VerboseLogRetentionDays = builder.Configuration.GetValue<int?>("Telemetry:VerboseLogRetentionDays") ?? 14,
+            // Warm tier: how much of the sealed history stays on local disk rather than being fetched
+            // back from object storage. See docs/telemetry-in-cluster.md §3.1.
+            WarmRetentionDays = builder.Configuration.GetValue<int?>("Telemetry:WarmRetentionDays") ?? 3,
+            WarmMaxBytes = builder.Configuration.GetValue<long?>("Telemetry:WarmMaxBytes") ?? 8L * 1024 * 1024 * 1024,
         };
         builder.Services.AddSingleton(segmentOptions);
         // Per-tenant setting for which StorageLink backs a tenant's telemetry (edited in the tenant's
         // telemetry settings UI) + the per-tenant blob-store factory that resolves it.
+        // The segment catalog — the engine's only tie to the management-plane database. Everything behind
+        // this interface is Lucene indexes, local files and object storage, which is what lets the same
+        // engine run inside a cluster with a SQLite catalog on its PV. See docs/telemetry-in-cluster.md.
+        builder.Services.AddSingleton<ISegmentCatalog, EfSegmentCatalog>();
         builder.Services.AddSingleton<TelemetryStorageSettingService>();
         builder.Services.AddSingleton<TenantBlobStoreFactory>();
         // Telemetry is TENANT-SCOPED: one segment manager per (tenant, signal), created lazily on first
@@ -267,14 +345,14 @@ public class Program
         // logs/traces/RUM ever share a segment or a bucket with another's. The registries hold them.
         builder.Services.AddSingleton(sp => new SegmentManagerRegistry<LogSegmentManager>(tenantId =>
             new LogSegmentManager(tenantId,
-                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<ISegmentCatalog>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<LogSegmentManager>>())));
         // Verbose (DEBUG/INFO) log tier — its own signal + short retention; the important (WARN+) tier is the
         // LogSegmentManager registry above. LogTierRegistries routes writes/queries between them.
         builder.Services.AddSingleton(sp => new SegmentManagerRegistry<VerboseLogSegmentManager>(tenantId =>
             new VerboseLogSegmentManager(tenantId,
-                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<ISegmentCatalog>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<LogSegmentManager>>())));
         builder.Services.AddSingleton(sp => new LogTierRegistries(
@@ -283,23 +361,32 @@ public class Program
             segmentOptions));
         builder.Services.AddSingleton(sp => new SegmentManagerRegistry<SpanSegmentManager>(tenantId =>
             new SpanSegmentManager(tenantId,
-                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<ISegmentCatalog>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<SpanSegmentManager>>())));
         builder.Services.AddSingleton(sp => new SegmentManagerRegistry<RumSegmentManager>(tenantId =>
             new RumSegmentManager(tenantId,
-                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<ISegmentCatalog>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<RumSegmentManager>>())));
         // Trace-summary index — pre-aggregated per-trace partials fed from span ingest for a fast trace list.
         builder.Services.AddSingleton(sp => new SegmentManagerRegistry<TraceSummarySegmentManager>(tenantId =>
             new TraceSummarySegmentManager(tenantId,
-                sp.GetRequiredService<IDbContextFactory<ApplicationDbContext>>(),
+                sp.GetRequiredService<ISegmentCatalog>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<TraceSummarySegmentManager>>())));
         builder.Services.AddSingleton<ITelemetryIngest, SegmentTelemetryStore>();
-        builder.Services.AddScoped<ILogBackend, SegmentLogService>();
-        builder.Services.AddScoped<ITraceQueryService, SegmentTraceService>();
+        // Reads route per cluster: to the cluster's own in-cluster telemetry node when one is installed,
+        // otherwise to the management plane's local segment store. LogQueryService's existing native-vs-Loki
+        // decision sits above this and is unchanged — the viewers still see one ILogBackend.
+        // See docs/telemetry-in-cluster.md.
+        builder.Services.AddScoped<TelemetryNodeClient>();
+        builder.Services.AddScoped<SegmentLogService>();
+        builder.Services.AddScoped<SegmentTraceService>();
+        builder.Services.AddScoped<NodeLogBackend>();
+        builder.Services.AddScoped<NodeTraceService>();
+        builder.Services.AddScoped<ILogBackend, ClusterRoutedLogBackend>();
+        builder.Services.AddScoped<ITraceQueryService, ClusterRoutedTraceService>();
         builder.Services.AddScoped<IRumQueryService, SegmentRumService>();
         builder.Services.AddScoped<IMetricsQuery, PromMetricsService>();
         // One seal/retention loop per signal; each iterates that signal's live per-tenant managers.
@@ -319,10 +406,17 @@ public class Program
             sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
         builder.Services.AddSingleton<IngestTokenService>();
+        // Configures the in-cluster telemetry components from platform state (bucket, identity, tokens).
+        builder.Services.AddScoped<EntKubeTelemetryService>();
+        builder.Services.AddScoped<EntKube.Web.Services.PublicApi.ApiTokenService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Scim.ScimUserService>();
         builder.Services.AddSingleton<IngestRateLimiter>();
         // Real User Monitoring: resolves per-site public keys for the public browser ingest endpoint.
         builder.Services.AddSingleton<RumSiteService>();
+        // The engine resolves cluster→tenant through IClusterTenantResolver; in the management plane that
+        // is the DB-backed ClusterTenantResolver (in-cluster it is FixedClusterTenantResolver).
         builder.Services.AddScoped<ClusterTenantResolver>();
+        builder.Services.AddScoped<IClusterTenantResolver>(sp => sp.GetRequiredService<ClusterTenantResolver>());
         // Native telemetry alerting: rules evaluated over logs/spans → incidents via the existing pipeline.
         builder.Services.AddScoped<TelemetryAlertRuleService>();
         builder.Services.AddScoped<DashboardService>();
@@ -343,6 +437,13 @@ public class Program
         builder.Services.AddScoped<RegisteredPostgresService>();
         builder.Services.AddScoped<EntKube.Web.Services.ClusterChanges.IClusterChangeGate, EntKube.Web.Services.ClusterChanges.ClusterChangeGate>();
         builder.Services.AddScoped<IKubernetesClientFactory, KubernetesClientFactory>();
+        // Singleton: pools one HTTP handler per distinct OpenStack egress transport.
+        builder.Services.AddSingleton<OpenStackHttpFactory>();
+        // Singleton: owns long-lived `kubectl port-forward` processes to cluster relays.
+        builder.Services.AddSingleton<ClusterEgressTunnel>();
+        // Singleton: an agent link outlives any request or circuit that uses it.
+        builder.Services.AddSingleton<AgentRegistry>();
+        builder.Services.AddScoped<ClusterEgressRelay>();
         builder.Services.AddScoped<OpenStackKeystoneClient>();
         builder.Services.AddScoped<OpenStackS3Service>();
         builder.Services.AddScoped<OpenStackComputeService>();
@@ -375,6 +476,9 @@ public class Program
         builder.Services.AddScoped<KyvernoPolicyService>();
         builder.Services.AddScoped<KedaScalerService>();
         builder.Services.AddScoped<TrustBundleService>();
+        builder.Services.AddScoped<MtlsService>();
+        builder.Services.AddScoped<MeshMtlsService>();
+        builder.Services.AddScoped<OutboundMtlsService>();
         builder.Services.AddScoped<CertificateDistributionService>();
         builder.Services.Configure<CertificateDistributionReconcileOptions>(
             builder.Configuration.GetSection("CertificateDistribution"));
@@ -385,6 +489,32 @@ public class Program
         builder.Services.AddScoped<ErrorBudgetService>();
         builder.Services.AddScoped<AdvisorStateService>();
         builder.Services.AddScoped<AdvisorDigestConfigService>();
+        // Singleton so the fetched chart indexes are shared: one repo backs several catalog
+        // entries, and a per-scope client would refetch a multi-megabyte index per component.
+        builder.Services.AddSingleton<EntKube.Web.Services.Upgrades.HelmRepoIndexClient>();
+        builder.Services.AddScoped<EntKube.Web.Services.Upgrades.ComponentUpgradeService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Upgrades.ReleaseVolumeGuard>();
+        builder.Services.AddScoped<EntKube.Web.Services.Upgrades.ComponentUpgradeRunner>();
+        builder.Services.AddScoped<EntKube.Web.Services.Upgrades.DriftDetectionService>();
+        // Singleton cache + background sweep: the advisor reads the cache and never forks a
+        // server-side dry-run per deployment while rendering a page.
+        builder.Services.AddSingleton<EntKube.Web.Services.Upgrades.DriftScanCache>();
+        builder.Services.AddHostedService<EntKube.Web.Services.Upgrades.DriftScanService>();
+        builder.Services.AddScoped<EntKube.Web.Services.SupplyChain.SupplyChainService>();
+        builder.Services.AddSingleton<EntKube.Web.Services.SupplyChain.SupplyChainScanCache>();
+        builder.Services.AddHostedService<EntKube.Web.Services.SupplyChain.SupplyChainScanService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Cost.CostReportService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Cost.CostRateService>();
+        builder.Services.AddSingleton<EntKube.Web.Services.Cost.CostScanCache>();
+        builder.Services.AddHostedService<EntKube.Web.Services.Cost.CostScanService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Rollouts.RolloutService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Rollouts.IRolloutStarter>(
+            sp => sp.GetRequiredService<EntKube.Web.Services.Rollouts.RolloutService>());
+        builder.Services.AddHostedService<EntKube.Web.Services.Rollouts.RolloutWatcherService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Adoption.DriftAdoptionService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Dr.VeleroService>();
+        builder.Services.AddSingleton<EntKube.Web.Services.Dr.DrScanCache>();
+        builder.Services.AddHostedService<EntKube.Web.Services.Dr.DrScanService>();
         builder.Services.AddScoped<OperationsAdvisorService>();
         builder.Services.AddScoped<CustomerNotificationService>();
 
@@ -467,6 +597,8 @@ public class Program
             await EnsureDeploymentRouteRewritePathAsync(db, app.Logger);
             await EnsureNotificationChannelFiltersAsync(db, app.Logger);
             await EnsureRumSiteAppIdAsync(db, app.Logger);
+            await EnsureDeploymentGitUrlAsync(db, app.Logger);
+            await EnsureNotificationProviderConfigsAsync(db, app.Logger);
             await EnsureClusterKubeconfigsMigratedAsync(db, scope.ServiceProvider, app.Logger);
             await EnsureImportedTlsSecretsAsCertificatesAsync(scope.ServiceProvider, app.Logger);
 
@@ -547,6 +679,10 @@ public class Program
 
         app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
         app.UseHttpsRedirection();
+
+        // Required for the egress agent endpoint to accept its upgrade request;
+        // must sit ahead of endpoint execution.
+        app.UseWebSockets();
 
         app.UseAntiforgery();
 
@@ -767,6 +903,12 @@ public class Program
             return Results.NoContent();
         }).DisableAntiforgery();
 
+        // Egress agents dial in here from customer networks that permit no inbound
+        // traffic. Token-authenticated inside the handler, not by the cookie scheme.
+        app.MapAgentEndpoint();
+        EntKube.Web.Services.PublicApi.PublicApiEndpoints.MapPublicApi(app);
+        EntKube.Web.Services.Scim.ScimEndpoints.MapScim(app);
+
         app.Run();
     }
 
@@ -803,6 +945,98 @@ public class Program
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Schema repair for AppEnvironments.Namespace skipped or failed.");
+        }
+    }
+
+    // Ten migration files under Data/Migrations/ were hand-written without their
+    // .Designer.cs partial, which is where EF Core puts the [Migration] attribute it
+    // discovers them by. Without it they are invisible: `dotnet ef database update`
+    // reports success and silently skips them. On a database built from migrations that
+    // leaves AppDeployments.GitUrl and the NotificationProviderConfigs table absent, and
+    // the app then dies at startup on "no such column: a.GitUrl".
+    //
+    // These two repairs close the proven gaps idempotently. They are not the real fix —
+    // the migrations themselves need their Designer partials regenerated — but that has
+    // to be done knowing which databases already carry the schema, and a startup repair
+    // is safe either way.
+
+    private static async Task EnsureDeploymentGitUrlAsync(DbContext db, ILogger logger)
+    {
+        try
+        {
+            string? provider = db.Database.ProviderName;
+            string? sql = null;
+            if (provider == "Npgsql.EntityFrameworkCore.PostgreSQL")
+                sql = "ALTER TABLE \"AppDeployments\" ADD COLUMN IF NOT EXISTS \"GitUrl\" character varying(2000) NULL";
+            else if (provider == "Microsoft.EntityFrameworkCore.SqlServer")
+                sql = "IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'AppDeployments') AND name = N'GitUrl')" +
+                      " ALTER TABLE [AppDeployments] ADD [GitUrl] nvarchar(2000) NULL";
+            else if (provider == "Microsoft.EntityFrameworkCore.Sqlite")
+                // SQLite has no ADD COLUMN IF NOT EXISTS; a duplicate-column error here
+                // means the column already exists, which is the outcome we wanted.
+                sql = "ALTER TABLE \"AppDeployments\" ADD COLUMN \"GitUrl\" TEXT NULL";
+
+            if (sql is not null)
+                await db.Database.ExecuteSqlRawAsync(sql);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Schema repair for AppDeployments.GitUrl skipped (column likely already present).");
+        }
+    }
+
+    private static async Task EnsureNotificationProviderConfigsAsync(DbContext db, ILogger logger)
+    {
+        try
+        {
+            string? provider = db.Database.ProviderName;
+            string? sql = null;
+            if (provider == "Npgsql.EntityFrameworkCore.PostgreSQL")
+                sql = """
+                    CREATE TABLE IF NOT EXISTS "NotificationProviderConfigs" (
+                        "Id" uuid NOT NULL CONSTRAINT "PK_NotificationProviderConfigs" PRIMARY KEY,
+                        "ProviderType" character varying(30) NOT NULL,
+                        "ConfigurationJson" text NOT NULL,
+                        "IsEnabled" boolean NOT NULL,
+                        "UpdatedAt" timestamp with time zone NOT NULL,
+                        "UpdatedByUserId" character varying(450) NULL);
+                    CREATE UNIQUE INDEX IF NOT EXISTS "IX_NotificationProviderConfigs_ProviderType"
+                        ON "NotificationProviderConfigs" ("ProviderType");
+                    """;
+            else if (provider == "Microsoft.EntityFrameworkCore.SqlServer")
+                sql = """
+                    IF OBJECT_ID(N'NotificationProviderConfigs', N'U') IS NULL
+                    BEGIN
+                        CREATE TABLE [NotificationProviderConfigs] (
+                            [Id] uniqueidentifier NOT NULL CONSTRAINT [PK_NotificationProviderConfigs] PRIMARY KEY,
+                            [ProviderType] nvarchar(30) NOT NULL,
+                            [ConfigurationJson] nvarchar(max) NOT NULL,
+                            [IsEnabled] bit NOT NULL,
+                            [UpdatedAt] datetime2 NOT NULL,
+                            [UpdatedByUserId] nvarchar(450) NULL);
+                        CREATE UNIQUE INDEX [IX_NotificationProviderConfigs_ProviderType]
+                            ON [NotificationProviderConfigs] ([ProviderType]);
+                    END
+                    """;
+            else if (provider == "Microsoft.EntityFrameworkCore.Sqlite")
+                sql = """
+                    CREATE TABLE IF NOT EXISTS "NotificationProviderConfigs" (
+                        "Id" TEXT NOT NULL CONSTRAINT "PK_NotificationProviderConfigs" PRIMARY KEY,
+                        "ProviderType" TEXT NOT NULL,
+                        "ConfigurationJson" TEXT NOT NULL,
+                        "IsEnabled" INTEGER NOT NULL,
+                        "UpdatedAt" TEXT NOT NULL,
+                        "UpdatedByUserId" TEXT NULL);
+                    CREATE UNIQUE INDEX IF NOT EXISTS "IX_NotificationProviderConfigs_ProviderType"
+                        ON "NotificationProviderConfigs" ("ProviderType");
+                    """;
+
+            if (sql is not null)
+                await db.Database.ExecuteSqlRawAsync(sql);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Schema repair for NotificationProviderConfigs skipped or failed.");
         }
     }
 

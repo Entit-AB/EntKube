@@ -21,7 +21,14 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<Customer> Customers => Set<Customer>();
     public DbSet<App> Apps => Set<App>();
     public DbSet<AppEnvironment> AppEnvironments => Set<AppEnvironment>();
+    public DbSet<CustomerEnvironment> CustomerEnvironments => Set<CustomerEnvironment>();
     public DbSet<KubernetesCluster> KubernetesClusters => Set<KubernetesCluster>();
+    public DbSet<EgressAgent> EgressAgents => Set<EgressAgent>();
+    public DbSet<ApiToken> ApiTokens => Set<ApiToken>();
+    public DbSet<ClusterCostRate> ClusterCostRates => Set<ClusterCostRate>();
+    public DbSet<ExternalGroupMapping> ExternalGroupMappings => Set<ExternalGroupMapping>();
+    public DbSet<RolloutPolicy> RolloutPolicies => Set<RolloutPolicy>();
+    public DbSet<DeploymentRollout> DeploymentRollouts => Set<DeploymentRollout>();
     public DbSet<SecretVault> SecretVaults => Set<SecretVault>();
     public DbSet<VaultSecret> VaultSecrets => Set<VaultSecret>();
     public DbSet<VaultSecretVersion> VaultSecretVersions => Set<VaultSecretVersion>();
@@ -116,6 +123,10 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<BlueprintRolloutTarget> BlueprintRolloutTargets => Set<BlueprintRolloutTarget>();
     public DbSet<BlueprintVariable> BlueprintVariables => Set<BlueprintVariable>();
     public DbSet<BlueprintVariableValue> BlueprintVariableValues => Set<BlueprintVariableValue>();
+    public DbSet<MeshMtlsPolicy> MeshMtlsPolicies => Set<MeshMtlsPolicy>();
+    public DbSet<OutboundMtlsCredential> OutboundMtlsCredentials => Set<OutboundMtlsCredential>();
+    public DbSet<ClientCaBundle> ClientCaBundles => Set<ClientCaBundle>();
+    public DbSet<ClientCaCertificate> ClientCaCertificates => Set<ClientCaCertificate>();
     public DbSet<CaTrustBundle> CaTrustBundles => Set<CaTrustBundle>();
     public DbSet<CaTrustBundleSource> CaTrustBundleSources => Set<CaTrustBundleSource>();
     public DbSet<CertificateDistribution> CertificateDistributions => Set<CertificateDistribution>();
@@ -148,6 +159,108 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasIndex(t => t.Slug).IsUnique();
             entity.Property(t => t.Name).HasMaxLength(200).IsRequired();
             entity.Property(t => t.Slug).HasMaxLength(100).IsRequired();
+        });
+
+        // ApiToken — the hash is the lookup key on every authenticated API request, so it
+        // is uniquely indexed. Tokens cascade with their tenant: a deleted tenant must not
+        // leave working credentials behind.
+
+        builder.Entity<ApiToken>(entity =>
+        {
+            entity.HasKey(t => t.Id);
+            entity.HasIndex(t => t.TokenHash).IsUnique();
+            entity.HasIndex(t => t.TenantId);
+            entity.Property(t => t.Name).HasMaxLength(200).IsRequired();
+            entity.Property(t => t.TokenHash).HasMaxLength(64).IsRequired();
+            entity.Property(t => t.DisplayPrefix).HasMaxLength(32).IsRequired();
+            entity.Property(t => t.Scopes).HasMaxLength(500);
+            entity.Property(t => t.CreatedBy).HasMaxLength(256);
+            entity.HasOne(t => t.Tenant)
+                  .WithMany()
+                  .HasForeignKey(t => t.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ClusterCostRate — at most one price sheet per cluster, so the unique index is
+        // what prevents two rates silently disagreeing about what a core costs.
+
+        builder.Entity<ClusterCostRate>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => r.ClusterId).IsUnique();
+            entity.Property(r => r.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(r => r.UpdatedBy).HasMaxLength(256);
+            // Money: an explicit precision rather than the provider default, which for
+            // SQL Server would silently round to 2 decimals — useless for a per-core-hour
+            // rate that is routinely fractions of a cent.
+            entity.Property(r => r.CpuCoreHourCost).HasPrecision(18, 6);
+            entity.Property(r => r.MemoryGiBHourCost).HasPrecision(18, 6);
+            entity.Property(r => r.StorageGiBMonthCost).HasPrecision(18, 6);
+            entity.Property(r => r.ClusterMonthlyOverhead).HasPrecision(18, 2);
+            // Monthly amounts, so two decimals is the right precision — but stated
+            // explicitly rather than left to a provider default, which is how the hourly
+            // rates would have silently become decimal(18,2) on SQL Server and rounded to
+            // zero. Same reasoning, opposite answer.
+            entity.Property(r => r.LoadBalancerMonthlyCost).HasPrecision(18, 2);
+            entity.Property(r => r.PublicIpMonthlyCost).HasPrecision(18, 2);
+            entity.HasOne(r => r.Cluster)
+                  .WithMany()
+                  .HasForeignKey(r => r.ClusterId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // RolloutPolicy — one per deployment; the unique index is what stops two policies
+        // disagreeing about whether a release should be rolled back.
+
+        builder.Entity<RolloutPolicy>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => p.DeploymentId).IsUnique();
+            entity.Property(p => p.TelemetryServiceName).HasMaxLength(200);
+            entity.Property(p => p.UpdatedBy).HasMaxLength(256);
+            entity.HasOne(p => p.Deployment)
+                  .WithMany()
+                  .HasForeignKey(p => p.DeploymentId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // DeploymentRollout — the watch history. Indexed on (DeploymentId, StartedAt) for
+        // the per-deployment history view, and on Status so the background watcher can find
+        // open rollouts without scanning the whole table.
+
+        builder.Entity<DeploymentRollout>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => new { r.DeploymentId, r.StartedAt });
+            entity.HasIndex(r => r.Status);
+            entity.Property(r => r.TriggeredBy).HasMaxLength(256);
+            entity.Property(r => r.Verdict).HasMaxLength(1000);
+            entity.HasOne(r => r.Deployment)
+                  .WithMany()
+                  .HasForeignKey(r => r.DeploymentId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ExternalGroupMapping — a group may grant access to several tenants, but only one
+        // role per tenant: two roles for the same group in the same tenant would make the
+        // resulting access depend on evaluation order.
+
+        builder.Entity<ExternalGroupMapping>(entity =>
+        {
+            entity.HasKey(m => m.Id);
+            entity.HasIndex(m => new { m.ExternalGroup, m.TenantId }).IsUnique();
+            entity.Property(m => m.ExternalGroup).HasMaxLength(400).IsRequired();
+            entity.Property(m => m.CreatedBy).HasMaxLength(256);
+            entity.HasOne(m => m.Tenant)
+                  .WithMany()
+                  .HasForeignKey(m => m.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(m => m.Role)
+                  .WithMany()
+                  .HasForeignKey(m => m.RoleId)
+                  // Restrict, not Cascade: deleting a role that a group mapping depends on
+                  // must be a deliberate act, not a silent revocation of everyone's access.
+                  .OnDelete(DeleteBehavior.Restrict);
         });
 
         // TenantRole — each role name must be unique within its tenant.
@@ -278,6 +391,26 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(ae => ae.Environment)
                 .WithMany(e => e.AppEnvironments)
                 .HasForeignKey(ae => ae.EnvironmentId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // CustomerEnvironment — many-to-many join between Customer and Environment.
+        // Composite key prevents duplicate memberships. Environment is Restrict for the
+        // same reason AppEnvironment is: two cascade paths from Tenant would otherwise
+        // meet here and SQL Server rejects that.
+
+        builder.Entity<CustomerEnvironment>(entity =>
+        {
+            entity.HasKey(ce => new { ce.CustomerId, ce.EnvironmentId });
+
+            entity.HasOne(ce => ce.Customer)
+                .WithMany(c => c.CustomerEnvironments)
+                .HasForeignKey(ce => ce.CustomerId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(ce => ce.Environment)
+                .WithMany(e => e.CustomerEnvironments)
+                .HasForeignKey(ce => ce.EnvironmentId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
@@ -507,6 +640,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(r => r.GatewayName).HasMaxLength(200);
             entity.Property(r => r.GatewayNamespace).HasMaxLength(63);
             entity.Property(r => r.TlsMode).HasConversion<string>().HasMaxLength(20);
+            entity.Property(r => r.SessionAffinity).HasConversion<string>().HasMaxLength(20);
+            entity.Property(r => r.SessionAffinityKey).HasMaxLength(200);
 
             entity.HasOne(r => r.Component)
                 .WithMany(c => c.ExternalRoutes)
@@ -1821,6 +1956,70 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithMany(a => a.Routes)
                 .HasForeignKey(r => r.AppId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict, not Cascade: deleting a trust anchor that routes still authenticate
+            // against would silently drop those routes' only client check. The delete is
+            // blocked until the routes are moved off it or stop requiring a certificate.
+            entity.HasOne(r => r.ClientCaBundle)
+                .WithMany(b => b.Routes)
+                .HasForeignKey(r => r.ClientCaBundleId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // MeshMtlsPolicy — service-to-service mTLS posture per cluster namespace.
+
+        builder.Entity<MeshMtlsPolicy>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.Property(p => p.Namespace).HasMaxLength(63).IsRequired();
+            entity.Property(p => p.Mode).HasConversion<string>().HasMaxLength(20);
+
+            // One posture per namespace: two rows would render two namespace-wide
+            // PeerAuthentications and leave which one wins up to Istio.
+            entity.HasIndex(p => new { p.ClusterId, p.Namespace }).IsUnique();
+        });
+
+        // OutboundMtlsCredential — client certificates a customer app presents to partner APIs.
+
+        builder.Entity<OutboundMtlsCredential>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.Name).HasMaxLength(200).IsRequired();
+            entity.Property(c => c.Host).HasMaxLength(253).IsRequired();
+            entity.Property(c => c.Mode).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.Port).HasDefaultValue(443);
+
+            // The name becomes the Secret/ServiceEntry/DestinationRule name in the app's
+            // namespace, so it has to be unique within the app.
+            entity.HasIndex(c => new { c.AppId, c.Name }).IsUnique();
+        });
+
+        // ClientCaBundle — CA trust anchors for inbound client-certificate authentication.
+        // Public CA material only; no encryption, same as CaTrustBundleSource.
+
+        builder.Entity<ClientCaBundle>(entity =>
+        {
+            entity.HasKey(b => b.Id);
+            entity.Property(b => b.Name).HasMaxLength(200).IsRequired();
+            entity.Property(b => b.Description).HasMaxLength(1000);
+            entity.Property(b => b.ListenerPort).HasDefaultValue(Services.MtlsService.DefaultListenerPort);
+
+            // One name per tenant — the name is how an operator picks a trust anchor on a route.
+            entity.HasIndex(b => new { b.TenantId, b.Name }).IsUnique();
+        });
+
+        builder.Entity<ClientCaCertificate>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.Name).HasMaxLength(200).IsRequired();
+            entity.Property(c => c.Pem).IsRequired();
+            entity.Property(c => c.Subject).HasMaxLength(500);
+            entity.Property(c => c.Fingerprint).HasMaxLength(100);
+
+            entity.HasOne(c => c.Bundle)
+                .WithMany(b => b.Certificates)
+                .HasForeignKey(c => c.BundleId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         // AppDeploymentRoute — per-deployment path + service target. Cascades from AppRoute.
@@ -1832,6 +2031,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(r => r.ServiceName).HasMaxLength(200).IsRequired();
             entity.Property(r => r.GatewayName).HasMaxLength(200);
             entity.Property(r => r.GatewayNamespace).HasMaxLength(63);
+            entity.Property(r => r.SessionAffinity).HasConversion<string>().HasMaxLength(20);
+            entity.Property(r => r.SessionAffinityKey).HasMaxLength(200);
 
             entity.HasOne(r => r.AppRoute)
                 .WithMany(ar => ar.DeploymentRoutes)
@@ -2039,8 +2240,9 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
-        // KedaScaler — KEDA autoscaler (ScaledObject / Custom) scoped per (App, Environment).
-        // Name is unique within that scope and used as the Kubernetes resource name.
+        // KedaScaler — autoscaler (KEDA ScaledObject / Custom YAML / native HPA) scoped per
+        // (App, Environment). Name is unique within that scope and used as the Kubernetes
+        // resource name.
 
         builder.Entity<KedaScaler>(entity =>
         {

@@ -7,6 +7,7 @@
 @using Microsoft.AspNetCore.Identity
 @using Microsoft.AspNetCore.WebUtilities
 @using EntKube.Web.Data
+@using EntKube.Web.Services.Sso
 
 @inject SignInManager<ApplicationUser> SignInManager
 @inject UserManager<ApplicationUser> UserManager
@@ -15,6 +16,8 @@
 @inject NavigationManager NavigationManager
 @inject IdentityRedirectManager RedirectManager
 @inject ILogger<ExternalLogin> Logger
+@inject ExternalGroupSync GroupSync
+@inject OidcOptions Oidc
 
 <PageTitle>Register</PageTitle>
 
@@ -121,6 +124,15 @@
                 "{Name} logged in with {LoginProvider} provider.",
                 externalLoginInfo.Principal.Identity?.Name,
                 externalLoginInfo.LoginProvider);
+
+            // Reconcile access from the provider's groups on EVERY login, not just the
+            // first: that is what makes offboarding work — losing a group in the directory
+            // has to remove EntKube access without anyone doing it here too.
+            if (!await SyncGroupsAsync(externalLoginInfo))
+            {
+                return;
+            }
+
             RedirectManager.RedirectTo(ReturnUrl);
             return;
         }
@@ -175,6 +187,11 @@
                 }
                 else
                 {
+                    if (!await SyncGroupsAsync(externalLoginInfo))
+                    {
+                        return;
+                    }
+
                     await SignInManager.SignInAsync(user, isPersistent: false, externalLoginInfo.LoginProvider);
                     RedirectManager.RedirectTo(ReturnUrl);
                 }
@@ -184,6 +201,59 @@
         {
             message = $"Error: {string.Join(",", result.Errors.Select(error => error.Description))}";
         }
+    }
+
+    /// <summary>
+    /// Reconciles the signed-in user's tenant access from the identity provider's groups.
+    /// Returns false when the caller has already been redirected (access refused).
+    ///
+    /// Only runs for the configured OIDC scheme: other external providers (a social login,
+    /// say) carry no group claims EntKube has any authority over, and running the sync for
+    /// them would revoke every SSO-derived membership the user has.
+    /// </summary>
+    private async Task<bool> SyncGroupsAsync(ExternalLoginInfo info)
+    {
+        if (!Oidc.IsUsable || info.LoginProvider != OidcOptions.Scheme)
+        {
+            return true;
+        }
+
+        ApplicationUser? user = await UserManager.FindByLoginAsync(info.LoginProvider, info.ProviderKey);
+        if (user is null)
+        {
+            return true;
+        }
+
+        try
+        {
+            GroupSyncResult sync = await GroupSync.SyncAsync(user.Id, info.Principal, Oidc.GroupsClaim);
+
+            if (sync.HasNoAccess && !Oidc.AllowUsersWithoutMappedGroups)
+            {
+                // Signed in but entitled to nothing. Sign back out and say so plainly, rather
+                // than dropping them into an empty portal that looks broken.
+                Logger.LogWarning(
+                    "SSO login for {UserId} refused: none of the {Count} asserted group(s) map to a tenant.",
+                    user.Id, sync.AssertedGroups.Count);
+
+                await SignInManager.SignOutAsync();
+                RedirectManager.RedirectToWithStatus(
+                    "Account/Login",
+                    "Your account signed in successfully but none of your groups grant access to EntKube. "
+                    + "Ask an administrator to map one of your directory groups to a tenant.",
+                    HttpContext);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            // A failure here must not lock everyone out of the platform, so the login proceeds
+            // on whatever access the user already had. It is logged loudly because stale access
+            // after a group change is a real security concern, not a cosmetic one.
+            Logger.LogError(ex, "SSO group sync failed for user {UserId}; existing access left unchanged.", user.Id);
+        }
+
+        return true;
     }
 
     private ApplicationUser CreateUser()

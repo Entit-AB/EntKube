@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>EntKube.TelemetryNode</RootNamespace>
+    <AssemblyName>entkube-telemetry</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!--
+    The in-cluster telemetry node: one binary, two roles.
+
+      indexer  — receives OTLP from the cluster's collector, owns the hot active index and the warm
+                 sealed segments on its PersistentVolume, seals to object storage.
+      querier  — answers queries from the management plane, reading cold segments from object storage
+                 into a bounded local cache, and the hot/warm ones from the indexer.
+
+    Deployed as two catalog components off this same image, so read and write scale independently and a
+    heavy query can never stall ingest. See docs/telemetry-in-cluster.md.
+  -->
+  <ItemGroup>
+    <!-- The node keeps its segment catalog in a SQLite file on its own volume. Raw ADO.NET, not EF:
+         the catalog is four statements and the engine is deliberately EF-free. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\EntKube.Telemetry\EntKube.Telemetry.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="EntKube.Telemetry" />
+    <Using Include="EntKube.Web.Data" />
+    <Using Include="EntKube.Web.Services" />
+    <!-- Same collision as in the engine: this assembly means log severity, not logger verbosity. -->
+    <Using Include="EntKube.Web.Services.LogLevel" Alias="LogLevel" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,40 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="EntKube.Installer.Gui.Views.HostKeyDialog"
+        Title="Unrecognised server"
+        Width="560" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False">
+
+  <StackPanel Margin="24" Spacing="12">
+    <TextBlock Classes="heading" Text="This server has not been seen before" />
+
+    <TextBlock TextWrapping="Wrap"
+               Text="Its host key is not in your known_hosts file. That is expected the first time you connect to a machine — and it is also what an intercepted connection looks like." />
+
+    <Border Classes="card">
+      <StackPanel Spacing="6">
+        <TextBlock Classes="label" Margin="0" Text="Server" />
+        <SelectableTextBlock x:Name="HostText" FontFamily="monospace" />
+        <TextBlock Classes="label" Text="Key type" />
+        <SelectableTextBlock x:Name="AlgorithmText" FontFamily="monospace" />
+        <TextBlock Classes="label" Text="Fingerprint" />
+        <SelectableTextBlock x:Name="FingerprintText" FontFamily="monospace" TextWrapping="Wrap" />
+      </StackPanel>
+    </Border>
+
+    <TextBlock Classes="hint" TextWrapping="Wrap"
+               Text="Check it against the server itself before accepting. On the server:  ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub" />
+
+    <TextBlock Classes="warning" TextWrapping="Wrap"
+               Text="This connection will carry your sudo password and write the vault root key. Do not accept a fingerprint you cannot verify." />
+
+    <CheckBox x:Name="RememberBox" IsChecked="True"
+              Content="Add to ~/.ssh/known_hosts so ssh and this installer recognise it next time" />
+
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,8,0,0">
+      <Button x:Name="RejectButton" Content="Cancel" IsCancel="True" />
+      <Button x:Name="AcceptButton" Content="Accept and connect" Classes="accent" IsDefault="True" />
+    </StackPanel>
+  </StackPanel>
+</Window>

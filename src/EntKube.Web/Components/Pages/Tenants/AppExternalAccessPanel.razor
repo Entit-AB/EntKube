@@ -5,6 +5,7 @@
 @inject TenantService TenantService
 @inject ComponentLifecycleService ComponentLifecycleService
 @inject KubernetesOperationsService K8sOps
+@inject MtlsService Mtls
 @inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
@@ -105,6 +106,58 @@
                     </div>
                 }
             </div>
+            @* ── Client certificates (inbound mTLS) ── *@
+            <div class="border-top mt-3 pt-2">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="new-route-mtls"
+                           @bind="newRequireClientCert" />
+                    <label class="form-check-label small" for="new-route-mtls">
+                        <i class="bi bi-person-badge me-1"></i>Require a client certificate (mTLS)
+                    </label>
+                </div>
+
+                @if (newRequireClientCert)
+                {
+                    @if (clientCaAnchors.Count == 0)
+                    {
+                        <div class="alert alert-warning py-1 small mt-2 mb-0">
+                            No client CA trust anchors yet. Add one under a cluster's
+                            <strong>CA &amp; Trust</strong> tab first.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="row g-2 mt-1">
+                            <div class="col-md-6">
+                                <label class="form-label small">Trust anchor</label>
+                                <select class="form-select form-select-sm" @bind="newClientCaBundleId">
+                                    <option value="@Guid.Empty">— select —</option>
+                                    @foreach (ClientCaBundle a in clientCaAnchors)
+                                    {
+                                        <option value="@a.Id">@a.Name (port @a.ListenerPort)</option>
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-6 d-flex align-items-end">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="new-route-mtls-only"
+                                           @bind="newClientCertOnly" />
+                                    <label class="form-check-label small" for="new-route-mtls-only">
+                                        mTLS only — drop the plain 443 listener
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-text small text-muted mt-1">
+                            The hostname is published on the anchor's port as well as 443. Client-certificate
+                            validation applies to a whole port, so it can't ride on 443 without demanding a
+                            certificate from every other hostname on the gateway. Clients connect to
+                            <code>https://@(string.IsNullOrWhiteSpace(newHostname) ? "host" : newHostname):@(SelectedAnchorPort)</code>.
+                        </div>
+                    }
+                }
+            </div>
+
             <div class="d-flex gap-1 mt-2">
                 <button class="btn btn-sm btn-primary" @onclick="AddRoute"
                         disabled="@(string.IsNullOrWhiteSpace(newHostname) || addingRoute)">
@@ -161,6 +214,21 @@
                                 @route.Hostname
                             </a>
                             @TlsBadge(route)
+                            @if (route.RequireClientCertificate)
+                            {
+                                <span class="badge bg-primary bg-opacity-75 small ms-1"
+                                      title="@($"Client certificates validated against '{route.ClientCaBundle?.Name}'. Clients connect on port {route.ClientCaBundle?.ListenerPort ?? MtlsService.DefaultListenerPort}.")">
+                                    <i class="bi bi-person-badge me-1"></i>mTLS
+                                    @if (route.ClientCaBundle is { } anchor) { <text>· @anchor.ListenerPort</text> }
+                                </span>
+                                @if (route.ClientCertificateOnly)
+                                {
+                                    <span class="badge bg-secondary bg-opacity-75 small ms-1"
+                                          title="No plain 443 listener — this hostname is reachable only with a client certificate.">
+                                        mTLS only
+                                    </span>
+                                }
+                            }
                             @if (!route.IsEnabled)
                             {
                                 <span class="badge bg-secondary ms-1">Disabled</span>
@@ -243,6 +311,9 @@
                                                 <th class="small">Env</th>
                                                 <th class="small">Path</th>
                                                 <th class="small">Service</th>
+                                                <th class="small" title="Gateway request timeout. 0 waits forever — only for long-lived streams.">Timeout</th>
+                                                <th class="small" title="Send a share of traffic to a second Service. EntKube splits the traffic; you provide the canary workload. Takes effect when the route is applied.">Canary</th>
+                                                <th class="small" title="Sticky sessions: pin a client to one backend pod by hashing a cookie, header, query parameter or source IP. Istio only, and it applies to the whole backend Service. Takes effect when the route is applied.">Sticky</th>
                                                 <th class="small">Cluster</th>
                                                 <th class="small">Health</th>
                                                 <th></th>
@@ -263,6 +334,87 @@
                                                         }
                                                     </td>
                                                     <td class="small align-middle text-muted">@dr.ServiceName:@dr.ServicePort</td>
+                                                    <td class="small align-middle" style="width: 7rem;">
+                                                        <div class="input-group input-group-sm">
+                                                            <input type="number" min="0" class="form-control form-control-sm"
+                                                                   style="max-width: 4.5rem;"
+                                                                   aria-label="@($"Request timeout in seconds for {dr.PathPrefix}")"
+                                                                   value="@(dr.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds)"
+                                                                   @onchange="e => SaveDrTimeout(dr, e.Value?.ToString())" />
+                                                            <span class="input-group-text px-1 small">s</span>
+                                                        </div>
+                                                        @if ((dr.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds) == 0)
+                                                        {
+                                                            <small class="text-warning">waits forever</small>
+                                                        }
+                                                    </td>
+                                                    <td class="small align-middle" style="width: 12rem;">
+                                                        <div class="input-group input-group-sm">
+                                                            <input class="form-control form-control-sm font-monospace"
+                                                                   style="max-width: 7rem;" placeholder="canary svc"
+                                                                   aria-label="@($"Canary service for {dr.PathPrefix}")"
+                                                                   value="@dr.CanaryServiceName"
+                                                                   @onchange="e => SaveDrCanaryService(dr, e.Value?.ToString())" />
+                                                            <input type="number" min="0" max="100"
+                                                                   class="form-control form-control-sm"
+                                                                   style="max-width: 3.75rem;"
+                                                                   aria-label="@($"Canary traffic percentage for {dr.PathPrefix}")"
+                                                                   value="@dr.CanaryWeight"
+                                                                   disabled="@(string.IsNullOrWhiteSpace(dr.CanaryServiceName))"
+                                                                   @onchange="e => SaveDrCanaryWeight(dr, e.Value?.ToString())" />
+                                                            <span class="input-group-text px-1 small">%</span>
+                                                        </div>
+                                                        @if (!string.IsNullOrWhiteSpace(dr.CanaryServiceName) && dr.CanaryWeight > 0)
+                                                        {
+                                                            <small class="text-info">@(100 - dr.CanaryWeight)% stable</small>
+                                                        }
+                                                    </td>
+                                                    @{
+                                                        SessionAffinityMode drAffinity = EffectiveAffinity(dr);
+                                                    }
+                                                    <td class="small align-middle" style="width: 10rem;">
+                                                        <select class="form-select form-select-sm"
+                                                                aria-label="@($"Session affinity for {dr.PathPrefix}")"
+                                                                value="@drAffinity"
+                                                                @onchange="e => SaveDrAffinityMode(dr, e.Value?.ToString())">
+                                                            <option value="@nameof(SessionAffinityMode.None)">off</option>
+                                                            <option value="@nameof(SessionAffinityMode.Cookie)">cookie</option>
+                                                            <option value="@nameof(SessionAffinityMode.Header)">header</option>
+                                                            <option value="@nameof(SessionAffinityMode.QueryParameter)">query</option>
+                                                            <option value="@nameof(SessionAffinityMode.SourceIp)">source IP</option>
+                                                        </select>
+                                                        @if (drAffinity is SessionAffinityMode.Cookie
+                                                            or SessionAffinityMode.Header
+                                                            or SessionAffinityMode.QueryParameter)
+                                                        {
+                                                            <div class="input-group input-group-sm mt-1">
+                                                                <input class="form-control form-control-sm font-monospace"
+                                                                       placeholder="@AffinityKeyPlaceholder(drAffinity)"
+                                                                       aria-label="@($"Session affinity key for {dr.PathPrefix}")"
+                                                                       value="@dr.SessionAffinityKey"
+                                                                       @onchange="e => SaveDrAffinityKey(dr, e.Value?.ToString())" />
+                                                                @if (drAffinity == SessionAffinityMode.Cookie)
+                                                                {
+                                                                    <input type="number" min="0"
+                                                                           class="form-control form-control-sm"
+                                                                           style="max-width: 4rem;"
+                                                                           placeholder="ttl"
+                                                                           title="Affinity cookie lifetime in seconds. Empty issues a session cookie."
+                                                                           aria-label="@($"Session affinity cookie lifetime for {dr.PathPrefix}")"
+                                                                           value="@dr.SessionAffinityTtlSeconds"
+                                                                           @onchange="e => SaveDrAffinityTtl(dr, e.Value?.ToString())" />
+                                                                }
+                                                            </div>
+                                                        }
+                                                        @if (pendingAffinityMode.ContainsKey(dr.Id))
+                                                        {
+                                                            <small class="text-warning">name it to save</small>
+                                                        }
+                                                        else if (drAffinity == SessionAffinityMode.SourceIp)
+                                                        {
+                                                            <small class="text-muted">one pod per client IP</small>
+                                                        }
+                                                    </td>
                                                     <td class="small align-middle">@ClusterStatusBadge(dr)</td>
                                                     <td class="small align-middle">@HealthBadge(dr)</td>
                                                     <td class="text-end align-middle" style="white-space: nowrap;">
@@ -410,6 +562,14 @@
                                                        @bind="newDrRewritePath" />
                                                 <div class="form-text small text-muted">Rewrites the path prefix before forwarding. Leave empty to forward as-is.</div>
                                             </div>
+
+                                            @* Request timeout — bounds the whole exchange at the gateway *@
+                                            <div class="col-md-2">
+                                                <label class="form-label small">Timeout (s)</label>
+                                                <input type="number" min="0" class="form-control form-control-sm"
+                                                       @bind="newDrTimeoutSeconds" />
+                                                <div class="form-text small text-muted">0 = no timeout. Only for websockets or streaming paths.</div>
+                                            </div>
                                         </div>
 
                                         @* Endpoint health preview *@
@@ -508,6 +668,17 @@
     private string? addRouteError;
     private bool addingRoute;
 
+    // Inbound mTLS
+    private bool newRequireClientCert;
+    private Guid newClientCaBundleId;
+    private bool newClientCertOnly;
+    private List<ClientCaBundle> clientCaAnchors = [];
+
+    /// <summary>Port the selected anchor publishes on, for the "connect to host:port" hint.</summary>
+    private int SelectedAnchorPort =>
+        clientCaAnchors.FirstOrDefault(a => a.Id == newClientCaBundleId)?.ListenerPort
+        ?? MtlsService.DefaultListenerPort;
+
     // ClusterIssuer selector
     private Guid issuerClusterId;
     private bool loadingIssuers;
@@ -520,6 +691,7 @@
     private string? newDrRewritePath;
     private string newDrService = "";
     private int newDrPort = 80;
+    private int newDrTimeoutSeconds = ExternalRouteService.DefaultRequestTimeoutSeconds;
     private string? addDrError;
     private bool addingDr;
 
@@ -560,6 +732,7 @@
         {
             await LoadAsync();
             tenantClusters ??= await TenantService.GetClustersAsync(TenantId);
+            clientCaAnchors = await Mtls.GetBundlesAsync(TenantId);
         }
         catch (Exception ex)
         {
@@ -605,6 +778,9 @@
             addRouteError = null;
             issuerClusterId = Guid.Empty;
             availableIssuers = [];
+            newRequireClientCert = false;
+            newClientCaBundleId = Guid.Empty;
+            newClientCertOnly = false;
         }
     }
 
@@ -642,6 +818,9 @@
                 ClusterIssuerName = newTlsMode == TlsMode.ClusterIssuer ? newClusterIssuer : null,
                 TlsCertificate = newTlsMode == TlsMode.Manual ? newTlsCert : null,
                 TlsPrivateKey = newTlsMode == TlsMode.Manual ? newTlsKey : null,
+                RequireClientCertificate = newRequireClientCert,
+                ClientCaBundleId = newClientCaBundleId == Guid.Empty ? null : newClientCaBundleId,
+                ClientCertificateOnly = newClientCertOnly,
             });
             showAddRoute = false;
             await LoadAsync();
@@ -666,6 +845,11 @@
     {
         await AppRouteService.UpdateRouteAsync(route.Id, new AppRouteRequest
         {
+            // Carried through: this call site only flips an unrelated field, and omitting these
+            // would silently turn client-certificate authentication off.
+            RequireClientCertificate = route.RequireClientCertificate,
+            ClientCaBundleId = route.ClientCaBundleId,
+            ClientCertificateOnly = route.ClientCertificateOnly,
             Hostname = route.Hostname,
             TlsMode = route.TlsMode,
             ClusterIssuerName = route.ClusterIssuerName,
@@ -736,6 +920,7 @@
         newDrRewritePath = null;
         newDrService = "";
         newDrPort = 80;
+        newDrTimeoutSeconds = ExternalRouteService.DefaultRequestTimeoutSeconds;
         addDrError = null;
         availableServices = [];
         availablePorts = [];
@@ -824,7 +1009,8 @@
                 ServiceName = newDrService,
                 ServicePort = newDrPort,
                 PathPrefix = newDrPath,
-                RewritePath = newDrRewritePath
+                RewritePath = newDrRewritePath,
+                RequestTimeoutSeconds = newDrTimeoutSeconds
             });
             CancelAddDr();
             await LoadAsync();
@@ -852,6 +1038,154 @@
         {
             Toasts.Error($"Failed to remove deployment route: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Persists an edited request timeout. The route is marked as needing a re-apply rather than
+    /// applied here — the new value only takes effect with the regenerated HTTPRoute, and
+    /// observed-only routes must never be applied by EntKube at all.
+    /// </summary>
+    private async Task SaveDrTimeout(AppDeploymentRoute dr, string? raw)
+    {
+        applyRouteError = null;
+
+        if (!int.TryParse(raw, out int seconds) || seconds < 0)
+        {
+            applyRouteError = "Timeout must be 0 or a positive number of seconds.";
+            return;
+        }
+
+        if (seconds == (dr.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds))
+            return;
+
+        try
+        {
+            await AppRouteService.UpdateDeploymentRouteTimeoutAsync(dr.Id, seconds);
+            await LoadAsync();
+        }
+        catch (Exception ex) { applyRouteError = ex.Message; }
+    }
+
+    // ── Session affinity ──
+    //
+    // Header and query-parameter affinity are meaningless without a name to hash on, so the
+    // service refuses to save them bare. Picking one in the dropdown therefore parks the choice
+    // here until the name is typed, instead of throwing an error at someone who has done nothing
+    // wrong yet — they cannot type the header name before choosing "header".
+    private readonly Dictionary<Guid, SessionAffinityMode> pendingAffinityMode = [];
+
+    private SessionAffinityMode EffectiveAffinity(AppDeploymentRoute dr) =>
+        pendingAffinityMode.TryGetValue(dr.Id, out SessionAffinityMode pending) ? pending : dr.SessionAffinity;
+
+    private static string AffinityKeyPlaceholder(SessionAffinityMode mode) => mode switch
+    {
+        SessionAffinityMode.Cookie => ExternalRouteService.DefaultAffinityCookieName,
+        SessionAffinityMode.Header => "x-tenant-id",
+        _ => "parameter"
+    };
+
+    private static bool NeedsAffinityKey(SessionAffinityMode mode) =>
+        mode is SessionAffinityMode.Header or SessionAffinityMode.QueryParameter;
+
+    private async Task SaveDrAffinityMode(AppDeploymentRoute dr, string? raw)
+    {
+        applyRouteError = null;
+
+        if (!Enum.TryParse(raw, out SessionAffinityMode mode) || mode == EffectiveAffinity(dr))
+            return;
+
+        if (NeedsAffinityKey(mode) && string.IsNullOrWhiteSpace(dr.SessionAffinityKey))
+        {
+            pendingAffinityMode[dr.Id] = mode;
+            return;
+        }
+
+        pendingAffinityMode.Remove(dr.Id);
+        await SaveDrAffinity(dr, mode, dr.SessionAffinityKey, dr.SessionAffinityTtlSeconds);
+    }
+
+    private async Task SaveDrAffinityKey(AppDeploymentRoute dr, string? raw)
+    {
+        applyRouteError = null;
+
+        SessionAffinityMode mode = EffectiveAffinity(dr);
+        string? key = string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
+
+        if (key == dr.SessionAffinityKey && mode == dr.SessionAffinity) return;
+
+        if (NeedsAffinityKey(mode) && key is null)
+        {
+            applyRouteError = ExternalRouteService.ValidateSessionAffinity(mode, key);
+            return;
+        }
+
+        pendingAffinityMode.Remove(dr.Id);
+        await SaveDrAffinity(dr, mode, key, dr.SessionAffinityTtlSeconds);
+    }
+
+    private async Task SaveDrAffinityTtl(AppDeploymentRoute dr, string? raw)
+    {
+        applyRouteError = null;
+
+        int? ttl = string.IsNullOrWhiteSpace(raw) ? null : int.TryParse(raw, out int parsed) ? parsed : -1;
+        if (ttl == dr.SessionAffinityTtlSeconds) return;
+
+        if (ttl is < 0)
+        {
+            applyRouteError = "Affinity cookie lifetime must be 0 or a positive number of seconds.";
+            return;
+        }
+
+        await SaveDrAffinity(dr, EffectiveAffinity(dr), dr.SessionAffinityKey, ttl);
+    }
+
+    private async Task SaveDrAffinity(AppDeploymentRoute dr, SessionAffinityMode mode, string? key, int? ttl)
+    {
+        try
+        {
+            await AppRouteService.UpdateDeploymentRouteSessionAffinityAsync(dr.Id, mode, key, ttl);
+            await LoadAsync();
+        }
+        catch (Exception ex) { applyRouteError = ex.Message; }
+    }
+
+    private async Task SaveDrCanaryService(AppDeploymentRoute dr, string? raw)
+    {
+        applyRouteError = null;
+        string? service = string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
+
+        if (service == dr.CanaryServiceName) return;
+
+        try
+        {
+            // A newly named canary starts at 0% — naming it must never move traffic by
+            // itself. The operator sets the share deliberately, as a second action.
+            await AppRouteService.UpdateDeploymentRouteCanaryAsync(
+                dr.Id, service, service is null ? 0 : dr.CanaryWeight, dr.CanaryServicePort);
+            await LoadAsync();
+        }
+        catch (Exception ex) { applyRouteError = ex.Message; }
+    }
+
+    private async Task SaveDrCanaryWeight(AppDeploymentRoute dr, string? raw)
+    {
+        applyRouteError = null;
+
+        if (!int.TryParse(raw, out int weight) || weight is < 0 or > 100)
+        {
+            applyRouteError = "Canary weight must be between 0 and 100.";
+            return;
+        }
+
+        if (weight == dr.CanaryWeight) return;
+
+        try
+        {
+            await AppRouteService.UpdateDeploymentRouteCanaryAsync(
+                dr.Id, dr.CanaryServiceName, weight, dr.CanaryServicePort);
+            await LoadAsync();
+        }
+        catch (Exception ex) { applyRouteError = ex.Message; }
     }
 
     private async Task ApplyRouteToCluster(Guid drId)

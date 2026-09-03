@@ -1,8 +1,10 @@
 using EntKube.Web.Data;
 using EntKube.Web.Services;
+using EntKube.Web.Services.Agents;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 
 namespace EntKube.Web.Tests;
@@ -42,10 +44,16 @@ public class StorageServiceTests : IDisposable
 
         VaultEncryptionService encryption = new(TestRootKey);
         vaultService = new VaultService(dbFactory, encryption);
-        Mock<IHttpClientFactory> httpFactory = new();
-        OpenStackS3Service openStackS3 = new(vaultService, httpFactory.Object, new OpenStackKeystoneClient(httpFactory.Object));
-        StorageLinkClientFactory storageClientFactory = new(vaultService, dbFactory);
-        sut = new StorageService(dbFactory, vaultService, openStackS3, new Mock<IKubernetesClientFactory>().Object, storageClientFactory);
+        Mock<IHttpClientFactory> innerHttpFactory = new();
+        AgentRegistry agentRegistry = new(dbFactory, NullLogger<AgentRegistry>.Instance);
+        OpenStackHttpFactory httpFactory = new(innerHttpFactory.Object, agentRegistry);
+        Mock<IKubernetesClientFactory> k8sMock = new();
+        ClusterEgressRelay egressRelay = new(k8sMock.Object, NullLogger<ClusterEgressRelay>.Instance);
+        ClusterEgressTunnel egressTunnel = new(NullLogger<ClusterEgressTunnel>.Instance);
+        OpenStackKeystoneClient keystone = new(httpFactory, vaultService, egressTunnel, dbFactory);
+        OpenStackS3Service openStackS3 = new(vaultService, httpFactory, keystone);
+        StorageLinkClientFactory storageClientFactory = new(vaultService, dbFactory, httpFactory, keystone);
+        sut = new StorageService(dbFactory, vaultService, openStackS3, keystone, egressRelay, egressTunnel, agentRegistry, k8sMock.Object, storageClientFactory);
     }
 
     public void Dispose()
@@ -421,7 +429,8 @@ public class StorageServiceTests : IDisposable
             "Default",
             "Default",
             "admin@example.com",
-            "supersecret");
+            "supersecret",
+            null, null, null, null, null, null);
 
         // Assert — connection is persisted with metadata.
 
@@ -452,7 +461,7 @@ public class StorageServiceTests : IDisposable
 
         OpenStackConnection connection = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "ToDelete", "https://auth.example.com/v3",
-            "Sto2", null, null, null, null, "user", "pass123");
+            "Sto2", null, null, null, null, "user", "pass123", null, null, null, null, null, null);
 
         // Act
 
@@ -478,7 +487,7 @@ public class StorageServiceTests : IDisposable
 
         OpenStackConnection connection = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "InUse", "https://auth.example.com/v3",
-            "Kna1", null, null, null, null, null, null);
+            "Kna1", null, null, null, null, null, null, null, null, null, null, null, null);
 
         StorageLink link = new()
         {
@@ -513,7 +522,7 @@ public class StorageServiceTests : IDisposable
 
         OpenStackConnection connection = await sut.CreateOpenStackConnectionAsync(
             tenant.Id, "Cleura", "https://auth.example.com/v3",
-            "Kna1", null, null, null, null, null, null);
+            "Kna1", null, null, null, null, null, null, null, null, null, null, null, null);
 
         // Act
 

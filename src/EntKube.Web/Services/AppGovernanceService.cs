@@ -1,5 +1,6 @@
 using System.Text;
 using EntKube.Web.Data;
+using k8s;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -46,6 +47,170 @@ public class AppGovernanceService(
         if (ae is null) return;
         ae.Namespace = string.IsNullOrWhiteSpace(ns) ? null : ns.Trim().ToLowerInvariant();
         await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Checks whether <paramref name="ns"/> already exists on every cluster this app+environment
+    /// is governed on, so a namespace lock can be validated (and the namespace created) before any
+    /// governance is pushed.
+    ///
+    /// Cluster set: the clusters hosting a deployment for this app+environment — the same set
+    /// <see cref="ApplyToClusterAsync"/> targets. Before the first deployment exists there are none,
+    /// so it falls back to every cluster assigned to the environment, which is where a deployment
+    /// would land anyway.
+    /// </summary>
+    public async Task<NamespaceCheckResult> CheckNamespaceAsync(
+        Guid appId, Guid environmentId, string? ns, CancellationToken ct = default)
+    {
+        string? name = Blank(ns)?.ToLowerInvariant();
+        if (name is null) return new NamespaceCheckResult { Namespace = "" };
+
+        List<KubernetesCluster> clusters;
+        bool fromDeployments;
+
+        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        {
+            List<Guid> clusterIds = await db.AppDeployments
+                .Where(d => d.AppId == appId && d.EnvironmentId == environmentId)
+                .Select(d => d.ClusterId)
+                .Distinct()
+                .ToListAsync(ct);
+
+            fromDeployments = clusterIds.Count > 0;
+
+            clusters = fromDeployments
+                ? await db.KubernetesClusters.Where(c => clusterIds.Contains(c.Id)).ToListAsync(ct)
+                : await db.KubernetesClusters.Where(c => c.EnvironmentId == environmentId).ToListAsync(ct);
+        }
+
+        var statuses = new List<NamespaceClusterStatus>();
+        var known = new SortedSet<string>(StringComparer.Ordinal);
+
+        foreach (KubernetesCluster cluster in clusters.OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            {
+                statuses.Add(new NamespaceClusterStatus
+                {
+                    ClusterId   = cluster.Id,
+                    ClusterName = cluster.Name,
+                    Error       = "Cluster has no kubeconfig configured.",
+                });
+                continue;
+            }
+
+            (List<string>? names, string? error) = await ListNamespacesAsync(cluster.Kubeconfig, ct);
+            if (names is null)
+            {
+                statuses.Add(new NamespaceClusterStatus
+                {
+                    ClusterId   = cluster.Id,
+                    ClusterName = cluster.Name,
+                    Error       = error,
+                });
+                continue;
+            }
+
+            foreach (string n in names) known.Add(n);
+
+            statuses.Add(new NamespaceClusterStatus
+            {
+                ClusterId   = cluster.Id,
+                ClusterName = cluster.Name,
+                Exists      = names.Contains(name, StringComparer.Ordinal),
+            });
+        }
+
+        return new NamespaceCheckResult
+        {
+            Namespace       = name,
+            FromDeployments = fromDeployments,
+            Clusters        = statuses,
+            KnownNamespaces = [.. known],
+        };
+    }
+
+    /// <summary>
+    /// Creates the namespace on one cluster. Goes through the change gate first, so an interactive
+    /// operator acknowledges the dry-run before the namespace is written.
+    /// </summary>
+    public async Task<(bool Success, string Output)> CreateNamespaceOnClusterAsync(
+        Guid clusterId, string ns, CancellationToken ct = default)
+    {
+        string? name = Blank(ns)?.ToLowerInvariant();
+        if (name is null) return (false, "Namespace name is empty.");
+        if (ValidateNamespaceName(name) is { } invalid) return (false, invalid);
+
+        KubernetesCluster? cluster;
+        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        {
+            cluster = await db.KubernetesClusters.FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+        }
+
+        if (cluster is null) return (false, "Cluster not found.");
+        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            return (false, "Cluster has no kubeconfig configured.");
+
+        string yaml = Y(
+            "apiVersion: v1",
+            "kind: Namespace",
+            "metadata:",
+            $"  name: {name}");
+
+        await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+        {
+            Verb        = EntKube.Web.Services.ClusterChanges.ChangeVerb.EnsureNamespace,
+            Kubeconfig  = cluster.Kubeconfig,
+            ClusterLabel = cluster.Name,
+            Namespace   = name,
+            Summary     = $"Create namespace {name}",
+            Manifest    = yaml,
+        }, ct);
+
+        (bool ok, string output) = await KubectlApplyAsync(yaml, cluster.Kubeconfig, ct);
+
+        if (ok)
+            logger.LogInformation("Namespace {Namespace} created on {Cluster}", name, cluster.Name);
+        else
+            logger.LogWarning("Namespace {Namespace} create failed on {Cluster}: {Output}", name, cluster.Name, output);
+
+        return (ok, output);
+    }
+
+    /// <summary>
+    /// Returns null when the name is a valid Kubernetes namespace (DNS-1123 label),
+    /// otherwise a human-readable reason.
+    /// </summary>
+    public static string? ValidateNamespaceName(string ns)
+    {
+        if (ns.Length > 63)
+            return "Namespace names may be at most 63 characters.";
+        if (!System.Text.RegularExpressions.Regex.IsMatch(ns, "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"))
+            return "Namespace names may contain only lowercase letters, digits and '-', and must start and end with a letter or digit.";
+        return null;
+    }
+
+    private static async Task<(List<string>? Names, string? Error)> ListNamespacesAsync(
+        string kubeconfig, CancellationToken ct)
+    {
+        try
+        {
+            using var stream = new MemoryStream(Encoding.UTF8.GetBytes(kubeconfig));
+            KubernetesClientConfiguration config =
+                KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
+            using var client = new Kubernetes(config);
+
+            k8s.Models.V1NamespaceList list = await client.CoreV1.ListNamespaceAsync(cancellationToken: ct);
+            return (list.Items
+                .Select(n => n.Metadata?.Name)
+                .Where(n => !string.IsNullOrEmpty(n))
+                .Select(n => n!)
+                .ToList(), null);
+        }
+        catch (Exception ex)
+        {
+            return (null, $"Could not list namespaces: {ex.Message}");
+        }
     }
 
     // ── Quota ─────────────────────────────────────────────────────────────────
@@ -395,12 +560,29 @@ public class AppGovernanceService(
             Manifest = yaml,
         }, ct);
 
+        (bool ok, string result) = await KubectlApplyAsync(yaml, cluster.Kubeconfig, ct);
+
+        if (ok)
+            logger.LogInformation("Governance applied to {Cluster}/{Namespace}", cluster.Name, ns);
+        else
+            logger.LogWarning("Governance apply failed for {Cluster}: {Output}", cluster.Name, result);
+
+        return (ok, result);
+    }
+
+    /// <summary>
+    /// Runs "kubectl apply" for a manifest against a kubeconfig, returning the exit status and
+    /// combined stdout/stderr. Callers gate the change before calling this.
+    /// </summary>
+    private static async Task<(bool Success, string Output)> KubectlApplyAsync(
+        string yaml, string kubeconfig, CancellationToken ct)
+    {
         string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-gov-{Guid.NewGuid():N}.kubeconfig");
         string manifestPath   = Path.Combine(Path.GetTempPath(), $"entkube-gov-{Guid.NewGuid():N}.yaml");
 
         try
         {
-            await File.WriteAllTextAsync(kubeconfigPath, cluster.Kubeconfig, ct);
+            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
             await File.WriteAllTextAsync(manifestPath, yaml, ct);
 
             System.Diagnostics.ProcessStartInfo psi = new("kubectl",
@@ -421,15 +603,7 @@ public class AppGovernanceService(
             proc.BeginErrorReadLine();
             await proc.WaitForExitAsync(ct);
 
-            bool ok = proc.ExitCode == 0;
-            string result = output.ToString().TrimEnd();
-
-            if (ok)
-                logger.LogInformation("Governance applied to {Cluster}/{Namespace}", cluster.Name, ns);
-            else
-                logger.LogWarning("Governance apply failed for {Cluster}: {Output}", cluster.Name, result);
-
-            return (ok, result);
+            return (proc.ExitCode == 0, output.ToString().TrimEnd());
         }
         finally
         {
@@ -812,6 +986,40 @@ public class AppGovernanceData
     public List<AppAllowedDatabase> AllowedDatabases { get; init; } = [];
     public List<AppAllowedCache> AllowedCaches { get; init; } = [];
     public List<AppAllowedStorage> AllowedStorages { get; init; } = [];
+}
+
+/// <summary>Per-cluster existence of a governance namespace.</summary>
+public class NamespaceClusterStatus
+{
+    public required Guid ClusterId { get; init; }
+    public required string ClusterName { get; init; }
+
+    /// <summary>True when the namespace already exists on this cluster.</summary>
+    public bool Exists { get; init; }
+
+    /// <summary>Non-null when the cluster could not be reached — existence is then unknown.</summary>
+    public string? Error { get; init; }
+}
+
+/// <summary>Result of checking a namespace across the clusters an app+environment is governed on.</summary>
+public class NamespaceCheckResult
+{
+    public required string Namespace { get; init; }
+
+    /// <summary>
+    /// True when the checked clusters came from this environment's deployments; false when the app
+    /// has no deployment yet and every cluster in the environment was checked instead.
+    /// </summary>
+    public bool FromDeployments { get; init; }
+
+    public List<NamespaceClusterStatus> Clusters { get; init; } = [];
+
+    /// <summary>All namespace names seen across the checked clusters — used to suggest existing ones.</summary>
+    public List<string> KnownNamespaces { get; init; } = [];
+
+    /// <summary>Clusters that were reachable and are missing the namespace.</summary>
+    public List<NamespaceClusterStatus> Missing =>
+        Clusters.Where(c => c.Error is null && !c.Exists).ToList();
 }
 
 public record AvailableDatabaseOption(

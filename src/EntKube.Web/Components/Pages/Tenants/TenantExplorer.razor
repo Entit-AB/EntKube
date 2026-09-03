@@ -76,7 +76,12 @@ else
                         @* Customers under this environment *@
                         <div class="tree-subhead indent-2">
                             <span class="tree-sub">Customers</span>
-                            <button type="button" class="tree-add" title="Add customer" aria-label="Add customer"
+                            @if (CustomersNotInEnv(env).Count > 0)
+                            {
+                                <button type="button" class="tree-add" title="Add an existing customer to @env.Name" aria-label="Add existing customer"
+                                        @onclick="() => StartLinkCustomer(env.Id)"><i class="bi bi-person-plus"></i></button>
+                            }
+                            <button type="button" class="tree-add" title="New customer in @env.Name" aria-label="Add customer"
                                     @onclick="() => StartAddCustomer(env.Id)"><i class="bi bi-plus-lg"></i></button>
                         </div>
                         @if (addingCustomerEnv == env.Id)
@@ -85,6 +90,19 @@ else
                                 <input placeholder="New customer name" @bind="newCustomerName" @bind:event="oninput"
                                        @onkeydown="e => OnAddKey(e, AddCustomer)" />
                                 <button type="button" class="tree-add-ok" @onclick="AddCustomer" aria-label="Create"><i class="bi bi-check-lg"></i></button>
+                            </div>
+                        }
+                        @if (linkingCustomerEnv == env.Id)
+                        {
+                            <div class="tree-add-row indent-3">
+                                <select @bind="linkCustomerId">
+                                    <option value="">Existing customer…</option>
+                                    @foreach (Customer other in CustomersNotInEnv(env))
+                                    {
+                                        <option value="@other.Id">@other.Name</option>
+                                    }
+                                </select>
+                                <button type="button" class="tree-add-ok" @onclick="LinkCustomer" aria-label="Add to environment"><i class="bi bi-check-lg"></i></button>
                             </div>
                         }
                         @foreach (Customer c in VisibleCustomersInEnv(env))
@@ -100,6 +118,12 @@ else
                                 </button>
                                 <button type="button" class="tree-add" title="Add app to @c.Name" aria-label="Add app"
                                         @onclick="() => StartAddApp(env.Id, c.Id)"><i class="bi bi-plus-lg"></i></button>
+                                @if (AppsOfInEnv(c, env).Count == 0)
+                                {
+                                    @* Only offered with no apps here — removing the membership would otherwise hide them. *@
+                                    <button type="button" class="tree-add" title="Remove @c.Name from @env.Name" aria-label="Remove customer from environment"
+                                            @onclick="() => UnlinkCustomer(env.Id, c.Id)"><i class="bi bi-x-lg"></i></button>
+                                }
                             </div>
                             @if (copen)
                             {
@@ -327,26 +351,38 @@ else
         new("Advisor", "bi-lightbulb",
         [ new("advisor", "Priorities", "bi-lightbulb") ]),
         new("Monitoring", "bi-speedometer2",
-        [ new("overview", "Overview", "bi-speedometer2"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
+        [ new("overview", "Overview", "bi-speedometer2"), new("workloads", "Workloads", "bi-boxes"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
         [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon") ]),
         new("Networking", "bi-signpost-split",
         [ new("ingress", "Routes & Ingress", "bi-signpost-split"), new("networking", "VPN mesh", "bi-hdd-network") ]),
+        new("Disaster recovery", "bi-shield-check",
+        [ new("disaster-recovery", "Backups & restore", "bi-shield-check") ]),
         new("Reliability", "bi-check2-square",
         [ new("sla", "SLA", "bi-check2-square"), new("maintenance", "Maintenance", "bi-tools"), new("secret-expiry", "Secret expiry", "bi-clock-history") ]),
+        new("Lifecycle", "bi-arrow-up-circle",
+        [ new("upgrades", "Upgrades", "bi-arrow-up-circle"), new("drift", "Drift", "bi-shuffle"), new("supply-chain", "Supply chain", "bi-box-seam") ]),
+        new("Delivery", "bi-rocket-takeoff",
+        [ new("rollouts", "Rollouts", "bi-rocket-takeoff") ]),
+        new("Cost", "bi-cash-coin",
+        [ new("cost", "Cost & chargeback", "bi-cash-coin") ]),
     ];
     private static readonly SectionItem[] ManageItems =
     [
         new("customers", "Customers", "bi-people"),
         new("groups", "Groups", "bi-diagram-2"),
         new("blueprints", "Blueprints", "bi-diagram-2-fill"),
+        new("api-tokens", "API tokens", "bi-key"),
     ];
 
     private Tenant? tenant;
     private List<Data.Environment> environments = [];
     private List<Customer> customers = [];
+    // envId -> customers explicitly added to that environment. A customer belongs to the
+    // environments it was created/added under, not to every environment in the tenant.
+    private readonly Dictionary<Guid, HashSet<Guid>> customersByEnv = [];
     private readonly Dictionary<Guid, List<Data.App>> appsByCustomer = [];
     private readonly Dictionary<Guid, Customer> customerByAppId = [];
     private List<Data.App> allApps = [];
@@ -364,6 +400,8 @@ else
     private string newEnvName = "";
     private Guid? addingCustomerEnv;
     private string newCustomerName = "";
+    private Guid? linkingCustomerEnv;      // env whose "add existing customer" picker is open
+    private Guid? linkCustomerId;
     private (Guid Env, Guid Cust)? addingApp;
     private string newAppName = "";
 
@@ -423,6 +461,7 @@ else
         expandedEnvCustomers.Clear();
         expandedGroups.Clear();
         appsByCustomer.Clear();
+        customersByEnv.Clear();
         filter = "";
         selectedApp = null; selectedAppCustomer = null; selectedCluster = null;
         selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
@@ -432,6 +471,7 @@ else
         foreach (Customer c in customers)
             appsByCustomer[c.Id] = await TenantService.GetAppsAsync(c.Id);
         clusters = await TenantService.GetClustersAsync(t.Id);
+        await LoadCustomerEnvironmentsAsync(t.Id);
         RebuildAppIndex();
 
         tenant = t;
@@ -496,15 +536,33 @@ else
     private bool EnvHasMatch(Data.Environment env) =>
         Match(env.Name)
         || ClustersInEnv(env).Any(c => Match(c.Name))
-        || customers.Any(c => AppsOfInEnv(c, env).Any(a => Match(a.Name)));
+        || CustomersInEnv(env).Any(c => Match(c.Name) || AppsOfInEnv(c, env).Any(a => Match(a.Name)));
 
     private List<Data.Environment> VisibleEnvironments() =>
         HasFilter ? environments.Where(EnvHasMatch).ToList() : environments;
 
+    /// <summary>
+    /// Customers that belong to this environment: the ones explicitly added to it, plus any
+    /// that have an app deployed there (belt and braces — an app must never be orphaned by a
+    /// missing membership row).
+    /// </summary>
+    private List<Customer> CustomersInEnv(Data.Environment env)
+    {
+        HashSet<Guid> members = customersByEnv.GetValueOrDefault(env.Id, []);
+        return customers.Where(c => members.Contains(c.Id) || AppsOfInEnv(c, env).Count > 0).ToList();
+    }
+
+    private List<Customer> CustomersNotInEnv(Data.Environment env)
+    {
+        HashSet<Guid> inEnv = CustomersInEnv(env).Select(c => c.Id).ToHashSet();
+        return customers.Where(c => !inEnv.Contains(c.Id)).ToList();
+    }
+
     private List<Customer> VisibleCustomersInEnv(Data.Environment env)
     {
-        if (!HasFilter || Match(env.Name)) return customers;
-        return customers.Where(c => Match(c.Name) || AppsOfInEnv(c, env).Any(a => Match(a.Name))).ToList();
+        List<Customer> inEnv = CustomersInEnv(env);
+        if (!HasFilter || Match(env.Name)) return inEnv;
+        return inEnv.Where(c => Match(c.Name) || AppsOfInEnv(c, env).Any(a => Match(a.Name))).ToList();
     }
     private List<Data.App> VisibleAppsOfInEnv(Customer c, Data.Environment env)
     {
@@ -537,7 +595,13 @@ else
 
     // ── Inline add ──
     private bool IsAddingApp(Guid envId, Guid custId) => addingApp is { } a && a.Env == envId && a.Cust == custId;
-    private void StartAddCustomer(Guid envId) { addingCustomerEnv = addingCustomerEnv == envId ? null : envId; newCustomerName = ""; }
+    private void StartAddCustomer(Guid envId) { addingCustomerEnv = addingCustomerEnv == envId ? null : envId; linkingCustomerEnv = null; newCustomerName = ""; }
+    private void StartLinkCustomer(Guid envId)
+    {
+        linkingCustomerEnv = linkingCustomerEnv == envId ? null : envId;
+        addingCustomerEnv = null;
+        linkCustomerId = null;
+    }
     private void StartAddApp(Guid envId, Guid custId)
     {
         addingApp = IsAddingApp(envId, custId) ? null : (envId, custId);
@@ -558,12 +622,42 @@ else
     private async Task AddCustomer()
     {
         string name = newCustomerName.Trim();
-        if (name.Length == 0 || tenant is null) return;
-        Customer c = await TenantService.CreateCustomerAsync(tenant.Id, name);
+        if (name.Length == 0 || tenant is null || addingCustomerEnv is not { } envId) return;
+        // The customer joins the environment it was created under — and only that one.
+        Customer c = await TenantService.CreateCustomerAsync(tenant.Id, name, envId);
         customers = await TenantService.GetCustomersAsync(tenant.Id);
         appsByCustomer[c.Id] = await TenantService.GetAppsAsync(c.Id);
+        await LoadCustomerEnvironmentsAsync(tenant.Id);
         RebuildAppIndex();
         newCustomerName = ""; addingCustomerEnv = null;
+    }
+
+    private async Task LinkCustomer()
+    {
+        if (tenant is null || linkingCustomerEnv is not { } envId || linkCustomerId is not { } custId) return;
+        await TenantService.AddCustomerToEnvironmentAsync(custId, envId);
+        await LoadCustomerEnvironmentsAsync(tenant.Id);
+        linkingCustomerEnv = null; linkCustomerId = null;
+    }
+
+    private async Task UnlinkCustomer(Guid envId, Guid custId)
+    {
+        if (tenant is null) return;
+        // Refused server-side while apps remain, so the tree can't drop an app out of view.
+        await TenantService.RemoveCustomerFromEnvironmentAsync(custId, envId);
+        await LoadCustomerEnvironmentsAsync(tenant.Id);
+        expandedEnvCustomers.Remove($"{envId}:{custId}");
+    }
+
+    private async Task LoadCustomerEnvironmentsAsync(Guid tenantId)
+    {
+        customersByEnv.Clear();
+        foreach (CustomerEnvironment ce in await TenantService.GetCustomerEnvironmentsAsync(tenantId))
+        {
+            if (!customersByEnv.TryGetValue(ce.EnvironmentId, out HashSet<Guid>? set))
+                customersByEnv[ce.EnvironmentId] = set = [];
+            set.Add(ce.CustomerId);
+        }
     }
 
     private async Task AddApp(Guid envId, Guid custId)
@@ -573,6 +667,7 @@ else
         Data.App app = await TenantService.CreateAppAsync(custId, name);
         await TenantService.LinkAppToEnvironmentAsync(app.Id, envId);
         appsByCustomer[custId] = await TenantService.GetAppsAsync(custId);
+        if (tenant is not null) await LoadCustomerEnvironmentsAsync(tenant.Id);
         RebuildAppIndex();
         newAppName = ""; addingApp = null;
     }
@@ -670,6 +765,7 @@ else
                 break;
             case "groups": builder.OpenComponent<GroupTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "ingress": builder.OpenComponent<IngressDashboardTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "workloads": builder.OpenComponent<WorkloadsTab>(0); builder.AddComponentParameter(1, "TenantId", (Guid?)tid); builder.CloseComponent(); break;
             case "networking": builder.OpenComponent<NetworkingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "blueprints": builder.OpenComponent<BlueprintsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "databases": OpenEnvScoped<DatabaseTab>(builder, tid); break;
@@ -720,6 +816,42 @@ else
                 builder.OpenComponent<SecretExpiryTab>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);
                 builder.AddComponentParameter(2, "OnNavigateTab", EventCallback.Factory.Create<string>(this, NavigateToSection));
+                builder.CloseComponent();
+                break;
+            case "disaster-recovery":
+                builder.OpenComponent<DisasterRecoveryTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.CloseComponent();
+                break;
+            case "rollouts":
+                builder.OpenComponent<RolloutsTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.CloseComponent();
+                break;
+            case "cost":
+                builder.OpenComponent<CostTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.CloseComponent();
+                break;
+            case "api-tokens":
+                builder.OpenComponent<ApiTokensTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.CloseComponent();
+                break;
+            case "supply-chain":
+                builder.OpenComponent<SupplyChainTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.CloseComponent();
+                break;
+            case "drift":
+                builder.OpenComponent<DriftTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.CloseComponent();
+                break;
+            case "upgrades":
+                builder.OpenComponent<UpgradesTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.AddComponentParameter(2, "TenantSlug", tenant!.Slug);
                 builder.CloseComponent();
                 break;
             case "advisor":

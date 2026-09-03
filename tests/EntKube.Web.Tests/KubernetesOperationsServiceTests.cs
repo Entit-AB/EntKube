@@ -44,6 +44,7 @@ public class KubernetesOperationsServiceTests : IDisposable
         sut = new KubernetesOperationsService(dbFactory, new AuditService(dbFactory),
             new KyvernoPolicyService(dbFactory, new Mock<IKubernetesClientFactory>().Object, gate, NullLogger<KyvernoPolicyService>.Instance),
             gate,
+            new EntKube.Web.Services.Rollouts.NoOpRolloutStarter(),
             NullLogger<KubernetesOperationsService>.Instance);
     }
 

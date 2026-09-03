@@ -261,6 +261,61 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("AlertRoutingRules");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ApiToken", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DisplayPrefix")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("ExpiresAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("LastUsedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("RevokedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Scopes")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique();
+
+                    b.ToTable("ApiTokens");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.App", b =>
                 {
                     b.Property<Guid>("Id")
@@ -511,6 +566,15 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<Guid>("AppRouteId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("CanaryServiceName")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("CanaryServicePort")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("CanaryWeight")
+                        .HasColumnType("INTEGER");
+
                     b.Property<DateTime?>("ClusterAppliedAt")
                         .HasColumnType("TEXT");
 
@@ -542,6 +606,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
 
+                    b.Property<int?>("RequestTimeoutSeconds")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("RewritePath")
                         .HasColumnType("TEXT");
 
@@ -551,6 +618,18 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.Property<int>("ServicePort")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SessionAffinity")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SessionAffinityKey")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("SessionAffinityTtlSeconds")
                         .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
@@ -804,6 +883,12 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<Guid>("AppId")
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid?>("ClientCaBundleId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("ClientCertificateOnly")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("ClusterIssuerName")
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
@@ -824,6 +909,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("INTEGER")
                         .HasDefaultValue(true);
 
+                    b.Property<bool>("RequireClientCertificate")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("TlsCertificate")
                         .HasColumnType("TEXT");
 
@@ -838,6 +926,8 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasKey("Id");
 
                     b.HasIndex("AppId");
+
+                    b.HasIndex("ClientCaBundleId");
 
                     b.ToTable("AppRoutes");
                 });
@@ -1476,6 +1566,82 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("CertificateDistributions");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ClientCaBundle", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(1000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ListenerPort")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(8443);
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("ClientCaBundles");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ClientCaCertificate", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("BundleId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("ExpiresAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Fingerprint")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Pem")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Subject")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BundleId");
+
+                    b.ToTable("ClientCaCertificates");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1570,6 +1736,62 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .IsUnique();
 
                     b.ToTable("ClusterComponents");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ClusterCostRate", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("ChargeOnRequests")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<decimal>("ClusterMonthlyOverhead")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("TEXT");
+
+                    b.Property<decimal>("CpuCoreHourCost")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("TEXT");
+
+                    b.Property<decimal>("LoadBalancerMonthlyCost")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("TEXT");
+
+                    b.Property<decimal>("MemoryGiBHourCost")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("TEXT");
+
+                    b.Property<decimal>("PublicIpMonthlyCost")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("TEXT");
+
+                    b.Property<decimal>("StorageGiBMonthCost")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterId")
+                        .IsUnique();
+
+                    b.ToTable("ClusterCostRates");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterServer", b =>
@@ -1917,6 +2139,24 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("CustomerAccesses");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.CustomerEnvironment", b =>
+                {
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("EnvironmentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("LinkedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("CustomerId", "EnvironmentId");
+
+                    b.HasIndex("EnvironmentId");
+
+                    b.ToTable("CustomerEnvironments");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.CustomerGitCredential", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2258,6 +2498,47 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("DeploymentResources");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.DeploymentRollout", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("DecideAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("DeploymentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("FinishedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SignalsJson")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("StartedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("TriggeredBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Verdict")
+                        .HasMaxLength(1000)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Status");
+
+                    b.HasIndex("DeploymentId", "StartedAt");
+
+                    b.ToTable("DeploymentRollouts");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.DockerRegistryCredential", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2333,6 +2614,48 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("DockerRegistryCredentials");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.EgressAgent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LastRemoteAddress")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("LastSeenAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReportedAllowlist")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("EgressAgents");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2406,6 +2729,42 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("ExternalDependencies");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ExternalGroupMapping", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ExternalGroup")
+                        .IsRequired()
+                        .HasMaxLength(400)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("RoleId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RoleId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("ExternalGroup", "TenantId")
+                        .IsUnique();
+
+                    b.ToTable("ExternalGroupMappings");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ExternalRoute", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2449,11 +2808,26 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
 
+                    b.Property<int?>("RequestTimeoutSeconds")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("ServiceName")
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
 
                     b.Property<int>("ServicePort")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SessionAffinity")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SessionAffinityKey")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("SessionAffinityTtlSeconds")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("TlsCertificate")
@@ -2993,6 +3367,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<Guid>("AppId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("BehaviorYaml")
+                        .HasColumnType("TEXT");
+
                     b.Property<int?>("CooldownPeriod")
                         .HasColumnType("INTEGER");
 
@@ -3031,6 +3408,12 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<string>("ScaleTargetName")
                         .HasColumnType("TEXT");
+
+                    b.Property<int?>("TargetCpuUtilization")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("TargetMemoryUtilization")
+                        .HasColumnType("INTEGER");
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("TEXT");
@@ -3384,6 +3767,45 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("TenantId", "StartsAt");
 
                     b.ToTable("MaintenanceWindows");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.MeshMtlsPolicy", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("AppliedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(63)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterId", "Namespace")
+                        .IsUnique();
+
+                    b.ToTable("MeshMtlsPolicies");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MessagingBinding", b =>
@@ -4129,7 +4551,22 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<string>("ProjectName")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ProxyUrl")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProxyUsername")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Region")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("RouteViaAgentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("RouteViaClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("S3Endpoint")
                         .HasColumnType("TEXT");
 
                     b.Property<Guid>("TenantId")
@@ -4146,6 +4583,64 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("TenantId");
 
                     b.ToTable("OpenStackConnections");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.OutboundMtlsCredential", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("AppliedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("EnvironmentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Port")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(443);
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("VaultSecretId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WorkloadSelectorJson")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("OutboundMtlsCredentials");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQBackup", b =>
@@ -4508,6 +5003,64 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("ClusterId", "Kind", "SnapshotAt");
 
                     b.ToTable("ResourceUsageSnapshots");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.RolloutPolicy", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("AnalysisWindowMinutes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("DeploymentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<double?>("MaxErrorBudgetBurnRate")
+                        .HasColumnType("REAL");
+
+                    b.Property<double?>("MaxErrorRatePercent")
+                        .HasColumnType("REAL");
+
+                    b.Property<double?>("MaxLatencyP95Ms")
+                        .HasColumnType("REAL");
+
+                    b.Property<int?>("MaxRestarts")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<double?>("MinReadyFraction")
+                        .HasColumnType("REAL");
+
+                    b.Property<int>("OnFailure")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("OnInconclusive")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("TelemetryServiceName")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("WarmupMinutes")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DeploymentId")
+                        .IsUnique();
+
+                    b.ToTable("RolloutPolicies");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RumSite", b =>
@@ -5567,6 +6120,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ApiToken", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.App", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Customer", "Customer")
@@ -5838,7 +6402,14 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("EntKube.Web.Data.ClientCaBundle", "ClientCaBundle")
+                        .WithMany("Routes")
+                        .HasForeignKey("ClientCaBundleId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.Navigation("App");
+
+                    b.Navigation("ClientCaBundle");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppServicePort", b =>
@@ -5977,6 +6548,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("RedisCluster");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ClientCaCertificate", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ClientCaBundle", "Bundle")
+                        .WithMany("Certificates")
+                        .HasForeignKey("BundleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Bundle");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
@@ -5992,6 +6574,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                 {
                     b.HasOne("EntKube.Web.Data.KubernetesCluster", "Cluster")
                         .WithMany("Components")
+                        .HasForeignKey("ClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Cluster");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ClusterCostRate", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KubernetesCluster", "Cluster")
+                        .WithMany()
                         .HasForeignKey("ClusterId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
@@ -6112,6 +6705,25 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Customer");
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CustomerEnvironment", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany("CustomerEnvironments")
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Environment", "Environment")
+                        .WithMany("CustomerEnvironments")
+                        .HasForeignKey("EnvironmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Environment");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CustomerGitCredential", b =>
@@ -6243,6 +6855,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("ParentResource");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.DeploymentRollout", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.AppDeployment", "Deployment")
+                        .WithMany()
+                        .HasForeignKey("DeploymentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Deployment");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.DockerRegistryCredential", b =>
                 {
                     b.HasOne("EntKube.Web.Data.App", "App")
@@ -6275,6 +6898,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Vault");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.EgressAgent", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
@@ -6303,6 +6937,25 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("App");
 
                     b.Navigation("Environment");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ExternalGroupMapping", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.TenantRole", "Role")
+                        .WithMany()
+                        .HasForeignKey("RoleId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Role");
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ExternalRoute", b =>
@@ -7057,6 +7710,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.RolloutPolicy", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.AppDeployment", "Deployment")
+                        .WithMany()
+                        .HasForeignKey("DeploymentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Deployment");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.SecretExpiryNotification", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
@@ -7584,6 +8248,13 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Sources");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ClientCaBundle", b =>
+                {
+                    b.Navigation("Certificates");
+
+                    b.Navigation("Routes");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
                 {
                     b.Navigation("Steps");
@@ -7616,6 +8287,8 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                 {
                     b.Navigation("Apps");
 
+                    b.Navigation("CustomerEnvironments");
+
                     b.Navigation("GitCredentials");
 
                     b.Navigation("GitRepoPolicies");
@@ -7629,6 +8302,8 @@ namespace EntKube.Web.Data.Migrations.Sqlite
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>
                 {
                     b.Navigation("AppEnvironments");
+
+                    b.Navigation("CustomerEnvironments");
 
                     b.Navigation("KubernetesClusters");
                 });

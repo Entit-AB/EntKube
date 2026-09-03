@@ -322,6 +322,10 @@
                         }
                         <EditForm Model="editDeployModel" OnValidSubmit="SaveDeployment">
                             <DataAnnotationsValidator />
+                            @* A field can be hidden (a governance-locked namespace renders as a
+                               disabled box), and a validation error on a hidden field would
+                               otherwise make Save do nothing at all with no explanation. *@
+                            <ValidationSummary class="text-danger small mb-2" />
                             <div class="row g-2 mb-2">
                                 <div class="col-md-6">
                                     <label class="form-label small">Name</label>
@@ -341,7 +345,10 @@
                                         <ValidationMessage For="() => editDeployModel.Namespace" class="text-danger small" />
                                     }
                                 </div>
-                                @if (selectedDeployment.Type == DeploymentType.HelmChart)
+                                @* Git — Helm deployments take their values from git but still pull the
+                                   chart itself from a Helm repo, so they need these fields just as much
+                                   as a hand-entered Helm deployment does. *@
+                                @if (selectedDeployment.Type is DeploymentType.HelmChart or DeploymentType.GitHelm)
                                 {
                                     <div class="col-md-4">
                                         <label class="form-label small">Helm Repo URL</label>
@@ -354,7 +361,17 @@
                                     <div class="col-md-4">
                                         <label class="form-label small">Chart Version</label>
                                         <InputText class="form-control form-control-sm" @bind-Value="editDeployModel.HelmChartVersion" />
+                                        <div class="form-text small">Leave empty for the latest version.</div>
                                     </div>
+                                    @if (selectedDeployment.Type == DeploymentType.GitHelm)
+                                    {
+                                        <div class="col-12">
+                                            <div class="form-text small">
+                                                <i class="bi bi-git me-1"></i>Git supplies this release's <strong>values</strong>;
+                                                the chart comes from the Helm repo above.
+                                            </div>
+                                        </div>
+                                    }
                                 }
                             </div>
                             <div class="d-flex gap-1">
@@ -390,14 +407,29 @@
                     </div>
                 }
 
-                @if (!showEditDeployment && selectedDeployment.Type == DeploymentType.HelmChart)
+                @if (!showEditDeployment && selectedDeployment.Type is DeploymentType.HelmChart or DeploymentType.GitHelm)
                 {
                     <div class="mt-3 p-2 bg-light rounded">
                         <small class="text-muted">
                             <i class="bi bi-box-seam me-1"></i>
-                            @selectedDeployment.HelmChartName
-                            <span class="mx-1">@selectedDeployment.HelmChartVersion</span>
-                            <span class="text-muted">from @selectedDeployment.HelmRepoUrl</span>
+                            @if (string.IsNullOrWhiteSpace(selectedDeployment.HelmChartName))
+                            {
+                                @* Without a chart name an install fails outright, so say so here
+                                   rather than at the end of a failed helm run. *@
+                                <span class="text-warning">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>No chart configured —
+                                    set the chart name with <i class="bi bi-pencil"></i> Edit before installing.
+                                </span>
+                            }
+                            else
+                            {
+                                @selectedDeployment.HelmChartName
+                                <span class="mx-1">@(string.IsNullOrWhiteSpace(selectedDeployment.HelmChartVersion) ? "(latest)" : selectedDeployment.HelmChartVersion)</span>
+                                @if (!string.IsNullOrWhiteSpace(selectedDeployment.HelmRepoUrl))
+                                {
+                                    <span class="text-muted">from @selectedDeployment.HelmRepoUrl</span>
+                                }
+                            }
                         </small>
                     </div>
                 }
@@ -927,7 +959,7 @@
                                     }
                                 </div>
                             </div>
-                            @if (newDeployType == DeploymentType.HelmChart)
+                            @if (newDeployType is DeploymentType.HelmChart or DeploymentType.GitHelm)
                             {
                                 <div class="row g-2 mb-2">
                                     <div class="col-md-4">
@@ -940,9 +972,16 @@
                                     </div>
                                     <div class="col-md-4">
                                         <label class="form-label small">Chart Version</label>
-                                        <input class="form-control form-control-sm" @bind="newHelmChartVersion" />
+                                        <input class="form-control form-control-sm" @bind="newHelmChartVersion" placeholder="latest" />
                                     </div>
                                 </div>
+                                @if (newDeployType == DeploymentType.GitHelm)
+                                {
+                                    <div class="form-text small mb-2">
+                                        <i class="bi bi-git me-1"></i>Git supplies the release's <strong>values</strong>;
+                                        the chart itself is pulled from this Helm repo.
+                                    </div>
+                                }
                             }
                             @if (newDeployType is DeploymentType.GitYaml or DeploymentType.GitHelm or DeploymentType.GitAppOfApps)
                             {
@@ -1074,7 +1113,7 @@
 
 
 @* ══════════════════════════════════════════════════════
-   Autoscaling tab — KEDA ScaledObjects / ScaledJobs (tenant admins only)
+   Autoscaling tab — HPAs and KEDA ScaledObjects / ScaledJobs (tenant admins only)
    ══════════════════════════════════════════════════════ *@
 @if (section == "autoscaling")
 {
@@ -2654,6 +2693,7 @@
     {
         createDeployError = null;
         bool isGit = newDeployType is DeploymentType.GitYaml or DeploymentType.GitHelm or DeploymentType.GitAppOfApps;
+        bool isHelm = newDeployType is DeploymentType.HelmChart or DeploymentType.GitHelm;
 
         string? resolvedGitUrl = null;
         if (isGit)
@@ -2663,15 +2703,20 @@
             resolvedGitUrl = newGitUrl.Trim();
         }
 
+        string effectiveNs = !string.IsNullOrWhiteSpace(governanceNamespace) ? governanceNamespace : newDeployNamespace;
+
+        // A deployment saved without a namespace cannot be installed, and the edit form's own
+        // required-namespace rule then blocks every later change to it. Catch it at creation.
+        if (string.IsNullOrWhiteSpace(effectiveNs)) { createDeployError = "Enter a namespace."; return; }
+
         try
         {
-            string effectiveNs = !string.IsNullOrWhiteSpace(governanceNamespace) ? governanceNamespace : newDeployNamespace;
             await DeploymentService.CreateDeploymentAsync(
                 App.Id, newDeployName, newDeployType,
                 Environment.Id, newDeployClusterId, effectiveNs,
-                newDeployType == DeploymentType.HelmChart ? newHelmRepoUrl : null,
-                newDeployType == DeploymentType.HelmChart ? newHelmChartName : null,
-                newDeployType == DeploymentType.HelmChart ? newHelmChartVersion : null,
+                isHelm ? newHelmRepoUrl : null,
+                isHelm ? newHelmChartName : null,
+                isHelm ? newHelmChartVersion : null,
                 gitUrl: resolvedGitUrl,
                 gitPath: isGit ? newGitPath : null,
                 gitRevision: isGit && !string.IsNullOrWhiteSpace(newGitRevision) ? newGitRevision : null,
@@ -2782,7 +2827,13 @@
         editDeployModel = new EditDeploymentModel
         {
             Name = selectedDeployment.Name,
-            Namespace = selectedDeployment.Namespace,
+            // Under a governance lock the namespace box is disabled and the locked value is what
+            // gets saved, so seed the model with it. Seeding the deployment's own (possibly empty)
+            // namespace instead left the required-field validation failing on a field the operator
+            // cannot reach, and the whole Save — chart version included — silently did nothing.
+            Namespace = !string.IsNullOrWhiteSpace(governanceNamespace)
+                ? governanceNamespace
+                : selectedDeployment.Namespace,
             HelmRepoUrl = selectedDeployment.HelmRepoUrl ?? "",
             HelmChartName = selectedDeployment.HelmChartName ?? "",
             HelmChartVersion = selectedDeployment.HelmChartVersion ?? "",
@@ -2836,11 +2887,12 @@
         try
         {
             string effectiveNs = !string.IsNullOrWhiteSpace(governanceNamespace) ? governanceNamespace : editDeployModel.Namespace;
+            bool isHelm = selectedDeployment.Type is DeploymentType.HelmChart or DeploymentType.GitHelm;
             await DeploymentService.UpdateDeploymentAsync(
                 selectedDeployment.Id, editDeployModel.Name, effectiveNs,
-                selectedDeployment.Type == DeploymentType.HelmChart ? editDeployModel.HelmRepoUrl : null,
-                selectedDeployment.Type == DeploymentType.HelmChart ? editDeployModel.HelmChartName : null,
-                selectedDeployment.Type == DeploymentType.HelmChart ? editDeployModel.HelmChartVersion : null);
+                isHelm ? editDeployModel.HelmRepoUrl : null,
+                isHelm ? editDeployModel.HelmChartName : null,
+                isHelm ? editDeployModel.HelmChartVersion : null);
             await LoadDeployments();
             selectedDeployment = deployments?.FirstOrDefault(d => d.Id == selectedDeployment.Id) ?? selectedDeployment;
             showEditDeployment = false;

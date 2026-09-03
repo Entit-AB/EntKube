@@ -16,7 +16,11 @@ namespace EntKube.Web.Services;
 /// server proxy; AWS S3 uses a regional endpoint; Cleura / custom-endpoint S3 uses ServiceURL with
 /// path-style addressing. Credentials come from the vault (ACCESS_KEY / SECRET_KEY per storage link).
 /// </summary>
-public sealed class StorageLinkClientFactory(VaultService vaultService, IDbContextFactory<ApplicationDbContext> dbFactory)
+public sealed class StorageLinkClientFactory(
+    VaultService vaultService,
+    IDbContextFactory<ApplicationDbContext> dbFactory,
+    OpenStackHttpFactory openStackHttpFactory,
+    OpenStackKeystoneClient keystone)
 {
     /// <summary>
     /// Creates an S3 client for <paramref name="link"/>. Returns the client plus an optional
@@ -72,7 +76,33 @@ public sealed class StorageLinkClientFactory(VaultService vaultService, IDbConte
             Timeout = TimeSpan.FromSeconds(30),
             MaxErrorRetry = 1,
         };
+
+        // Cleura links inherit their OpenStack connection's egress route, so browsing
+        // and telemetry blob access reach an IP-allowlisted object store the same way
+        // bucket provisioning does.
+        if (openStackHttpFactory.CreateAwsHttpClientFactory(await ResolveOpenStackEgressAsync(link, ct)) is { } awsFactory)
+        {
+            s3Config.HttpClientFactory = awsFactory;
+        }
+
         return (new AmazonS3Client(credentials, s3Config), null);
+    }
+
+    /// <summary>
+    /// Returns the egress transport of the OpenStack connection behind this link,
+    /// or null when the link has no connection or the connection talks directly.
+    /// </summary>
+    private async Task<ResolvedEgress?> ResolveOpenStackEgressAsync(StorageLink link, CancellationToken ct)
+    {
+        if (!link.OpenStackConnectionId.HasValue)
+            return null;
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        OpenStackConnection? connection = await db.OpenStackConnections
+            .FirstOrDefaultAsync(c => c.Id == link.OpenStackConnectionId.Value, ct);
+
+        return connection is null ? null : await keystone.ResolveEgressAsync(connection, ct);
     }
 
     /// <summary>

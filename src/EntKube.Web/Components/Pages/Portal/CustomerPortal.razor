@@ -308,6 +308,14 @@ else
                 </div>
                 <CustomerObservability Customer="selectedCustomer" />
             }
+            else if (selectedCustomerOp == "cost" && currentAccessRole >= CustomerAccessRole.Operator)
+            {
+                <div class="d-flex align-items-center mb-3">
+                    <span class="bi bi-cash-coin fs-4 me-2 text-primary"></span>
+                    <h4 class="mb-0">Consumption &amp; cost — @selectedCustomer.Name</h4>
+                </div>
+                <CustomerCostPanel Customer="selectedCustomer" />
+            }
             else if (selectedCustomerOp == "notifications")
             {
                 <PortalNotifications
@@ -524,7 +532,7 @@ else
     private KeycloakRealm? selectedIdentityRealm;
     private HarborProject? selectedRegistryProject;
     private Data.App? selectedRoutesApp;
-    private string? selectedCustomerOp;             // "monitoring" | "logs" | "observability" | "notifications"
+    private string? selectedCustomerOp;             // "monitoring" | "logs" | "observability" | "notifications" | "cost"
     private Guid? activeAppId;                       // app whose service leaf is active (for tree highlight)
     private string? activeAppServiceKey;
 
@@ -638,7 +646,7 @@ else
         {
             selectedOverviewApp = app;
         }
-        else if (SectionParam is "monitoring" or "logs" or "observability" or "notifications")
+        else if (SectionParam is "monitoring" or "logs" or "observability" or "notifications" or "cost")
         {
             selectedCustomerOp = SectionParam;
         }
@@ -922,7 +930,12 @@ else
             ("logs", "Logs", "bi-journal-text"),
         };
         if (currentAccessRole >= CustomerAccessRole.Operator)
+        {
             items.Add(("observability", "Traces & Metrics", "bi-graph-up"));
+            // Cost is commercial information, so it follows the same role gate as the
+            // other operator-only views rather than being visible to every viewer.
+            items.Add(("cost", "Consumption", "bi-cash-coin"));
+        }
         items.Add(("notifications", "Notifications", "bi-bell"));
 
         if (!HasFilter) return items;
