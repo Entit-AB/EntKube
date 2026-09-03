@@ -227,7 +227,8 @@ public sealed class SegmentLogService(
             DateTime from = DateTime.UtcNow.AddMinutes(-windowMinutes);
             var sink = new HashSet<string>(StringComparer.Ordinal);
             foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value))
-                await segments.QueryAsync(Scope, from, null, s => { s.Search(filter, new DistinctCollector(field, sink)); return 0; }, ct);
+                await segments.QueryAsync(Scope, from, null,
+                    s => { DistinctFieldValues.Collect(s, filter, field, sink); return 0; }, ct);
 
             List<string> values = sink.Where(v => v.Length > 0).OrderBy(v => v, StringComparer.Ordinal).ToList();
             LabelCache[cacheKey] = (DateTime.UtcNow, values);
@@ -313,27 +314,6 @@ public sealed class SegmentLogService(
 
     private static KubernetesOperationResult<T> Fail<T>(string message = "Segment telemetry store error.")
         => KubernetesOperationResult<T>.Failure(message);
-
-    // Collects distinct SortedDocValues of a field over matched docs (per leaf), resolving each ordinal to
-    // its string — a cheap, index-native distinct for the label dropdowns.
-    private sealed class DistinctCollector(string field, HashSet<string> sink) : ICollector
-    {
-        private SortedDocValues? _dv;
-        private readonly BytesRef _scratch = new();
-
-        public void SetScorer(Scorer scorer) { }
-        public void SetNextReader(AtomicReaderContext context) => _dv = context.AtomicReader.GetSortedDocValues(field);
-        public bool AcceptsDocsOutOfOrder => true;
-
-        public void Collect(int doc)
-        {
-            if (_dv is null) return;
-            int ord = _dv.GetOrd(doc);
-            if (ord < 0) return;
-            _dv.LookupOrd(ord, _scratch);
-            sink.Add(_scratch.Utf8ToString());
-        }
-    }
 
     // Buckets matched docs by (ts - from) / bucketMs using ts + severity DocValues; counts total and the
     // error+fatal (severity >= Error) subcount — the C# equivalent of the old date_bin + FILTER SQL.
