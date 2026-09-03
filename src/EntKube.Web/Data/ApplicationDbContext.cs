@@ -23,6 +23,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<AppEnvironment> AppEnvironments => Set<AppEnvironment>();
     public DbSet<KubernetesCluster> KubernetesClusters => Set<KubernetesCluster>();
     public DbSet<EgressAgent> EgressAgents => Set<EgressAgent>();
+    public DbSet<ApiToken> ApiTokens => Set<ApiToken>();
     public DbSet<SecretVault> SecretVaults => Set<SecretVault>();
     public DbSet<VaultSecret> VaultSecrets => Set<VaultSecret>();
     public DbSet<VaultSecretVersion> VaultSecretVersions => Set<VaultSecretVersion>();
@@ -149,6 +150,26 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasIndex(t => t.Slug).IsUnique();
             entity.Property(t => t.Name).HasMaxLength(200).IsRequired();
             entity.Property(t => t.Slug).HasMaxLength(100).IsRequired();
+        });
+
+        // ApiToken — the hash is the lookup key on every authenticated API request, so it
+        // is uniquely indexed. Tokens cascade with their tenant: a deleted tenant must not
+        // leave working credentials behind.
+
+        builder.Entity<ApiToken>(entity =>
+        {
+            entity.HasKey(t => t.Id);
+            entity.HasIndex(t => t.TokenHash).IsUnique();
+            entity.HasIndex(t => t.TenantId);
+            entity.Property(t => t.Name).HasMaxLength(200).IsRequired();
+            entity.Property(t => t.TokenHash).HasMaxLength(64).IsRequired();
+            entity.Property(t => t.DisplayPrefix).HasMaxLength(32).IsRequired();
+            entity.Property(t => t.Scopes).HasMaxLength(500);
+            entity.Property(t => t.CreatedBy).HasMaxLength(256);
+            entity.HasOne(t => t.Tenant)
+                  .WithMany()
+                  .HasForeignKey(t => t.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
         });
 
         // TenantRole — each role name must be unique within its tenant.

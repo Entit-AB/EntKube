@@ -1,0 +1,257 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services.PublicApi
+@using Microsoft.AspNetCore.Components.Authorization
+@inject ApiTokenService TokenService
+@inject AuthenticationStateProvider AuthState
+
+@* ═══════════════════════════════════════════════════════════════════
+   API tokens — scoped bearer credentials for the public REST API.
+   The plaintext is shown exactly once, at creation.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3 mt-4">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span><i class="bi bi-key me-2 text-primary"></i><strong>API tokens</strong></span>
+        <button class="btn btn-sm btn-primary" @onclick="() => showCreate = !showCreate">
+            <i class="bi bi-plus-lg me-1"></i>New token
+        </button>
+    </div>
+    <div class="card-body pt-3">
+        <p class="text-muted small mb-3">
+            Bearer tokens for <code>/api/v1</code>. Each token is scoped to this tenant and to the
+            permissions you grant — it can never reach another tenant's data.
+        </p>
+
+        @if (justCreated is not null)
+        {
+            <div class="alert alert-success">
+                <div class="fw-semibold mb-1"><i class="bi bi-check-circle me-1"></i>Token created</div>
+                <p class="small mb-2">
+                    Copy it now — <strong>this is the only time it will ever be shown.</strong>
+                    Only a hash is stored, so it cannot be recovered.
+                </p>
+                <div class="input-group input-group-sm">
+                    <input class="form-control font-monospace" readonly value="@justCreated" />
+                    <button class="btn btn-outline-secondary" @onclick="() => justCreated = null">Dismiss</button>
+                </div>
+            </div>
+        }
+
+        @if (error is not null)
+        {
+            <div class="alert alert-danger py-2">@error</div>
+        }
+
+        @if (showCreate)
+        {
+            <div class="border rounded p-3 mb-3 bg-light">
+                <div class="row g-2">
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1">Name</label>
+                        <input class="form-control form-control-sm" @bind="newName" placeholder="e.g. CI pipeline" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small mb-1">Expires</label>
+                        <select class="form-select form-select-sm" @bind="newExpiryDays">
+                            <option value="0">Never</option>
+                            <option value="30">In 30 days</option>
+                            <option value="90">In 90 days</option>
+                            <option value="365">In 1 year</option>
+                        </select>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label small mb-1">Scopes</label>
+                        <div class="d-flex flex-column gap-1">
+                            @foreach (string scope in ApiScopes.All)
+                            {
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="@($"scope-{scope}")"
+                                           checked="@newScopes.Contains(scope)"
+                                           @onchange="e => ToggleScope(scope, (bool)e.Value!)" />
+                                    <label class="form-check-label small" for="@($"scope-{scope}")">
+                                        <code>@scope</code>
+                                        <span class="text-muted ms-2">@ApiScopes.Describe(scope)</span>
+                                    </label>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                    <div class="col-12 d-flex gap-2 mt-2">
+                        <button class="btn btn-sm btn-primary" @onclick="CreateAsync"
+                                disabled="@(creating || string.IsNullOrWhiteSpace(newName) || newScopes.Count == 0)">
+                            @if (creating) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Create token
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => showCreate = false">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (loading)
+        {
+            <div class="text-center py-3"><span class="spinner-border spinner-border-sm text-primary"></span></div>
+        }
+        else if (tokens.Count == 0)
+        {
+            <p class="text-muted small mb-0">No API tokens yet.</p>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead>
+                        <tr class="text-muted small">
+                            <th>Name</th>
+                            <th>Token</th>
+                            <th>Scopes</th>
+                            <th>Created</th>
+                            <th>Last used</th>
+                            <th>Status</th>
+                            <th class="text-end">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (ApiToken token in tokens)
+                        {
+                            <tr class="@(IsActive(token) ? "" : "opacity-50")">
+                                <td class="fw-medium">@token.Name</td>
+                                <td><code class="small">@token.DisplayPrefix…</code></td>
+                                <td>
+                                    @foreach (string scope in ApiScopes.Parse(token.Scopes))
+                                    {
+                                        <span class="badge bg-light text-muted border me-1">@scope</span>
+                                    }
+                                </td>
+                                <td class="small text-muted">
+                                    @token.CreatedAt.ToString("yyyy-MM-dd")
+                                    @if (token.CreatedBy is not null)
+                                    {
+                                        <div>by @token.CreatedBy</div>
+                                    }
+                                </td>
+                                <td class="small text-muted">@(token.LastUsedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")</td>
+                                <td>
+                                    @if (token.RevokedAt is not null)
+                                    {
+                                        <span class="badge bg-secondary">Revoked</span>
+                                    }
+                                    else if (token.ExpiresAt is DateTime exp && exp <= DateTime.UtcNow)
+                                    {
+                                        <span class="badge bg-warning text-dark">Expired</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-success">Active</span>
+                                        @if (token.ExpiresAt is DateTime future)
+                                        {
+                                            <div class="small text-muted">until @future.ToString("yyyy-MM-dd")</div>
+                                        }
+                                    }
+                                </td>
+                                <td class="text-end">
+                                    @if (IsActive(token))
+                                    {
+                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => RevokeAsync(token)">
+                                            Revoke
+                                        </button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private List<ApiToken> tokens = [];
+    private bool loading = true;
+    private string? error;
+
+    private bool showCreate;
+    private bool creating;
+    private string newName = "";
+    private int newExpiryDays;
+    private readonly HashSet<string> newScopes = [];
+
+    /// <summary>The plaintext of a just-created token. Held only for this render, never re-fetched.</summary>
+    private string? justCreated;
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private static bool IsActive(ApiToken token) =>
+        token.RevokedAt is null && (token.ExpiresAt is null || token.ExpiresAt > DateTime.UtcNow);
+
+    private void ToggleScope(string scope, bool on)
+    {
+        if (on) newScopes.Add(scope);
+        else newScopes.Remove(scope);
+    }
+
+    private async Task ReloadAsync()
+    {
+        loading = true;
+        try
+        {
+            tokens = await TokenService.ListAsync(TenantId);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task CreateAsync()
+    {
+        creating = true;
+        error = null;
+        try
+        {
+            AuthenticationState auth = await AuthState.GetAuthenticationStateAsync();
+
+            CreatedApiToken created = await TokenService.CreateAsync(
+                TenantId, newName, newScopes,
+                createdBy: auth.User.Identity?.Name,
+                expiresAt: newExpiryDays > 0 ? DateTime.UtcNow.AddDays(newExpiryDays) : null);
+
+            justCreated = created.Plaintext;
+            newName = "";
+            newScopes.Clear();
+            newExpiryDays = 0;
+            showCreate = false;
+
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            creating = false;
+        }
+    }
+
+    private async Task RevokeAsync(ApiToken token)
+    {
+        error = null;
+        try
+        {
+            await TokenService.RevokeAsync(TenantId, token.Id);
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+    }
+}

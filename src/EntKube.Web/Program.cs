@@ -323,6 +323,7 @@ public class Program
             sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
         builder.Services.AddSingleton<IngestTokenService>();
+        builder.Services.AddScoped<EntKube.Web.Services.PublicApi.ApiTokenService>();
         builder.Services.AddSingleton<IngestRateLimiter>();
         // Real User Monitoring: resolves per-site public keys for the public browser ingest endpoint.
         builder.Services.AddSingleton<RumSiteService>();
@@ -797,6 +798,7 @@ public class Program
         // Egress agents dial in here from customer networks that permit no inbound
         // traffic. Token-authenticated inside the handler, not by the cookie scheme.
         app.MapAgentEndpoint();
+        EntKube.Web.Services.PublicApi.PublicApiEndpoints.MapPublicApi(app);
 
         app.Run();
     }
