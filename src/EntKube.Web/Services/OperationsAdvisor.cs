@@ -145,6 +145,7 @@ public class OperationsAdvisorService(
     EntKube.Web.Services.Upgrades.ComponentUpgradeService componentUpgrades,
     EntKube.Web.Services.Upgrades.DriftScanCache driftCache,
     EntKube.Web.Services.SupplyChain.SupplyChainScanCache supplyChainCache,
+    EntKube.Web.Services.Dr.DrScanCache drCache,
     ILogger<OperationsAdvisorService> logger)
 {
     /// <summary>Overdue findings older than this, still unacknowledged, are escalated.</summary>
@@ -165,6 +166,7 @@ public class OperationsAdvisorService(
         findings.AddRange(await BuildUpgradeFindingsAsync(tenantId, now, ct));
         findings.AddRange(BuildDriftFindings(tenantId, now));
         findings.AddRange(BuildSupplyChainFindings(tenantId, now));
+        findings.AddRange(BuildDrFindings(tenantId, now));
 
         var merged = await MergeStateAsync(tenantId, findings, now, ct);
 
@@ -1252,6 +1254,60 @@ public class OperationsAdvisorService(
                 ClusterId = cluster.Key,
                 Source = "supply-chain",
             });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Turns the last disaster-recovery sweep into findings.
+    ///
+    /// One finding per gap rather than aggregated per cluster: unlike patch drift, each
+    /// of these is a distinct decision — an unavailable bucket, a paused schedule and an
+    /// untested restore need three different actions from three different people.
+    /// </summary>
+    private List<OperationsFinding> BuildDrFindings(Guid tenantId, DateTime now)
+    {
+        var result = new List<OperationsFinding>();
+
+        IReadOnlyList<EntKube.Web.Services.Dr.ClusterDrStatus>? statuses = drCache.Get(tenantId);
+        if (statuses is null)
+        {
+            return result;
+        }
+
+        foreach (EntKube.Web.Services.Dr.ClusterDrStatus status in statuses)
+        {
+            foreach (EntKube.Web.Services.Dr.DrGap gap in
+                     EntKube.Web.Services.Dr.DrReadiness.Evaluate(status, now))
+            {
+                result.Add(new OperationsFinding
+                {
+                    Id = gap.Key,
+                    Category = AdvisorCategory.DataProtection,
+                    Severity = gap.Severity switch
+                    {
+                        EntKube.Web.Services.Dr.DrSeverity.Critical => AdvisorSeverity.Critical,
+                        EntKube.Web.Services.Dr.DrSeverity.Warning => AdvisorSeverity.Warning,
+                        _ => AdvisorSeverity.Info,
+                    },
+                    // A cluster with nothing to restore from is a today problem: the exposure
+                    // is total and every hour it persists is more data that cannot come back.
+                    Horizon = gap.Severity switch
+                    {
+                        EntKube.Web.Services.Dr.DrSeverity.Critical => AdvisorHorizon.Today,
+                        EntKube.Web.Services.Dr.DrSeverity.Warning => AdvisorHorizon.ThisWeek,
+                        _ => AdvisorHorizon.Later,
+                    },
+                    Title = gap.Title,
+                    Detail = gap.Detail,
+                    ScopeLabel = $"Cluster: {status.ClusterName}",
+                    Remediation = gap.Remediation,
+                    LinkSection = "disaster-recovery",
+                    ClusterId = status.ClusterId,
+                    Source = "dr",
+                });
+            }
         }
 
         return result;

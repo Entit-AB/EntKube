@@ -24,6 +24,10 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<KubernetesCluster> KubernetesClusters => Set<KubernetesCluster>();
     public DbSet<EgressAgent> EgressAgents => Set<EgressAgent>();
     public DbSet<ApiToken> ApiTokens => Set<ApiToken>();
+    public DbSet<ClusterCostRate> ClusterCostRates => Set<ClusterCostRate>();
+    public DbSet<ExternalGroupMapping> ExternalGroupMappings => Set<ExternalGroupMapping>();
+    public DbSet<RolloutPolicy> RolloutPolicies => Set<RolloutPolicy>();
+    public DbSet<DeploymentRollout> DeploymentRollouts => Set<DeploymentRollout>();
     public DbSet<SecretVault> SecretVaults => Set<SecretVault>();
     public DbSet<VaultSecret> VaultSecrets => Set<VaultSecret>();
     public DbSet<VaultSecretVersion> VaultSecretVersions => Set<VaultSecretVersion>();
@@ -170,6 +174,82 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                   .WithMany()
                   .HasForeignKey(t => t.TenantId)
                   .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ClusterCostRate — at most one price sheet per cluster, so the unique index is
+        // what prevents two rates silently disagreeing about what a core costs.
+
+        builder.Entity<ClusterCostRate>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => r.ClusterId).IsUnique();
+            entity.Property(r => r.Currency).HasMaxLength(3).IsRequired();
+            entity.Property(r => r.UpdatedBy).HasMaxLength(256);
+            // Money: an explicit precision rather than the provider default, which for
+            // SQL Server would silently round to 2 decimals — useless for a per-core-hour
+            // rate that is routinely fractions of a cent.
+            entity.Property(r => r.CpuCoreHourCost).HasPrecision(18, 6);
+            entity.Property(r => r.MemoryGiBHourCost).HasPrecision(18, 6);
+            entity.Property(r => r.StorageGiBMonthCost).HasPrecision(18, 6);
+            entity.Property(r => r.ClusterMonthlyOverhead).HasPrecision(18, 2);
+            entity.HasOne(r => r.Cluster)
+                  .WithMany()
+                  .HasForeignKey(r => r.ClusterId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // RolloutPolicy — one per deployment; the unique index is what stops two policies
+        // disagreeing about whether a release should be rolled back.
+
+        builder.Entity<RolloutPolicy>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => p.DeploymentId).IsUnique();
+            entity.Property(p => p.TelemetryServiceName).HasMaxLength(200);
+            entity.Property(p => p.UpdatedBy).HasMaxLength(256);
+            entity.HasOne(p => p.Deployment)
+                  .WithMany()
+                  .HasForeignKey(p => p.DeploymentId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // DeploymentRollout — the watch history. Indexed on (DeploymentId, StartedAt) for
+        // the per-deployment history view, and on Status so the background watcher can find
+        // open rollouts without scanning the whole table.
+
+        builder.Entity<DeploymentRollout>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => new { r.DeploymentId, r.StartedAt });
+            entity.HasIndex(r => r.Status);
+            entity.Property(r => r.TriggeredBy).HasMaxLength(256);
+            entity.Property(r => r.Verdict).HasMaxLength(1000);
+            entity.HasOne(r => r.Deployment)
+                  .WithMany()
+                  .HasForeignKey(r => r.DeploymentId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ExternalGroupMapping — a group may grant access to several tenants, but only one
+        // role per tenant: two roles for the same group in the same tenant would make the
+        // resulting access depend on evaluation order.
+
+        builder.Entity<ExternalGroupMapping>(entity =>
+        {
+            entity.HasKey(m => m.Id);
+            entity.HasIndex(m => new { m.ExternalGroup, m.TenantId }).IsUnique();
+            entity.Property(m => m.ExternalGroup).HasMaxLength(400).IsRequired();
+            entity.Property(m => m.CreatedBy).HasMaxLength(256);
+            entity.HasOne(m => m.Tenant)
+                  .WithMany()
+                  .HasForeignKey(m => m.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(m => m.Role)
+                  .WithMany()
+                  .HasForeignKey(m => m.RoleId)
+                  // Restrict, not Cascade: deleting a role that a group mapping depends on
+                  // must be a deliberate act, not a silent revocation of everyone's access.
+                  .OnDelete(DeleteBehavior.Restrict);
         });
 
         // TenantRole — each role name must be unique within its tenant.

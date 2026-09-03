@@ -14,4 +14,8 @@
          The RuntimeIdentifier is set at publish time, not here. -->
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="../EntKube.ApiClient/EntKube.ApiClient.csproj" />
+  </ItemGroup>
+
 </Project>

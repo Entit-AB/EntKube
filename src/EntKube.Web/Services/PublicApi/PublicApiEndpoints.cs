@@ -1,4 +1,6 @@
 using EntKube.Web.Data;
+using EntKube.Web.Services.Cost;
+using EntKube.Web.Services.Dr;
 using EntKube.Web.Services.SupplyChain;
 using EntKube.Web.Services.Upgrades;
 using Microsoft.EntityFrameworkCore;
@@ -379,6 +381,119 @@ public static class PublicApiEndpoints
                     workloads = i.Workloads,
                 }),
             });
+        }).RequireApiScope(ApiScopes.OpsRead);
+
+        api.MapGet("/cost", (HttpContext ctx, CostScanCache cache) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+            CostReport? report = cache.Get(tenantId);
+
+            if (report is null)
+            {
+                return Results.Problem(
+                    "No cost calculation has completed yet for this tenant.",
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            return Results.Ok(new
+            {
+                generatedAt = report.GeneratedAt,
+                currency = report.Currency,
+                totalMonthlyCost = report.TotalMonthlyCost,
+                totalHourlyCost = report.TotalHourlyCost,
+                unattributedMonthlyCost = report.UnattributedMonthlyCost,
+                warnings = report.Warnings,
+                byCustomer = report.ByCustomer.Select(c => new
+                {
+                    customerId = c.CustomerId,
+                    customer = c.CustomerName,
+                    monthlyCost = c.MonthlyCost,
+                }),
+                byEnvironment = report.ByEnvironment.Select(e => new
+                {
+                    environment = e.Environment,
+                    monthlyCost = e.MonthlyCost,
+                }),
+                namespaces = report.Namespaces.Select(n => new
+                {
+                    ns = n.Namespace,
+                    cluster = n.ClusterName,
+                    customer = n.CustomerName,
+                    app = n.AppName,
+                    environment = n.EnvironmentName,
+                    cpuCores = n.CpuCores,
+                    memoryGiB = n.MemoryGiB,
+                    storageGiB = n.StorageGiB,
+                    monthlyCost = n.TotalMonthlyCost,
+                    unattributed = n.IsUnattributed,
+                }),
+            });
+        }).RequireApiScope(ApiScopes.OpsRead);
+
+        api.MapGet("/rollouts", async (
+            HttpContext ctx, IDbContextFactory<ApplicationDbContext> dbFactory, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+            await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+            var rollouts = await db.DeploymentRollouts
+                .AsNoTracking()
+                .Where(r => r.Deployment.App.Customer.TenantId == tenantId)
+                .OrderByDescending(r => r.StartedAt)
+                .Take(100)
+                .Select(r => new
+                {
+                    id = r.Id,
+                    app = r.Deployment.App.Name,
+                    deployment = r.Deployment.Name,
+                    environment = r.Deployment.Environment.Name,
+                    cluster = r.Deployment.Cluster.Name,
+                    status = r.Status.ToString(),
+                    startedAt = r.StartedAt,
+                    finishedAt = r.FinishedAt,
+                    verdict = r.Verdict,
+                    triggeredBy = r.TriggeredBy,
+                })
+                .ToListAsync(ct);
+
+            return Results.Ok(rollouts);
+        }).RequireApiScope(ApiScopes.OpsRead);
+
+        api.MapGet("/disaster-recovery", (HttpContext ctx, DrScanCache cache) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+            IReadOnlyList<ClusterDrStatus>? statuses = cache.Get(tenantId);
+
+            if (statuses is null)
+            {
+                return Results.Problem(
+                    "No disaster-recovery check has completed yet for this tenant.",
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            DateTime now = DateTime.UtcNow;
+
+            return Results.Ok(statuses.Select(s => new
+            {
+                clusterId = s.ClusterId,
+                cluster = s.ClusterName,
+                veleroInstalled = s.IsVeleroInstalled,
+                error = s.Error,
+                // "restorable" reflects a clean backup only — a partially-failed backup has
+                // skipped resources and is not something to report as recoverable.
+                restorable = s.LastUsableBackup is not null,
+                lastUsableBackupAt = s.LastUsableBackup?.CompletedAt,
+                lastRestoreAt = s.LastSuccessfulRestore?.CompletedAt,
+                scheduleCount = s.Schedules.Count,
+                gaps = DrReadiness.Evaluate(s, now).Select(g => new
+                {
+                    key = g.Key,
+                    severity = g.Severity.ToString(),
+                    title = g.Title,
+                    detail = g.Detail,
+                    remediation = g.Remediation,
+                }),
+            }));
         }).RequireApiScope(ApiScopes.OpsRead);
 
         api.MapPost("/advisor/findings/{findingId}/acknowledge", async (

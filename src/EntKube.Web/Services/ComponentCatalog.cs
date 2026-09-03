@@ -1721,6 +1721,100 @@ public static class ComponentCatalog
 
         new CatalogEntry
         {
+            Key = "velero",
+            DisplayName = "Velero",
+            Description = "Cluster backup and disaster recovery. Backs up Kubernetes resources and "
+                        + "persistent volume data to S3-compatible object storage, on a schedule, "
+                        + "and restores them into this or another cluster.",
+            Icon = "bi-shield-check",
+            Category = "Storage",
+            HelmRepoUrl = "https://vmware-tanzu.github.io/helm-charts",
+            HelmChartName = "velero",
+            HelmChartVersion = "12.1.0",
+            DefaultNamespace = "velero",
+            DefaultReleaseName = "velero",
+            // Velero's own CRDs. Their presence is what the component scan uses to notice an
+            // installation that was made with the velero CLI rather than through EntKube.
+            DetectionCrds = ["backups.velero.io", "schedules.velero.io", "restores.velero.io"],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "bucket", Label = "Bucket",
+                    YamlPath = "configuration.backupStorageLocation[0].bucket", Type = FormFieldType.Text,
+                    HelpText = "S3 bucket that will hold the backups. It must already exist — Velero does not create it."
+                },
+                new ComponentFormField
+                {
+                    Key = "s3-url", Label = "S3 Endpoint",
+                    YamlPath = "configuration.backupStorageLocation[0].config.s3Url", Type = FormFieldType.Text,
+                    HelpText = "S3-compatible endpoint, e.g. https://s3.eu-north-1.amazonaws.com or an in-cluster MinIO URL."
+                },
+                new ComponentFormField
+                {
+                    Key = "region", Label = "Region",
+                    YamlPath = "configuration.backupStorageLocation[0].config.region", Type = FormFieldType.Text,
+                    DefaultValue = "us-east-1",
+                    HelpText = "Region string. MinIO and most S3-compatible stores accept us-east-1."
+                },
+                new ComponentFormField
+                {
+                    Key = "access-key", Label = "Access Key",
+                    YamlPath = "credentials.secretContents.cloud", Type = FormFieldType.Text,
+                    HelpText = "Access key for the bucket."
+                },
+                new ComponentFormField
+                {
+                    Key = "secret-key", Label = "Secret Key",
+                    YamlPath = "credentials.secretContents.cloudSecret", Type = FormFieldType.Password,
+                    HelpText = "Secret key for the bucket. Stored in the EntKube vault, never in plain Helm values."
+                },
+            ],
+            DefaultValues = """
+                # Velero needs a provider plugin; the AWS plugin also serves every
+                # S3-compatible store (MinIO, Cleura, Ceph RGW), so it is the right
+                # default even when the backend is not AWS.
+                initContainers:
+                  - name: velero-plugin-for-aws
+                    image: velero/velero-plugin-for-aws:v1.13.0
+                    volumeMounts:
+                      - mountPath: /target
+                        name: plugins
+
+                configuration:
+                  backupStorageLocation:
+                    - name: default
+                      provider: aws
+                      default: true
+                      bucket: CHANGE_ME
+                      config:
+                        region: us-east-1
+                        s3Url: CHANGE_ME
+                        # Path-style addressing: MinIO and most S3-compatible stores do not
+                        # serve virtual-hosted-style bucket URLs.
+                        s3ForcePathStyle: "true"
+
+                # File-system backup captures volume DATA, not just the PVC objects. Without
+                # it a restore brings back empty volumes, which looks like success right up
+                # until someone opens the application.
+                deployNodeAgent: true
+
+                snapshotsEnabled: false
+
+                credentials:
+                  useSecret: true
+
+                resources:
+                  requests:
+                    cpu: 200m
+                    memory: 256Mi
+                  limits:
+                    memory: 1Gi
+                """,
+        },
+
+        new CatalogEntry
+        {
             Key = "minio",
             DisplayName = "MinIO",
             Description = "High-performance S3-compatible object storage. Use for application data, backups, and artifact storage.",

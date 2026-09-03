@@ -1,0 +1,378 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Dr
+@inject VeleroService Velero
+@inject DrScanCache ScanCache
+
+@* ═══════════════════════════════════════════════════════════════════
+   Disaster recovery — what could actually be restored, per cluster.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3 mt-4">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span><i class="bi bi-shield-check me-2 text-primary"></i><strong>Disaster recovery</strong></span>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="RefreshAsync" disabled="@loading">
+            @if (loading)
+            {
+                <span class="spinner-border spinner-border-sm me-1"></span>
+                <span>Checking…</span>
+            }
+            else
+            {
+                <i class="bi bi-arrow-clockwise me-1"></i>
+                <span>Refresh</span>
+            }
+        </button>
+    </div>
+    <div class="card-body pt-3">
+        <p class="text-muted small mb-3">
+            Velero backup state per cluster. <strong>A backup that exists is not a backup that works</strong> —
+            a partially-failed backup has skipped resources and is not counted as restorable here,
+            even though Velero records it as completed.
+        </p>
+
+        @if (message is not null)
+        {
+            <div class="alert py-2 small @(messageOk ? "alert-success" : "alert-danger")">@message</div>
+        }
+
+        @if (statuses is null)
+        {
+            <div class="alert alert-light border mb-0">
+                <i class="bi bi-info-circle me-1"></i>
+                No check has run yet. It refreshes hourly, or
+                <a href="#" @onclick:preventDefault @onclick="RefreshAsync">check now</a>.
+            </div>
+        }
+        else if (statuses.Count == 0)
+        {
+            <p class="text-muted small mb-0">No clusters registered.</p>
+        }
+        else
+        {
+            @foreach (ClusterDrStatus status in statuses)
+            {
+                <div class="border rounded p-3 mb-3">
+                    <div class="d-flex align-items-center justify-content-between mb-2">
+                        <div>
+                            <strong>@status.ClusterName</strong>
+                            @if (!status.IsVeleroInstalled)
+                            {
+                                <span class="badge bg-secondary ms-2">Velero not installed</span>
+                            }
+                            else if (status.LastUsableBackup is not null)
+                            {
+                                <span class="badge bg-success ms-2">Restorable</span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-danger ms-2">No usable backup</span>
+                            }
+                        </div>
+                        @if (status.IsVeleroInstalled)
+                        {
+                            <button class="btn btn-sm btn-outline-primary"
+                                    @onclick="() => BackupNowAsync(status)" disabled="@loading">
+                                <i class="bi bi-play-circle me-1"></i>Back up now
+                            </button>
+                        }
+                    </div>
+
+                    @if (status.Error is not null)
+                    {
+                        <div class="text-muted small"><i class="bi bi-exclamation-circle me-1"></i>@status.Error</div>
+                    }
+                    else if (!status.IsVeleroInstalled)
+                    {
+                        <div class="text-muted small">
+                            Install the Velero component on this cluster to enable backups.
+                        </div>
+                    }
+                    else
+                    {
+                        IReadOnlyList<DrGap> gaps = DrReadiness.Evaluate(status, DateTime.UtcNow);
+
+                        @if (gaps.Count > 0)
+                        {
+                            <ul class="list-unstyled small mb-3">
+                                @foreach (DrGap gap in gaps)
+                                {
+                                    <li class="mb-1">
+                                        <span class="badge @GapClass(gap.Severity) me-1">@gap.Severity</span>
+                                        <strong>@gap.Title</strong>
+                                        <div class="text-muted ms-1">@gap.Detail</div>
+                                        @if (gap.Remediation is not null)
+                                        {
+                                            <div class="text-primary ms-1">→ @gap.Remediation</div>
+                                        }
+                                    </li>
+                                }
+                            </ul>
+                        }
+                        else
+                        {
+                            <div class="small text-success mb-3">
+                                <i class="bi bi-check2-circle me-1"></i>No gaps found.
+                            </div>
+                        }
+
+                        <div class="row g-3 small">
+                            <div class="col-md-4">
+                                <div class="text-muted">Last usable backup</div>
+                                @if (status.LastUsableBackup is VeleroBackup usable)
+                                {
+                                    <div><code>@usable.Name</code></div>
+                                    <div class="text-muted">@(usable.CompletedAt?.ToString("yyyy-MM-dd HH:mm") ?? "—") UTC</div>
+                                }
+                                else
+                                {
+                                    <div class="text-danger">none</div>
+                                }
+                            </div>
+                            <div class="col-md-4">
+                                <div class="text-muted">Last restore</div>
+                                @if (status.LastSuccessfulRestore is VeleroRestore restore)
+                                {
+                                    <div><code>@restore.Name</code></div>
+                                    <div class="text-muted">@(restore.CompletedAt?.ToString("yyyy-MM-dd") ?? "—")</div>
+                                }
+                                else
+                                {
+                                    <div class="text-muted">never</div>
+                                }
+                            </div>
+                            <div class="col-md-4">
+                                <div class="text-muted">Storage</div>
+                                @foreach (VeleroStorageLocation location in status.StorageLocations)
+                                {
+                                    <div>
+                                        <code>@location.Name</code>
+                                        <span class="badge @(location.IsAvailable ? "bg-success" : "bg-danger") ms-1">
+                                            @location.Phase
+                                        </span>
+                                    </div>
+                                }
+                                @if (status.StorageLocations.Count == 0)
+                                {
+                                    <div class="text-muted">—</div>
+                                }
+                            </div>
+                        </div>
+
+                        @if (status.Schedules.Count > 0)
+                        {
+                            <div class="table-responsive mt-3">
+                                <table class="table table-sm mb-0">
+                                    <thead>
+                                        <tr class="text-muted small">
+                                            <th>Schedule</th><th>Cron</th><th>Retention</th>
+                                            <th>Volumes</th><th>Last backup</th><th class="text-end"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (VeleroSchedule schedule in status.Schedules)
+                                        {
+                                            <tr>
+                                                <td class="small">
+                                                    <code>@schedule.Name</code>
+                                                    @if (schedule.IsPaused)
+                                                    {
+                                                        <span class="badge bg-warning text-dark ms-1">paused</span>
+                                                    }
+                                                </td>
+                                                <td class="small"><code>@schedule.Cron</code></td>
+                                                <td class="small text-muted">@(schedule.Ttl ?? "—")</td>
+                                                <td class="small">
+                                                    @if (schedule.SnapshotVolumes)
+                                                    {
+                                                        <i class="bi bi-check2 text-success"></i>
+                                                    }
+                                                    else
+                                                    {
+                                                        <i class="bi bi-x text-danger" title="Volume data is not captured"></i>
+                                                    }
+                                                </td>
+                                                <td class="small text-muted">
+                                                    @(schedule.LastBackupAt?.ToString("MM-dd HH:mm") ?? "never")
+                                                </td>
+                                                <td class="text-end">
+                                                    <button class="btn btn-sm btn-outline-danger"
+                                                            @onclick="() => DeleteScheduleAsync(status, schedule.Name)">
+                                                        Delete
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        }
+
+                        <div class="border-top pt-3 mt-3">
+                            <div class="row g-2 align-items-end">
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-1">New schedule name</label>
+                                    <input class="form-control form-control-sm font-monospace"
+                                           @bind="NewSchedule(status).Name" placeholder="daily" />
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label small mb-1">Cron</label>
+                                    <input class="form-control form-control-sm font-monospace"
+                                           @bind="NewSchedule(status).Cron" placeholder="0 2 * * *" />
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label small mb-1">Retention (days)</label>
+                                    <input type="number" min="1" class="form-control form-control-sm"
+                                           @bind="NewSchedule(status).RetentionDays" />
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-1">Namespaces</label>
+                                    <input class="form-control form-control-sm font-monospace"
+                                           @bind="NewSchedule(status).Namespaces"
+                                           placeholder="blank = all namespaces" />
+                                </div>
+                                <div class="col-md-2">
+                                    <button class="btn btn-sm btn-primary w-100"
+                                            @onclick="() => SaveScheduleAsync(status)" disabled="@loading">
+                                        Add schedule
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private sealed class ScheduleForm
+    {
+        public string Name { get; set; } = "daily";
+        public string Cron { get; set; } = "0 2 * * *";
+        public int RetentionDays { get; set; } = 30;
+        public string Namespaces { get; set; } = "";
+    }
+
+    private IReadOnlyList<ClusterDrStatus>? statuses;
+    private readonly Dictionary<Guid, ScheduleForm> forms = [];
+    private bool loading;
+    private string? message;
+    private bool messageOk;
+
+    protected override void OnInitialized() => statuses = ScanCache.Get(TenantId);
+
+    private ScheduleForm NewSchedule(ClusterDrStatus status)
+    {
+        if (!forms.TryGetValue(status.ClusterId, out ScheduleForm? form))
+        {
+            form = new ScheduleForm();
+            forms[status.ClusterId] = form;
+        }
+
+        return form;
+    }
+
+    private async Task RefreshAsync()
+    {
+        loading = true;
+        message = null;
+        try
+        {
+            statuses = await Velero.GetTenantStatusAsync(TenantId);
+            // Publish so the advisor reflects this check rather than the superseded one.
+            ScanCache.Set(TenantId, statuses);
+        }
+        catch (Exception ex)
+        {
+            messageOk = false;
+            message = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    /// <summary>Splits the namespace box. Blank means every namespace, which is Velero's own default.</summary>
+    private static List<string> ParseNamespaces(string raw) =>
+        [.. raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
+
+    private async Task SaveScheduleAsync(ClusterDrStatus status)
+    {
+        ScheduleForm form = NewSchedule(status);
+        loading = true;
+        try
+        {
+            (bool ok, string result) = await Velero.SaveScheduleAsync(
+                TenantId, status.ClusterId, form.Name, form.Cron, form.RetentionDays,
+                ParseNamespaces(form.Namespaces), snapshotVolumes: true, storageLocation: null);
+
+            messageOk = ok;
+            message = result;
+            if (ok)
+            {
+                await RefreshAsync();
+            }
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task DeleteScheduleAsync(ClusterDrStatus status, string name)
+    {
+        loading = true;
+        try
+        {
+            (bool ok, string result) = await Velero.DeleteScheduleAsync(TenantId, status.ClusterId, name);
+            messageOk = ok;
+            message = result;
+            if (ok)
+            {
+                await RefreshAsync();
+            }
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task BackupNowAsync(ClusterDrStatus status)
+    {
+        loading = true;
+        try
+        {
+            // Velero requires a unique name per backup; a UTC timestamp is both unique and
+            // tells an operator when it was taken without opening it.
+            string name = $"entkube-{DateTime.UtcNow:yyyyMMdd-HHmmss}";
+
+            (bool ok, string result) = await Velero.CreateBackupAsync(
+                TenantId, status.ClusterId, name, includedNamespaces: null,
+                retentionDays: 30, storageLocation: null);
+
+            messageOk = ok;
+            message = result;
+            if (ok)
+            {
+                await RefreshAsync();
+            }
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private static string GapClass(DrSeverity severity) => severity switch
+    {
+        DrSeverity.Critical => "bg-danger",
+        DrSeverity.Warning => "bg-warning text-dark",
+        _ => "bg-secondary",
+    };
+}

@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Nodes;
 
+using EntKube.ApiClient;
 namespace EntKube.Mcp;
 
 /// <summary>

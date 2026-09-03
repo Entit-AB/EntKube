@@ -122,6 +122,27 @@ services:
       # Set to false after the first admin account is created.
       Auth__AllowRegistration: "true"
 
+      # --- Single sign-on (OIDC) ---
+      # Entirely optional. With OIDC__ENABLED unset or false no OIDC scheme is
+      # registered at all and the login page is unchanged, so leaving this alone
+      # costs nothing. See docs/sso.md.
+      #
+      # Register https://${DOMAIN}/signin-oidc as the redirect URI with your provider.
+      Oidc__Enabled: "${OIDC_ENABLED:-false}"
+      Oidc__Authority: "${OIDC_AUTHORITY:-}"
+      Oidc__ClientId: "${OIDC_CLIENT_ID:-}"
+      Oidc__ClientSecret: "${OIDC_CLIENT_SECRET:-}"
+      Oidc__DisplayName: "${OIDC_DISPLAY_NAME:-Single sign-on}"
+      # Claim carrying group membership. Providers disagree: Keycloak "groups",
+      # Entra "groups" (object ids) or "roles", Okta configurable.
+      Oidc__GroupsClaim: "${OIDC_GROUPS_CLAIM:-groups}"
+      # Extra scope beyond openid/profile/email. Configuration arrays are indexed,
+      # hence the __0 — add __1, __2 for more.
+      Oidc__Scopes__0: "${OIDC_SCOPE:-groups}"
+      # false (default) refuses a user whose groups map to no tenant. A
+      # directory-wide SSO app should not let your whole directory create accounts.
+      Oidc__AllowUsersWithoutMappedGroups: "${OIDC_ALLOW_UNMAPPED:-false}"
+
       # --- Temporary: log all HTTP requests so we can see 404s ---
       Logging__LogLevel__Microsoft__AspNetCore__Hosting__Diagnostics: "Information"
 

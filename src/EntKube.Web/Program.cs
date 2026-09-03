@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
@@ -32,14 +33,70 @@ public class Program
         builder.Services.AddScoped<IdentityRedirectManager>();
         builder.Services.AddScoped<AuthenticationStateProvider, IdentityRevalidatingAuthenticationStateProvider>();
 
-        builder.Services.AddAuthentication(options =>
+        EntKube.Web.Services.Sso.OidcOptions oidcOptions = new();
+        builder.Configuration
+            .GetSection(EntKube.Web.Services.Sso.OidcOptions.SectionName)
+            .Bind(oidcOptions);
+        builder.Services.AddSingleton(oidcOptions);
+
+        Microsoft.AspNetCore.Authentication.AuthenticationBuilder authBuilder =
+            builder.Services.AddAuthentication(options =>
             {
                 options.DefaultScheme = IdentityConstants.ApplicationScheme;
                 options.DefaultSignInScheme = IdentityConstants.ExternalScheme;
-            })
-            .AddIdentityCookies();
+            });
 
+        // SSO is opt-in and entirely config-driven. With no usable Oidc section no scheme is
+        // registered at all, so the login page is unchanged rather than showing a button that
+        // leads to a half-configured provider.
+        if (oidcOptions.IsUsable)
+        {
+            authBuilder.AddOpenIdConnect(
+                EntKube.Web.Services.Sso.OidcOptions.Scheme, oidcOptions.DisplayName, options =>
+                {
+                    options.Authority = oidcOptions.Authority;
+                    options.ClientId = oidcOptions.ClientId;
+                    options.ClientSecret = oidcOptions.ClientSecret;
+                    options.RequireHttpsMetadata = oidcOptions.RequireHttpsMetadata;
 
+                    // Authorization code flow with PKCE. The implicit and hybrid flows are
+                    // deprecated and leak tokens through the browser's address bar.
+                    options.ResponseType = "code";
+                    options.UsePkce = true;
+                    options.SaveTokens = false;
+
+                    // Sign in to Identity's external scheme so the existing external-login
+                    // callback page handles account linking exactly as it does for any other
+                    // provider — no second, parallel sign-in path to keep correct.
+                    options.SignInScheme = IdentityConstants.ExternalScheme;
+
+                    options.Scope.Clear();
+                    options.Scope.Add("openid");
+                    options.Scope.Add("profile");
+                    options.Scope.Add("email");
+                    foreach (string scope in oidcOptions.Scopes)
+                    {
+                        if (!string.IsNullOrWhiteSpace(scope))
+                        {
+                            options.Scope.Add(scope.Trim());
+                        }
+                    }
+
+                    options.GetClaimsFromUserInfoEndpoint = true;
+                    options.MapInboundClaims = false;
+                    options.TokenValidationParameters.NameClaimType = "name";
+                    options.TokenValidationParameters.RoleClaimType = "role";
+
+                    // The groups claim must survive into the principal the callback page reads,
+                    // or the group sync has nothing to work from.
+                    options.ClaimActions.MapJsonKey(oidcOptions.GroupsClaim, oidcOptions.GroupsClaim);
+                    options.ClaimActions.MapJsonKey("email", "email");
+                });
+        }
+
+        authBuilder.AddIdentityCookies();
+
+        builder.Services.AddScoped<EntKube.Web.Services.Sso.ExternalGroupSync>();
 
         // The app runs behind the Caddy reverse proxy which terminates TLS. Honor the
         // X-Forwarded-Proto/For headers so the app knows the original request was HTTPS —
@@ -409,6 +466,17 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.SupplyChain.SupplyChainService>();
         builder.Services.AddSingleton<EntKube.Web.Services.SupplyChain.SupplyChainScanCache>();
         builder.Services.AddHostedService<EntKube.Web.Services.SupplyChain.SupplyChainScanService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Cost.CostReportService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Cost.CostRateService>();
+        builder.Services.AddSingleton<EntKube.Web.Services.Cost.CostScanCache>();
+        builder.Services.AddHostedService<EntKube.Web.Services.Cost.CostScanService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Rollouts.RolloutService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Rollouts.IRolloutStarter>(
+            sp => sp.GetRequiredService<EntKube.Web.Services.Rollouts.RolloutService>());
+        builder.Services.AddHostedService<EntKube.Web.Services.Rollouts.RolloutWatcherService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Dr.VeleroService>();
+        builder.Services.AddSingleton<EntKube.Web.Services.Dr.DrScanCache>();
+        builder.Services.AddHostedService<EntKube.Web.Services.Dr.DrScanService>();
         builder.Services.AddScoped<OperationsAdvisorService>();
         builder.Services.AddScoped<CustomerNotificationService>();
 

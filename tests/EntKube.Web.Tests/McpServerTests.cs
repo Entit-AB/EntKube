@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using EntKube.ApiClient;
 using EntKube.Mcp;
 using FluentAssertions;
 

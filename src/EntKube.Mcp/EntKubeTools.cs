@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 
+using EntKube.ApiClient;
 namespace EntKube.Mcp;
 
 /// <summary>One MCP tool: its schema, whether it mutates, and how to run it.</summary>
@@ -170,6 +171,39 @@ public static class EntKubeTools
                         + "unknown — it is NOT a clean image. Returns 503 if no sweep has run yet.",
             InputSchema = NoArgs(),
             Handler = (api, _, ct) => api.GetAsync("/api/v1/supply-chain", ct),
+        },
+
+        new McpTool
+        {
+            Name = "entkube_cost",
+            Description = "What the fleet costs at the current rate of consumption, broken down "
+                        + "by customer, environment and namespace. These are run-rate projections "
+                        + "over a 730-hour month, not a historical bill — they reflect what is "
+                        + "reserved right now. Returns 503 if no calculation has run yet.",
+            InputSchema = NoArgs(),
+            Handler = (api, _, ct) => api.GetAsync("/api/v1/cost", ct),
+        },
+
+        new McpTool
+        {
+            Name = "entkube_rollouts",
+            Description = "Recent release watches and their verdicts — whether each release was "
+                        + "promoted, alerted on, or rolled back automatically, and why. A verdict "
+                        + "of 'Inconclusive' means nothing could be measured, which is not the "
+                        + "same as the release being healthy.",
+            InputSchema = NoArgs(),
+            Handler = (api, _, ct) => api.GetAsync("/api/v1/rollouts", ct),
+        },
+
+        new McpTool
+        {
+            Name = "entkube_disaster_recovery",
+            Description = "Per-cluster backup and restore posture, and any gaps in it. Note that "
+                        + "'restorable' counts only clean backups: Velero records a partially-failed "
+                        + "backup as completed, but it has skipped resources and cannot be relied on. "
+                        + "Returns 503 if no check has run yet.",
+            InputSchema = NoArgs(),
+            Handler = (api, _, ct) => api.GetAsync("/api/v1/disaster-recovery", ct),
         },
 
         new McpTool

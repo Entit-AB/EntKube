@@ -334,10 +334,16 @@ else
         [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon") ]),
         new("Networking", "bi-signpost-split",
         [ new("ingress", "Routes & Ingress", "bi-signpost-split"), new("networking", "VPN mesh", "bi-hdd-network") ]),
+        new("Disaster recovery", "bi-shield-check",
+        [ new("disaster-recovery", "Backups & restore", "bi-shield-check") ]),
         new("Reliability", "bi-check2-square",
         [ new("sla", "SLA", "bi-check2-square"), new("maintenance", "Maintenance", "bi-tools"), new("secret-expiry", "Secret expiry", "bi-clock-history") ]),
         new("Lifecycle", "bi-arrow-up-circle",
         [ new("upgrades", "Upgrades", "bi-arrow-up-circle"), new("drift", "Drift", "bi-shuffle"), new("supply-chain", "Supply chain", "bi-box-seam") ]),
+        new("Delivery", "bi-rocket-takeoff",
+        [ new("rollouts", "Rollouts", "bi-rocket-takeoff") ]),
+        new("Cost", "bi-cash-coin",
+        [ new("cost", "Cost & chargeback", "bi-cash-coin") ]),
     ];
     private static readonly SectionItem[] ManageItems =
     [
@@ -724,6 +730,21 @@ else
                 builder.OpenComponent<SecretExpiryTab>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);
                 builder.AddComponentParameter(2, "OnNavigateTab", EventCallback.Factory.Create<string>(this, NavigateToSection));
+                builder.CloseComponent();
+                break;
+            case "disaster-recovery":
+                builder.OpenComponent<DisasterRecoveryTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.CloseComponent();
+                break;
+            case "rollouts":
+                builder.OpenComponent<RolloutsTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.CloseComponent();
+                break;
+            case "cost":
+                builder.OpenComponent<CostTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
                 builder.CloseComponent();
                 break;
             case "api-tokens":
