@@ -449,3 +449,6 @@ src/EntKube.Web/keys/
 !/src/EntKube.Web/appsettings*.json.example
 
 */kubecontext.yaml
+
+# Terraform provider build output (see scripts/build-terraform-provider.sh)
+artifacts/terraform-provider/

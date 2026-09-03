@@ -186,6 +186,16 @@ else
                                 <label class="form-label">Bearer Token (optional)</label>
                                 <InputText class="form-control" type="password" @bind-Value="addForm.BearerToken" />
                             </div>
+                            <div class="mb-3">
+                                <label class="form-label">Signing secret (optional)</label>
+                                <InputText class="form-control" type="password" @bind-Value="addForm.SigningSecret" />
+                                <div class="form-text">
+                                    When set, each delivery carries an HMAC-SHA256 signature of the body in
+                                    <code>X-EntKube-Signature-256</code> so your receiver can verify it really
+                                    came from EntKube. A bearer token proves the sender knew a secret; a
+                                    signature also proves the body was not altered. See <code>docs/webhooks.md</code>.
+                                </div>
+                            </div>
                         }
 
                         <div class="mb-3">
@@ -262,6 +272,7 @@ else
 
         [Url(ErrorMessage = "Enter a valid URL (https://…).")]
         public string WebhookUrl { get; set; } = "";
+        public string SigningSecret { get; set; } = "";
 
         [EmailAddress(ErrorMessage = "Enter a valid email address.")]
         public string Email { get; set; } = "";
@@ -420,7 +431,8 @@ else
                 System.Text.Json.JsonSerializer.Serialize(new
                 {
                     url = addForm.WebhookUrl.Trim(),
-                    token = string.IsNullOrWhiteSpace(addForm.BearerToken) ? null : addForm.BearerToken.Trim()
+                    token = string.IsNullOrWhiteSpace(addForm.BearerToken) ? null : addForm.BearerToken.Trim(),
+                    secret = string.IsNullOrWhiteSpace(addForm.SigningSecret) ? null : addForm.SigningSecret.Trim()
                 }),
 
             _ => "{}"

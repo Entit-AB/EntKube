@@ -381,6 +381,7 @@ public class Program
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
         builder.Services.AddSingleton<IngestTokenService>();
         builder.Services.AddScoped<EntKube.Web.Services.PublicApi.ApiTokenService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Scim.ScimUserService>();
         builder.Services.AddSingleton<IngestRateLimiter>();
         // Real User Monitoring: resolves per-site public keys for the public browser ingest endpoint.
         builder.Services.AddSingleton<RumSiteService>();
@@ -474,6 +475,7 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.Rollouts.IRolloutStarter>(
             sp => sp.GetRequiredService<EntKube.Web.Services.Rollouts.RolloutService>());
         builder.Services.AddHostedService<EntKube.Web.Services.Rollouts.RolloutWatcherService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Adoption.DriftAdoptionService>();
         builder.Services.AddScoped<EntKube.Web.Services.Dr.VeleroService>();
         builder.Services.AddSingleton<EntKube.Web.Services.Dr.DrScanCache>();
         builder.Services.AddHostedService<EntKube.Web.Services.Dr.DrScanService>();
@@ -559,6 +561,8 @@ public class Program
             await EnsureDeploymentRouteRewritePathAsync(db, app.Logger);
             await EnsureNotificationChannelFiltersAsync(db, app.Logger);
             await EnsureRumSiteAppIdAsync(db, app.Logger);
+            await EnsureDeploymentGitUrlAsync(db, app.Logger);
+            await EnsureNotificationProviderConfigsAsync(db, app.Logger);
             await EnsureClusterKubeconfigsMigratedAsync(db, scope.ServiceProvider, app.Logger);
             await EnsureImportedTlsSecretsAsCertificatesAsync(scope.ServiceProvider, app.Logger);
 
@@ -867,6 +871,7 @@ public class Program
         // traffic. Token-authenticated inside the handler, not by the cookie scheme.
         app.MapAgentEndpoint();
         EntKube.Web.Services.PublicApi.PublicApiEndpoints.MapPublicApi(app);
+        EntKube.Web.Services.Scim.ScimEndpoints.MapScim(app);
 
         app.Run();
     }
@@ -904,6 +909,98 @@ public class Program
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Schema repair for AppEnvironments.Namespace skipped or failed.");
+        }
+    }
+
+    // Ten migration files under Data/Migrations/ were hand-written without their
+    // .Designer.cs partial, which is where EF Core puts the [Migration] attribute it
+    // discovers them by. Without it they are invisible: `dotnet ef database update`
+    // reports success and silently skips them. On a database built from migrations that
+    // leaves AppDeployments.GitUrl and the NotificationProviderConfigs table absent, and
+    // the app then dies at startup on "no such column: a.GitUrl".
+    //
+    // These two repairs close the proven gaps idempotently. They are not the real fix —
+    // the migrations themselves need their Designer partials regenerated — but that has
+    // to be done knowing which databases already carry the schema, and a startup repair
+    // is safe either way.
+
+    private static async Task EnsureDeploymentGitUrlAsync(DbContext db, ILogger logger)
+    {
+        try
+        {
+            string? provider = db.Database.ProviderName;
+            string? sql = null;
+            if (provider == "Npgsql.EntityFrameworkCore.PostgreSQL")
+                sql = "ALTER TABLE \"AppDeployments\" ADD COLUMN IF NOT EXISTS \"GitUrl\" character varying(2000) NULL";
+            else if (provider == "Microsoft.EntityFrameworkCore.SqlServer")
+                sql = "IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'AppDeployments') AND name = N'GitUrl')" +
+                      " ALTER TABLE [AppDeployments] ADD [GitUrl] nvarchar(2000) NULL";
+            else if (provider == "Microsoft.EntityFrameworkCore.Sqlite")
+                // SQLite has no ADD COLUMN IF NOT EXISTS; a duplicate-column error here
+                // means the column already exists, which is the outcome we wanted.
+                sql = "ALTER TABLE \"AppDeployments\" ADD COLUMN \"GitUrl\" TEXT NULL";
+
+            if (sql is not null)
+                await db.Database.ExecuteSqlRawAsync(sql);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Schema repair for AppDeployments.GitUrl skipped (column likely already present).");
+        }
+    }
+
+    private static async Task EnsureNotificationProviderConfigsAsync(DbContext db, ILogger logger)
+    {
+        try
+        {
+            string? provider = db.Database.ProviderName;
+            string? sql = null;
+            if (provider == "Npgsql.EntityFrameworkCore.PostgreSQL")
+                sql = """
+                    CREATE TABLE IF NOT EXISTS "NotificationProviderConfigs" (
+                        "Id" uuid NOT NULL CONSTRAINT "PK_NotificationProviderConfigs" PRIMARY KEY,
+                        "ProviderType" character varying(30) NOT NULL,
+                        "ConfigurationJson" text NOT NULL,
+                        "IsEnabled" boolean NOT NULL,
+                        "UpdatedAt" timestamp with time zone NOT NULL,
+                        "UpdatedByUserId" character varying(450) NULL);
+                    CREATE UNIQUE INDEX IF NOT EXISTS "IX_NotificationProviderConfigs_ProviderType"
+                        ON "NotificationProviderConfigs" ("ProviderType");
+                    """;
+            else if (provider == "Microsoft.EntityFrameworkCore.SqlServer")
+                sql = """
+                    IF OBJECT_ID(N'NotificationProviderConfigs', N'U') IS NULL
+                    BEGIN
+                        CREATE TABLE [NotificationProviderConfigs] (
+                            [Id] uniqueidentifier NOT NULL CONSTRAINT [PK_NotificationProviderConfigs] PRIMARY KEY,
+                            [ProviderType] nvarchar(30) NOT NULL,
+                            [ConfigurationJson] nvarchar(max) NOT NULL,
+                            [IsEnabled] bit NOT NULL,
+                            [UpdatedAt] datetime2 NOT NULL,
+                            [UpdatedByUserId] nvarchar(450) NULL);
+                        CREATE UNIQUE INDEX [IX_NotificationProviderConfigs_ProviderType]
+                            ON [NotificationProviderConfigs] ([ProviderType]);
+                    END
+                    """;
+            else if (provider == "Microsoft.EntityFrameworkCore.Sqlite")
+                sql = """
+                    CREATE TABLE IF NOT EXISTS "NotificationProviderConfigs" (
+                        "Id" TEXT NOT NULL CONSTRAINT "PK_NotificationProviderConfigs" PRIMARY KEY,
+                        "ProviderType" TEXT NOT NULL,
+                        "ConfigurationJson" TEXT NOT NULL,
+                        "IsEnabled" INTEGER NOT NULL,
+                        "UpdatedAt" TEXT NOT NULL,
+                        "UpdatedByUserId" TEXT NULL);
+                    CREATE UNIQUE INDEX IF NOT EXISTS "IX_NotificationProviderConfigs_ProviderType"
+                        ON "NotificationProviderConfigs" ("ProviderType");
+                    """;
+
+            if (sql is not null)
+                await db.Database.ExecuteSqlRawAsync(sql);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Schema repair for NotificationProviderConfigs skipped or failed.");
         }
     }
 

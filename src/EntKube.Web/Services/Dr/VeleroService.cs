@@ -15,8 +15,132 @@ namespace EntKube.Web.Services.Dr;
 public class VeleroService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     IKubernetesClientFactory k8s,
+    StorageService storageService,
+    VaultService vaultService,
     ILogger<VeleroService> logger)
 {
+    /// <summary>
+    /// Persisted on the component so the storage picker can be re-populated when the
+    /// component is edited, rather than showing an empty dropdown for something that is
+    /// already configured.
+    /// </summary>
+    public sealed class VeleroConfig
+    {
+        public Guid? StorageLinkId { get; set; }
+    }
+
+    /// <summary>
+    /// Points Velero at a registered storage link: writes the bucket, region and endpoint
+    /// into the component's Helm values and puts the bucket credentials in the vault.
+    ///
+    /// Nothing about the bucket is typed in by hand. Retyping an endpoint and a pair of
+    /// keys into Helm values means they live in two places that can disagree, and a
+    /// rotated key then has to be found and edited in every component that copied it.
+    /// Going through the storage link means the credentials have exactly one home, and
+    /// re-applying the component picks up a rotation.
+    ///
+    /// Velero reads its cloud credentials from a single INI file rather than from separate
+    /// values, so the two keys are composed into one blob and stored as one vault secret,
+    /// injected at install time through the hidden velero-s3-credentials catalog field.
+    /// </summary>
+    public async Task WriteStorageHelmValuesAsync(
+        Guid tenantId, Guid clusterComponentId, Guid storageLinkId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ClusterComponent component = await db.ClusterComponents
+            .Include(c => c.Cluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Component not found.");
+
+        StorageLink link = await db.StorageLinks
+            .FirstOrDefaultAsync(s => s.Id == storageLinkId && s.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Storage link not found.");
+
+        if (string.IsNullOrWhiteSpace(link.BucketName))
+        {
+            // Velero would install and then fail every backup with an unavailable storage
+            // location. Refusing here puts the error where the operator can act on it.
+            throw new InvalidOperationException(
+                $"Storage link “{link.Name}” has no bucket name, so Velero has nowhere to write backups.");
+        }
+
+        Dictionary<string, string> values = BuildStorageValues(link);
+        component.HelmValues = YamlFormMerger.MergeFormValues(component.HelmValues ?? "", values);
+
+        VeleroConfig config = TryReadConfig(component.Configuration) ?? new VeleroConfig();
+        config.StorageLinkId = storageLinkId;
+        component.Configuration = JsonSerializer.Serialize(config);
+
+        await db.SaveChangesAsync(ct);
+
+        await vaultService.InitializeVaultAsync(tenantId, ct);
+        (string accessKey, string secretKey) =
+            await storageService.GetStoredCredentialsInternalAsync(tenantId, storageLinkId, ct);
+
+        if (string.IsNullOrEmpty(accessKey) || string.IsNullOrEmpty(secretKey))
+        {
+            // A backup location with no credentials is not a partially-working setup — it is
+            // one where every backup fails, so say so rather than installing something broken.
+            throw new InvalidOperationException(
+                $"Storage link “{link.Name}” has no stored credentials. Add them before installing Velero.");
+        }
+
+        await vaultService.SetComponentSecretAsync(
+            tenantId, clusterComponentId, "velero-s3-credentials",
+            BuildCredentialsFile(accessKey, secretKey), ct);
+
+        logger.LogInformation(
+            "Velero component {ComponentId} pointed at storage link {StorageLinkId} (bucket {Bucket})",
+            clusterComponentId, storageLinkId, link.BucketName);
+    }
+
+    /// <summary>
+    /// Maps a storage link onto Velero's backup storage location. Pure and public so the
+    /// mapping can be checked without a database — an endpoint written into the wrong key
+    /// produces a component that installs cleanly and cannot back anything up.
+    /// </summary>
+    public static Dictionary<string, string> BuildStorageValues(StorageLink link)
+    {
+        Dictionary<string, string> values = new()
+        {
+            ["configuration.backupStorageLocation.0.provider"] = "aws",
+            ["configuration.backupStorageLocation.0.bucket"] = link.BucketName ?? "",
+            // MinIO, Ceph RGW and most S3-compatible stores accept us-east-1 but reject an
+            // empty region outright, so a link without one gets the conventional default.
+            ["configuration.backupStorageLocation.0.config.region"] = string.IsNullOrWhiteSpace(link.Region)
+                ? "us-east-1"
+                : link.Region,
+        };
+
+        if (!string.IsNullOrWhiteSpace(link.Endpoint))
+        {
+            values["configuration.backupStorageLocation.0.config.s3Url"] = link.Endpoint;
+        }
+
+        // AWS proper serves virtual-hosted-style URLs; everything else needs path style.
+        // Getting this backwards yields DNS failures against a bucket-prefixed hostname.
+        values["configuration.backupStorageLocation.0.config.s3ForcePathStyle"] =
+            link.Provider == StorageProvider.AwsS3 ? "false" : "true";
+
+        return values;
+    }
+
+    /// <summary>
+    /// Builds the credentials file the Velero AWS plugin expects. It reads an INI profile,
+    /// not environment variables, so the whole block is one secret.
+    /// </summary>
+    public static string BuildCredentialsFile(string accessKey, string secretKey) =>
+        $"[default]\naws_access_key_id={accessKey}\naws_secret_access_key={secretKey}\n";
+
+    /// <summary>Reads the stored config, tolerating anything that is not ours.</summary>
+    public static VeleroConfig? TryReadConfig(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try { return JsonSerializer.Deserialize<VeleroConfig>(json); }
+        catch (JsonException) { return null; }
+    }
+
     /// <summary>Namespace Velero is installed into by the catalog entry.</summary>
     public const string DefaultNamespace = "velero";
 
@@ -128,6 +252,8 @@ public class VeleroService(
                 Warnings = Int(status, "warnings"),
                 IncludedNamespaces = StrArray(spec, "includedNamespaces"),
                 StorageLocation = Str(spec, "storageLocation"),
+                FailureReason = Str(status, "failureReason"),
+                ValidationErrors = StrArray(status, "validationErrors"),
             };
         });
 

@@ -72,11 +72,43 @@ and the failure is logged as an error. Locking everyone out of the platform beca
 reconciliation query failed would be the worse outcome — but stale access after a
 group change is a real security concern, so the log is loud.
 
-## Not implemented: SCIM
+## SCIM provisioning
 
-There is no SCIM 2.0 provisioning endpoint. Users are provisioned just-in-time on
-first SSO login and their access is reconciled on every login, which covers the
-common case. SCIM would add directory-pushed provisioning and deprovisioning
-*without* requiring a login, which matters when you need access revoked within
-minutes rather than at next sign-in. It is a substantial surface — `/Users`,
-`/Groups`, filtering, PATCH semantics — and is not started.
+`/scim/v2` accepts SCIM 2.0 user provisioning from a directory connector. It matters
+alongside just-in-time provisioning because JIT only reconciles someone when they sign
+in — so revoking a person who has just been dismissed takes effect *whenever they next
+log in*, which may be never. SCIM lets the directory push the change.
+
+Authenticate the connector with an API token carrying **`scim:provision`** and nothing
+else. That scope stands alone deliberately: the token lives inside a directory
+connector, it needs to disable accounts, and it has no business reading clusters or
+triggering deployments.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/scim/v2/ServiceProviderConfig` | Capability discovery |
+| GET | `/scim/v2/Users` | `?filter=userName eq "..."`, `startIndex`, `count` |
+| GET/PUT/PATCH/DELETE | `/scim/v2/Users/{id}` | |
+| POST | `/scim/v2/Users` | 409 if the userName exists |
+
+### Two behaviours worth knowing
+
+**Deactivation, not deletion.** `DELETE` and `active: false` both *disable* the
+account rather than removing the row. A deleted user takes their tenant memberships,
+audit trail and identity with them, so re-provisioning later would silently create a
+different person wearing the same name — and any record of what the original did would
+be gone. Disabling blocks every sign-in path including SSO, and also stamps the
+security stamp so an existing session is invalidated rather than running until its
+cookie expires.
+
+**An unsupported filter is a 400, never ignored.** Only a single
+`attribute eq "value"` is supported. Silently dropping a filter would turn "find this
+one user" into "here is every user", and a connector that asked whether someone exists
+then concludes something false about who is already there — which, depending on the
+connector, means a duplicate account or an update written onto the wrong person.
+
+### Not implemented
+
+`/Groups`. Tenant access is already derived from OIDC group claims at login, and a
+second, disagreeing source of group membership is how people end up with access nobody
+can explain. Provision users over SCIM; grant access with group mappings.

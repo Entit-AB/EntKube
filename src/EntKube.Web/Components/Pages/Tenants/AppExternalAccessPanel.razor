@@ -244,6 +244,7 @@
                                                 <th class="small">Path</th>
                                                 <th class="small">Service</th>
                                                 <th class="small" title="Gateway request timeout. 0 waits forever — only for long-lived streams.">Timeout</th>
+                                                <th class="small" title="Send a share of traffic to a second Service. EntKube splits the traffic; you provide the canary workload. Takes effect when the route is applied.">Canary</th>
                                                 <th class="small">Cluster</th>
                                                 <th class="small">Health</th>
                                                 <th></th>
@@ -276,6 +277,27 @@
                                                         @if ((dr.RequestTimeoutSeconds ?? ExternalRouteService.DefaultRequestTimeoutSeconds) == 0)
                                                         {
                                                             <small class="text-warning">waits forever</small>
+                                                        }
+                                                    </td>
+                                                    <td class="small align-middle" style="width: 12rem;">
+                                                        <div class="input-group input-group-sm">
+                                                            <input class="form-control form-control-sm font-monospace"
+                                                                   style="max-width: 7rem;" placeholder="canary svc"
+                                                                   aria-label="@($"Canary service for {dr.PathPrefix}")"
+                                                                   value="@dr.CanaryServiceName"
+                                                                   @onchange="e => SaveDrCanaryService(dr, e.Value?.ToString())" />
+                                                            <input type="number" min="0" max="100"
+                                                                   class="form-control form-control-sm"
+                                                                   style="max-width: 3.75rem;"
+                                                                   aria-label="@($"Canary traffic percentage for {dr.PathPrefix}")"
+                                                                   value="@dr.CanaryWeight"
+                                                                   disabled="@(string.IsNullOrWhiteSpace(dr.CanaryServiceName))"
+                                                                   @onchange="e => SaveDrCanaryWeight(dr, e.Value?.ToString())" />
+                                                            <span class="input-group-text px-1 small">%</span>
+                                                        </div>
+                                                        @if (!string.IsNullOrWhiteSpace(dr.CanaryServiceName) && dr.CanaryWeight > 0)
+                                                        {
+                                                            <small class="text-info">@(100 - dr.CanaryWeight)% stable</small>
                                                         }
                                                     </td>
                                                     <td class="small align-middle">@ClusterStatusBadge(dr)</td>
@@ -901,6 +923,45 @@
         try
         {
             await AppRouteService.UpdateDeploymentRouteTimeoutAsync(dr.Id, seconds);
+            await LoadAsync();
+        }
+        catch (Exception ex) { applyRouteError = ex.Message; }
+    }
+
+    private async Task SaveDrCanaryService(AppDeploymentRoute dr, string? raw)
+    {
+        applyRouteError = null;
+        string? service = string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
+
+        if (service == dr.CanaryServiceName) return;
+
+        try
+        {
+            // A newly named canary starts at 0% — naming it must never move traffic by
+            // itself. The operator sets the share deliberately, as a second action.
+            await AppRouteService.UpdateDeploymentRouteCanaryAsync(
+                dr.Id, service, service is null ? 0 : dr.CanaryWeight, dr.CanaryServicePort);
+            await LoadAsync();
+        }
+        catch (Exception ex) { applyRouteError = ex.Message; }
+    }
+
+    private async Task SaveDrCanaryWeight(AppDeploymentRoute dr, string? raw)
+    {
+        applyRouteError = null;
+
+        if (!int.TryParse(raw, out int weight) || weight is < 0 or > 100)
+        {
+            applyRouteError = "Canary weight must be between 0 and 100.";
+            return;
+        }
+
+        if (weight == dr.CanaryWeight) return;
+
+        try
+        {
+            await AppRouteService.UpdateDeploymentRouteCanaryAsync(
+                dr.Id, dr.CanaryServiceName, weight, dr.CanaryServicePort);
             await LoadAsync();
         }
         catch (Exception ex) { applyRouteError = ex.Message; }

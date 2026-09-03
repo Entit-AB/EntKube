@@ -571,6 +571,15 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<Guid>("AppRouteId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("CanaryServiceName")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("CanaryServicePort")
+                        .HasColumnType("int");
+
+                    b.Property<int>("CanaryWeight")
+                        .HasColumnType("int");
+
                     b.Property<DateTime?>("ClusterAppliedAt")
                         .HasColumnType("datetime2");
 
@@ -1661,9 +1670,17 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(3)
                         .HasColumnType("nvarchar(3)");
 
+                    b.Property<decimal>("LoadBalancerMonthlyCost")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
                     b.Property<decimal>("MemoryGiBHourCost")
                         .HasPrecision(18, 6)
                         .HasColumnType("decimal(18,6)");
+
+                    b.Property<decimal>("PublicIpMonthlyCost")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
 
                     b.Property<decimal>("StorageGiBMonthCost")
                         .HasPrecision(18, 6)

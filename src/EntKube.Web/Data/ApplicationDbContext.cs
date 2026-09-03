@@ -192,6 +192,12 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(r => r.MemoryGiBHourCost).HasPrecision(18, 6);
             entity.Property(r => r.StorageGiBMonthCost).HasPrecision(18, 6);
             entity.Property(r => r.ClusterMonthlyOverhead).HasPrecision(18, 2);
+            // Monthly amounts, so two decimals is the right precision — but stated
+            // explicitly rather than left to a provider default, which is how the hourly
+            // rates would have silently become decimal(18,2) on SQL Server and rounded to
+            // zero. Same reasoning, opposite answer.
+            entity.Property(r => r.LoadBalancerMonthlyCost).HasPrecision(18, 2);
+            entity.Property(r => r.PublicIpMonthlyCost).HasPrecision(18, 2);
             entity.HasOne(r => r.Cluster)
                   .WithMany()
                   .HasForeignKey(r => r.ClusterId)

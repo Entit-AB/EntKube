@@ -79,6 +79,12 @@
             <em>inconclusive</em>, not healthy. An inconclusive release is never rolled back
             automatically: rolling back production on no evidence would be worse than the risk it
             avoids.
+            <br /><br />
+            Outcomes that need a person are sent to this tenant's notification channels: a failed
+            rollback and an automatic rollback as <em>critical</em>, a failed analysis as
+            <em>warning</em>, an unverifiable release as <em>info</em>. Promoted releases notify
+            nothing — a channel that fires on every successful deploy gets muted, and the rollback
+            notification would be muted with it.
         </div>
 
         @if (deployments.Count == 0)
@@ -126,8 +132,8 @@
                                            title="Service name in the trace store. Without it, error rate and latency cannot be measured." />
                                 </td>
                                 <td>
-                                    <select class="form-select form-select-sm" style="width:8rem" @bind="form.OnFailure">
-                                        <option value="alert">Alert</option>
+                                    <select class="form-select form-select-sm" style="width:9rem" @bind="form.OnFailure">
+                                        <option value="alert">Notify only</option>
                                         <option value="rollback">Roll back</option>
                                     </select>
                                 </td>

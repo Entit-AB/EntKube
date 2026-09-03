@@ -226,3 +226,105 @@ public class DriftDetectionTests
         cache.Get(tenantId).Should().BeNull();
     }
 }
+
+/// <summary>
+/// Tests for updating a single row of a cached drift sweep, which is what lets the UI
+/// act on one deployment without re-walking the fleet.
+/// </summary>
+public class DriftCacheReplaceTests
+{
+    private static readonly DateTime Swept = new(2026, 8, 23, 9, 0, 0, DateTimeKind.Utc);
+
+    private static DriftResult Row(string app, DriftState state, int changedLines = 0, Guid? id = null) => new()
+    {
+        DeploymentId = id ?? Guid.NewGuid(),
+        DeploymentName = "web",
+        AppName = app,
+        ClusterId = Guid.NewGuid(),
+        ClusterName = "prod",
+        Namespace = "ns",
+        State = state,
+        ChangedLines = changedLines,
+        CheckedAt = Swept,
+    };
+
+    [Fact]
+    public void Replacing_a_row_leaves_the_other_rows_alone()
+    {
+        // Re-running the whole sweep to refresh one row would walk every cluster.
+        DriftScanCache cache = new();
+        Guid tenantId = Guid.NewGuid();
+        DriftResult target = Row("storefront", DriftState.Drifted, 12);
+        DriftResult other = Row("billing", DriftState.Drifted, 4);
+
+        cache.Set(tenantId, new DriftReport { Results = [target, other], GeneratedAt = Swept });
+
+        cache.Replace(tenantId, target with { State = DriftState.InSync, ChangedLines = 0 });
+
+        DriftReport updated = cache.Get(tenantId)!;
+        updated.Results.Should().HaveCount(2);
+        updated.Results.Single(r => r.AppName == "storefront").State.Should().Be(DriftState.InSync);
+        updated.Results.Single(r => r.AppName == "billing").ChangedLines.Should().Be(4);
+    }
+
+    [Fact]
+    public void A_converged_deployment_stops_counting_as_drifted_immediately()
+    {
+        // Otherwise the advisor keeps reporting drift that has already been fixed, and an
+        // operator re-applies something that is already converged.
+        DriftScanCache cache = new();
+        Guid tenantId = Guid.NewGuid();
+        DriftResult target = Row("storefront", DriftState.Drifted, 12);
+
+        cache.Set(tenantId, new DriftReport { Results = [target], GeneratedAt = Swept });
+        cache.Get(tenantId)!.DriftedCount.Should().Be(1);
+
+        cache.Replace(tenantId, target with { State = DriftState.InSync, ChangedLines = 0 });
+
+        cache.Get(tenantId)!.DriftedCount.Should().Be(0);
+        cache.Get(tenantId)!.InSyncCount.Should().Be(1);
+    }
+
+    [Fact]
+    public void Replacing_into_an_unswept_tenant_creates_a_report_rather_than_dropping_the_result()
+    {
+        DriftScanCache cache = new();
+        Guid tenantId = Guid.NewGuid();
+
+        cache.Replace(tenantId, Row("storefront", DriftState.InSync));
+
+        cache.Get(tenantId)!.Results.Should().ContainSingle();
+    }
+
+    [Fact]
+    public void The_replaced_row_is_not_duplicated()
+    {
+        DriftScanCache cache = new();
+        Guid tenantId = Guid.NewGuid();
+        Guid deploymentId = Guid.NewGuid();
+        DriftResult target = Row("storefront", DriftState.Drifted, 12, deploymentId);
+
+        cache.Set(tenantId, new DriftReport { Results = [target], GeneratedAt = Swept });
+        cache.Replace(tenantId, target with { ChangedLines = 3 });
+        cache.Replace(tenantId, target with { ChangedLines = 1 });
+
+        cache.Get(tenantId)!.Results.Should().ContainSingle()
+            .Which.ChangedLines.Should().Be(1);
+    }
+
+    [Fact]
+    public void Rows_stay_ordered_with_drifted_first_after_a_replace()
+    {
+        // The table is read top-down; a converged row must not stay at the top pushing
+        // the still-broken ones out of sight.
+        DriftScanCache cache = new();
+        Guid tenantId = Guid.NewGuid();
+        DriftResult first = Row("aaa", DriftState.Drifted, 99);
+        DriftResult second = Row("bbb", DriftState.Drifted, 5);
+
+        cache.Set(tenantId, new DriftReport { Results = [first, second], GeneratedAt = Swept });
+        cache.Replace(tenantId, first with { State = DriftState.InSync, ChangedLines = 0 });
+
+        cache.Get(tenantId)!.Results[0].AppName.Should().Be("bbb");
+    }
+}

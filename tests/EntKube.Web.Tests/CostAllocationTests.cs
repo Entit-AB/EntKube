@@ -281,3 +281,153 @@ public class CostAllocationTests
         CostAllocation.BytesToGiB(1024d * 1024d * 1024d).Should().Be(1d);
     }
 }
+
+/// <summary>
+/// Tests for the per-month network charges OpenStack providers bill separately —
+/// a load balancer and its public IPv4. Cleura, for one, bills Octavia per load
+/// balancer and IPv4 per address, and neither was modelled before.
+/// </summary>
+public class NetworkCostTests
+{
+    private static ClusterCostRate Rate(decimal loadBalancer = 0m, decimal publicIp = 0m, decimal overhead = 0m) => new()
+    {
+        Id = Guid.NewGuid(),
+        ClusterId = Guid.NewGuid(),
+        LoadBalancerMonthlyCost = loadBalancer,
+        PublicIpMonthlyCost = publicIp,
+        ClusterMonthlyOverhead = overhead,
+        Currency = "SEK",
+    };
+
+    private static IReadOnlyList<NamespaceCost> Allocate(
+        IReadOnlyList<NamespaceConsumption> consumption, ClusterCostRate rate) =>
+        CostAllocation.Allocate(consumption, rate, Guid.NewGuid(), "prod",
+            _ => (null, null, null, null));
+
+    [Fact]
+    public void A_load_balancer_is_charged_by_the_month_not_the_hour()
+    {
+        // Clouds bill a load balancer per month. Multiplying by the 730-hour month, as
+        // the compute rates are, would overstate it by three orders of magnitude.
+        NamespaceCost cost = Allocate(
+            [new NamespaceConsumption { Namespace = "acme", LoadBalancers = 1 }],
+            Rate(loadBalancer: 120m)).Single();
+
+        cost.NetworkMonthlyCost.Should().Be(120m);
+    }
+
+    [Fact]
+    public void Each_load_balancer_and_public_ip_is_counted()
+    {
+        NamespaceCost cost = Allocate(
+            [new NamespaceConsumption { Namespace = "acme", LoadBalancers = 3, PublicIps = 3 }],
+            Rate(loadBalancer: 100m, publicIp: 25m)).Single();
+
+        cost.NetworkMonthlyCost.Should().Be(3 * 100m + 3 * 25m);
+    }
+
+    [Fact]
+    public void Network_cost_is_attributed_not_spread()
+    {
+        // A namespace that provisions load balancers causes those charges. Burying them
+        // in shared overhead would bill every other customer for them.
+        Guid other = Guid.NewGuid();
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+        [
+            new NamespaceConsumption { Namespace = "acme", CpuCores = 1, LoadBalancers = 2 },
+            new NamespaceConsumption { Namespace = "globex", CpuCores = 1 },
+        ], Rate(loadBalancer: 100m));
+
+        costs.Single(c => c.Namespace == "acme").NetworkMonthlyCost.Should().Be(200m);
+        costs.Single(c => c.Namespace == "globex").NetworkMonthlyCost.Should().Be(0m);
+    }
+
+    [Fact]
+    public void Network_cost_counts_toward_the_namespace_total()
+    {
+        NamespaceCost cost = Allocate(
+            [new NamespaceConsumption { Namespace = "acme", LoadBalancers = 1 }],
+            Rate(loadBalancer: 120m)).Single();
+
+        cost.TotalMonthlyCost.Should().Be(120m);
+    }
+
+    [Fact]
+    public void An_unpriced_load_balancer_adds_nothing()
+    {
+        // Zero means "not billed", which is what an operator who has not entered a rate
+        // means — inventing one would put a number they never agreed to on an invoice.
+        Allocate([new NamespaceConsumption { Namespace = "acme", LoadBalancers = 5 }], Rate())
+            .Single().NetworkMonthlyCost.Should().Be(0m);
+    }
+
+    [Fact]
+    public void Network_cost_does_not_change_how_fixed_overhead_is_shared()
+    {
+        // Overhead is spread by COMPUTE share. Letting load balancers influence that split
+        // would charge a namespace twice for the same thing.
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+        [
+            new NamespaceConsumption { Namespace = "a", CpuCores = 1, LoadBalancers = 10 },
+            new NamespaceConsumption { Namespace = "b", CpuCores = 1 },
+        ], Rate(loadBalancer: 100m, overhead: 200m));
+
+        costs.Single(c => c.Namespace == "a").OverheadMonthlyCost.Should().Be(100m);
+        costs.Single(c => c.Namespace == "b").OverheadMonthlyCost.Should().Be(100m);
+    }
+
+    // ── Counting them off the cluster ──
+
+    private const string ServicesJson = """
+    {
+      "items": [
+        { "metadata": { "name": "web", "namespace": "acme" },
+          "spec": { "type": "LoadBalancer" },
+          "status": { "loadBalancer": { "ingress": [ { "ip": "203.0.113.10" } ] } } },
+        { "metadata": { "name": "api", "namespace": "acme" },
+          "spec": { "type": "LoadBalancer" },
+          "status": { "loadBalancer": { "ingress": [ { "ip": "203.0.113.11" } ] } } },
+        { "metadata": { "name": "internal", "namespace": "acme" },
+          "spec": { "type": "ClusterIP" } },
+        { "metadata": { "name": "edge", "namespace": "globex" },
+          "spec": { "type": "NodePort" } },
+        { "metadata": { "name": "pending", "namespace": "globex" },
+          "spec": { "type": "LoadBalancer" },
+          "status": { "loadBalancer": {} } }
+      ]
+    }
+    """;
+
+    [Fact]
+    public void Only_load_balancer_services_are_counted()
+    {
+        var counts = CostReportService.ParseLoadBalancerServices(ServicesJson);
+
+        counts["acme"].LoadBalancers.Should().Be(2);
+        counts["globex"].LoadBalancers.Should().Be(1);
+        counts.Should().NotContainKey("");
+    }
+
+    [Fact]
+    public void A_load_balancer_still_awaiting_an_address_is_not_billed_for_an_ip()
+    {
+        // It is provisioning a load balancer but holds no IP yet, and billing for an
+        // address that does not exist would be wrong.
+        var counts = CostReportService.ParseLoadBalancerServices(ServicesJson);
+
+        counts["globex"].LoadBalancers.Should().Be(1);
+        counts["globex"].PublicIps.Should().Be(0);
+        counts["acme"].PublicIps.Should().Be(2);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not json")]
+    [InlineData("{}")]
+    public void An_unreadable_service_list_yields_no_counts_rather_than_throwing(string? json)
+    {
+        // Losing the network line is better than losing the whole cost report.
+        CostReportService.ParseLoadBalancerServices(json).Should().BeEmpty();
+    }
+}

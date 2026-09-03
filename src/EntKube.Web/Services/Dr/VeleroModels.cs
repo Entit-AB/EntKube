@@ -42,6 +42,16 @@ public sealed record VeleroBackup
     public string? StorageLocation { get; init; }
 
     /// <summary>
+    /// Velero's own explanation of what went wrong. Surfaced because a phase alone sends
+    /// an operator to the CLI to find out why — which is exactly the moment the tool
+    /// should be answering the question instead of restating the problem.
+    /// </summary>
+    public string? FailureReason { get; init; }
+
+    /// <summary>Validation errors Velero recorded, e.g. an unavailable storage location.</summary>
+    public IReadOnlyList<string> ValidationErrors { get; init; } = [];
+
+    /// <summary>
     /// True only for a fully clean backup. PartiallyFailed is deliberately excluded:
     /// a backup that skipped resources is not one you can rely on to restore.
     /// </summary>

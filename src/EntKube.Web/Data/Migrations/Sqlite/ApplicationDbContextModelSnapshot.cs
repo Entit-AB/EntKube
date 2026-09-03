@@ -566,6 +566,15 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<Guid>("AppRouteId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("CanaryServiceName")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("CanaryServicePort")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("CanaryWeight")
+                        .HasColumnType("INTEGER");
+
                     b.Property<DateTime?>("ClusterAppliedAt")
                         .HasColumnType("TEXT");
 
@@ -1655,8 +1664,16 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(3)
                         .HasColumnType("TEXT");
 
+                    b.Property<decimal>("LoadBalancerMonthlyCost")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("TEXT");
+
                     b.Property<decimal>("MemoryGiBHourCost")
                         .HasPrecision(18, 6)
+                        .HasColumnType("TEXT");
+
+                    b.Property<decimal>("PublicIpMonthlyCost")
+                        .HasPrecision(18, 2)
                         .HasColumnType("TEXT");
 
                     b.Property<decimal>("StorageGiBMonthCost")

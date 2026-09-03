@@ -123,7 +123,19 @@ public class ApiTokenService(
         if (token.LastUsedAt is null || now - token.LastUsedAt.Value > TimeSpan.FromMinutes(1))
         {
             token.LastUsedAt = now;
-            await db.SaveChangesAsync(ct);
+
+            try
+            {
+                await db.SaveChangesAsync(ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Last-used tracking is a convenience for finding unused tokens. It must
+                // never be able to fail authentication: if the row is revoked or deleted
+                // between the read above and this write, the caller should get a clean
+                // result from the token they presented, not a 500 from our bookkeeping.
+                logger.LogDebug(ex, "Could not stamp last-used on API token {TokenId}", token.Id);
+            }
         }
 
         return new ApiTokenPrincipal

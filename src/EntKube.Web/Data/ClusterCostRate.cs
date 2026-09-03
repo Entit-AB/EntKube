@@ -27,11 +27,26 @@ public class ClusterCostRate
     public decimal StorageGiBMonthCost { get; set; }
 
     /// <summary>
-    /// Fixed monthly cost for the cluster itself — control plane fees, load balancers,
-    /// support contracts. Spread across consumers in proportion to their compute share
-    /// rather than hidden, so the reported total matches the actual bill.
+    /// Fixed monthly cost for the cluster itself — control-plane fees, support contracts,
+    /// anything billed per cluster rather than per workload. Spread across consumers in
+    /// proportion to their compute share rather than hidden, so the reported total matches
+    /// the actual bill.
     /// </summary>
     public decimal ClusterMonthlyOverhead { get; set; }
+
+    /// <summary>
+    /// Cost of one load balancer for a month. OpenStack clouds bill Octavia per load
+    /// balancer, and every Service of type LoadBalancer provisions one — so this is a real
+    /// charge caused by a specific namespace, not shared infrastructure. Zero leaves it out.
+    /// </summary>
+    public decimal LoadBalancerMonthlyCost { get; set; }
+
+    /// <summary>
+    /// Cost of one public IPv4 address for a month. Charged per address by most clouds
+    /// (Cleura bills IPv4 and gives IPv6 away), and a LoadBalancer Service normally holds
+    /// one. Zero leaves it out.
+    /// </summary>
+    public decimal PublicIpMonthlyCost { get; set; }
 
     /// <summary>ISO currency code, used for display only — no conversion is performed.</summary>
     public string Currency { get; set; } = "USD";

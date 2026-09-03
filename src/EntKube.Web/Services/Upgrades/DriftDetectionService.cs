@@ -41,6 +41,13 @@ public sealed record DriftResult
 
     /// <summary>Removed/soon-removed Kubernetes APIs found in this deployment's manifests.</summary>
     public IReadOnlyList<DeprecatedApiUsage> DeprecatedApis { get; init; } = [];
+
+    /// <summary>
+    /// When this row was measured. Per-row rather than per-report because a row can be
+    /// re-checked on its own after an operator acts, and showing it under the whole
+    /// sweep's timestamp would misdate it.
+    /// </summary>
+    public DateTime CheckedAt { get; init; }
 }
 
 /// <summary>A tenant-wide drift sweep.</summary>
@@ -90,8 +97,28 @@ public class DriftDetectionService(
     /// deployments are skipped: Helm owns their reconciliation and its own drift story,
     /// and a raw manifest diff against a rendered chart would report noise as drift.
     /// </summary>
-    public async Task<DriftReport> GetTenantDriftAsync(
-        Guid tenantId, DateTime now, CancellationToken ct = default)
+    public Task<DriftReport> GetTenantDriftAsync(
+        Guid tenantId, DateTime now, CancellationToken ct = default) =>
+        SweepAsync(tenantId, onlyDeploymentId: null, now, ct);
+
+    /// <summary>
+    /// Re-checks a single deployment. Used after acting on drift, so the row an operator
+    /// just re-applied shows its new state immediately rather than staying stale until the
+    /// next two-hourly sweep — which would leave the UI claiming drift that no longer
+    /// exists, and an operator re-applying something already converged.
+    ///
+    /// Returns null when the deployment is not a drift target: not this tenant's, not
+    /// managed, or Helm-based.
+    /// </summary>
+    public async Task<DriftResult?> GetDeploymentDriftAsync(
+        Guid tenantId, Guid deploymentId, DateTime now, CancellationToken ct = default)
+    {
+        DriftReport report = await SweepAsync(tenantId, deploymentId, now, ct);
+        return report.Results.FirstOrDefault();
+    }
+
+    private async Task<DriftReport> SweepAsync(
+        Guid tenantId, Guid? onlyDeploymentId, DateTime now, CancellationToken ct)
     {
         await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
@@ -102,7 +129,8 @@ public class DriftDetectionService(
             .AsNoTracking()
             .Where(d => d.App.Customer.TenantId == tenantId
                      && d.IsManaged
-                     && manifestTypes.Contains(d.Type))
+                     && manifestTypes.Contains(d.Type)
+                     && (onlyDeploymentId == null || d.Id == onlyDeploymentId))
             .Select(d => new
             {
                 d.Id,
@@ -162,6 +190,7 @@ public class DriftDetectionService(
                     CustomerName = target.CustomerName,
                     State = state,
                     Note = note,
+                    CheckedAt = now,
                 };
 
                 if (!manifestsByDeployment.TryGetValue(target.Id, out List<string>? bodies) || bodies.Count == 0)

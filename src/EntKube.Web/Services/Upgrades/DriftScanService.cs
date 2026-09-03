@@ -27,6 +27,30 @@ public class DriftScanCache
 
     public void Set(Guid tenantId, DriftReport report) => reports[tenantId] = report;
 
+    /// <summary>
+    /// Replaces one deployment's row in the cached sweep, leaving the rest untouched.
+    ///
+    /// Acting on a single deployment must not discard everything else the last sweep
+    /// found — re-running the whole sweep to refresh one row would walk every cluster,
+    /// and dropping the cache entirely would make the advisor briefly report that
+    /// nothing has drifted, which is a false all-clear.
+    /// </summary>
+    public void Replace(Guid tenantId, DriftResult result)
+    {
+        reports.AddOrUpdate(
+            tenantId,
+            _ => new DriftReport { Results = [result], GeneratedAt = result.CheckedAt },
+            (_, existing) => existing with
+            {
+                Results = [.. existing.Results
+                    .Where(r => r.DeploymentId != result.DeploymentId)
+                    .Append(result)
+                    .OrderBy(r => r.State)
+                    .ThenByDescending(r => r.ChangedLines)
+                    .ThenBy(r => r.AppName, StringComparer.OrdinalIgnoreCase)],
+            });
+    }
+
     /// <summary>Drops a tenant's cached sweep — used when a tenant is removed.</summary>
     public void Clear(Guid tenantId) => reports.TryRemove(tenantId, out _);
 }

@@ -571,6 +571,15 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid>("AppRouteId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("CanaryServiceName")
+                        .HasColumnType("text");
+
+                    b.Property<int?>("CanaryServicePort")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("CanaryWeight")
+                        .HasColumnType("integer");
+
                     b.Property<DateTime?>("ClusterAppliedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -1660,9 +1669,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(3)
                         .HasColumnType("character varying(3)");
 
+                    b.Property<decimal>("LoadBalancerMonthlyCost")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
+
                     b.Property<decimal>("MemoryGiBHourCost")
                         .HasPrecision(18, 6)
                         .HasColumnType("numeric(18,6)");
+
+                    b.Property<decimal>("PublicIpMonthlyCost")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
 
                     b.Property<decimal>("StorageGiBMonthCost")
                         .HasPrecision(18, 6)

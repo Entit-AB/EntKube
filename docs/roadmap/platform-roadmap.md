@@ -7,9 +7,9 @@ Status legend: ☐ not started · ◐ in progress · ☑ shipped
 | 1 | Fleet upgrade & lifecycle planner | 1 | ☑ |
 | 6 | Drift detection for managed components | 1 | ☑ |
 | 4 | Supply-chain security (CVE + signing) | 2 | ☑ |
-| 2 | Public API, tokens, CLI, MCP server | 2 | ◐ |
+| 2 | Public API, tokens, CLI, MCP server | 2 | ☑ |
 | 3 | Cost & chargeback | 3 | ☑ |
-| 5 | Progressive delivery + auto-rollback | 3 | ◐ |
+| 5 | Progressive delivery + auto-rollback | 3 | ☑ |
 | 7 | OIDC/SSO + SCIM for the portal | 4 | ◐ |
 | 8 | Velero cluster DR | 4 | ☑ |
 
@@ -23,6 +23,24 @@ almost verbatim. Doing them in any other order means building that spine twice.
 
 Features 2, 3, 5, 7 and 8 are independent of that spine and of each other, so they
 are sequenced by value rather than dependency.
+
+## Verification status
+
+Unit tests: **1135**, all passing. A clean checkout builds, and the app now starts
+from a plain `dotnet ef database update` (neither was true at the start — see
+`docs/migrations-defect.md`).
+
+**Verified against a running instance** via `scripts/smoke-api.sh`: authentication,
+every read endpoint, the 503 contract on all four sweep-backed endpoints, per-scope
+enforcement (403 for a token missing `fleet:read` or `apps:write`), the CLI including
+its non-zero exit on an unswept fleet, and the MCP server including its read-only
+refusal of a write tool the token *was* otherwise permitted to call. The upgrade
+planner was confirmed end to end against the live Traefik chart repository.
+
+**Not verified against Kubernetes.** Every path that talks to a cluster — drift's
+`kubectl diff`, Velero backup/restore state, the rollback in `RolloutService`, Helm
+component installs — has only ever run in unit tests. The rollback path is the one to
+exercise first: it changes production and pages someone.
 
 ## Shared foundations (build once, used by many)
 
@@ -107,6 +125,22 @@ sweep), advisor findings (`Source = "drift"`), `DriftTab` under Ops → Lifecycl
   for an advisory signal; would not be for anything gating a mutation.
 - The advisor reads the cache and never triggers a sweep, so a page render never
   forks a dry-run per deployment.
+
+**Acting on drift, not just seeing it.** Each drifted row offers **Overwrite** —
+re-applying the stored manifests through the *ordinary* apply path, so the cluster
+change gate shows a server-side dry-run diff and waits for acknowledgment. That
+matters more here than anywhere else in the product: it is the one button whose whole
+purpose is to discard somebody else's change. Cancelling at the dialog is reported as
+a decision ("nothing was changed"), not an error. A **Re-check** action re-measures one
+deployment without re-walking the fleet, and the result replaces just that row in the
+shared cache — so a converged deployment stops being reported as drifted immediately
+rather than at the next two-hourly sweep. **Adopt** is the other answer, for when
+the out-of-band change was the right one: it pulls live state back into the stored
+manifests and leaves the cluster alone. See `docs/drift-adoption.md` — the sanitiser is
+the whole feature (a live object carries status, identity, history and cluster-bound
+allocations that make a stored manifest unapplicable elsewhere), Secrets are refused
+outright rather than having their data copied into YAML, and adoption is per resource
+so nothing un-adoptable is dropped from the set and then pruned off the cluster.
 
 **Subprocess hardening found by testing against a real kubectl** (v1.36.2):
 - kubectl *prompts on stdin* when a kubeconfig's user has no usable credentials.
@@ -227,7 +261,39 @@ See `docs/cli.md`.
   rather than 0, so a pipeline cannot mistake an unmeasured fleet for a clean one.
 - Tables by default (a person is reading), `--json` for `jq`.
 
-**Outstanding**: outbound webhooks and the Terraform provider.
+**Outbound webhooks: hardened rather than rebuilt.** A Webhook notification channel
+already existed, so the work was to make it safe rather than to add a second one.
+
+- **SSRF fix.** The channel posted to an operator-supplied URL with no destination
+  validation at all. Since the management plane can reach every managed cluster, its
+  own loopback and the cloud metadata service — while the URL is supplied by a
+  *tenant* user — "send my alerts here" was a request for EntKube to dial anything it
+  could reach. `OutboundUrlGuard` now default-denies everything not publicly routable,
+  including IPv4-mapped IPv6 forms of private ranges, and resolves hostnames requiring
+  every returned address to be public. Applied to the Slack, Teams and generic webhook
+  senders; the hard-coded Graph endpoint needs no check. Instance-wide opt-in for
+  operators with a genuine internal receiver, deliberately not per-tenant.
+- **HMAC signing.** Deliveries can now carry `X-EntKube-Signature-256` over
+  `{timestamp}.{body}`. The timestamp is inside the signed material so a captured
+  delivery cannot be replayed with a fresh one. Verification uses a fixed-time compare.
+
+Residual risk, stated in `docs/webhooks.md`: DNS rebinding between validation and the
+request still gets through. Closing it needs the connection pinned to the validated
+address via a `SocketsHttpHandler` connect callback.
+
+**Rollout outcomes now notify.** The rollout policy offered an "Alert" failure action
+that did nothing but write a log line, while sitting in the UI next to "Roll back"
+implying somebody got told — a defect in #5 as originally shipped, since an option
+that promises a notification and delivers none is worse than not offering one.
+Outcomes now dispatch through the tenant's notification channels (which, after the
+hardening above, are SSRF-guarded and signable): failed rollback and automatic
+rollback as critical, failed analysis as warning, unverifiable release as info.
+Promoted and superseded stay silent — a channel firing on every successful deploy is
+muted within a week, and the rollback notification is muted along with it.
+
+**Outstanding**: the Terraform provider, and webhook events for the remaining new
+signals (drift detected, DR gap opened) — advisor findings already reach channels
+through the daily digest.
 
 ## Phase 3 — Prove and control value
 
@@ -264,6 +330,24 @@ per-core-hour rate to zero), `CostAllocation` (pure, no DB or Prometheus),
 `CostTab` with price-sheet editing, `CustomerCostPanel` in the portal (Operator role
 and above — cost is commercial information), `/api/v1/cost`, an `entkube_cost` MCP
 tool, and 20 unit tests on the allocation arithmetic.
+
+**Matches how OpenStack providers actually bill.** Cleura and similar clouds charge per
+vCPU-hour, per GB RAM-hour and per GB storage — which the rate model already matched —
+plus a monthly charge per load balancer and per public IPv4. Those two are now modelled
+and, crucially, **attributed rather than spread**: every `Service` of type LoadBalancer
+provisions one cloud load balancer, so a namespace that creates three causes three real
+charges, and burying them in shared overhead would bill everyone else for them. Counted
+from the API server rather than a metric, since they are objects billed by the month and
+a scrape interval would only approximate them. A load balancer still awaiting an address
+is counted but its IP is not — billing for an address that does not exist would be wrong.
+
+**No provider's price list is shipped.** Cleura's figures are rendered client-side and
+are not fetchable, but that is not the reason: published prices change, and a stale rate
+baked into the product would quietly produce a wrong invoice. The units and currency are
+the operator's to enter from their contract, and the UI says so, including that most
+published cloud prices exclude VAT. Egress, object storage and DNS zones are named as
+*not* modelled — egress cannot be attributed to a namespace without network accounting
+EntKube does not collect, so it is left out rather than guessed at.
 
 **Deliberately not built**: historical billing. This is a *run rate* — what current
 reservations project to — not a ledger of what was consumed last month. Invoicing
@@ -318,13 +402,37 @@ production workload is something an operator opts into, never inherits.
 `RolloutWatcherService`, `RolloutsTab`, `/api/v1/rollouts`, an `entkube_rollouts` MCP
 tool, and 20 unit tests on the judgement rules.
 
-**Outstanding: the *progressive* half.** Weighted canary traffic-splitting — stepping
-an HTTPRoute's `backendRefs` weights toward a canary Service and promoting on success —
-is not built. It needs a canary workload to exist, which means either synthesising
-renamed manifests or having the operator declare a canary service; that is a
-substantial feature in its own right and was not worth half-building. What ships here
-is the analysis and rollback engine, which is the part that needed the control plane
-and the differentiated part versus Flagger.
+**Weighted traffic splitting now ships too**, completing the progressive half — with
+one deliberate boundary.
+
+A deployment route can name a **canary Service** and a **traffic share**, and the
+generated HTTPRoute emits weighted `backendRefs` across the stable and canary
+backends. Combined with the analysis engine above, that is a working canary: shift
+10%, read the verdict, shift more or drop back to zero.
+
+**EntKube does not synthesise the canary workload.** Doing so means rewriting
+someone's manifests under a new name, and getting that subtly wrong produces a canary
+that is not actually the thing being tested — a worse failure than not having the
+feature. The operator declares what the canary is; EntKube owns the traffic split,
+which is the part that needs a control plane.
+
+**Advancing is a human action, not a timer.** The engine already tells you whether a
+release is healthy; automating the step *and* the judgement, on a code path that has
+never run against a real cluster, is not something to ship unverified. The stepping
+loop is the natural next addition once this has been exercised live.
+
+Safety properties, each pinned by a test:
+- A route with **no canary generates byte-identical YAML** to before this existed.
+  Otherwise every deployment in the fleet would have reported as drifted on upgrade.
+- A canary service with **0% weight emits no canary backend** — staging a canary must
+  not move traffic.
+- A **weight with no service** sends everything to stable; half-configured fails safe.
+- Naming the **stable service as the canary is rejected** — it would emit two identical
+  backends and split traffic between a workload and itself, which is valid YAML that
+  quietly means nothing.
+- Clearing the service **clears the weight**, so no orphaned "10% is going somewhere".
+- Changing either **clears `ClusterAppliedAt`**, so the UI cannot show a weight as live
+  before the HTTPRoute has actually reached the cluster.
 
 ## Phase 4 — Enterprise edges
 
@@ -369,11 +477,25 @@ people out of their own platform. Pinned by three separate tests.
 entity + migrations (all three providers), OIDC scheme registration, sync hooked into
 the external-login callback, `AdminSso` page, `docs/sso.md`, 16 unit tests.
 
-**Outstanding: SCIM.** Users are provisioned just-in-time at first SSO login and
-reconciled on every login, which covers the common case. SCIM adds directory-*pushed*
-provisioning and deprovisioning without requiring a login — which matters when access
-must be revoked in minutes rather than at next sign-in. It is a substantial surface
-(`/Users`, `/Groups`, filtering, PATCH semantics) and is not started.
+**SCIM shipped.** `/scim/v2` user provisioning behind a dedicated `scim:provision`
+scope, so the token handed to a directory connector cannot also read clusters.
+
+- **Deactivation, not deletion** — `DELETE` and `active:false` disable rather than
+  remove, keeping memberships, audit trail and identity intact, and stamp the security
+  stamp so an existing session dies rather than running to cookie expiry.
+- **An unsupported filter is a 400, never ignored** — silently dropping it turns "find
+  this user" into "here is every user", and the connector then concludes something
+  false about who exists.
+- Handles the shapes directories actually send: Entra's `"False"` as a *string*, PATCH
+  with no `path` (fields inside `value`), and `startIndex` being 1-based.
+- `/Groups` deliberately not implemented — tenant access already derives from OIDC
+  group claims, and a second disagreeing source of membership is how people end up
+  with access nobody can explain.
+
+Verified end to end against a running instance: 401 unauthenticated, 403 for a token
+without the scope, 409 on duplicate, filter match, 400 with the SCIM error envelope on
+an unsupported filter, PATCH deprovision persisting to an Identity lockout in the
+database, reactivation, and DELETE leaving the user present but inactive.
 
 ### 8. Velero cluster DR  ☑
 
@@ -408,12 +530,31 @@ Two of those are easy to get wrong and are pinned by tests:
 A cluster without Velero produces no gaps at all — it is outside the feature's scope
 rather than failing it, and flagging every such cluster would drown the real gaps.
 
+**Storage is chosen, not retyped.** The component takes a `StorageLink` from the
+tenant's registered storage — bucket, endpoint and region are written into Helm values
+from it, and the credentials come from the vault. Nothing about the bucket is entered
+by hand. Two copies of a credential can disagree, and a rotated key would otherwise
+have to be chased through every component that copied it; going through the storage
+link means it has one home and re-applying picks up a rotation. Velero reads an INI
+profile rather than separate values, so the pair is composed into one vault-backed
+secret injected through a hidden catalog field — the same rails Loki, Mimir, Tempo and
+Harbor already use. Wired into both install paths (UI and blueprint registrar), and the
+picker repopulates when an installed component is edited.
+
 **Shipped**: Velero catalog component (chart 12.1.0 / Velero 1.18.1, verified against
 the live chart repo; AWS plugin since it serves every S3-compatible store, node agent
 on so volume *data* is captured, path-style addressing for MinIO), `VeleroService`
 (read CRs, create/delete schedules, one-off backups), `DrReadiness` (pure),
 `DrScanCache` + hourly `DrScanService`, advisor findings, `DisasterRecoveryTab`,
 `/api/v1/disaster-recovery`, an `entkube_disaster_recovery` MCP tool, 28 unit tests.
+
+**Field bug, fixed**: every backup came back `PartiallyFailed` with nothing restorable.
+The catalog set `deployNodeAgent: true` and `snapshotsEnabled: false` but left
+`configuration.defaultVolumesToFsBackup` at the chart's default of `false` — so a volume
+could be captured by **neither** route, and Velero errored on every PVC. The readiness
+report also only stated the phase, sending the operator to the CLI to find out why; it
+now surfaces Velero's own `failureReason` and validation errors, and names this exact
+cause when a partially-failed backup has item errors.
 
 **Deliberately not built**: triggering restores from EntKube. Reading restore history
 as evidence of testing is safe; *performing* a restore overwrites live cluster state
