@@ -41,6 +41,7 @@ Output lands under `artifacts/`, in the same per-target layout as before. Common
 | `--configuration <list>` | `Release` (default) or `Debug`, or `Debug,Release` for both. Binary targets only. |
 | `--registry <host>` | Default `entit.azurecr.io`. |
 | `--platforms <list>` | Override the container image platforms. |
+| `--build-platform <p>` | Which platform the images *compile* on. Defaults to the builder's own, except on an Apple Silicon Mac — see below. |
 
 > **A note if you remember the old scripts.** `release.sh` replaces `build-agent.sh`, `build-cli.sh`,
 > `build-mcp.sh`, `build-terraform-provider.sh` and `build-telemetry.sh`. Two behaviours changed:
@@ -69,26 +70,35 @@ that is the tag `docker-compose.yml` on the server pulls — a push that updated
 build an image the server never sees. It does not deploy: the server still has to pull, which is the SSH
 step in `deploy.yml`.
 
-### Building this one on an Apple Silicon laptop usually fails, and that is expected
+### The compiler and the image no longer have to share an architecture
 
-The `linux/arm64` leg dies part-way through `dotnet publish` with **`Illegal instruction`** and exit code
-**132** (128+4, SIGILL). It lands on whichever project happened to be compiling and moves between runs, so
-the error names a different file each time and reads like a source problem. It is not one: the same commit
-builds on the native arm64 runner in CI. The telemetry image is small enough to usually get through, which
-is why `scripts/release.sh telemetry --push` works from a laptop and `web --push` generally does not.
+Both image Dockerfiles compile in a stage that runs on `BUILD_PLATFORM` and cross-publish with
+`dotnet publish --arch` for whichever architecture the image is being built for. `BUILD_PLATFORM`
+defaults to the builder's own platform, so on CI — where `deploy.yml` gives each architecture a native
+runner — nothing changes and `--arch` is a no-op.
 
-`release.sh` detects it and prints what to do instead. **Publish the management-plane image from CI** — a
-push to `main`, or a `workflow_dispatch` on `deploy.yml` — which builds each architecture on its own native
-runner and merges the digests into the manifest list that `latest` points at.
+It exists because of one host. On an Apple M-series Mac the `linux/arm64` leg used to die a few seconds
+into `dotnet publish` with **`Illegal instruction`** and exit code **132** (128+4, SIGILL), reported
+either as `"csc" exited with code 132` or, when the crash took the whole publish, as buildx's
+`exit code: 132`. It reads like a source problem and is not one: macOS runs Linux containers under
+Hypervisor.framework, which advertises the ARMv9 **SME2** CPU features to the guest and then cannot
+execute them, so the .NET toolchain detects them, emits them, and is killed
+([containers/podman#28312](https://github.com/containers/podman/issues/28312),
+[dotnet/runtime#122608](https://github.com/dotnet/runtime/issues/122608)). Nothing inside the container
+avoids it — with `DOTNET_EnableHWIntrinsic=0` the crash simply moves from `csc` to the MSBuild worker
+node, and `DOTNET_EnableSVE=0`, `DOTNET_PROCESSOR_COUNT=2` and `GLIBC_TUNABLES=...-SME,-SME2,-SVE`
+change nothing at all.
 
-Building locally anyway means dropping the failing leg:
+So `release.sh` does not run an arm64 compiler on such a host. It passes `BUILD_PLATFORM=linux/amd64`,
+the compile runs under Rosetta — which works — and `--arch arm64` produces linux-arm64 output from it.
+The runtime stage is still the target architecture; it only unpacks tarballs and runs `apt`, neither of
+which trips the hypervisor. The build prints which platform it compiled on.
 
-```
-scripts/release.sh web --push --platforms linux/amd64
-```
+`scripts/release.sh web --push` therefore builds and publishes both architectures from a laptop, `latest`
+included. Publishing from CI remains equally correct and is still what a push to `main` does.
 
-That pushes a single-architecture image and deliberately does **not** move `latest`, because arm64 hosts
-pull that tag and an amd64-only `latest` fails them at pull time.
+`--build-platform <platform>` overrides the choice in either direction, and the SIGILL diagnostic points
+at it if the crash ever appears somewhere this heuristic does not cover.
 
 ### Both architectures
 
@@ -218,7 +228,9 @@ Two mechanics worth knowing:
 `release-telemetry.yml` sets up QEMU so an amd64 runner can cross-build arm64. That is a
 reasonable trade there — the telemetry image is small and released on a tag, not on every push —
 whereas `deploy.yml` uses native arm64 runners because the management-plane image is far more
-expensive to build and is built on every merge.
+expensive to build and is built on every merge. Since the compile now happens on the *builder's*
+platform and cross-publishes (see the management-plane section), QEMU there only has to emulate the
+runtime stage — unpacking a layer and adding a user — rather than a full .NET publish.
 
 ### Registry authentication — two separate surfaces
 

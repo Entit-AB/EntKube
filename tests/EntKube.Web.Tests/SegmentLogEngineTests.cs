@@ -128,6 +128,40 @@ public sealed class SegmentLogEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task Labels_AreScopedToOneCluster_WhenTwoClustersShareASegment()
+    {
+        // Two clusters of the SAME tenant write into the same segment, so the segment's term dictionary
+        // holds both clusters' namespaces. Label discovery reads that dictionary rather than visiting
+        // every document — the whole reason the dropdowns are fast — so this is the case that would
+        // wrongly offer cluster B's namespaces on cluster A's log viewer.
+        Guid clusterB = Guid.NewGuid();
+        _context.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = clusterB,
+            TenantId = _tenantId,
+            EnvironmentId = _context.Environments.First().Id,
+            Name = "c2",
+            ApiServerUrl = "https://k8s.example.com",
+        });
+        _context.SaveChanges();
+
+        DateTime t0 = new(2026, 7, 9, 12, 0, 0, DateTimeKind.Utc);
+        LogSegmentManager mgr = NewManager();
+        mgr.WriteLogs(_tenantId, _clusterId, [Log(t0, "a-only", "api-1", 2, "cluster A")]);
+        mgr.WriteLogs(_tenantId, clusterB, [Log(t0, "b-only", "api-2", 2, "cluster B")]);
+
+        SegmentLogService svc = NewService();
+        const int allTime = 10_000_000;
+
+        (await svc.GetNamespacesAsync(_clusterId, allTime)).Data.Should().BeEquivalentTo(["a-only"]);
+        (await svc.GetNamespacesAsync(clusterB, allTime)).Data.Should().BeEquivalentTo(["b-only"]);
+
+        // Same for the pod dropdown, which additionally narrows by namespace.
+        (await svc.GetPodsAsync(_clusterId, "a-only", allTime)).Data.Should().BeEquivalentTo(["api-1"]);
+        (await svc.GetPodsAsync(_clusterId, "b-only", allTime)).Data.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task Labels_And_Histogram_AreComputed()
     {
         DateTime t0 = new(2026, 7, 7, 12, 0, 0, DateTimeKind.Utc);

@@ -280,4 +280,67 @@ public class YamlFormMergerTests
         // It must remain a list element, not become a mapping keyed "0".
         result.Should().NotContain("0:");
     }
+
+    // ── trust-manager: an enabled secretTargets block must carry the permission it needs ──
+
+    [Fact]
+    public void TrustManager_SecretTargetsEnabled_GainsTheAuthorizationTheChartRequires()
+    {
+        // What a component registered before the catalog carried authorizedSecretsAll looks like once the
+        // operator flips the "Allow Secret targets" toggle on: enabled, with no permission to go with it.
+        const string yaml = """
+            app:
+              trust:
+                namespace: cert-manager
+            secretTargets:
+              enabled: true
+            """;
+
+        string result = YamlFormMerger.EnsureTrustManagerSecretTargets(yaml);
+
+        result.Should().Contain("authorizedSecretsAll: true");
+        result.Should().Contain("enabled: true");
+        result.Should().Contain("namespace: cert-manager");
+    }
+
+    [Theory]
+    [InlineData("""
+        secretTargets:
+          enabled: false
+          authorizedSecretsAll: false
+        """)]
+    [InlineData("""
+        secretTargets:
+          enabled: true
+          authorizedSecretsAll: true
+        """)]
+    [InlineData("""
+        app:
+          trust:
+            namespace: cert-manager
+        """)]
+    [InlineData("")]
+    public void TrustManager_ValuesThatAreAlreadyCoherent_AreReturnedUntouched(string yaml)
+    {
+        // Including the disabled case: this may only complete a permission the operator has already
+        // granted, never widen trust-manager's RBAC on its own.
+        YamlFormMerger.EnsureTrustManagerSecretTargets(yaml).Should().Be(yaml);
+    }
+
+    [Fact]
+    public void TrustManager_AnExplicitSecretList_IsLeftAsTheNarrowerGrant()
+    {
+        const string yaml = """
+            secretTargets:
+              enabled: true
+              authorizedSecrets:
+                - ca-bundle
+            """;
+
+        // A named list is the other way the chart grants the permission, and it is the tighter one —
+        // replacing it with "all secrets" would quietly widen what the operator chose.
+        string result = YamlFormMerger.EnsureTrustManagerSecretTargets(yaml);
+
+        result.Should().Be(yaml);
+    }
 }
