@@ -12,7 +12,8 @@ namespace EntKube.Web.Tests;
 public class CostAllocationTests
 {
     private static ClusterCostRate Rate(
-        decimal cpu = 0.03m, decimal memory = 0.004m, decimal storage = 0.10m, decimal overhead = 0m) => new()
+        decimal cpu = 0.03m, decimal memory = 0.004m, decimal storage = 0.10m,
+        decimal overhead = 0m, decimal loadBalancer = 0m) => new()
     {
         Id = Guid.NewGuid(),
         ClusterId = Guid.NewGuid(),
@@ -20,16 +21,30 @@ public class CostAllocationTests
         MemoryGiBHourCost = memory,
         StorageGiBMonthCost = storage,
         ClusterMonthlyOverhead = overhead,
+        LoadBalancerMonthlyCost = loadBalancer,
         Currency = "USD",
     };
 
-    private static readonly Func<string, (Guid?, string?, string?, string?)> Unattributed =
-        _ => (null, null, null, null);
+    private static readonly Func<string, NamespaceOwner> Unattributed = _ => NamespaceOwner.None;
+
+    /// <summary>An owner for a namespace that belongs to one customer and one app.</summary>
+    private static NamespaceOwner Owned(
+        string app = "storefront", string customer = "Acme", string environment = "Production") =>
+        new()
+        {
+            CustomerId = Guid.NewGuid(),
+            CustomerName = customer,
+            Apps = [new AppRef(Guid.NewGuid(), app)],
+            EnvironmentName = environment,
+        };
+
+    /// <summary>Attributes every namespace to its own customer, so nothing is pooled.</summary>
+    private static readonly Func<string, NamespaceOwner> AllOwned = ns => Owned(app: ns);
 
     private static IReadOnlyList<NamespaceCost> Allocate(
         IReadOnlyList<NamespaceConsumption> consumption,
         ClusterCostRate rate,
-        Func<string, (Guid?, string?, string?, string?)>? attribute = null) =>
+        Func<string, NamespaceOwner>? attribute = null) =>
         CostAllocation.Allocate(
             consumption, rate, Guid.NewGuid(), "prod-eu-west-1", attribute ?? Unattributed);
 
@@ -112,10 +127,15 @@ public class CostAllocationTests
         Allocate([], Rate(overhead: 500m)).Should().BeEmpty();
     }
 
-    // ── Fixed overhead ──
+    // ── Sharing the pool ──
+    //
+    // Everything EntKube has no deployment record for — platform namespaces plus the
+    // cluster's fixed fee — is pooled and charged to the namespaces that are attributed,
+    // in proportion to the capacity each holds. These tests pin that split, because it is
+    // the part a customer will ask to have justified.
 
     [Fact]
-    public void Overhead_is_shared_in_proportion_to_compute_not_evenly()
+    public void The_pool_is_shared_in_proportion_to_consumption_not_evenly()
     {
         // A namespace running one small pod should not carry the same share of a
         // control-plane fee as one running most of the cluster.
@@ -123,56 +143,176 @@ public class CostAllocationTests
         [
             new NamespaceConsumption { Namespace = "big", CpuCores = 9 },
             new NamespaceConsumption { Namespace = "small", CpuCores = 1 },
-        ], Rate(cpu: 0.03m, overhead: 100m));
+        ], Rate(cpu: 0.03m, overhead: 100m), AllOwned);
 
-        costs.Single(c => c.Namespace == "big").OverheadMonthlyCost.Should().Be(90.00m);
-        costs.Single(c => c.Namespace == "small").OverheadMonthlyCost.Should().Be(10.00m);
+        costs.Single(c => c.Namespace == "big").SharedMonthlyCost.Should().Be(90.00m);
+        costs.Single(c => c.Namespace == "small").SharedMonthlyCost.Should().Be(10.00m);
     }
 
     [Fact]
-    public void Overhead_shares_reconcile_to_the_full_overhead()
+    public void Shares_reconcile_to_the_full_pool_to_the_cent()
     {
-        // The point of spreading overhead is that the total matches the real bill.
+        // The point of spreading the pool is that the total matches the real bill. Rounding
+        // each share independently would leave pennies unbilled, so the residual is assigned.
         IReadOnlyList<NamespaceCost> costs = Allocate(
         [
             new NamespaceConsumption { Namespace = "a", CpuCores = 3 },
             new NamespaceConsumption { Namespace = "b", CpuCores = 5 },
             new NamespaceConsumption { Namespace = "c", MemoryGiB = 16 },
-        ], Rate(overhead: 300m));
+        ], Rate(overhead: 300m), AllOwned);
 
-        costs.Sum(c => c.OverheadMonthlyCost).Should().BeApproximately(300m, 0.05m);
+        costs.Sum(c => c.SharedMonthlyCost).Should().Be(300m);
     }
 
     [Fact]
-    public void Memory_counts_toward_the_overhead_share_as_well_as_cpu()
+    public void An_awkward_split_still_reconciles_exactly()
+    {
+        // Three equal namespaces over $100 is $33.33 each, which loses a cent.
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+        [
+            new NamespaceConsumption { Namespace = "a", CpuCores = 1 },
+            new NamespaceConsumption { Namespace = "b", CpuCores = 1 },
+            new NamespaceConsumption { Namespace = "c", CpuCores = 1 },
+        ], Rate(overhead: 100m), AllOwned);
+
+        costs.Sum(c => c.SharedMonthlyCost).Should().Be(100m);
+    }
+
+    [Fact]
+    public void Memory_counts_toward_the_share_as_well_as_cpu()
     {
         IReadOnlyList<NamespaceCost> costs = Allocate(
         [
             new NamespaceConsumption { Namespace = "cpu-only", CpuCores = 1 },
             new NamespaceConsumption { Namespace = "mem-only", MemoryGiB = 100 },
-        ], Rate(overhead: 100m));
+        ], Rate(overhead: 100m), AllOwned);
 
-        costs.Single(c => c.Namespace == "mem-only").OverheadMonthlyCost.Should().BeGreaterThan(0m);
+        costs.Single(c => c.Namespace == "mem-only").SharedMonthlyCost.Should().BeGreaterThan(0m);
     }
 
     [Fact]
-    public void Overhead_is_split_evenly_when_nothing_consumes_compute()
+    public void Storage_counts_toward_the_share_too()
+    {
+        // A storage-heavy app is a large tenant of the cluster even when it barely computes,
+        // and the shared services backing it — backups, monitoring, the log stack — scale
+        // with what it stores.
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+        [
+            new NamespaceConsumption { Namespace = "compute", CpuCores = 1 },
+            new NamespaceConsumption { Namespace = "archive", StorageGiB = 5000 },
+        ], Rate(cpu: 0.03m, storage: 0.10m, overhead: 100m), AllOwned);
+
+        // archive: 5000 × $0.10 = $500. compute: 1 × $0.03 × 730 = $21.90.
+        costs.Single(c => c.Namespace == "archive").SharedMonthlyCost
+            .Should().BeApproximately(500m / 521.90m * 100m, 0.01m);
+    }
+
+    [Fact]
+    public void Network_charges_do_not_enlarge_a_share()
+    {
+        // A load balancer is billed straight to the namespace that provisioned it. Letting
+        // it also grow that namespace's share of the platform would charge for it twice.
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+        [
+            new NamespaceConsumption { Namespace = "a", CpuCores = 1, LoadBalancers = 10 },
+            new NamespaceConsumption { Namespace = "b", CpuCores = 1 },
+        ], Rate(overhead: 200m, loadBalancer: 100m), AllOwned);
+
+        costs.Single(c => c.Namespace == "a").SharedMonthlyCost.Should().Be(100m);
+        costs.Single(c => c.Namespace == "b").SharedMonthlyCost.Should().Be(100m);
+    }
+
+    [Fact]
+    public void The_pool_is_split_evenly_when_nothing_holds_any_capacity()
     {
         // Dropping it instead would make the reported total understate the real bill.
         IReadOnlyList<NamespaceCost> costs = Allocate(
         [
-            new NamespaceConsumption { Namespace = "a", StorageGiB = 10 },
-            new NamespaceConsumption { Namespace = "b", StorageGiB = 10 },
-        ], Rate(overhead: 100m));
+            new NamespaceConsumption { Namespace = "a" },
+            new NamespaceConsumption { Namespace = "b" },
+        ], Rate(overhead: 100m), AllOwned);
 
-        costs.Should().OnlyContain(c => c.OverheadMonthlyCost == 50.00m);
+        costs.Should().OnlyContain(c => c.SharedMonthlyCost == 50.00m);
     }
 
     [Fact]
-    public void No_overhead_configured_means_no_overhead_line()
+    public void Nothing_to_share_means_no_shared_line()
     {
-        Allocate([new NamespaceConsumption { Namespace = "a", CpuCores = 1 }], Rate(overhead: 0m))
-            .Single().OverheadMonthlyCost.Should().Be(0m);
+        Allocate([new NamespaceConsumption { Namespace = "a", CpuCores = 1 }], Rate(overhead: 0m), AllOwned)
+            .Single().SharedMonthlyCost.Should().Be(0m);
+    }
+
+    // ── What goes into the pool ──
+
+    [Fact]
+    public void A_namespace_with_no_deployment_record_is_pooled_onto_the_ones_that_have_them()
+    {
+        // The platform exists to serve the workloads, so the workloads pay for it. Leaving
+        // it charged to nobody means the operator silently absorbs it.
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+        [
+            new NamespaceConsumption { Namespace = "acme", CpuCores = 1 },
+            new NamespaceConsumption { Namespace = "monitoring", CpuCores = 3 },
+        ], Rate(cpu: 0.03m), ns => ns == "acme" ? Owned() : NamespaceOwner.None);
+
+        NamespaceCost acme = costs.Single(c => c.Namespace == "acme");
+        NamespaceCost monitoring = costs.Single(c => c.Namespace == "monitoring");
+
+        // monitoring's whole cost lands on acme, the only namespace there is to bill.
+        monitoring.IsRedistributed.Should().BeTrue();
+        acme.SharedMonthlyCost.Should().Be(monitoring.DirectMonthlyCost);
+        acme.TotalMonthlyCost.Should().Be(acme.DirectMonthlyCost + monitoring.DirectMonthlyCost);
+    }
+
+    [Fact]
+    public void A_pooled_namespace_keeps_its_own_figures_so_the_pool_can_be_audited()
+    {
+        // Zeroing it would hide what is being charged out, and an unexpected workload in
+        // the pool is billed to every customer — exactly the thing worth being able to see.
+        NamespaceCost pooled = Allocate(
+        [
+            new NamespaceConsumption { Namespace = "acme", CpuCores = 1 },
+            new NamespaceConsumption { Namespace = "rogue", CpuCores = 4 },
+        ], Rate(cpu: 0.03m), ns => ns == "acme" ? Owned() : NamespaceOwner.None)
+            .Single(c => c.Namespace == "rogue");
+
+        pooled.DirectMonthlyCost.Should().BeGreaterThan(0m);
+        pooled.SharedMonthlyCost.Should().Be(0m);
+        pooled.IsRedistributed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Storage_in_the_pool_is_shared_even_when_one_app_caused_it()
+    {
+        // The log stack's 5 TiB is charged by capacity share, not to whoever generated the
+        // logs: EntKube cannot attribute a shared volume's contents, and guessing would put
+        // an unfounded number on an invoice.
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+        [
+            new NamespaceConsumption { Namespace = "chatty", CpuCores = 1 },
+            new NamespaceConsumption { Namespace = "quiet", CpuCores = 1 },
+            new NamespaceConsumption { Namespace = "logging", StorageGiB = 5000 },
+        ], Rate(cpu: 0.03m, storage: 0.10m),
+            ns => ns is "chatty" or "quiet" ? Owned(app: ns) : NamespaceOwner.None);
+
+        costs.Single(c => c.Namespace == "chatty").SharedMonthlyCost
+            .Should().Be(costs.Single(c => c.Namespace == "quiet").SharedMonthlyCost);
+    }
+
+    [Fact]
+    public void The_pool_stays_unattributed_when_there_is_nobody_to_charge_it_to()
+    {
+        // A cluster running only platform components has no app to absorb the fixed fee.
+        // Spreading it over the platform namespaces keeps it in the total; inventing a
+        // recipient would not.
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+        [
+            new NamespaceConsumption { Namespace = "kube-system", CpuCores = 1 },
+            new NamespaceConsumption { Namespace = "monitoring", CpuCores = 1 },
+        ], Rate(overhead: 100m));
+
+        costs.Should().OnlyContain(c => !c.IsRedistributed);
+        costs.Sum(c => c.SharedMonthlyCost).Should().Be(100m);
     }
 
     // ── Attribution ──
@@ -181,17 +321,50 @@ public class CostAllocationTests
     public void An_attributed_namespace_carries_its_customer_app_and_environment()
     {
         Guid customerId = Guid.NewGuid();
+        Guid appId = Guid.NewGuid();
 
         NamespaceCost cost = Allocate(
             [new NamespaceConsumption { Namespace = "acme-prod", CpuCores = 1 }],
             Rate(),
-            _ => (customerId, "Acme", "storefront", "Production")).Single();
+            _ => new NamespaceOwner
+            {
+                CustomerId = customerId,
+                CustomerName = "Acme",
+                Apps = [new AppRef(appId, "storefront")],
+                EnvironmentName = "Production",
+            }).Single();
 
         cost.CustomerId.Should().Be(customerId);
         cost.CustomerName.Should().Be("Acme");
+        cost.AppId.Should().Be(appId);
         cost.AppName.Should().Be("storefront");
         cost.EnvironmentName.Should().Be("Production");
         cost.IsUnattributed.Should().BeFalse();
+        cost.IsMultiApp.Should().BeFalse();
+    }
+
+    [Fact]
+    public void A_namespace_shared_by_two_apps_is_attributed_to_neither()
+    {
+        // Consumption is measured per namespace. Handing the whole figure to one of the
+        // two apps would put a number on an invoice that nothing measured.
+        NamespaceCost cost = Allocate(
+            [new NamespaceConsumption { Namespace = "shared", CpuCores = 1 }],
+            Rate(),
+            _ => new NamespaceOwner
+            {
+                CustomerId = Guid.NewGuid(),
+                CustomerName = "Acme",
+                Apps = [new AppRef(Guid.NewGuid(), "api"), new AppRef(Guid.NewGuid(), "worker")],
+            }).Single();
+
+        cost.IsMultiApp.Should().BeTrue();
+        cost.AppId.Should().BeNull();
+        cost.AppName.Should().Be("2 apps");
+
+        // Still billed — it belongs to a customer, just not to one app.
+        cost.IsUnattributed.Should().BeFalse();
+        cost.IsRedistributed.Should().BeFalse();
     }
 
     [Fact]
@@ -208,6 +381,21 @@ public class CostAllocationTests
         cost.TotalMonthlyCost.Should().BeGreaterThan(0m);
     }
 
+    [Fact]
+    public void The_share_of_a_cluster_is_reported_alongside_the_money()
+    {
+        // It is the number an operator gets asked to justify, so it is not left implicit
+        // in the arithmetic.
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+        [
+            new NamespaceConsumption { Namespace = "big", CpuCores = 3 },
+            new NamespaceConsumption { Namespace = "small", CpuCores = 1 },
+        ], Rate(overhead: 100m), AllOwned);
+
+        costs.Single(c => c.Namespace == "big").ShareOfCluster.Should().BeApproximately(0.75d, 0.0001d);
+        costs.Single(c => c.Namespace == "small").ShareOfCluster.Should().BeApproximately(0.25d, 0.0001d);
+    }
+
     // ── Report roll-ups ──
 
     private static CostReport Report(params NamespaceCost[] namespaces) =>
@@ -215,7 +403,9 @@ public class CostAllocationTests
 
     private static NamespaceCost Cost(
         string ns, decimal cpuCost, Guid? customerId = null,
-        string? customerName = null, string? environment = null) => new()
+        string? customerName = null, string? environment = null,
+        decimal sharedCost = 0m, bool redistributed = false,
+        params AppRef[] apps) => new()
     {
         Namespace = ns,
         ClusterId = Guid.NewGuid(),
@@ -223,7 +413,10 @@ public class CostAllocationTests
         CustomerId = customerId,
         CustomerName = customerName,
         EnvironmentName = environment,
+        Apps = apps,
         CpuMonthlyCost = cpuCost,
+        SharedMonthlyCost = sharedCost,
+        IsRedistributed = redistributed,
     };
 
     [Fact]
@@ -245,12 +438,92 @@ public class CostAllocationTests
     [Fact]
     public void Report_excludes_unattributed_cost_from_the_per_customer_view_but_not_the_total()
     {
+        // Nothing was pooled here, so the platform namespace still stands on its own.
         CostReport report = Report(
             Cost("acme-prod", 60m, Guid.NewGuid(), "Acme"),
             Cost("kube-system", 40m));
 
         report.ByCustomer.Sum(c => c.MonthlyCost).Should().Be(60m);
         report.UnattributedMonthlyCost.Should().Be(40m);
+        report.TotalMonthlyCost.Should().Be(100m);
+    }
+
+    [Fact]
+    public void A_pooled_namespace_is_not_counted_again_in_the_total()
+    {
+        // Its $40 was charged out to acme-prod. Adding both would report $140 for a $100
+        // cluster — the failure mode the redistributed flag exists to prevent.
+        CostReport report = Report(
+            Cost("acme-prod", 60m, Guid.NewGuid(), "Acme", sharedCost: 40m),
+            Cost("kube-system", 40m, redistributed: true));
+
+        report.TotalMonthlyCost.Should().Be(100m);
+        report.UnattributedMonthlyCost.Should().Be(0m);
+        report.SharedPoolMonthlyCost.Should().Be(40m);
+        report.SharedPool.Should().ContainSingle(n => n.Namespace == "kube-system");
+    }
+
+    // ── Per-app roll-up ──
+
+    [Fact]
+    public void Report_groups_cost_by_app_including_each_apps_share_of_the_platform()
+    {
+        Guid acme = Guid.NewGuid();
+        AppRef storefront = new(Guid.NewGuid(), "storefront");
+        AppRef billing = new(Guid.NewGuid(), "billing");
+
+        CostReport report = Report(
+            Cost("sf-prod", 60m, acme, "Acme", "Production", sharedCost: 30m, apps: [storefront]),
+            Cost("sf-test", 20m, acme, "Acme", "Staging", sharedCost: 10m, apps: [storefront]),
+            Cost("bill-prod", 10m, acme, "Acme", "Production", sharedCost: 5m, apps: [billing]),
+            Cost("monitoring", 45m, redistributed: true));
+
+        report.ByApp.Should().HaveCount(2);
+
+        AppCost first = report.ByApp[0];
+        first.AppId.Should().Be(storefront.AppId);
+        first.AppName.Should().Be("storefront");
+        first.DirectMonthlyCost.Should().Be(80m);
+        first.SharedMonthlyCost.Should().Be(40m);
+        first.TotalMonthlyCost.Should().Be(120m);
+        first.Environments.Should().Equal("Production", "Staging");
+        first.Namespaces.Should().Equal("sf-prod", "sf-test");
+
+        report.ByApp[1].AppName.Should().Be("billing");
+        report.ByApp[1].TotalMonthlyCost.Should().Be(15m);
+    }
+
+    [Fact]
+    public void Per_app_totals_reconcile_to_the_whole_bill()
+    {
+        // Every attributed namespace belongs to exactly one app here, so the app roll-up
+        // must add up to the same number the tenant total reports.
+        Guid acme = Guid.NewGuid();
+
+        CostReport report = Report(
+            Cost("a", 60m, acme, "Acme", sharedCost: 30m, apps: [new AppRef(Guid.NewGuid(), "a")]),
+            Cost("b", 10m, acme, "Acme", sharedCost: 5m, apps: [new AppRef(Guid.NewGuid(), "b")]),
+            Cost("platform", 35m, redistributed: true));
+
+        report.ByApp.Sum(a => a.TotalMonthlyCost).Should().Be(report.TotalMonthlyCost);
+        report.ByApp.Sum(a => a.ShareOfBillable).Should().BeApproximately(1d, 0.0001d);
+    }
+
+    [Fact]
+    public void A_namespace_shared_by_apps_is_reported_beside_the_per_app_view_not_inside_it()
+    {
+        Guid acme = Guid.NewGuid();
+
+        CostReport report = Report(
+            Cost("solo", 60m, acme, "Acme", sharedCost: 0m, apps: [new AppRef(Guid.NewGuid(), "solo")]),
+            Cost("shared", 40m, acme, "Acme", apps:
+                [new AppRef(Guid.NewGuid(), "api"), new AppRef(Guid.NewGuid(), "worker")]));
+
+        report.ByApp.Should().ContainSingle();
+        report.MultiAppMonthlyCost.Should().Be(40m);
+
+        // Still the customer's money, just not resolvable to one app.
+        report.ByCustomer.Single().MonthlyCost.Should().Be(100m);
         report.TotalMonthlyCost.Should().Be(100m);
     }
 
@@ -302,7 +575,7 @@ public class NetworkCostTests
     private static IReadOnlyList<NamespaceCost> Allocate(
         IReadOnlyList<NamespaceConsumption> consumption, ClusterCostRate rate) =>
         CostAllocation.Allocate(consumption, rate, Guid.NewGuid(), "prod",
-            _ => (null, null, null, null));
+            _ => NamespaceOwner.None);
 
     [Fact]
     public void A_load_balancer_is_charged_by_the_month_not_the_hour()
@@ -362,18 +635,18 @@ public class NetworkCostTests
     }
 
     [Fact]
-    public void Network_cost_does_not_change_how_fixed_overhead_is_shared()
+    public void Network_cost_does_not_change_how_the_fixed_fee_is_shared()
     {
-        // Overhead is spread by COMPUTE share. Letting load balancers influence that split
-        // would charge a namespace twice for the same thing.
+        // The pool is spread by the capacity a namespace holds. Letting load balancers
+        // influence that split would charge a namespace twice for the same thing.
         IReadOnlyList<NamespaceCost> costs = Allocate(
         [
             new NamespaceConsumption { Namespace = "a", CpuCores = 1, LoadBalancers = 10 },
             new NamespaceConsumption { Namespace = "b", CpuCores = 1 },
         ], Rate(loadBalancer: 100m, overhead: 200m));
 
-        costs.Single(c => c.Namespace == "a").OverheadMonthlyCost.Should().Be(100m);
-        costs.Single(c => c.Namespace == "b").OverheadMonthlyCost.Should().Be(100m);
+        costs.Single(c => c.Namespace == "a").SharedMonthlyCost.Should().Be(100m);
+        costs.Single(c => c.Namespace == "b").SharedMonthlyCost.Should().Be(100m);
     }
 
     // ── Counting them off the cluster ──

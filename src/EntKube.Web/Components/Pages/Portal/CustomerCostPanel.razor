@@ -4,7 +4,7 @@
 
 @* Customer-facing consumption and cost. Reads the cached tenant report and shows
    ONLY this customer's rows — a customer must never see another's figures, nor the
-   tenant's platform overhead. *@
+   tenant's platform overhead as a line of its own. *@
 
 @if (report is null)
 {
@@ -12,7 +12,7 @@
         Consumption figures are not available yet. They are recalculated hourly.
     </div>
 }
-else if (rows.Count == 0)
+else if (apps.Count == 0 && shared.Count == 0)
 {
     <div class="text-muted small">No consumption recorded for your workloads yet.</div>
 }
@@ -31,7 +31,7 @@ else
             <div class="card shadow-sm h-100">
                 <div class="card-body py-3">
                     <div class="text-muted small text-uppercase">CPU reserved</div>
-                    <div class="display-6 fw-semibold">@rows.Sum(r => r.CpuCores).ToString("N1")</div>
+                    <div class="display-6 fw-semibold">@TotalCpu.ToString("N1")</div>
                     <div class="text-muted small">cores</div>
                 </div>
             </div>
@@ -40,7 +40,7 @@ else
             <div class="card shadow-sm h-100">
                 <div class="card-body py-3">
                     <div class="text-muted small text-uppercase">Memory reserved</div>
-                    <div class="display-6 fw-semibold">@rows.Sum(r => r.MemoryGiB).ToString("N0")</div>
+                    <div class="display-6 fw-semibold">@TotalMemory.ToString("N0")</div>
                     <div class="text-muted small">GiB</div>
                 </div>
             </div>
@@ -56,32 +56,63 @@ else
                     <th class="text-end">CPU</th>
                     <th class="text-end">Memory</th>
                     <th class="text-end">Storage</th>
+                    <th class="text-end" title="What your own workloads consume.">Direct</th>
+                    <th class="text-end" title="Your share of the shared platform these workloads run on — ingress, monitoring, backups and the cluster itself.">Platform</th>
                     <th class="text-end">Monthly</th>
                 </tr>
             </thead>
             <tbody>
-                @foreach (NamespaceCost row in rows)
+                @foreach (AppCost app in apps)
                 {
                     <tr>
-                        <td class="small">@(row.AppName ?? row.Namespace)</td>
+                        <td class="small">@app.AppName</td>
+                        <td class="small text-muted">
+                            @(app.Environments.Count > 0 ? string.Join(", ", app.Environments) : "—")
+                        </td>
+                        <td class="text-end small text-muted">@app.CpuCores.ToString("N2")</td>
+                        <td class="text-end small text-muted">@app.MemoryGiB.ToString("N1") Gi</td>
+                        <td class="text-end small text-muted">@app.StorageGiB.ToString("N0") Gi</td>
+                        <td class="text-end small text-muted">@Money(app.DirectMonthlyCost)</td>
+                        <td class="text-end small text-muted">@Money(app.SharedMonthlyCost)</td>
+                        <td class="text-end fw-semibold">@Money(app.TotalMonthlyCost)</td>
+                    </tr>
+                }
+
+                @* Namespaces running more than one application. Measurement is per
+                   namespace, so these are shown as they are measured rather than split. *@
+                @foreach (NamespaceCost row in shared)
+                {
+                    <tr>
+                        <td class="small">
+                            <code>@row.Namespace</code>
+                            <div class="text-muted">@row.AppName</div>
+                        </td>
                         <td class="small text-muted">@(row.EnvironmentName ?? "—")</td>
                         <td class="text-end small text-muted">@row.CpuCores.ToString("N2")</td>
                         <td class="text-end small text-muted">@row.MemoryGiB.ToString("N1") Gi</td>
                         <td class="text-end small text-muted">@row.StorageGiB.ToString("N0") Gi</td>
+                        <td class="text-end small text-muted">@Money(row.DirectMonthlyCost)</td>
+                        <td class="text-end small text-muted">@Money(row.SharedMonthlyCost)</td>
                         <td class="text-end fw-semibold">@Money(row.TotalMonthlyCost)</td>
                     </tr>
                 }
             </tbody>
             <tfoot>
                 <tr>
-                    <td colspan="5" class="text-end fw-semibold">Total</td>
+                    <td colspan="7" class="text-end fw-semibold">Total</td>
                     <td class="text-end fw-semibold">@Money(TotalMonthly)</td>
                 </tr>
             </tfoot>
         </table>
     </div>
 
-    <p class="text-muted small mt-3 mb-0">
+    <p class="text-muted small mt-3 mb-1">
+        <strong>Platform</strong> is your share of the shared infrastructure your workloads run on —
+        ingress, monitoring, logging and the cluster itself. It is apportioned by how much CPU,
+        memory and storage you hold relative to everything else running there, so it moves with your
+        own footprint rather than being a flat fee.
+    </p>
+    <p class="text-muted small mb-0">
         Figures are a <strong>run rate</strong>: what your current reservations project to over a
         730-hour month, as of @report.GeneratedAt.ToString("yyyy-MM-dd HH:mm") UTC. They change when
         workloads are scaled or redeployed, and are not a final invoice.
@@ -92,23 +123,43 @@ else
     [Parameter] public required Customer Customer { get; set; }
 
     private CostReport? report;
-    private List<NamespaceCost> rows = [];
+
+    /// <summary>This customer's apps, largest first.</summary>
+    private List<AppCost> apps = [];
+
+    /// <summary>
+    /// This customer's namespaces that run more than one of their apps. Billed to them,
+    /// but not divisible between those apps, so they are listed by namespace instead of
+    /// being folded into one app's figure.
+    /// </summary>
+    private List<NamespaceCost> shared = [];
 
     protected override void OnParametersSet()
     {
         report = ScanCache.Get(Customer.TenantId);
 
-        // Filter to this customer only. Unattributed platform namespaces are excluded
-        // as well as other customers': the tenant's shared overhead is not this
-        // customer's line item to see.
-        rows = report is null
+        // Filter to this customer only. Pooled platform namespaces are excluded as well
+        // as other customers': this customer's share of them is already inside their own
+        // rows, and the rest is not theirs to see.
+        apps = report is null
             ? []
-            : [.. report.Namespaces
-                .Where(n => n.CustomerId == Customer.Id)
+            : [.. report.ByApp
+                .Where(a => a.CustomerId == Customer.Id)
+                .OrderByDescending(a => a.TotalMonthlyCost)];
+
+        shared = report is null
+            ? []
+            : [.. report.Billed
+                .Where(n => n.CustomerId == Customer.Id && n.IsMultiApp)
                 .OrderByDescending(n => n.TotalMonthlyCost)];
     }
 
-    private decimal TotalMonthly => rows.Sum(r => r.TotalMonthlyCost);
+    private decimal TotalMonthly =>
+        apps.Sum(a => a.TotalMonthlyCost) + shared.Sum(n => n.TotalMonthlyCost);
+
+    private double TotalCpu => apps.Sum(a => a.CpuCores) + shared.Sum(n => n.CpuCores);
+
+    private double TotalMemory => apps.Sum(a => a.MemoryGiB) + shared.Sum(n => n.MemoryGiB);
 
     private string Money(decimal value) => $"{value:N2} {report?.Currency ?? ""}".Trim();
 }
