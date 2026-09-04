@@ -6,6 +6,7 @@
 @inject CostReportService CostService
 @inject CostRateService RateService
 @inject CostScanCache ScanCache
+@inject CostLedgerService Ledger
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject AuthenticationStateProvider AuthState
 
@@ -363,6 +364,254 @@
 </div>
 
 <div class="card shadow-sm mb-3">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span><i class="bi bi-graph-up me-2 text-primary"></i><strong>Cost history</strong></span>
+        <div class="d-flex align-items-center gap-2">
+            <select class="form-select form-select-sm" style="width:auto"
+                    value="@rangeDays" @onchange="ChangeRangeAsync">
+                <option value="7">Last 7 days</option>
+                <option value="30">Last 30 days</option>
+                <option value="90">Last 90 days</option>
+                <option value="180">Last 180 days</option>
+            </select>
+            <select class="form-select form-select-sm" style="width:auto"
+                    value="@grouping" @onchange="ChangeGroupingAsync">
+                <option value="@CostGroupBy.Customer">By customer</option>
+                <option value="@CostGroupBy.App">By app</option>
+                <option value="@CostGroupBy.Environment">By environment</option>
+                <option value="@CostGroupBy.Cluster">By cluster</option>
+                <option value="@CostGroupBy.Namespace">By namespace</option>
+            </select>
+        </div>
+    </div>
+    <div class="card-body pt-3">
+        <p class="text-muted small mb-3">
+            What the fleet <strong>actually cost</strong>, accrued hour by hour and totalled per day.
+            Unlike the run rate above, this counts a workload for the time it really ran — so
+            something that existed for three days is three days of cost, not a month of it.
+        </p>
+
+        @if (historyError is not null)
+        {
+            <div class="alert alert-danger py-2">@historyError</div>
+        }
+        else if (history is null)
+        {
+            <div class="alert alert-light border mb-0">
+                <i class="bi bi-info-circle me-1"></i>
+                Nothing has been recorded yet. The ledger accrues hourly, starting one hour after a
+                cluster is given a price sheet — so this fills in from now on rather than backwards.
+            </div>
+        }
+        else
+        {
+            @if (history.Warnings.Count > 0)
+            {
+                <div class="alert alert-warning py-2">
+                    <ul class="small mb-0 ps-3">
+                        @foreach (string warning in history.Warnings)
+                        {
+                            <li>@warning</li>
+                        }
+                    </ul>
+                </div>
+            }
+
+            <div class="row g-2 mb-3">
+                <div class="col-6 col-md-3">
+                    <div class="border rounded p-2 h-100">
+                        <div class="text-muted small">
+                            <i class="bi bi-cash-stack me-1"></i>Spent, last @rangeDays days
+                        </div>
+                        <div class="fs-4 fw-semibold">@HistoryMoney(history.TotalCost)</div>
+                    </div>
+                </div>
+                <div class="col-6 col-md-3">
+                    <div class="border rounded p-2 h-100">
+                        <div class="text-muted small" title="The same number of days immediately before this window.">
+                            <i class="bi bi-arrow-left-right me-1"></i>vs previous @rangeDays days
+                        </div>
+                        <div class="fs-4 fw-semibold @(history.Change > 0m ? "text-danger" : history.Change < 0m ? "text-success" : "")">
+                            @if (history.PreviousTotalCost == 0m)
+                            {
+                                <span class="text-muted">—</span>
+                            }
+                            else
+                            {
+                                @($"{(history.Change > 0m ? "+" : "")}{history.ChangeFraction * 100:N1}%")
+                            }
+                        </div>
+                    </div>
+                </div>
+                <div class="col-6 col-md-3">
+                    <div class="border rounded p-2 h-100">
+                        <div class="text-muted small"><i class="bi bi-calendar-day me-1"></i>Per day</div>
+                        <div class="fs-4 fw-semibold">@HistoryMoney(history.DailyAverage)</div>
+                    </div>
+                </div>
+                <div class="col-6 col-md-3">
+                    <div class="border rounded p-2 h-100">
+                        <div class="text-muted small"
+                             title="How much of the period the ledger actually measured. Anything under 100% means the figures are a floor.">
+                            <i class="bi bi-clock-history me-1"></i>Measured
+                        </div>
+                        <div class="fs-4 fw-semibold @(history.IsComplete ? "" : "text-warning")">
+                            @((history.Completeness * 100).ToString("N1"))%
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <CostHistoryChart Points="history.Daily" Currency="@history.Currency" />
+
+            <div class="d-flex align-items-center justify-content-between mt-4 mb-1">
+                <h6 class="small text-muted fw-semibold mb-0">@GroupingLabel</h6>
+                <span class="small text-muted">
+                    Change is against the @rangeDays days before this window
+                </span>
+            </div>
+
+            @if (history.Groups.Count == 0)
+            {
+                <p class="text-muted small mb-0">Nothing was recorded in this period.</p>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead>
+                            <tr class="text-muted small">
+                                <th>@GroupingColumn</th>
+                                <th class="text-end">CPU core-h</th>
+                                <th class="text-end">Memory GiB-h</th>
+                                <th class="text-end">Previous</th>
+                                <th class="text-end">Spent</th>
+                                <th class="text-end" style="width:12%">Change</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (CostHistoryGroup group in history.Groups.Take(100))
+                            {
+                                <tr class="@(group.IsGone ? "text-muted" : "")">
+                                    <td class="small">
+                                        @if (group.IsUnattributed)
+                                        {
+                                            <span class="fst-italic text-muted">@group.Label</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="fw-medium">@group.Label</span>
+                                        }
+
+                                        @if (group.IsNew)
+                                        {
+                                            <span class="badge bg-info-subtle text-info-emphasis ms-2">new</span>
+                                        }
+                                        else if (group.IsGone)
+                                        {
+                                            <span class="badge bg-secondary-subtle text-secondary-emphasis ms-2">gone</span>
+                                        }
+                                    </td>
+                                    <td class="text-end small text-muted">@group.CpuCoreHours.ToString("N0")</td>
+                                    <td class="text-end small text-muted">@group.MemoryGiBHours.ToString("N0")</td>
+                                    <td class="text-end small text-muted">@HistoryMoney(group.PreviousCost)</td>
+                                    <td class="text-end fw-semibold">@HistoryMoney(group.Cost)</td>
+                                    <td class="text-end small">
+                                        @if (group.ChangeFraction is double fraction)
+                                        {
+                                            <span class="@(group.Change > 0m ? "text-danger" : group.Change < 0m ? "text-success" : "text-muted")">
+                                                @($"{(group.Change > 0m ? "+" : "")}{fraction * 100:N0}%")
+                                            </span>
+                                        }
+                                        else
+                                        {
+                                            <span class="text-muted" title="Nothing to compare against — this did not exist in the previous period.">—</span>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+
+            <div class="row g-3 mt-2">
+                <div class="col-md-7">
+                    <h6 class="small text-muted fw-semibold">By month</h6>
+                    @if (months.Count == 0)
+                    {
+                        <p class="text-muted small mb-0">No completed months yet.</p>
+                    }
+                    else
+                    {
+                        <table class="table table-sm mb-0">
+                            <tbody>
+                                @foreach (CostMonth month in months.AsEnumerable().Reverse())
+                                {
+                                    <tr>
+                                        <td class="small">@month.Label</td>
+                                        <td class="text-end small fw-medium">
+                                            @($"{month.Cost.ToString("N2")} {month.Currency}")
+                                        </td>
+                                        <td class="small text-end" style="width:22%">
+                                            @if (!month.IsComplete)
+                                            {
+                                                <span class="text-warning"
+                                                      title="Part of this month was never measured, so the figure is lower than what was incurred.">
+                                                    @((month.Completeness * 100).ToString("N0"))% measured
+                                                </span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                </div>
+                <div class="col-md-5">
+                    <h6 class="small text-muted fw-semibold">Where it went</h6>
+                    <table class="table table-sm mb-0">
+                        <tbody>
+                            <tr>
+                                <td class="small text-muted"
+                                    title="What the platform namespaces themselves cost. Already inside the total above, charged out to the apps in proportion to what each holds — not an extra.">
+                                    Platform namespaces
+                                </td>
+                                <td class="text-end small">@HistoryMoney(history.PlatformCost)</td>
+                            </tr>
+                            <tr>
+                                <td class="small text-muted"
+                                    title="Platform namespaces plus fixed cluster fees, as charged out to apps.">
+                                    Shared, charged out
+                                </td>
+                                <td class="text-end small">@HistoryMoney(history.SharedChargedOutCost)</td>
+                            </tr>
+                            <tr>
+                                <td class="small text-muted">Reached no customer</td>
+                                <td class="text-end small">@HistoryMoney(history.UnattributedCost)</td>
+                            </tr>
+                            <tr>
+                                <td class="small text-muted"
+                                    title="Namespaces shared by several apps: billable to the customer, but not attributable to one app.">
+                                    Shared by several apps
+                                </td>
+                                <td class="text-end small">@HistoryMoney(history.MultiAppCost)</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <p class="small text-muted mt-3 mb-0">
+                <i class="bi bi-info-circle me-1"></i>
+                A record of what was measured, not an issued invoice. Amounts are kept as they were
+                priced at the time, so renaming or moving an app does not restate the past.
+            </p>
+        }
+    </div>
+</div>
+
+<div class="card shadow-sm mb-3">
     <div class="card-header bg-white py-2">
         <span><i class="bi bi-tags me-2 text-primary"></i><strong>Price sheets</strong></span>
     </div>
@@ -460,6 +709,14 @@
     private bool calculating;
     private string? error;
 
+    // ── Cost history ──
+
+    private CostHistoryReport? history;
+    private IReadOnlyList<CostMonth> months = [];
+    private string? historyError;
+    private int rangeDays = 30;
+    private CostGroupBy grouping = CostGroupBy.Customer;
+
     /// <summary>
     /// The namespaces that carry a cost of their own, largest first. Pooled platform
     /// namespaces are shown separately — their cost has already been charged out to
@@ -488,7 +745,79 @@
     {
         report = ScanCache.Get(TenantId);
         await LoadRatesAsync();
+        await LoadHistoryAsync();
     }
+
+    /// <summary>
+    /// Reads the ledger for the selected window. A tenant with no ledger at all leaves
+    /// <see cref="history"/> null, which the markup explains as "nothing recorded yet" —
+    /// deliberately not as a zero, which would read as "this cost nothing".
+    /// </summary>
+    private async Task LoadHistoryAsync()
+    {
+        historyError = null;
+        try
+        {
+            if (!await Ledger.HasAnyAsync(TenantId))
+            {
+                history = null;
+                months = [];
+                return;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            history = await Ledger.GetHistoryAsync(
+                TenantId, now.AddDays(-(rangeDays - 1)), now, grouping, now);
+            months = await Ledger.GetMonthlyAsync(TenantId, months: 6, now);
+        }
+        catch (Exception ex)
+        {
+            historyError = ex.Message;
+        }
+    }
+
+    private async Task ChangeRangeAsync(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out int days))
+        {
+            rangeDays = days;
+            await LoadHistoryAsync();
+        }
+    }
+
+    private async Task ChangeGroupingAsync(ChangeEventArgs e)
+    {
+        if (Enum.TryParse(e.Value?.ToString(), out CostGroupBy parsed))
+        {
+            grouping = parsed;
+            await LoadHistoryAsync();
+        }
+    }
+
+    private string GroupingLabel => grouping switch
+    {
+        CostGroupBy.Customer => "By customer",
+        CostGroupBy.App => "By app",
+        CostGroupBy.Environment => "By environment",
+        CostGroupBy.Cluster => "By cluster",
+        _ => "By namespace",
+    };
+
+    private string GroupingColumn => grouping switch
+    {
+        CostGroupBy.Customer => "Customer",
+        CostGroupBy.App => "App",
+        CostGroupBy.Environment => "Environment",
+        CostGroupBy.Cluster => "Cluster",
+        _ => "Namespace",
+    };
+
+    /// <summary>
+    /// Historical amounts carry their own currency: the ledger records what each cluster
+    /// was priced in at the time, which need not be what it is priced in now.
+    /// </summary>
+    private string HistoryMoney(decimal value) =>
+        $"{value.ToString("N2")} {history?.Currency ?? "USD"}";
 
     private async Task LoadRatesAsync()
     {

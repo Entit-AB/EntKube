@@ -53,7 +53,7 @@ token should not by itself let a model change a cluster.
 
 ## Tools
 
-Read-only (10):
+Read-only (14):
 
 | Tool | What it answers |
 |---|---|
@@ -67,6 +67,19 @@ Read-only (10):
 | `entkube_upgrades` | Components behind their published chart versions |
 | `entkube_drift` | Deployments changed outside EntKube |
 | `entkube_supply_chain` | Running images joined to vulnerability scans |
+| `entkube_cost` | What the fleet costs at the current rate of consumption |
+| `entkube_cost_history` | What it actually cost over a period, and how that changed |
+| `entkube_rollouts` | Recent release watches and their verdicts |
+| `entkube_disaster_recovery` | Backup and restore posture per cluster |
+
+`entkube_cost` and `entkube_cost_history` are deliberately separate tools rather than
+one with a date range, because they answer different questions and a model that
+conflates them gives a confidently wrong answer. The first is a projection of the
+present — what a month at today's reservations would cost — and it cannot say what
+was spent last month or whether anything got more expensive. The second is the
+ledger. Its figures carry a **completeness** fraction: a period the management plane
+did not fully measure under-states cost, so anything below 1 makes the total a floor
+rather than the amount.
 
 Write, requiring `--allow-write` (3):
 

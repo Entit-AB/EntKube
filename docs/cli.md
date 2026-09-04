@@ -37,6 +37,7 @@ upgrades             Components behind their published chart versions
 drift                Deployments changed outside EntKube
 supply-chain         Running images joined to their vulnerability scans
 cost                 Cost run rate by namespace
+cost history         Cost actually incurred over a period (--from, --to, --group-by)
 rollouts             Recent release watches and their verdicts
 dr                   Backup and restore posture per cluster
 ```
@@ -74,7 +75,8 @@ entkube drift --fail-on-results
 entkube supply-chain --fail-on-results
 ```
 
-Note what that means for the sweep-backed commands: `drift`, `supply-chain`, `cost`
-and `dr` return **503** when no background sweep has completed yet. That is not the
+Note what that means for the sweep-backed commands: `drift`, `supply-chain`, `cost`,
+`cost history` and `dr` return **503** when no background sweep has completed yet —
+for `cost history`, when the ledger has never recorded anything at all. That is not the
 same as "nothing is wrong", and the CLI exits 1 rather than 0 so a pipeline cannot
 mistake an unmeasured fleet for a clean one.

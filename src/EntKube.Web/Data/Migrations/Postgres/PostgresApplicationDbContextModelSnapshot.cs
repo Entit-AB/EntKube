@@ -2096,6 +2096,179 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("ConnectivityRules");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.CostLedgerCoverage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ClusterName")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<decimal>("CoveredHours")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<DateTime>("Day")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<decimal>("GapHours")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<int>("SampleCount")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterId", "Day")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "Day");
+
+                    b.ToTable("CostLedgerCoverages");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CostLedgerCursor", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("LastSampleAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterId")
+                        .IsUnique();
+
+                    b.ToTable("CostLedgerCursors");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CostLedgerEntry", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AppName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<bool>("ChargedOnRequests")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ClusterName")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<double>("CpuCoreHours")
+                        .HasColumnType("double precision");
+
+                    b.Property<decimal>("CpuCost")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CustomerName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime>("Day")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("EnvironmentName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<decimal>("Hours")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<bool>("IsMultiApp")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsRedistributed")
+                        .HasColumnType("boolean");
+
+                    b.Property<double>("LoadBalancerHours")
+                        .HasColumnType("double precision");
+
+                    b.Property<decimal>("MemoryCost")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<double>("MemoryGiBHours")
+                        .HasColumnType("double precision");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<decimal>("NetworkCost")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<double>("PublicIpHours")
+                        .HasColumnType("double precision");
+
+                    b.Property<decimal>("SharedCost")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<decimal>("StorageCost")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<double>("StorageGiBHours")
+                        .HasColumnType("double precision");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Day");
+
+                    b.HasIndex("ClusterId", "Namespace", "Day")
+                        .IsUnique();
+
+                    b.ToTable("CostLedgerEntries");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Customer", b =>
                 {
                     b.Property<Guid>("Id")
@@ -6684,6 +6857,39 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Environment");
 
                     b.Navigation("PeerApp");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CostLedgerCoverage", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CostLedgerCursor", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KubernetesCluster", "Cluster")
+                        .WithMany()
+                        .HasForeignKey("ClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Cluster");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CostLedgerEntry", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Customer", b =>

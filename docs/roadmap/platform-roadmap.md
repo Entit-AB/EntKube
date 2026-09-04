@@ -26,7 +26,7 @@ are sequenced by value rather than dependency.
 
 ## Verification status
 
-Unit tests: **1135**, all passing. A clean checkout builds, and the app now starts
+Unit tests: **1679**, all passing. A clean checkout builds, and the app now starts
 from a plain `dotnet ef database update` (neither was true at the start — see
 `docs/migrations-defect.md`).
 
@@ -349,11 +349,61 @@ published cloud prices exclude VAT. Egress, object storage and DNS zones are nam
 *not* modelled — egress cannot be attributed to a namespace without network accounting
 EntKube does not collect, so it is left out rather than guessed at.
 
-**Deliberately not built**: historical billing. This is a *run rate* — what current
-reservations project to — not a ledger of what was consumed last month. Invoicing
-from history needs a cost rollup table and a retention policy; the run rate is the
-chargeback basis and the larger slice of the value. The UI and every API/MCP
-description say "run rate, not a bill" so it is never mistaken for one.
+**Cost history now ships too** — the ledger the run rate could never be.
+
+**The rule the feature is built on: the ledger accrues hours, it does not sample a
+run rate.** A run rate is a projection of the present; reading it once a month would
+bill a workload that ran for three days as though it ran for thirty, or miss it
+entirely if it was gone before anyone looked. Each hourly sweep therefore books the
+hours that have actually elapsed since the previous one, priced at what it just
+measured, into the row for the UTC day they fell in. A namespace held steady for a
+730-hour period accrues exactly the monthly figure the dashboard quotes — the same
+730-hour month is used on both sides, so the two numbers cannot drift apart in front
+of a customer.
+
+**An hour is never billed twice.** Each cluster's period is *claimed* with a
+conditional update on a per-cluster cursor before anything is written, so a second
+management-plane instance books nothing at all rather than a second copy. The claim
+is taken before the rows are written on purpose: the surviving failure mode is an
+hour lost to a crash mid-write, which shows up as missing coverage, where a
+double-booking would be a wrong number on an invoice with nothing to distinguish it
+from a right one.
+
+**An hour nobody measured is reported, not billed.** One measurement speaks for at
+most three hours; beyond that the period is recorded as a gap. This is what stops the
+chart lying — a six-hour outage accrues nothing, and without coverage recorded
+separately "the bill went down" and "we stopped watching" are the same picture. Days
+the ledger did not fully measure are drawn hollow rather than solid, every total
+carries a completeness fraction, and the API and MCP tool return it beside every
+figure. A cluster that is priced but returns no metrics has its period recorded as
+unmeasured rather than as a cheap day.
+
+**History does not follow the present.** Customer, app, environment and cluster are
+copied into each row as they stood, and the row keeps bare ids rather than foreign
+keys, so renaming an app, moving it to another customer, or removing a cluster leaves
+what it cost intact. A ledger that re-derives the past from present relationships is
+not a record of anything. The tenant is the one relationship kept, because a purged
+tenant is meant to leave nothing behind.
+
+**Daily grain, six decimal places.** The hourly sweep adds into one row per namespace
+per day — a few thousand rows a month rather than a few hundred thousand — and
+intra-day resolution would say nothing the live run rate does not already show.
+Amounts are stored to six decimals because an hour of a small namespace is fractions
+of a cent, and rounding on the way in would store zero for most of the fleet;
+rounding to money happens once, on display.
+
+**Shipped**: `CostLedgerEntry` / `CostLedgerCoverage` / `CostLedgerCursor` entities and
+migrations (all three providers, `decimal(18,6)` throughout), `CostAccrual` (pure),
+`CostLedgerWriter` with retention pruning, `CostLedgerService`, the history section of
+`CostTab` with a server-rendered SVG chart, per-customer spend in `CustomerCostPanel`,
+`/api/v1/cost/history` and `/api/v1/cost/months`, `entkube cost history` in the CLI, an
+`entkube_cost_history` MCP tool, and 28 unit tests.
+
+**Deliberately not built**: issued invoices. This is a statement of what was measured,
+not a numbered, immutable document with an issue/void lifecycle and locked per-period
+rates — that is an accounting system, with obligations around amendment, retention and
+tax the rest of the product does not have. The UI says so. The run rate remains labelled
+"run rate, not a bill" everywhere it appears, and now has a history beside it that is.
 
 **No advisor findings.** Cost is not a "what needs doing by when" signal with a
 deadline, and forcing it into the Advisor would dilute a feed whose value is that
