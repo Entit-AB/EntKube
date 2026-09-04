@@ -141,6 +141,21 @@ public static class CliCommands
         },
         new CliCommand
         {
+            Path = ["cost", "history"],
+            Description = "Cost actually incurred over a period "
+                        + "(--from yyyy-MM-dd --to yyyy-MM-dd --group-by customer|app|cluster|environment|namespace)",
+            BuildPath = a => "/api/v1/cost/history" + Query(
+                ("from", a.Optional("from")),
+                ("to", a.Optional("to")),
+                ("groupBy", a.Optional("group-by")),
+                ("customerId", a.Optional("customer")),
+                ("appId", a.Optional("app"))),
+            RowsProperty = "groups",
+            Columns = [("NAME", "label"), ("COST", "cost"), ("PREVIOUS", "previousCost"),
+                       ("CHANGE", "change"), ("CPU CORE-H", "cpuCoreHours")],
+        },
+        new CliCommand
+        {
             Path = ["rollouts"],
             Description = "Recent release watches and their verdicts",
             BuildPath = _ => "/api/v1/rollouts",

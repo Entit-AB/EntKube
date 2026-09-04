@@ -505,6 +505,8 @@ public class Program
         builder.Services.AddHostedService<EntKube.Web.Services.SupplyChain.SupplyChainScanService>();
         builder.Services.AddScoped<EntKube.Web.Services.Cost.CostReportService>();
         builder.Services.AddScoped<EntKube.Web.Services.Cost.CostRateService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Cost.CostLedgerWriter>();
+        builder.Services.AddScoped<EntKube.Web.Services.Cost.CostLedgerService>();
         builder.Services.AddSingleton<EntKube.Web.Services.Cost.CostScanCache>();
         builder.Services.AddHostedService<EntKube.Web.Services.Cost.CostScanService>();
         builder.Services.AddScoped<EntKube.Web.Services.Rollouts.RolloutService>();

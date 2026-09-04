@@ -24,6 +24,7 @@ public class CostScanCache
 public class CostScanService(
     IServiceScopeFactory scopeFactory,
     CostScanCache cache,
+    IConfiguration configuration,
     ILogger<CostScanService> logger) : BackgroundService
 {
     /// <summary>
@@ -35,6 +36,16 @@ public class CostScanService(
 
     /// <summary>Offset from the drift and supply-chain sweeps so they do not all fire at once.</summary>
     private static readonly TimeSpan StartupDelay = TimeSpan.FromMinutes(11);
+
+    /// <summary>
+    /// How long the ledger is kept. Generous by default — a daily grain makes even a
+    /// large fleet's year a modest table, and comparing a month against the same month
+    /// last year is the reason anyone keeps cost history at all.
+    /// </summary>
+    private const int DefaultRetentionDays = 800;
+
+    /// <summary>When the ledger was last pruned. Pruning is a daily job riding the hourly sweep.</summary>
+    private DateTime lastPrune = DateTime.MinValue;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -78,6 +89,8 @@ public class CostScanService(
         using IServiceScope scope = scopeFactory.CreateScope();
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
         var costs = scope.ServiceProvider.GetRequiredService<CostReportService>();
+        var rates = scope.ServiceProvider.GetRequiredService<CostRateService>();
+        var ledger = scope.ServiceProvider.GetRequiredService<CostLedgerWriter>();
 
         List<Guid> tenantIds;
         await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
@@ -89,7 +102,26 @@ public class CostScanService(
         {
             try
             {
-                cache.Set(tenantId, await costs.GetTenantReportAsync(tenantId, DateTime.UtcNow, ct));
+                DateTime now = DateTime.UtcNow;
+                CostReport report = await costs.GetTenantReportAsync(tenantId, now, ct);
+                cache.Set(tenantId, report);
+
+                // The run rate is what this sweep measured; the ledger is what it means
+                // over the hours since the last one. Booked here rather than inside the
+                // report service so that a page's "Recalculate" button — which produces
+                // the same report on demand — cannot accrue cost by being clicked.
+                Dictionary<Guid, ClusterCostRate> priced =
+                    (await rates.ListAsync(tenantId, ct)).ToDictionary(r => r.ClusterId);
+
+                CostLedgerWriteResult written =
+                    await ledger.RecordAsync(tenantId, report, priced, now, ct);
+
+                if (written.GapHours > 0m)
+                {
+                    logger.LogInformation(
+                        "Cost ledger for tenant {TenantId}: billed {Billed:F2} h, {Gap:F2} h unmeasured",
+                        tenantId, written.BilledHours, written.GapHours);
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -99,6 +131,37 @@ public class CostScanService(
             {
                 logger.LogWarning(ex, "Cost sweep failed for tenant {TenantId}", tenantId);
             }
+        }
+
+        await PruneAsync(ledger, ct);
+    }
+
+    /// <summary>
+    /// Drops ledger rows past the retention horizon, once a day. Failure is logged and
+    /// swallowed: an unpruned ledger is a table that is larger than it needs to be, which
+    /// is not a reason to fail the sweep that produces the figures.
+    /// </summary>
+    private async Task PruneAsync(CostLedgerWriter ledger, CancellationToken ct)
+    {
+        DateTime now = DateTime.UtcNow;
+        if (now - lastPrune < TimeSpan.FromHours(24))
+        {
+            return;
+        }
+
+        try
+        {
+            int retentionDays = configuration.GetValue("Cost:LedgerRetentionDays", DefaultRetentionDays);
+            await ledger.PruneAsync(retentionDays, now, ct);
+            lastPrune = now;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Cost ledger prune failed");
         }
     }
 }

@@ -457,6 +457,126 @@ public static class PublicApiEndpoints
             });
         }).RequireApiScope(ApiScopes.OpsRead);
 
+        // Cost history — what was actually incurred, as opposed to /cost, which is a
+        // projection of what today would cost over a month. This is the endpoint a
+        // billing system reads; the run rate is the one a dashboard reads.
+        api.MapGet("/cost/history", async (
+            HttpContext ctx, CostLedgerService ledger,
+            string? from, string? to, string? groupBy, Guid? customerId, Guid? appId, Guid? clusterId,
+            CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+
+            DateTime now = DateTime.UtcNow;
+            DateTime toDay = ParseDay(to) ?? now;
+            DateTime fromDay = ParseDay(from) ?? toDay.AddDays(-29);
+
+            if ((toDay - fromDay).TotalDays > 400)
+            {
+                return Results.Problem(
+                    "The window is limited to 400 days.", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            if (!Enum.TryParse(groupBy, ignoreCase: true, out CostGroupBy grouping))
+            {
+                grouping = CostGroupBy.Customer;
+            }
+
+            // An empty ledger and a quiet window are different answers, and a caller
+            // polling this must not read "never measured" as "cost nothing". Same
+            // contract as /drift and /supply-chain.
+            if (!await ledger.HasAnyAsync(tenantId, ct))
+            {
+                return Results.Problem(
+                    "The cost ledger has not recorded anything yet for this tenant. It accrues "
+                    + "hourly once a cluster has a price sheet.",
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            CostHistoryReport report = await ledger.GetHistoryAsync(
+                tenantId, fromDay, toDay, grouping, now, customerId, appId, clusterId, ct);
+
+            return Results.Ok(new
+            {
+                from = report.From,
+                to = report.To,
+                currency = report.Currency,
+                groupBy = report.GroupBy.ToString().ToLowerInvariant(),
+                totalCost = report.TotalCost,
+                previousTotalCost = report.PreviousTotalCost,
+                change = report.Change,
+                changeFraction = report.ChangeFraction,
+                unattributedCost = report.UnattributedCost,
+                multiAppCost = report.MultiAppCost,
+                platformCost = report.PlatformCost,
+                sharedChargedOutCost = report.SharedChargedOutCost,
+                dailyAverage = report.DailyAverage,
+                // Coverage travels with every figure: an under-measured window
+                // under-states cost, and a caller that cannot see that will read the
+                // shortfall as a saving.
+                coverage = new
+                {
+                    coveredHours = report.CoveredHours,
+                    expectedHours = report.ExpectedHours,
+                    gapHours = report.GapHours,
+                    completeness = report.Completeness,
+                    complete = report.IsComplete,
+                },
+                warnings = report.Warnings,
+                daily = report.Daily.Select(d => new
+                {
+                    day = d.Day,
+                    cost = d.Cost,
+                    coveredHours = d.CoveredHours,
+                    expectedHours = d.ExpectedHours,
+                    complete = d.IsComplete,
+                }),
+                groups = report.Groups.Select(g => new
+                {
+                    id = g.Id,
+                    label = g.Label,
+                    cost = g.Cost,
+                    previousCost = g.PreviousCost,
+                    change = g.Change,
+                    changeFraction = g.ChangeFraction,
+                    isNew = g.IsNew,
+                    isGone = g.IsGone,
+                    cpuCoreHours = g.CpuCoreHours,
+                    memoryGiBHours = g.MemoryGiBHours,
+                    storageGiBHours = g.StorageGiBHours,
+                    unattributed = g.IsUnattributed,
+                }),
+            });
+        }).RequireApiScope(ApiScopes.OpsRead);
+
+        api.MapGet("/cost/months", async (
+            HttpContext ctx, CostLedgerService ledger, int? months, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+
+            if (!await ledger.HasAnyAsync(tenantId, ct))
+            {
+                return Results.Problem(
+                    "The cost ledger has not recorded anything yet for this tenant.",
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            IReadOnlyList<CostMonth> all =
+                await ledger.GetMonthlyAsync(
+                    tenantId, Math.Clamp(months ?? 12, 1, 36), DateTime.UtcNow, customerId: null, ct);
+
+            return Results.Ok(all.Select(m => new
+            {
+                year = m.Year,
+                month = m.Month,
+                label = m.Label,
+                cost = m.Cost,
+                currency = m.Currency,
+                completeness = m.Completeness,
+                complete = m.IsComplete,
+            }));
+        }).RequireApiScope(ApiScopes.OpsRead);
+
         api.MapGet("/rollouts", async (
             HttpContext ctx, IDbContextFactory<ApplicationDbContext> dbFactory, CancellationToken ct) =>
         {
@@ -595,6 +715,20 @@ public static class PublicApiEndpoints
             return Results.Ok(new { ok = true });
         }).RequireApiScope(ApiScopes.OpsWrite);
     }
+
+    /// <summary>
+    /// Parses a yyyy-MM-dd query parameter as a UTC day. Returns null for anything else,
+    /// so a mistyped date falls back to the default window rather than being read as
+    /// some other date the caller did not ask for.
+    /// </summary>
+    private static DateTime? ParseDay(string? value) =>
+        DateTime.TryParse(
+            value, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal
+                | System.Globalization.DateTimeStyles.AssumeUniversal,
+            out DateTime parsed)
+            ? DateTime.SpecifyKind(parsed.Date, DateTimeKind.Utc)
+            : null;
 
     /// <summary>Shape a price sheet is returned in. A DTO so the entity can move without breaking clients.</summary>
     private static object ToCostRateDto(ClusterCostRate rate) => new
