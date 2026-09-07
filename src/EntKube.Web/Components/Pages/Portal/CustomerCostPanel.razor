@@ -1,6 +1,7 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services.Cost
 @inject CostScanCache ScanCache
+@inject CostLedgerService Ledger
 
 @* Customer-facing consumption and cost. Reads the cached tenant report and shows
    ONLY this customer's rows — a customer must never see another's figures, nor the
@@ -19,7 +20,7 @@ else if (apps.Count == 0 && shared.Count == 0)
 else
 {
     <div class="row g-3 mb-3">
-        <div class="col-6 col-md-4">
+        <div class="col-6 col-md-3">
             <div class="card shadow-sm h-100">
                 <div class="card-body py-3">
                     <div class="text-muted small text-uppercase">Monthly run rate</div>
@@ -27,7 +28,36 @@ else
                 </div>
             </div>
         </div>
-        <div class="col-6 col-md-4">
+        <div class="col-6 col-md-3">
+            <div class="card shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Spent, last 30 days</div>
+                    @if (spent is null)
+                    {
+                        <div class="display-6 fw-semibold text-muted">—</div>
+                        <div class="text-muted small">not recorded yet</div>
+                    }
+                    else
+                    {
+                        <div class="display-6 fw-semibold">@Spent(spent.TotalCost)</div>
+                        <div class="text-muted small">
+                            @if (spent.PreviousTotalCost > 0m)
+                            {
+                                <span class="@(spent.Change > 0m ? "text-danger" : spent.Change < 0m ? "text-success" : "")">
+                                    @($"{(spent.Change > 0m ? "+" : "")}{spent.ChangeFraction * 100:N0}%")
+                                </span>
+                                <span>on the 30 days before</span>
+                            }
+                            else
+                            {
+                                <span>actually incurred</span>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
             <div class="card shadow-sm h-100">
                 <div class="card-body py-3">
                     <div class="text-muted small text-uppercase">CPU reserved</div>
@@ -36,7 +66,7 @@ else
                 </div>
             </div>
         </div>
-        <div class="col-6 col-md-4">
+        <div class="col-6 col-md-3">
             <div class="card shadow-sm h-100">
                 <div class="card-body py-3">
                     <div class="text-muted small text-uppercase">Memory reserved</div>
@@ -106,6 +136,30 @@ else
         </table>
     </div>
 
+    @if (spentMonths.Count > 1)
+    {
+        <h6 class="small text-muted fw-semibold mt-4">What your workloads cost, by month</h6>
+        <table class="table table-sm mb-0" style="max-width:26rem">
+            <tbody>
+                @foreach (CostMonth month in spentMonths.AsEnumerable().Reverse())
+                {
+                    <tr>
+                        <td class="small">@month.Label</td>
+                        <td class="text-end small fw-medium">@Spent(month.Cost)</td>
+                        <td class="small text-muted text-end">
+                            @if (!month.IsComplete)
+                            {
+                                <span title="Part of this month was not measured, so this is lower than what ran.">
+                                    partial
+                                </span>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
     <p class="text-muted small mt-3 mb-1">
         <strong>Platform</strong> is your share of the shared infrastructure your workloads run on —
         ingress, monitoring, logging and the cluster itself. It is apportioned by how much CPU,
@@ -113,9 +167,10 @@ else
         own footprint rather than being a flat fee.
     </p>
     <p class="text-muted small mb-0">
-        Figures are a <strong>run rate</strong>: what your current reservations project to over a
-        730-hour month, as of @report.GeneratedAt.ToString("yyyy-MM-dd HH:mm") UTC. They change when
-        workloads are scaled or redeployed, and are not a final invoice.
+        The <strong>run rate</strong> is what your current reservations project to over a 730-hour
+        month, as of @report.GeneratedAt.ToString("yyyy-MM-dd HH:mm") UTC; it changes when workloads
+        are scaled or redeployed. The <strong>spend</strong> figures are what your workloads actually
+        consumed over the days shown. Neither is an invoice.
     </p>
 }
 
@@ -133,6 +188,44 @@ else
     /// being folded into one app's figure.
     /// </summary>
     private List<NamespaceCost> shared = [];
+
+    /// <summary>
+    /// What this customer actually accrued over the last 30 days, as opposed to what
+    /// their current reservations project to. Null until the ledger has recorded
+    /// something — which reads as "not recorded yet" rather than as zero, because a
+    /// customer told they spent nothing would reasonably expect no invoice.
+    /// </summary>
+    private CostHistoryReport? spent;
+
+    private IReadOnlyList<CostMonth> spentMonths = [];
+
+    protected override async Task OnParametersSetAsync()
+    {
+        try
+        {
+            DateTime now = DateTime.UtcNow;
+
+            // Scoped to this customer inside the query, not filtered afterwards: the
+            // panel must never hold another customer's figures, even briefly.
+            spent = await Ledger.HasAnyAsync(Customer.TenantId)
+                ? await Ledger.GetHistoryAsync(
+                    Customer.TenantId, now.AddDays(-29), now, CostGroupBy.App, now,
+                    customerId: Customer.Id)
+                : null;
+
+            spentMonths = spent is null
+                ? []
+                : [.. (await Ledger.GetMonthlyAsync(Customer.TenantId, months: 6, now, customerId: Customer.Id))
+                    .Where(m => m.Cost > 0m)];
+        }
+        catch
+        {
+            // Cost history is supplementary here; the run rate above is the panel's
+            // purpose and must still render if the ledger cannot be read.
+            spent = null;
+            spentMonths = [];
+        }
+    }
 
     protected override void OnParametersSet()
     {
@@ -162,4 +255,10 @@ else
     private double TotalMemory => apps.Sum(a => a.MemoryGiB) + shared.Sum(n => n.MemoryGiB);
 
     private string Money(decimal value) => $"{value:N2} {report?.Currency ?? ""}".Trim();
+
+    /// <summary>
+    /// Formats a historical amount in the currency the ledger recorded it in, which need
+    /// not be the one the fleet is priced in today.
+    /// </summary>
+    private string Spent(decimal value) => $"{value:N2} {spent?.Currency ?? ""}".Trim();
 }

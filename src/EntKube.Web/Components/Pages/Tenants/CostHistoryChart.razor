@@ -1,0 +1,117 @@
+@using EntKube.Web.Services.Cost
+@using System.Globalization
+
+@* ═══════════════════════════════════════════════════════════════════════════
+   CostHistoryChart — accrued cost per day as SVG bars. Server-rendered, no JS.
+
+   Days the ledger did not fully measure are drawn hollow rather than solid,
+   because they are short for a reason that has nothing to do with consumption.
+   Drawing them like any other day would make an outage look like a saving —
+   which is the one way a cost chart can be actively harmful.
+   ═══════════════════════════════════════════════════════════════════════════ *@
+
+<div class="cost-history-chart">
+    @if (Points.Count == 0)
+    {
+        <div class="text-center py-4 border rounded bg-light-subtle">
+            <span class="small text-muted">Nothing recorded in this period.</span>
+        </div>
+    }
+    else
+    {
+        <div style="display:grid;grid-template-columns:auto 1fr;grid-template-rows:@(HeightPx)px auto;column-gap:8px;">
+            <div class="d-flex flex-column justify-content-between text-muted"
+                 style="grid-column:1;grid-row:1;font-size:0.7rem;">
+                <span>@Axis(Max)</span>
+                <span>@Axis(Max / 2)</span>
+                <span>0</span>
+            </div>
+
+            <div style="grid-column:2;grid-row:1;min-width:0;">
+                <svg viewBox="0 0 @Width 100" preserveAspectRatio="none"
+                     style="width:100%;height:@(HeightPx)px;display:block;">
+                    @* Baseline and midline, kept recessive. *@
+                    <line x1="0" y1="100" x2="@Width" y2="100" stroke="currentColor"
+                          stroke-opacity="0.15" stroke-width="1" vector-effect="non-scaling-stroke" />
+                    <line x1="0" y1="50" x2="@Width" y2="50" stroke="currentColor"
+                          stroke-opacity="0.08" stroke-width="1" vector-effect="non-scaling-stroke" />
+
+                    @for (int i = 0; i < Points.Count; i++)
+                    {
+                        CostHistoryPoint point = Points[i];
+                        double height = Max > 0m ? (double)(point.Cost / Max) * 100d : 0d;
+                        double x = i * BarPitch;
+                        double y = 100d - height;
+
+                        <rect x="@F(x)" y="@F(y)" width="@F(BarWidth)" height="@F(Math.Max(height, 0.5))"
+                              fill="@(point.IsComplete ? "var(--bs-primary)" : "transparent")"
+                              fill-opacity="@(point.IsComplete ? "0.85" : "0")"
+                              stroke="@(point.IsComplete ? "none" : "var(--bs-warning)")"
+                              stroke-width="1"
+                              stroke-dasharray="2 1.5"
+                              vector-effect="non-scaling-stroke">
+                            <title>@Tooltip(point)</title>
+                        </rect>
+                    }
+                </svg>
+            </div>
+
+            <div class="d-flex justify-content-between text-muted"
+                 style="grid-column:2;grid-row:2;font-size:0.7rem;">
+                <span>@Points[0].Day.ToString("d MMM")</span>
+                <span>@Points[^1].Day.ToString("d MMM")</span>
+            </div>
+        </div>
+
+        @if (Points.Any(p => !p.IsComplete))
+        {
+            <div class="small text-muted mt-1">
+                <span class="border border-warning rounded"
+                      style="display:inline-block;width:10px;height:10px;border-style:dashed;"></span>
+                <span class="ms-1">
+                    Days the ledger did not fully measure. Their cost is a floor, not the amount.
+                </span>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<CostHistoryPoint> Points { get; set; } = [];
+
+    /// <summary>Currency shown in the axis and tooltips. Display only — no conversion.</summary>
+    [Parameter] public string Currency { get; set; } = "USD";
+
+    [Parameter] public int HeightPx { get; set; } = 140;
+
+    private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+
+    /// <summary>
+    /// A fixed viewBox width the bars are laid out in, scaled to the container by
+    /// preserveAspectRatio. Keeps the geometry independent of how wide the card is.
+    /// </summary>
+    private const double Width = 1000d;
+
+    private double BarPitch => Points.Count > 0 ? Width / Points.Count : Width;
+
+    /// <summary>A hair of space between bars, but never so little that they merge into a block.</summary>
+    private double BarWidth => Math.Max(BarPitch * 0.8d, 1d);
+
+    private decimal Max => Points.Count == 0 ? 0m : Points.Max(p => p.Cost);
+
+    private static string F(double value) => value.ToString("F2", Inv);
+
+    private string Axis(decimal value) => value.ToString(value >= 100m ? "N0" : "N2");
+
+    private string Tooltip(CostHistoryPoint point)
+    {
+        string amount = $"{point.Day:ddd d MMM}: {point.Cost.ToString("N2")} {Currency}";
+
+        // The completeness is part of the number, not a footnote: a reader comparing two
+        // bars needs to know that one of them is short because nobody was watching.
+        return point.IsComplete
+            ? amount
+            : $"{amount} — only {point.Completeness * 100:N0}% of the day was measured, "
+              + "so the real cost was higher";
+    }
+}

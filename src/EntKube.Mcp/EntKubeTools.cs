@@ -179,9 +179,41 @@ public static class EntKubeTools
             Description = "What the fleet costs at the current rate of consumption, broken down "
                         + "by customer, environment and namespace. These are run-rate projections "
                         + "over a 730-hour month, not a historical bill — they reflect what is "
-                        + "reserved right now. Returns 503 if no calculation has run yet.",
+                        + "reserved right now. Returns 503 if no calculation has run yet. For "
+                        + "what was actually spent, or any comparison over time, use "
+                        + "entkube_cost_history instead.",
             InputSchema = NoArgs(),
             Handler = (api, _, ct) => api.GetAsync("/api/v1/cost", ct),
+        },
+
+        new McpTool
+        {
+            Name = "entkube_cost_history",
+            Description = "What the fleet ACTUALLY cost over a period, day by day and broken "
+                        + "down, with the preceding period of the same length for comparison. "
+                        + "Use this — not entkube_cost — for any question about a trend, a "
+                        + "change, or what something cost last month; entkube_cost is a "
+                        + "projection of the present, and cannot answer those. Figures come with "
+                        + "a coverage fraction: a period the management plane did not fully "
+                        + "measure under-states cost, so a completeness below 1 means the total "
+                        + "is a floor, not the amount. Returns 503 if the ledger is empty, which "
+                        + "means cost has never been recorded — not that it was zero.",
+            InputSchema = ObjectSchema(new JsonObject
+            {
+                ["from"] = StringProp("First day of the window, yyyy-MM-dd. Defaults to 30 days ago."),
+                ["to"] = StringProp("Last day of the window, yyyy-MM-dd. Defaults to today."),
+                ["groupBy"] = StringProp(
+                    "How to break the total down: customer (default), app, cluster, environment or namespace."),
+                ["customerId"] = StringProp("Optional customer id (GUID) to restrict the window to."),
+                ["appId"] = StringProp("Optional app id (GUID) to restrict the window to."),
+            }),
+            Handler = (api, args, ct) => api.GetAsync(
+                "/api/v1/cost/history" + EntKubeApiClient.QueryString(
+                    ("from", EntKubeApiClient.OptionalString(args, "from")),
+                    ("to", EntKubeApiClient.OptionalString(args, "to")),
+                    ("groupBy", EntKubeApiClient.OptionalString(args, "groupBy")),
+                    ("customerId", EntKubeApiClient.OptionalString(args, "customerId")),
+                    ("appId", EntKubeApiClient.OptionalString(args, "appId"))), ct),
         },
 
         new McpTool

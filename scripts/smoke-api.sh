@@ -60,7 +60,7 @@ echo
 echo "Sweep-backed endpoints answer 503 until a sweep has run"
 echo "  (503 means UNMEASURED, which is not the same as nothing being wrong —"
 echo "   a 200 with an empty list here would be a false all-clear)"
-for ep in drift supply-chain cost disaster-recovery; do
+for ep in drift supply-chain cost cost/history cost/months disaster-recovery; do
   code="$(status GET "/api/v1/$ep")"
   if [[ "$code" == "503" || "$code" == "200" ]]; then
     printf '  ok    %-52s %s\n' "GET /$ep" "$code"
@@ -70,6 +70,20 @@ for ep in drift supply-chain cost disaster-recovery; do
     FAIL=$((FAIL + 1))
   fi
 done
+
+echo
+echo "Cost history bounds its window"
+code="$(status GET '/api/v1/cost/history?from=2000-01-01&to=2030-01-01')"
+if [[ "$code" == "400" ]]; then
+  printf '  ok    %-52s %s\n' "GET /cost/history (2-year window)" "$code"
+  PASS=$((PASS + 1))
+elif [[ "$code" == "503" ]]; then
+  printf '  ok    %-52s %s (ledger empty)\n' "GET /cost/history (2-year window)" "$code"
+  PASS=$((PASS + 1))
+else
+  printf '  FAIL  %-52s expected 400 or 503, got %s\n' "GET /cost/history (2-year window)" "$code"
+  FAIL=$((FAIL + 1))
+fi
 
 if [[ -n "${ENTKUBE_READONLY_TOKEN:-}" ]]; then
   echo
