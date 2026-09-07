@@ -62,7 +62,23 @@ telemetry:
   warmRetentionDays: 3
   # Hard ceiling on locally-held segment bytes, evicting least-recently-used first. The backstop for a
   # burst that seals more than warmRetentionDays anticipated. 0 disables the size bound.
-  warmMaxBytes: 8589934592
+  #
+  # Keep this WELL under indexer.persistence.size, and further under it when no bucket is configured:
+  # without object storage the sealed ARCHIVES live on this same volume too, so the warm tier is sharing
+  # the disk with the entire retention window rather than being the only thing on it.
+  warmMaxBytes: 4294967296
+
+  # The bound on the VOLUME, as opposed to the bounds above, each of which limits one consumer of it.
+  #
+  # Past highWater the node reclaims down to target: first by evicting warm copies, which costs a
+  # download on a later query and nothing else. If that is not enough AND the archives are on this volume
+  # (no bucket configured), it then deletes the OLDEST sealed segments — real data loss, done knowingly,
+  # because the alternative is a full disk, which fails writes, makes the collector upstream buffer until
+  # it is OOM-killed, and loses the NEWEST data instead. Set dropOldestWhenFull false if you would rather
+  # the indexer stop than lose the far end of the window.
+  volumeHighWaterPercent: 85
+  volumeTargetPercent: 70
+  dropOldestWhenFull: true
 
   # Most log VOLUME is DEBUG/INFO noise, so it ages out early while WARN+ keeps the full window.
   tieredLogRetention: true
@@ -92,8 +108,10 @@ indexer:
   # (the collector ships to one endpoint) and holds an empty volume.
   enabled: true
   persistence:
-    # Sized for the warm tier plus the unsealed active index. Below warmMaxBytes and the size rule will be
-    # evicting constantly; well above it is wasted.
+    # Sized for the warm tier plus the unsealed active index — and, when no object storage is configured,
+    # the whole retention window of sealed archives as well, which is far larger than either. A bucket is
+    # what keeps this volume small; without one, 20Gi holds only a few days of a busy cluster and the
+    # volume guard will be ageing data out to stay under its high-water mark.
     size: 20Gi
     storageClass: ""
   # ALWAYS set cpu explicitly, including the limit. A namespace LimitRange with a default CPU limit will

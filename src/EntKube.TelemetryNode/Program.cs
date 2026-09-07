@@ -33,6 +33,10 @@ SegmentEngineOptions engine = new()
     VerboseLogRetentionDays = builder.Configuration.GetValue<int?>("Telemetry:VerboseLogRetentionDays") ?? 14,
     WarmRetentionDays = builder.Configuration.GetValue<int?>("Telemetry:WarmRetentionDays") ?? 3,
     WarmMaxBytes = builder.Configuration.GetValue<long?>("Telemetry:WarmMaxBytes") ?? 8L * 1024 * 1024 * 1024,
+    VolumeHighWaterPercent = builder.Configuration.GetValue<int?>("Telemetry:VolumeHighWaterPercent") ?? 85,
+    VolumeTargetPercent = builder.Configuration.GetValue<int?>("Telemetry:VolumeTargetPercent") ?? 70,
+    DropOldestWhenVolumeFull =
+        builder.Configuration.GetValue<bool?>("Telemetry:DropOldestWhenVolumeFull") ?? true,
 };
 builder.Services.AddSingleton(engine);
 
@@ -162,6 +166,20 @@ if (node.Role == NodeRole.Indexer)
     builder.Services.AddHostedService(sp => new SegmentSealService(
         sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(), engine,
         sp.GetRequiredService<ILogger<SegmentSealService>>()));
+
+    // Each of those bounds one consumer of the volume. This one measures the volume — the bound that was
+    // missing, and the reason an indexer with no object storage could fill its disk while every individual
+    // setting was being honoured.
+    builder.Services.AddHostedService(sp => new VolumeGuardService(
+        [
+            sp.GetRequiredService<SegmentManagerRegistry<LogSegmentManager>>(),
+            sp.GetRequiredService<SegmentManagerRegistry<VerboseLogSegmentManager>>(),
+            sp.GetRequiredService<SegmentManagerRegistry<SpanSegmentManager>>(),
+            sp.GetRequiredService<SegmentManagerRegistry<RumSegmentManager>>(),
+            sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(),
+        ],
+        sp.GetRequiredService<ISegmentBlobStore>(), engine,
+        sp.GetRequiredService<ILogger<VolumeGuardService>>()));
 }
 
 else

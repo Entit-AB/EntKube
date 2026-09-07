@@ -190,6 +190,60 @@ public sealed class SegmentCatalogContractTests : IDisposable
     }
 
     [Theory, MemberData(nameof(Implementations))]
+    public async Task Named_segments_are_removed_and_reported_back(string kind)
+    {
+        // The volume guard picks its own victims — oldest first — rather than using a time cutoff, so the
+        // catalog needs to unlist an explicit set. Same contract as expiry: the returned rows are exactly
+        // what the caller will delete from storage.
+        ISegmentCatalog catalog = Create(kind);
+        Guid tenant = Guid.NewGuid();
+        DateTime day = new(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        TelemetrySegment first = Segment(tenant, "logs", day, day.AddHours(1));
+        TelemetrySegment second = Segment(tenant, "logs", day.AddDays(1), day.AddDays(1).AddHours(1));
+        await catalog.AddAsync(first);
+        await catalog.AddAsync(second);
+
+        IReadOnlyList<TelemetrySegment> removed = await catalog.RemoveAsync(tenant, "logs", [first.Id]);
+
+        removed.Should().ContainSingle();
+        removed[0].ObjectKey.Should().Be(first.ObjectKey);
+
+        IReadOnlyList<TelemetrySegment> left = await catalog.ListOverlappingAsync(tenant, "logs", null, null);
+        left.Should().ContainSingle();
+        left[0].Id.Should().Be(second.Id);
+    }
+
+    [Theory, MemberData(nameof(Implementations))]
+    public async Task Removing_another_tenants_segment_by_id_does_nothing(string kind)
+    {
+        // The id alone must never be enough. These rows point at archives holding raw log bodies, so a
+        // guessed or leaked id reaching a delete for the wrong tenant would be a cross-tenant data loss.
+        ISegmentCatalog catalog = Create(kind);
+        Guid mine = Guid.NewGuid();
+        Guid theirs = Guid.NewGuid();
+        DateTime day = new(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        TelemetrySegment other = Segment(theirs, "logs", day, day.AddHours(1));
+        await catalog.AddAsync(other);
+
+        (await catalog.RemoveAsync(mine, "logs", [other.Id])).Should().BeEmpty();
+        (await catalog.ListOverlappingAsync(theirs, "logs", null, null)).Should().ContainSingle();
+    }
+
+    [Theory, MemberData(nameof(Implementations))]
+    public async Task Removing_an_empty_set_is_a_no_op(string kind)
+    {
+        ISegmentCatalog catalog = Create(kind);
+        Guid tenant = Guid.NewGuid();
+        DateTime day = new(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc);
+        await catalog.AddAsync(Segment(tenant, "logs", day, day.AddHours(1)));
+
+        (await catalog.RemoveAsync(tenant, "logs", [])).Should().BeEmpty();
+        (await catalog.ListOverlappingAsync(tenant, "logs", null, null)).Should().ContainSingle();
+    }
+
+    [Theory, MemberData(nameof(Implementations))]
     public async Task The_earliest_indexed_time_is_reported_per_signal(string kind)
     {
         ISegmentCatalog catalog = Create(kind);

@@ -617,6 +617,55 @@ the CPU of the middle for a few percent of ratio.
 that data, never from process-local state. A counter that resets on restart is not a fact about an index —
 and the failure it causes is invisible, because "nothing to seal" and "nothing here" look identical.
 
+## 5.11 The bound on the volume, not just on its consumers
+
+The indexer filled its PersistentVolume in the field, at 100%, while every setting that limits disk was
+being honoured. That is the interesting part: `warmMaxBytes` bounded the warm tier, the roll thresholds
+bounded the active index, `retentionDays` bounded the window. Each bounded one **consumer** of the volume.
+Nothing bounded the **volume**.
+
+The gap opens when no object storage is configured. The node then seals to
+`{DataPath}/blobs` on that same volume, so the disk holds the active index, the warm tier *and* the entire
+retention window of archives — while being sized for the first two. Ninety days of compressed archives on
+a 20 GiB disk is not a close call.
+
+It gets worse than a full disk, because a full disk here is not a quiet degradation:
+
+    volume 100% → index writes fail → /ingest/otlp answers 500
+                → the collector retries 5xx and buffers while it does
+                → the collector's queue grows until the kubelet OOM-kills it
+                → the node's filelog position is lost with it
+
+Two alerts — a full PVC and a collector at its memory limit — one cause. And what is lost is the *newest*
+telemetry, at the moment somebody is trying to watch something.
+
+`VolumeGuardService` measures the volume every two minutes and acts in the order that costs least:
+
+1. **Evict the warm tier.** Local copies of sealed segments, whose archives are durable elsewhere. Costs a
+   download on a later query and nothing else, so it needs nobody's permission.
+2. **Drop the oldest sealed segments** — only when the archives are on this same volume (with a bucket,
+   deleting them frees nothing here), only when step 1 has been exhausted, and never the last segment of a
+   signal.
+
+Step 2 destroys telemetry, deliberately. **When the volume cannot hold the retention window, dropping the
+oldest beats stalling on the newest** — that is the trade every log store makes, and making it knowingly is
+far better than arriving at it by filling up. It is loud in the logs and `dropOldestWhenFull: false` turns
+it off, for an operator who would genuinely rather the indexer stop. It will stop, and take the collector
+with it.
+
+Two details that would each have made the guard useless:
+
+- It measures `DataPath`, **not** its path root. `Path.GetPathRoot("/data/telemetry")` is `/` — the
+  container's own filesystem — so the guard would have reported the image's free space while the mounted
+  PersistentVolume, the only disk that matters, filled up unwatched.
+- A failed measurement reports zero bytes, which the policy reads as *unknown* and acts on by doing
+  nothing. Reading it as 100% would delete data because a `statvfs` call failed.
+
+The collector side is bounded too, in `ComponentCatalog`: the batch processor and the exporter's sending
+queue are now stated rather than inherited. The chart's defaults — 8192 records a batch, 1000 batches
+queued — are up to eight million records resident when the destination is down. That is not a queue; it is
+an unbounded buffer with a large number written beside it.
+
 ## 6. Open items
 
 - **Indexer HA.** The engine is single-writer by design — one `IndexWriter` per signal,

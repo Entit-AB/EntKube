@@ -88,6 +88,12 @@ exactly why this is easy to miss until someone raises a limit.
   value: {{ .Values.telemetry.segmentMaxAgeMinutes | int64 | quote }}
 - name: Telemetry__ArchiveZstdLevel
   value: {{ .Values.telemetry.archiveZstdLevel | int64 | quote }}
+- name: Telemetry__VolumeHighWaterPercent
+  value: {{ .Values.telemetry.volumeHighWaterPercent | int64 | quote }}
+- name: Telemetry__VolumeTargetPercent
+  value: {{ .Values.telemetry.volumeTargetPercent | int64 | quote }}
+- name: Telemetry__DropOldestWhenVolumeFull
+  value: {{ .Values.telemetry.dropOldestWhenFull | quote }}
 {{- if .Values.objectStorage.bucket }}
 - name: Telemetry__ObjectStorage__Bucket
   value: {{ .Values.objectStorage.bucket | quote }}

@@ -1660,6 +1660,16 @@ public static class ComponentCatalog
                           - tag_name: app.kubernetes.io/name
                             key: app.kubernetes.io/name
                             from: pod
+                    # Bounded batching, stated rather than inherited. The chart's default batch
+                    # processor sends 8192 records at a time, and the exporter's default queue holds
+                    # 1000 batches — together up to eight MILLION records resident in memory when the
+                    # destination is unavailable. That is not a queue, it is an unbounded buffer with a
+                    # large number written next to it, and it is how a collector reaches its memory limit
+                    # while the indexer downstream is refusing writes.
+                    batch:
+                      send_batch_size: 1024
+                      send_batch_max_size: 2048
+                      timeout: 5s
                     # Alias long OTel resource attributes -> short names (ingest fallback).
                     resource/short-labels:
                       attributes:
@@ -1679,6 +1689,32 @@ public static class ComponentCatalog
                       encoding: json
                       auth:
                         authenticator: bearertokenauth
+                      timeout: 30s
+                      # A BOUNDED queue, and the bound is the point.
+                      #
+                      # When the destination cannot accept writes — the indexer's volume is full, the
+                      # ingest URL is wrong, the network is out — it answers 5xx, and a collector retries
+                      # 5xx while buffering everything behind it. With the defaults that buffer grows
+                      # until the kubelet OOM-kills the pod, which loses the queue anyway AND the
+                      # filelog reader's place, so the outage costs strictly more than the data it was
+                      # trying to protect.
+                      #
+                      # 32 batches of at most 2048 records is tens of megabytes, sized to sit far inside
+                      # the 512Mi limit above with the rest of the collector's working set. Past that,
+                      # new data is refused at the receiver and the oldest is dropped: losing some logs
+                      # during a downstream outage is a far better outcome than losing the collector.
+                      sending_queue:
+                        enabled: true
+                        num_consumers: 4
+                        queue_size: 32
+                      # Retry, but give up. Unbounded retry is what keeps a queue full forever: the
+                      # elapsed cap means a batch that cannot be delivered within a few minutes is
+                      # dropped, freeing its memory for data that still can be.
+                      retry_on_failure:
+                        enabled: true
+                        initial_interval: 5s
+                        max_interval: 30s
+                        max_elapsed_time: 120s
 
                   service:
                     extensions: [health_check, bearertokenauth, file_storage/filelog]
@@ -1871,7 +1907,7 @@ public static class ComponentCatalog
             Category = "Monitoring",
             HelmRepoUrl = "oci://entit.azurecr.io/helm",
             HelmChartName = "entkube-telemetry",
-            HelmChartVersion = "0.3.0",
+            HelmChartVersion = "0.4.0",
             ImageRegistryHost = "entit.azurecr.io",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "entkube-telemetry",
@@ -1903,8 +1939,29 @@ public static class ComponentCatalog
                 {
                     Key = "warm-max-bytes", Label = "Warm tier size ceiling (bytes)",
                     YamlPath = "telemetry.warmMaxBytes", Type = FormFieldType.Number,
-                    DefaultValue = "8589934592",
-                    HelpText = "Backstop for a burst that seals more than the day window anticipated: least-recently-used segments are evicted first. 0 disables the size bound. Default 8 GiB."
+                    DefaultValue = "4294967296",
+                    HelpText = "Backstop for a burst that seals more than the day window anticipated: least-recently-used segments are evicted first. 0 disables the size bound. Default 4 GiB — keep it well under the volume size, and further under it without object storage, where the sealed archives share the same disk."
+                },
+                new ComponentFormField
+                {
+                    Key = "volume-high-water", Label = "Volume high-water mark (%)",
+                    YamlPath = "telemetry.volumeHighWaterPercent", Type = FormFieldType.Number,
+                    DefaultValue = "85",
+                    HelpText = "Used-percentage of the volume at which the indexer starts reclaiming space. This is the bound on the DISK; every other setting here bounds one consumer of it. A full volume fails writes, and the collector upstream then buffers until it is OOM-killed — so this triggers well before that."
+                },
+                new ComponentFormField
+                {
+                    Key = "volume-target", Label = "Reclaim down to (%)",
+                    YamlPath = "telemetry.volumeTargetPercent", Type = FormFieldType.Number,
+                    DefaultValue = "70",
+                    HelpText = "Where reclaiming stops. Below the high-water mark on purpose: reclaiming back to exactly the trigger would fire again on the next cycle, taking a little more each time."
+                },
+                new ComponentFormField
+                {
+                    Key = "drop-oldest-when-full", Label = "Drop oldest data when the volume fills",
+                    YamlPath = "telemetry.dropOldestWhenFull", Type = FormFieldType.Toggle,
+                    DefaultValue = "true",
+                    HelpText = "When the volume is at its high-water mark with nothing left to evict, delete the OLDEST sealed segments to keep recording. Applies only without object storage, where the archives are on this volume — with a bucket, deleting them frees nothing here. Turn it off only if you would rather the indexer stop than lose the far end of the window; it will stop, and the collector upstream will be OOM-killed with it."
                 },
                 new ComponentFormField
                 {
@@ -1991,7 +2048,7 @@ public static class ComponentCatalog
             Category = "Monitoring",
             HelmRepoUrl = "oci://entit.azurecr.io/helm",
             HelmChartName = "entkube-telemetry",
-            HelmChartVersion = "0.3.0",
+            HelmChartVersion = "0.4.0",
             ImageRegistryHost = "entit.azurecr.io",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "entkube-telemetry-query",

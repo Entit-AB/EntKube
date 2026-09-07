@@ -47,6 +47,22 @@ public sealed class EfSegmentCatalog(IDbContextFactory<ApplicationDbContext> dbF
         return expired;
     }
 
+    public async Task<IReadOnlyList<TelemetrySegment>> RemoveAsync(
+        Guid tenantId, string signal, IReadOnlyCollection<Guid> segmentIds, CancellationToken ct = default)
+    {
+        if (segmentIds.Count == 0) return [];
+
+        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        List<TelemetrySegment> rows = await db.TelemetrySegments
+            .Where(s => s.TenantId == tenantId && s.Signal == signal && segmentIds.Contains(s.Id))
+            .ToListAsync(ct);
+        if (rows.Count == 0) return [];
+
+        db.TelemetrySegments.RemoveRange(rows);
+        await db.SaveChangesAsync(ct);
+        return rows;
+    }
+
     public async Task<DateTime?> GetMinTsAsync(Guid tenantId, string signal, CancellationToken ct = default)
     {
         await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
