@@ -12,6 +12,14 @@
                  LastRefreshed="lastRefreshed" />
 </div>
 
+@* ── First paint: the page has not yet read the tenant's own records ── *@
+@if (isLoading && clusterSummaries.Count == 0)
+{
+    <div class="text-center py-4 text-muted">
+        <span class="spinner-border spinner-border-sm me-2"></span>Loading…
+    </div>
+}
+
 @* ── Tenant-level summary strip ── *@
 @if (clusterSummaries.Count > 0)
 {
@@ -21,11 +29,15 @@
             <div class="text-muted small">Clusters</div>
         </div>
         <div class="card border-0 bg-light text-center px-3 py-2">
-            <div class="fw-bold fs-4">@clusterSummaries.Sum(s => s.Health?.TotalNodes ?? 0)</div>
+            <div class="fw-bold fs-4">
+                @clusterSummaries.Sum(s => s.Health?.TotalNodes ?? 0)@(StillMeasuring ? "…" : "")
+            </div>
             <div class="text-muted small">Nodes</div>
         </div>
         <div class="card border-0 bg-light text-center px-3 py-2">
-            <div class="fw-bold fs-4">@clusterSummaries.Sum(s => s.Health?.RunningPods ?? 0)</div>
+            <div class="fw-bold fs-4">
+                @clusterSummaries.Sum(s => s.Health?.RunningPods ?? 0)@(StillMeasuring ? "…" : "")
+            </div>
             <div class="text-muted small">Running Pods</div>
         </div>
         <div class="card border-0 text-center px-3 py-2 @(tenantActiveAlerts > 0 ? "bg-danger-subtle" : "bg-light")"
@@ -83,13 +95,27 @@
                     {
                         <span class="badge bg-danger">@vm.ActiveAlerts alert@(vm.ActiveAlerts == 1 ? "" : "s")</span>
                     }
+                    else if (vm.Loading)
+                    {
+                        <span class="badge bg-secondary">Checking…</span>
+                    }
                     else
                     {
                         <span class="badge bg-success">Healthy</span>
                     }
                 </div>
                 <div class="card-body py-2">
-                    @if (vm.Health is null)
+                    @if (vm.Loading)
+                    {
+                        @* Still measuring. Saying so matters: an empty tile here reads as
+                           "this cluster has no metrics", which is a different and alarming
+                           statement about a cluster that is merely slow to answer. *@
+                        <div class="text-muted small text-center py-2">
+                            <span class="spinner-border spinner-border-sm me-1"></span>
+                            Measuring…
+                        </div>
+                    }
+                    else if (vm.Health is null)
                     {
                         <div class="text-muted small text-center py-2">
                             <span class="bi bi-exclamation-triangle me-1"></span>
@@ -262,6 +288,7 @@
     private int criticalIncidents;
     private int advisorActionable;
     private DateTime? lastRefreshed;
+    /// <summary>True until the database-backed half of the page has loaded — phase one.</summary>
     private bool isLoading;
 
     protected override async Task OnInitializedAsync()
@@ -269,6 +296,20 @@
         await Refresh();
     }
 
+    /// <summary>
+    /// Loads the page in two phases, and renders between them.
+    ///
+    /// <para>Everything here used to be awaited before the first render, so the page — the
+    /// whole section, including the tabs out of it — appeared only once the last cluster
+    /// had answered. Cluster health is the slow part by a wide margin: it is a WAN
+    /// round-trip through each cluster's API server, where the rest is local database
+    /// work. Waiting for it to show what is already known, and to let somebody click
+    /// through to another tab, is the wrong trade in every case.</para>
+    ///
+    /// <para>So: the database-backed figures render first, then each cluster's tile fills
+    /// in as that cluster answers. A slow or unreachable cluster now delays its own tile
+    /// and nothing else.</para>
+    /// </summary>
     private async Task Refresh()
     {
         isLoading = true;
@@ -284,7 +325,8 @@
                 .ToListAsync();
         }
 
-        // Load per-cluster active alert counts and tenant-level stats in parallel
+        // ── Phase one: what the database already knows ──
+
         Dictionary<Guid, int> perClusterCounts = await IncidentService
             .GetActiveCountsPerClusterAsync(clusters.Select(c => c.Id));
 
@@ -308,14 +350,33 @@
             f.Horizon is AdvisorHorizon.Overdue or AdvisorHorizon.Today
             && f.State is not AdvisorFindingStatus.Dismissed and not AdvisorFindingStatus.Snoozed);
 
-        List<Task<ClusterSummaryVm>> tasks = clusters
-            .Select(c => LoadClusterSummaryAsync(c, perClusterCounts.GetValueOrDefault(c.Id)))
-            .ToList();
+        // The tiles are placed before their contents are known, so the page has its shape
+        // — and its links — immediately. Each tile says it is still measuring rather than
+        // claiming the cluster has no metrics, which is what an empty tile would imply.
+        clusterSummaries =
+            [.. clusters.Select(c => new ClusterSummaryVm(
+                c, null, null, perClusterCounts.GetValueOrDefault(c.Id), Loading: true))];
 
-        clusterSummaries = [.. await Task.WhenAll(tasks)];
+        isLoading = false;
+        StateHasChanged();
+
+        // ── Phase two: the clusters themselves, each rendering as it answers ──
+
+        await Task.WhenAll(clusters.Select(async cluster =>
+        {
+            ClusterSummaryVm vm =
+                await LoadClusterSummaryAsync(cluster, perClusterCounts.GetValueOrDefault(cluster.Id));
+
+            int index = clusterSummaries.FindIndex(s => s.Cluster.Id == cluster.Id);
+            if (index >= 0)
+            {
+                clusterSummaries[index] = vm;
+                await InvokeAsync(StateHasChanged);
+            }
+        }));
 
         lastRefreshed = DateTime.UtcNow;
-        isLoading = false;
+        await InvokeAsync(StateHasChanged);
     }
 
     private async Task<ClusterSummaryVm> LoadClusterSummaryAsync(KubernetesCluster cluster, int activeAlerts)
@@ -335,6 +396,13 @@
             result.IsSuccess ? null : result.Error,
             activeAlerts);
     }
+
+    /// <summary>
+    /// True while any cluster has yet to answer. The fleet totals are sums across tiles,
+    /// so until then they are partial — shown with an ellipsis rather than as a settled
+    /// number that would quietly climb while somebody was reading it.
+    /// </summary>
+    private bool StillMeasuring => clusterSummaries.Any(s => s.Loading);
 
     private async Task NavigateTo(string tab)
     {
@@ -375,5 +443,6 @@
         KubernetesCluster Cluster,
         ClusterHealthSummary? Health,
         string? Error,
-        int ActiveAlerts);
+        int ActiveAlerts,
+        bool Loading = false);
 }

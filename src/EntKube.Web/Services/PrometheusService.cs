@@ -433,70 +433,172 @@ public class PrometheusService(
     // ──────── Public API ────────
 
     /// <summary>
+    /// How long one cluster's health summary may take before it is abandoned.
+    ///
+    /// Without a bound this inherits <see cref="HttpClient"/>'s 100-second default, and a
+    /// single unreachable cluster holds the monitoring page for a minute and a half — the
+    /// page is a set of tiles, and a tile that says "unreachable" after ten seconds is
+    /// worth far more than the true number after ninety.
+    /// </summary>
+    private static readonly TimeSpan HealthTimeout = TimeSpan.FromSeconds(12);
+
+    /// <summary>Above this, a cluster's health query is worth naming in the log.</summary>
+    private static readonly TimeSpan SlowHealthThreshold = TimeSpan.FromSeconds(2);
+
+    /// <summary>
     /// Retrieves a health summary for the cluster by querying key Prometheus
     /// metrics (CPU, memory, nodes, pods, disk). Returns a failure result if
     /// the cluster isn't found, has no Prometheus component, or lacks kubeconfig.
+    ///
+    /// <para>The seven metrics are fetched <b>concurrently</b>. They were sequential, which
+    /// made the summary cost seven WAN round-trips through the API server's pod proxy
+    /// rather than one — the queries themselves are trivial for Prometheus, so almost the
+    /// whole of that time was latency being paid over and over.</para>
+    ///
+    /// <para>The result goes through the same short-lived single-flight cache as range
+    /// queries. That matters most for the first paint: a prerendered page runs its
+    /// initialisation twice, and without the cache the second pass repeats every query
+    /// while the user is still waiting for the first.</para>
     /// </summary>
     public async Task<KubernetesOperationResult<ClusterHealthSummary>> GetClusterHealthAsync(
         Guid clusterId, CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
-        if (info is null) return KubernetesOperationResult<ClusterHealthSummary>.Failure(error!);
-
-        return await WithServiceAsync<ClusterHealthSummary>(
-            info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
-            async (http, baseUrl, token) =>
+        return await queryCache.GetOrFetchAsync(
+            EntKube.Web.Services.Telemetry.PromQueryCache.Key(clusterId, "health", "cluster-health", 0),
+            async () =>
             {
-                static async Task<double> Scalar(HttpClient h, string url, CancellationToken t) =>
-                    ExtractScalarValue(await h.GetStringAsync(url, t));
+                var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+                if (info is null) return KubernetesOperationResult<ClusterHealthSummary>.Failure(error!);
 
-                // Detect which metric sources are available so we can use the right queries.
-                double hasKsm = await Scalar(http, $"{baseUrl}/api/v1/query?query=count%28kube_pod_info%29", token);
-                double hasNex = await Scalar(http, $"{baseUrl}/api/v1/query?query=count%28node_cpu_seconds_total%29", token);
+                using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(HealthTimeout);
 
-                double cpu, mem, nodes, rNode, pods, rPods, disk;
+                long startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
 
-                if (hasNex > 0 && hasKsm > 0)
+                KubernetesOperationResult<ClusterHealthSummary> result =
+                    await WithServiceAsync<ClusterHealthSummary>(
+                        info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+                        (http, baseUrl, token) => QueryClusterHealthAsync(http, baseUrl, clusterId, token),
+                        $"cluster health for {clusterId}", timeout.Token, probeHealthEndpoint: false);
+
+                TimeSpan elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(startedAt);
+
+                // Logged only when it is slow enough to be felt. The monitoring page is
+                // one tile per cluster, so when it drags, the question is always *which*
+                // cluster — and that is not answerable from a page that has simply not
+                // finished loading.
+                if (elapsed > SlowHealthThreshold)
                 {
-                    // Preferred: kube-prometheus-stack full stack (node-exporter + kube-state-metrics).
-                    cpu   = await Scalar(http, $"{baseUrl}/api/v1/query?query={Q("100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)")}", token);
-                    mem   = await Scalar(http, $"{baseUrl}/api/v1/query?query={Q("100 - (avg(node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)")}", token);
-                    nodes = await Scalar(http, $"{baseUrl}/api/v1/query?query={Q("count(kube_node_info)")}", token);
-                    rNode = await Scalar(http, $"{baseUrl}/api/v1/query?query={Q("count(kube_node_status_condition{condition=\"Ready\",status=\"true\"})")}", token);
-                    pods  = await Scalar(http, $"{baseUrl}/api/v1/query?query={Q("count(kube_pod_info)")}", token);
-                    rPods = await Scalar(http, $"{baseUrl}/api/v1/query?query={Q("sum(kube_pod_status_phase{phase=\"Running\"})")}", token);
-                    disk  = await Scalar(http, $"{baseUrl}/api/v1/query?query={Q("100 - (avg(node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}) * 100)")}", token);
-                }
-                else
-                {
-                    // Fallback: kubelet/cAdvisor metrics only (no kube-state-metrics or node-exporter).
-                    // These are available from the kubelet job in any kube-prometheus-stack installation.
                     logger.LogInformation(
-                        "kube-state-metrics/node-exporter not scraped — using kubelet/cAdvisor metrics for cluster health");
-
-                    cpu   = await Scalar(http, $"{baseUrl}/api/v1/query?query={Q("100 * sum(rate(container_cpu_usage_seconds_total{container!=\"\",namespace!=\"\"}[5m])) / sum(machine_cpu_cores)")}", token);
-                    mem   = await Scalar(http, $"{baseUrl}/api/v1/query?query={Q("100 * sum(container_memory_working_set_bytes{container!=\"\",namespace!=\"\"}) / sum(machine_memory_bytes)")}", token);
-                    nodes = await Scalar(http, $"{baseUrl}/api/v1/query?query={Q("count(count by (node) (kubelet_running_pods))")}", token);
-                    rNode = nodes; // kubelet_running_pods only reports healthy nodes
-                    pods  = await Scalar(http, $"{baseUrl}/api/v1/query?query={Q("sum(kubelet_running_pods)")}", token);
-                    rPods = pods;
-                    disk  = 0; // not available without node-exporter
+                        "Cluster health for {ClusterId} took {Elapsed:N1}s ({Outcome})",
+                        clusterId, elapsed.TotalSeconds, result.IsSuccess ? "ok" : result.Error);
                 }
 
-                return new ClusterHealthSummary
-                {
-                    CpuUsagePercent    = cpu,
-                    MemoryUsagePercent = mem,
-                    TotalNodes         = (int)nodes,
-                    ReadyNodes         = (int)rNode,
-                    TotalPods          = (int)pods,
-                    RunningPods        = (int)rPods,
-                    DiskUsagePercent   = disk,
-                    QueriedAt          = DateTime.UtcNow
-                };
-            },
-            $"cluster health for {clusterId}", ct);
+                return result;
+            });
     }
+
+    /// <summary>
+    /// The health summary's queries, issued in two rounds: one to find out which metric
+    /// sources this cluster actually scrapes, then one for every figure at once.
+    /// </summary>
+    private async Task<ClusterHealthSummary> QueryClusterHealthAsync(
+        HttpClient http, string baseUrl, Guid clusterId, CancellationToken ct)
+    {
+        Task<double> Scalar(string promQl) => ScalarAsync(http, $"{baseUrl}/api/v1/query?query={Q(promQl)}", ct);
+
+        // Which sources exist is a property of how the cluster is scraped, so it is asked
+        // once and remembered — in steady state this leaves a single round of queries.
+        (bool hasKsm, bool hasNex) = await DetectMetricSourcesAsync(http, baseUrl, clusterId, ct);
+
+        double cpu, mem, nodes, rNode, pods, rPods, disk;
+
+        if (hasNex && hasKsm)
+        {
+            // Preferred: kube-prometheus-stack full stack (node-exporter + kube-state-metrics).
+            Task<double> cpuT   = Scalar("100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)");
+            Task<double> memT   = Scalar("100 - (avg(node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)");
+            Task<double> nodesT = Scalar("count(kube_node_info)");
+            Task<double> rNodeT = Scalar("count(kube_node_status_condition{condition=\"Ready\",status=\"true\"})");
+            Task<double> podsT  = Scalar("count(kube_pod_info)");
+            Task<double> rPodsT = Scalar("sum(kube_pod_status_phase{phase=\"Running\"})");
+            Task<double> diskT  = Scalar("100 - (avg(node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}) * 100)");
+
+            await Task.WhenAll(cpuT, memT, nodesT, rNodeT, podsT, rPodsT, diskT);
+
+            (cpu, mem, nodes, rNode, pods, rPods, disk) =
+                (cpuT.Result, memT.Result, nodesT.Result, rNodeT.Result, podsT.Result, rPodsT.Result, diskT.Result);
+        }
+        else
+        {
+            // Fallback: kubelet/cAdvisor metrics only (no kube-state-metrics or node-exporter).
+            // These are available from the kubelet job in any kube-prometheus-stack installation.
+            logger.LogInformation(
+                "kube-state-metrics/node-exporter not scraped — using kubelet/cAdvisor metrics for cluster health");
+
+            Task<double> cpuT   = Scalar("100 * sum(rate(container_cpu_usage_seconds_total{container!=\"\",namespace!=\"\"}[5m])) / sum(machine_cpu_cores)");
+            Task<double> memT   = Scalar("100 * sum(container_memory_working_set_bytes{container!=\"\",namespace!=\"\"}) / sum(machine_memory_bytes)");
+            Task<double> nodesT = Scalar("count(count by (node) (kubelet_running_pods))");
+            Task<double> podsT  = Scalar("sum(kubelet_running_pods)");
+
+            await Task.WhenAll(cpuT, memT, nodesT, podsT);
+
+            cpu   = cpuT.Result;
+            mem   = memT.Result;
+            nodes = nodesT.Result;
+            rNode = nodes; // kubelet_running_pods only reports healthy nodes
+            pods  = podsT.Result;
+            rPods = pods;
+            disk  = 0; // not available without node-exporter
+        }
+
+        return new ClusterHealthSummary
+        {
+            CpuUsagePercent    = cpu,
+            MemoryUsagePercent = mem,
+            TotalNodes         = (int)nodes,
+            ReadyNodes         = (int)rNode,
+            TotalPods          = (int)pods,
+            RunningPods        = (int)rPods,
+            DiskUsagePercent   = disk,
+            QueriedAt          = DateTime.UtcNow
+        };
+    }
+
+    /// <summary>
+    /// Whether this cluster scrapes kube-state-metrics and node-exporter.
+    ///
+    /// Remembered for an hour: installing or removing a metrics stack is a deliberate act,
+    /// not something that changes between page loads, and paying two round-trips to
+    /// re-establish it on every render is most of what made the health summary slow.
+    /// </summary>
+    private async Task<(bool HasKsm, bool HasNex)> DetectMetricSourcesAsync(
+        HttpClient http, string baseUrl, Guid clusterId, CancellationToken ct)
+    {
+        if (metricSources.TryGetValue(clusterId, out (DateTime At, bool Ksm, bool Nex) cached)
+            && DateTime.UtcNow - cached.At < MetricSourceTtl)
+        {
+            return (cached.Ksm, cached.Nex);
+        }
+
+        Task<double> ksm = ScalarAsync(http, $"{baseUrl}/api/v1/query?query=count%28kube_pod_info%29", ct);
+        Task<double> nex = ScalarAsync(http, $"{baseUrl}/api/v1/query?query=count%28node_cpu_seconds_total%29", ct);
+
+        await Task.WhenAll(ksm, nex);
+
+        (bool hasKsm, bool hasNex) = (ksm.Result > 0, nex.Result > 0);
+        metricSources[clusterId] = (DateTime.UtcNow, hasKsm, hasNex);
+        return (hasKsm, hasNex);
+    }
+
+    private static async Task<double> ScalarAsync(HttpClient http, string url, CancellationToken ct) =>
+        ExtractScalarValue(await http.GetStringAsync(url, ct));
+
+    /// <summary>Per-cluster memo of which metric sources are scraped. See <see cref="DetectMetricSourcesAsync"/>.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (DateTime At, bool Ksm, bool Nex)>
+        metricSources = new();
+
+    private static readonly TimeSpan MetricSourceTtl = TimeSpan.FromHours(1);
 
     /// <summary>
     /// Queries a Prometheus range query over the given duration and returns time-series data.
@@ -2026,7 +2128,8 @@ public class PrometheusService(
         int svcPort,
         Func<HttpClient, string, CancellationToken, Task<T>> action,
         string logContext,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool probeHealthEndpoint = true)
     {
         try
         {
@@ -2049,7 +2152,14 @@ public class PrometheusService(
 
             logger.LogDebug("Prometheus proxy → pod {Pod} ({PodNs}) at {BaseUrl}", podName, podNs, baseUrl);
 
-            await VerifyPrometheusConnectionAsync(k8s.HttpClient, baseUrl, ct);
+            // The probe is a round-trip that tells us what the very next request is about
+            // to tell us anyway. Callers that immediately query skip it: on a page built
+            // from one tile per cluster it was a fixed WAN latency added to every tile,
+            // buying nothing but a slightly tidier error message.
+            if (probeHealthEndpoint)
+            {
+                await VerifyPrometheusConnectionAsync(k8s.HttpClient, baseUrl, ct);
+            }
 
             T result = await action(k8s.HttpClient, baseUrl, ct);
             return KubernetesOperationResult<T>.Success(result);

@@ -3,7 +3,16 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using Microsoft.AspNetCore.Components.Rendering
-@rendermode InteractiveServer
+@* Interactive WITHOUT prerendering.
+   
+   Prerendering runs the whole component tree to completion on the server before a byte
+   of HTML is sent, and then the circuit runs it all again. For a page whose sections
+   query live clusters that meant the browser saw nothing until every cluster had
+   answered — twice over — and the tabs out of a slow section were unreachable for as
+   long as that took. There is nothing here worth prerendering for: it is an
+   authenticated console, not a document, and every section fills itself in over the
+   circuit anyway. *@
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
 @inject TenantService TenantService
 @inject UserAccessService UserAccessService
 @inject AuthenticationStateProvider AuthStateProvider
@@ -468,8 +477,14 @@ else
 
         environments = await TenantService.GetEnvironmentsAsync(t.Id);
         customers = await TenantService.GetCustomersAsync(t.Id);
+
+        // One query for every customer's apps, rather than one per customer: this runs
+        // before the page can draw at all, so each round trip here is time the operator
+        // spends looking at nothing.
+        Dictionary<Guid, List<Data.App>> apps = await TenantService.GetAppsByCustomerAsync(t.Id);
         foreach (Customer c in customers)
-            appsByCustomer[c.Id] = await TenantService.GetAppsAsync(c.Id);
+            appsByCustomer[c.Id] = apps.GetValueOrDefault(c.Id, []);
+
         clusters = await TenantService.GetClustersAsync(t.Id);
         await LoadCustomerEnvironmentsAsync(t.Id);
         RebuildAppIndex();

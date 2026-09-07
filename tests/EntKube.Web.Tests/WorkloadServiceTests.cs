@@ -161,6 +161,76 @@ public class WorkloadServiceTests : IDisposable
         snapshot.Error.Should().Contain("kubeconfig");
     }
 
+    // ──────── Loading the namespace filter ────────
+
+    [Fact]
+    public async Task ListNamespacesAsync_ReturnsNamespacesWithoutListingAnyWorkloads()
+    {
+        // The namespace filter must not depend on the workload scan. It used to be
+        // populated from the snapshot, so the control for narrowing a slow cluster-wide
+        // listing only became usable once that listing had finished.
+        KubernetesCluster cluster = await SeedClusterAsync();
+        SetupAllNamespaces("namespaces", Wrap(
+            """{"metadata":{"name":"kube-system"}}""",
+            """{"metadata":{"name":"acme-prod"}}"""));
+
+        List<string> namespaces = await sut.ListNamespacesAsync(cluster.Id);
+
+        namespaces.Should().Equal("acme-prod", "kube-system");
+
+        k8s.Verify(f => f.GetJsonAllNamespacesAsync(
+            "pods", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ListNamespacesAsync_UnknownCluster_ReturnsEmptyRatherThanThrowing()
+    {
+        // This runs ahead of the main load purely to make the filter usable; it must
+        // never be the thing that breaks the page.
+        List<string> namespaces = await sut.ListNamespacesAsync(Guid.NewGuid());
+
+        namespaces.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task LoadAsync_FetchesEveryKindEvenThoughTheyRunConcurrently()
+    {
+        // The five kinds now run together and each carries its own warnings. The risk
+        // that introduces is a lost result, so this pins that all of them still land.
+        KubernetesCluster cluster = await SeedClusterAsync();
+        SetupAllNamespaces("namespaces", Wrap("""{"metadata":{"name":"acme-prod"}}"""));
+        SetupAllNamespaces("pods", Wrap(RunningPod()));
+
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+
+        snapshot.IsSuccess.Should().BeTrue();
+        snapshot.Namespaces.Should().Equal("acme-prod");
+        snapshot.Workloads.Should().Contain(w => w.Kind == WorkloadKind.Pod);
+
+        foreach (string resource in new[] { "pods", "deployments", "statefulsets", "replicasets", "daemonsets" })
+        {
+            k8s.Verify(f => f.GetJsonAllNamespacesAsync(
+                resource, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+        }
+    }
+
+    [Fact]
+    public async Task LoadAsync_OneKindFailing_StillReportsTheOthersAndSaysWhatFailed()
+    {
+        // Warnings are collected per task now rather than appended to one shared list;
+        // a failure must still reach the page.
+        KubernetesCluster cluster = await SeedClusterAsync();
+        SetupAllNamespaces("pods", Wrap(RunningPod()));
+        k8s.Setup(f => f.GetJsonAllNamespacesAsync(
+                "daemonsets", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("forbidden"));
+
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+
+        snapshot.Workloads.Should().Contain(w => w.Kind == WorkloadKind.Pod);
+        snapshot.Warnings.Should().ContainSingle(w => w.Contains("daemonsets"));
+    }
+
     // ──────── Pods ────────
 
     [Fact]

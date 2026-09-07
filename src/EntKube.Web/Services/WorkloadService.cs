@@ -140,50 +140,88 @@ public class WorkloadService(
         string kubeconfig = cluster.Kubeconfig;
         string? scope = string.IsNullOrWhiteSpace(ns) ? null : ns.Trim();
 
-        List<string> warnings = [];
+        // The six calls are independent of one another, and each is a round trip to the
+        // cluster. Run sequentially they cost the sum of six; run together they cost the
+        // slowest — and on a busy cluster listing pods and replicasets cluster-wide is
+        // most of that on its own.
+        Task<(List<string> Namespaces, List<string> Warnings)> namespacesTask =
+            GetNamespacesAsync(kubeconfig, ct);
+
+        Task<(List<WorkloadView> Rows, List<string> Warnings)>[] kinds =
+        [
+            FetchAsync("pods", kubeconfig, scope, ParsePods, ct),
+            FetchAsync("deployments", kubeconfig, scope,
+                items => ParseReplicaController(items, WorkloadKind.Deployment), ct),
+            FetchAsync("statefulsets", kubeconfig, scope,
+                items => ParseReplicaController(items, WorkloadKind.StatefulSet), ct),
+            FetchAsync("replicasets", kubeconfig, scope,
+                items => ParseReplicaController(items, WorkloadKind.ReplicaSet), ct),
+            FetchAsync("daemonsets", kubeconfig, scope, ParseDaemonSets, ct),
+        ];
+
+        await Task.WhenAll([namespacesTask, .. kinds.Cast<Task>()]);
+
         List<WorkloadView> workloads = [];
+        List<string> warnings = [.. namespacesTask.Result.Warnings];
 
-        // Namespace list for the filter — independent of the scope so switching namespaces
-        // never depends on what the current scope happened to contain.
-        List<string> namespaces = await GetNamespacesAsync(kubeconfig, warnings, ct);
-
-        // Pods and the four controller kinds. Each is best-effort and independently guarded.
-        workloads.AddRange(await FetchAsync("pods", kubeconfig, scope, warnings, ParsePods, ct));
-        workloads.AddRange(await FetchAsync("deployments", kubeconfig, scope, warnings,
-            items => ParseReplicaController(items, WorkloadKind.Deployment), ct));
-        workloads.AddRange(await FetchAsync("statefulsets", kubeconfig, scope, warnings,
-            items => ParseReplicaController(items, WorkloadKind.StatefulSet), ct));
-        workloads.AddRange(await FetchAsync("replicasets", kubeconfig, scope, warnings,
-            items => ParseReplicaController(items, WorkloadKind.ReplicaSet), ct));
-        workloads.AddRange(await FetchAsync("daemonsets", kubeconfig, scope, warnings, ParseDaemonSets, ct));
+        // Combined in declaration order rather than completion order, so the warnings a
+        // page shows do not shuffle between refreshes.
+        foreach (Task<(List<WorkloadView> Rows, List<string> Warnings)> kind in kinds)
+        {
+            workloads.AddRange(kind.Result.Rows);
+            warnings.AddRange(kind.Result.Warnings);
+        }
 
         return new WorkloadSnapshot
         {
             Workloads = [.. workloads.OrderBy(w => w.Namespace, StringComparer.Ordinal)
                                      .ThenBy(w => w.Kind)
                                      .ThenBy(w => w.Name, StringComparer.Ordinal)],
-            Namespaces = namespaces,
+            Namespaces = namespacesTask.Result.Namespaces,
             Warnings = warnings,
         };
     }
 
+    /// <summary>
+    /// Just the cluster's namespaces — the one call the namespace filter needs.
+    ///
+    /// Separated from <see cref="LoadAsync"/> because the filter used to be populated
+    /// from the snapshot, which meant it could not be used until a scan of every
+    /// workload in every namespace had finished: the control for narrowing the query was
+    /// unavailable for exactly as long as the unnarrowed query took.
+    /// </summary>
+    public async Task<List<string>> ListNamespacesAsync(Guid clusterId, CancellationToken ct = default)
+    {
+        KubernetesCluster? cluster;
+        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        {
+            cluster = await db.KubernetesClusters.FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+        }
+
+        if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        {
+            return [];
+        }
+
+        return (await GetNamespacesAsync(cluster.Kubeconfig, ct)).Namespaces;
+    }
+
     /// <summary>Lists every namespace in the cluster. A failure here is a warning, not a fatal error.</summary>
-    private async Task<List<string>> GetNamespacesAsync(
-        string kubeconfig, List<string> warnings, CancellationToken ct)
+    private async Task<(List<string> Namespaces, List<string> Warnings)> GetNamespacesAsync(
+        string kubeconfig, CancellationToken ct)
     {
         try
         {
             string json = await k8s.GetJsonAllNamespacesAsync("namespaces", kubeconfig, "", ct);
-            return [.. EnumerateItems(json)
+            return ([.. EnumerateItems(json)
                 .Select(item => GetString(item, "metadata", "name"))
                 .OfType<string>()
-                .OrderBy(n => n, StringComparer.Ordinal)];
+                .OrderBy(n => n, StringComparer.Ordinal)], []);
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Could not list namespaces");
-            warnings.Add($"Could not list namespaces: {Summarize(ex)}");
-            return [];
+            return ([], [$"Could not list namespaces: {Summarize(ex)}"]);
         }
     }
 
@@ -191,8 +229,14 @@ public class WorkloadService(
     /// Fetches one resource kind (namespace-scoped or cluster-wide) and parses it.
     /// Any failure is recorded as a warning and yields no rows.
     /// </summary>
-    private async Task<List<WorkloadView>> FetchAsync(
-        string resource, string kubeconfig, string? scope, List<string> warnings,
+    /// <summary>
+    /// Returns its own warnings rather than appending to a shared list: these run
+    /// concurrently now, and a <see cref="List{T}"/> written from five tasks at once is
+    /// a data race that would show up as a lost or corrupted warning long before anyone
+    /// suspected the collection.
+    /// </summary>
+    private async Task<(List<WorkloadView> Rows, List<string> Warnings)> FetchAsync(
+        string resource, string kubeconfig, string? scope,
         Func<IEnumerable<JsonElement>, List<WorkloadView>> parse, CancellationToken ct)
     {
         try
@@ -201,13 +245,12 @@ public class WorkloadService(
                 ? await k8s.GetJsonAllNamespacesAsync(resource, kubeconfig, "", ct)
                 : await k8s.GetJsonAsync(resource, scope, kubeconfig, "", ct);
 
-            return parse(EnumerateItems(json));
+            return (parse(EnumerateItems(json)), []);
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Could not list {Resource}", resource);
-            warnings.Add($"Could not list {resource}: {Summarize(ex)}");
-            return [];
+            return ([], [$"Could not list {resource}: {Summarize(ex)}"]);
         }
     }
 
