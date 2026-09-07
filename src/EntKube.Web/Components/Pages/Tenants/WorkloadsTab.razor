@@ -26,8 +26,48 @@
 }
 else if (snapshot is null && loading)
 {
+    @* The scope pickers are live during the first load, not after it. Listing every
+       workload in every namespace is the slowest thing this page does, and the control
+       that avoids it was previously unavailable until it had finished — so the only way
+       to get a narrow, fast answer was to first wait for the broad, slow one. *@
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+        @if (clusters.Count > 0)
+        {
+            <div class="input-group input-group-sm" style="width:14rem">
+                <span class="input-group-text"><i class="bi bi-hdd-rack"></i></span>
+                <select class="form-select" value="@ClusterId" @onchange="OnClusterChangedAsync"
+                        aria-label="Cluster">
+                    @foreach (KubernetesCluster c in clusters)
+                    {
+                        <option value="@c.Id">@c.Name</option>
+                    }
+                </select>
+            </div>
+        }
+
+        <div class="input-group input-group-sm" style="width:16rem">
+            <span class="input-group-text"><i class="bi bi-folder2"></i></span>
+            <select class="form-select" value="@selectedNamespace" @onchange="OnNamespaceChangedAsync"
+                    aria-label="Namespace" disabled="@(NamespaceOptions.Count == 0)">
+                <option value="">All namespaces</option>
+                @foreach (string ns in NamespaceOptions)
+                {
+                    <option value="@ns">@ns</option>
+                }
+            </select>
+        </div>
+    </div>
+
     <div class="text-center py-5 text-muted">
-        <div class="spinner-border spinner-border-sm me-2"></div>Loading workloads…
+        <div class="spinner-border spinner-border-sm me-2"></div>
+        @if (string.IsNullOrEmpty(selectedNamespace))
+        {
+            <span>Listing workloads across every namespace — pick one above to narrow it.</span>
+        }
+        else
+        {
+            <span>Loading workloads in <code>@selectedNamespace</code>…</span>
+        }
     </div>
 }
 else if (snapshot is { IsSuccess: false })
@@ -342,6 +382,9 @@ else if (snapshot is not null)
     private List<KubernetesCluster> clusters = [];
     private bool loading;
     private string selectedNamespace = "";
+
+    /// <summary>Namespaces fetched ahead of the workload scan, so the filter works while it runs.</summary>
+    private List<string> namespaces = [];
     private string search = "";
     private bool problemsOnly;
     private bool showInactive;
@@ -362,37 +405,91 @@ else if (snapshot is not null)
         }
 
         if (ClusterId != Guid.Empty)
+        {
+            // The namespace list first, and on its own. It is one cheap call, where the
+            // workload scan below is a listing of every pod and replicaset in the
+            // cluster — and until this arrives the operator cannot narrow the very query
+            // they are waiting on.
+            await LoadNamespacesAsync();
             await LoadAsync();
+        }
     }
 
+    /// <summary>
+    /// Populates the namespace filter without waiting for the workloads. Failures are
+    /// silent here: the filter falls back to the namespaces present in the snapshot, and
+    /// the scan itself reports the same problem with better context.
+    /// </summary>
+    private async Task LoadNamespacesAsync()
+    {
+        try
+        {
+            namespaces = await WorkloadService.ListNamespacesAsync(ClusterId);
+            StateHasChanged();
+        }
+        catch
+        {
+            namespaces = [];
+        }
+    }
+
+    /// <summary>
+    /// Loads the current scope, discarding any result that a later request has
+    /// superseded.
+    ///
+    /// This matters now that the namespace can be changed <em>during</em> the first load:
+    /// the slow all-namespace scan finishes after the narrow one it was abandoned for,
+    /// and without a sequence number it would land last and quietly replace the answer
+    /// the operator actually asked for.
+    /// </summary>
     private async Task LoadAsync()
     {
+        int request = ++loadSequence;
+        string scope = selectedNamespace;
+        Guid cluster = ClusterId;
+
         loading = true;
         StateHasChanged();
         try
         {
-            snapshot = await WorkloadService.LoadAsync(ClusterId, selectedNamespace);
+            WorkloadSnapshot result = await WorkloadService.LoadAsync(cluster, scope);
+
+            if (request != loadSequence) return;   // superseded — the newer load owns the view
+            snapshot = result;
         }
         finally
         {
-            loading = false;
+            if (request == loadSequence) loading = false;
         }
     }
+
+    /// <summary>Increments on every load; only the newest may write <see cref="snapshot"/>.</summary>
+    private int loadSequence;
 
     private async Task OnClusterChangedAsync(ChangeEventArgs e)
     {
         if (!Guid.TryParse(e.Value?.ToString(), out Guid clusterId)) return;
 
         ClusterId = clusterId;
-        // Namespaces are per-cluster, so a cluster switch resets the namespace scope.
+        // Namespaces are per-cluster, so a cluster switch resets the namespace scope
+        // and re-reads the list before the scan that will take a while.
         selectedNamespace = "";
         expandedKey = null;
+        namespaces = [];
+        await LoadNamespacesAsync();
         await LoadAsync();
     }
 
-    // Reload without flipping the full-page spinner — used by auto-refresh.
-    private async Task RefreshQuietlyAsync() =>
-        snapshot = await WorkloadService.LoadAsync(ClusterId, selectedNamespace);
+    // Reload without flipping the full-page spinner — used by auto-refresh. Sequenced
+    // like LoadAsync: a background tick must not overwrite a scope the operator changed
+    // to while it was running.
+    private async Task RefreshQuietlyAsync()
+    {
+        int request = ++loadSequence;
+        WorkloadSnapshot result = await WorkloadService.LoadAsync(ClusterId, selectedNamespace);
+
+        if (request == loadSequence) snapshot = result;
+    }
 
     private async Task OnNamespaceChangedAsync(ChangeEventArgs e)
     {
@@ -439,13 +536,18 @@ else if (snapshot is not null)
     private static bool IsHiddenWhenInactive(WorkloadView w) =>
         w.IsInactive || (w.Kind == WorkloadKind.Pod && w.Health == HealthStatus.Suspended);
 
-    /// <summary>The cluster's namespaces, falling back to the ones seen in the data.</summary>
+    /// <summary>
+    /// The cluster's namespaces: the list fetched up front, then the snapshot's once it
+    /// lands, falling back to the ones seen in the data. The first of those is what makes
+    /// the filter usable while the workloads are still loading.
+    /// </summary>
     private List<string> NamespaceOptions
     {
         get
         {
-            if (snapshot is null) return [];
+            if (snapshot is null) return namespaces;
             if (snapshot.Namespaces.Count > 0) return [.. snapshot.Namespaces];
+            if (namespaces.Count > 0) return namespaces;
             return [.. snapshot.Workloads.Select(w => w.Namespace).Distinct().OrderBy(n => n, StringComparer.Ordinal)];
         }
     }

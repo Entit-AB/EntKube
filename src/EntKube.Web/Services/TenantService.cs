@@ -369,6 +369,31 @@ public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory, Va
             .ToListAsync(ct);
     }
 
+    /// <summary>
+    /// Every app in a tenant, grouped by customer, in one query.
+    ///
+    /// The tree used to fetch these a customer at a time, which is a round trip and a
+    /// DbContext per customer before the page could draw anything. One query is not
+    /// faster because the database minds the work — it is faster because the page stops
+    /// paying the latency of a hundred sequential trips to get it.
+    /// </summary>
+    public async Task<Dictionary<Guid, List<App>>> GetAppsByCustomerAsync(
+        Guid tenantId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<App> apps = await db.Apps
+            .Where(a => a.Customer.TenantId == tenantId)
+            .Include(a => a.AppEnvironments)
+                .ThenInclude(ae => ae.Environment)
+            .OrderBy(a => a.Name)
+            .ToListAsync(ct);
+
+        return apps
+            .GroupBy(a => a.CustomerId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+    }
+
     public async Task<App> CreateAppAsync(Guid customerId, string name, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
