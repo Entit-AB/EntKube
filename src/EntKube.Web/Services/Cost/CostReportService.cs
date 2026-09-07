@@ -3,6 +3,43 @@ using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Cost;
 
+/// <summary>
+/// What one app costs: what it consumes in its own right, plus its share of the shared
+/// platform it runs on.
+/// </summary>
+public sealed record AppCost
+{
+    public required Guid AppId { get; init; }
+    public required string AppName { get; init; }
+    public Guid? CustomerId { get; init; }
+    public string? CustomerName { get; init; }
+
+    /// <summary>Environments this app is deployed to, in name order.</summary>
+    public IReadOnlyList<string> Environments { get; init; } = [];
+
+    /// <summary>The namespaces the figures were measured from, so a total can be traced back.</summary>
+    public IReadOnlyList<string> Namespaces { get; init; } = [];
+
+    public double CpuCores { get; init; }
+    public double MemoryGiB { get; init; }
+    public double StorageGiB { get; init; }
+
+    /// <summary>What this app's own workloads consumed.</summary>
+    public decimal DirectMonthlyCost { get; init; }
+
+    /// <summary>Its share of the platform namespaces and fixed cluster fees it runs on.</summary>
+    public decimal SharedMonthlyCost { get; init; }
+
+    public decimal TotalMonthlyCost => DirectMonthlyCost + SharedMonthlyCost;
+
+    /// <summary>
+    /// How big this app is across the fleet: its share of everything billable, 0–1.
+    /// Not the same as the per-cluster share the allocation used — an app on a cheap
+    /// cluster can be large there and small here.
+    /// </summary>
+    public double ShareOfBillable { get; init; }
+}
+
 /// <summary>A tenant-wide cost picture at current run rate.</summary>
 public sealed record CostReport
 {
@@ -18,15 +55,45 @@ public sealed record CostReport
     /// </summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
 
-    public decimal TotalMonthlyCost => Namespaces.Sum(n => n.TotalMonthlyCost);
+    /// <summary>
+    /// Namespaces that carry a cost of their own. Excludes the ones whose cost was pooled
+    /// and charged out to the others — counting both would count that money twice.
+    /// </summary>
+    public IEnumerable<NamespaceCost> Billed => Namespaces.Where(n => !n.IsRedistributed);
+
+    /// <summary>The platform namespaces whose cost was pooled and charged out, largest first.</summary>
+    public IReadOnlyList<NamespaceCost> SharedPool =>
+        [.. Namespaces.Where(n => n.IsRedistributed).OrderByDescending(n => n.DirectMonthlyCost)];
+
+    /// <summary>
+    /// The shared cost charged out to apps this run — the pooled platform namespaces plus
+    /// every cluster's fixed monthly fee. Read off the allocations rather than recomputed,
+    /// so it is exactly what was billed.
+    /// </summary>
+    public decimal SharedPoolMonthlyCost => Namespaces.Sum(n => n.SharedMonthlyCost);
+
+    public decimal TotalMonthlyCost => Billed.Sum(n => n.TotalMonthlyCost);
     public decimal TotalHourlyCost => TotalMonthlyCost / CostAllocation.HoursPerMonth;
 
-    /// <summary>Monthly cost that could not be attributed to a customer — platform overhead.</summary>
-    public decimal UnattributedMonthlyCost => Namespaces.Where(n => n.IsUnattributed).Sum(n => n.TotalMonthlyCost);
+    /// <summary>
+    /// Cost that reached no customer. Only non-zero on a cluster where nothing at all is
+    /// attributed — there being nobody to charge the platform to, it stays here rather
+    /// than dropping out of the total.
+    /// </summary>
+    public decimal UnattributedMonthlyCost =>
+        Billed.Where(n => n.IsUnattributed).Sum(n => n.TotalMonthlyCost);
+
+    /// <summary>
+    /// Cost in namespaces shared by more than one app. Billed to the customer, but not
+    /// resolvable to a single app, so it is reported beside <see cref="ByApp"/> rather
+    /// than being assigned to one of them arbitrarily.
+    /// </summary>
+    public decimal MultiAppMonthlyCost =>
+        Billed.Where(n => n.IsMultiApp).Sum(n => n.TotalMonthlyCost);
 
     /// <summary>Cost per customer, largest first — the chargeback view.</summary>
     public IReadOnlyList<(Guid CustomerId, string CustomerName, decimal MonthlyCost)> ByCustomer =>
-        [.. Namespaces
+        [.. Billed
             .Where(n => n.CustomerId is not null)
             .GroupBy(n => (n.CustomerId!.Value, n.CustomerName ?? "—"))
             .Select(g => (g.Key.Item1, g.Key.Item2, g.Sum(n => n.TotalMonthlyCost)))
@@ -34,11 +101,58 @@ public sealed record CostReport
 
     /// <summary>Cost per environment, largest first.</summary>
     public IReadOnlyList<(string Environment, decimal MonthlyCost)> ByEnvironment =>
-        [.. Namespaces
+        [.. Billed
             .Where(n => n.EnvironmentName is not null)
             .GroupBy(n => n.EnvironmentName!)
             .Select(g => (g.Key, g.Sum(n => n.TotalMonthlyCost)))
             .OrderByDescending(t => t.Item2)];
+
+    /// <summary>
+    /// Cost per app, largest first — direct consumption plus the app's share of the
+    /// platform. Namespaces shared by several apps are left out and reported through
+    /// <see cref="MultiAppMonthlyCost"/> instead: measurement is per namespace, so there
+    /// is nothing to divide such a namespace by.
+    /// </summary>
+    public IReadOnlyList<AppCost> ByApp
+    {
+        get
+        {
+            decimal billable = TotalMonthlyCost;
+
+            return
+            [.. Billed
+                .Where(n => n.AppId is not null)
+                .GroupBy(n => n.AppId!.Value)
+                .Select(g =>
+                {
+                    NamespaceCost first = g.First();
+                    decimal direct = g.Sum(n => n.DirectMonthlyCost);
+                    decimal shared = g.Sum(n => n.SharedMonthlyCost);
+
+                    return new AppCost
+                    {
+                        AppId = g.Key,
+                        AppName = first.Apps[0].AppName,
+                        CustomerId = first.CustomerId,
+                        CustomerName = first.CustomerName,
+                        Environments =
+                            [.. g.Select(n => n.EnvironmentName)
+                                 .Where(e => e is not null)
+                                 .Select(e => e!)
+                                 .Distinct()
+                                 .Order()],
+                        Namespaces = [.. g.Select(n => n.Namespace).Distinct().Order()],
+                        CpuCores = g.Sum(n => n.CpuCores),
+                        MemoryGiB = g.Sum(n => n.MemoryGiB),
+                        StorageGiB = g.Sum(n => n.StorageGiB),
+                        DirectMonthlyCost = direct,
+                        SharedMonthlyCost = shared,
+                        ShareOfBillable = billable > 0m ? (double)((direct + shared) / billable) : 0d,
+                    };
+                })
+                .OrderByDescending(a => a.TotalMonthlyCost)];
+        }
+    }
 }
 
 /// <summary>
@@ -104,6 +218,7 @@ public class CostReportService(
             {
                 d.ClusterId,
                 d.Namespace,
+                d.AppId,
                 CustomerId = (Guid?)d.App.CustomerId,
                 CustomerName = d.App.Customer.Name,
                 AppName = d.App.Name,
@@ -111,14 +226,33 @@ public class CostReportService(
             })
             .ToListAsync(ct);
 
-        Dictionary<(Guid, string), (Guid?, string?, string?, string?)> owners = [];
-        foreach (var row in ownership)
+        // Several deployments can target one namespace. The customer is taken from the
+        // first — any of them identifies it, and billing needs only that — but every
+        // distinct app is kept, because assigning a shared namespace's whole cost to
+        // whichever app was enumerated first would put a made-up number on an invoice.
+        Dictionary<(Guid, string), NamespaceOwner> owners = [];
+        foreach (var group in ownership.GroupBy(r => (r.ClusterId, r.Namespace)))
         {
-            // First writer wins: several deployments can share a namespace, and any of
-            // them identifies the owning customer, which is what billing needs.
-            owners.TryAdd(
-                (row.ClusterId, row.Namespace),
-                (row.CustomerId, row.CustomerName, row.AppName, row.EnvironmentName));
+            var first = group.First();
+
+            List<AppRef> apps =
+                [.. group
+                    .Select(r => new AppRef(r.AppId, r.AppName))
+                    .Distinct()
+                    .OrderBy(a => a.AppName)];
+
+            // Only name an environment when the namespace has exactly one. A namespace
+            // serving two environments belongs to neither for reporting purposes.
+            List<string> environments =
+                [.. group.Select(r => r.EnvironmentName).Distinct()];
+
+            owners[group.Key] = new NamespaceOwner
+            {
+                CustomerId = first.CustomerId,
+                CustomerName = first.CustomerName,
+                Apps = apps,
+                EnvironmentName = environments.Count == 1 ? environments[0] : null,
+            };
         }
 
         List<NamespaceCost> allCosts = [];
@@ -155,9 +289,7 @@ public class CostReportService(
 
             allCosts.AddRange(CostAllocation.Allocate(
                 consumption, rate, cluster.Id, cluster.Name,
-                ns => owners.TryGetValue((cluster.Id, ns), out var owner)
-                    ? owner
-                    : (null, null, null, null)));
+                ns => owners.GetValueOrDefault((cluster.Id, ns), NamespaceOwner.None)));
         }
 
         List<NamespaceCost> ordered = [.. allCosts.OrderByDescending(c => c.TotalMonthlyCost)];

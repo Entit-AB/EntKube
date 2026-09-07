@@ -42,6 +42,13 @@
             730-hour month. This is a run rate, not a historical bill — it reflects what is reserved
             right now, so it moves when workloads are scaled or redeployed.
         </p>
+        <p class="text-muted small mb-3">
+            Every app is charged what its own workloads consume, <strong>plus its share of the
+            shared platform</strong> — the ingress controller, monitoring, the telemetry stack and
+            each cluster's fixed fee. That share is the app's CPU, memory and storage over
+            everything billable on the same cluster, so an app occupying a third of a cluster
+            carries a third of what running that cluster costs.
+        </p>
 
         @if (error is not null)
         {
@@ -97,10 +104,10 @@
                 </div>
                 <div class="col-6 col-md-3">
                     <div class="border rounded p-2 h-100">
-                        <div class="text-muted small" title="Namespaces EntKube does not map to a customer — platform components, ingress, monitoring.">
-                            <i class="bi bi-hdd-stack me-1"></i>Platform overhead
+                        <div class="text-muted small" title="Platform namespaces and fixed cluster fees, charged out to apps in proportion to what each holds. Already included in the total — not an extra.">
+                            <i class="bi bi-hdd-stack me-1"></i>Shared, charged out
                         </div>
-                        <div class="fs-4 fw-semibold text-muted">@Money(report.UnattributedMonthlyCost)</div>
+                        <div class="fs-4 fw-semibold text-muted">@Money(report.SharedPoolMonthlyCost)</div>
                     </div>
                 </div>
             </div>
@@ -160,6 +167,70 @@
                 </div>
             </div>
 
+            <h6 class="small text-muted fw-semibold mt-4">By app</h6>
+            @if (report.ByApp.Count == 0)
+            {
+                <p class="text-muted small">No namespace is attributed to an app yet.</p>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead>
+                            <tr class="text-muted small">
+                                <th>App</th>
+                                <th>Customer</th>
+                                <th>Environments</th>
+                                <th class="text-end">CPU</th>
+                                <th class="text-end">Memory</th>
+                                <th class="text-end">Storage</th>
+                                <th class="text-end" title="What this app's own workloads consume.">Direct</th>
+                                <th class="text-end" title="This app's share of the platform namespaces and fixed cluster fees, in proportion to the capacity it holds.">Shared</th>
+                                <th class="text-end">Monthly</th>
+                                <th style="width:14%" title="How big this app is across everything billable.">Share</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (AppCost app in report.ByApp)
+                            {
+                                <tr>
+                                    <td class="small fw-medium">@app.AppName</td>
+                                    <td class="small text-muted">@app.CustomerName</td>
+                                    <td class="small text-muted">
+                                        @(app.Environments.Count > 0 ? string.Join(", ", app.Environments) : "—")
+                                    </td>
+                                    <td class="text-end small text-muted">@app.CpuCores.ToString("N2")</td>
+                                    <td class="text-end small text-muted">@app.MemoryGiB.ToString("N1") Gi</td>
+                                    <td class="text-end small text-muted">@app.StorageGiB.ToString("N0") Gi</td>
+                                    <td class="text-end small text-muted">@Money(app.DirectMonthlyCost)</td>
+                                    <td class="text-end small text-muted">@Money(app.SharedMonthlyCost)</td>
+                                    <td class="text-end fw-semibold">@Money(app.TotalMonthlyCost)</td>
+                                    <td>
+                                        <div class="d-flex align-items-center gap-2">
+                                            <div class="progress flex-grow-1" style="height:6px">
+                                                <div class="progress-bar bg-success"
+                                                     style="width:@((int)Math.Round(app.ShareOfBillable * 100))%"></div>
+                                            </div>
+                                            <span class="small text-muted">@((app.ShareOfBillable * 100).ToString("N1"))%</span>
+                                        </div>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+
+                @if (report.MultiAppMonthlyCost > 0m)
+                {
+                    <p class="small text-muted mt-2 mb-0">
+                        <i class="bi bi-info-circle me-1"></i>
+                        @Money(report.MultiAppMonthlyCost) sits in namespaces shared by more than one
+                        app. Consumption is measured per namespace, so it is billed to the customer
+                        but cannot be split between those apps — it is not in the figures above.
+                    </p>
+                }
+            }
+
             <h6 class="small text-muted fw-semibold mt-4">By namespace</h6>
             <div class="table-responsive">
                 <table class="table table-sm align-middle mb-0">
@@ -172,12 +243,12 @@
                             <th class="text-end">Memory</th>
                             <th class="text-end">Storage</th>
                             <th class="text-end" title="Load balancers and public IPs this namespace provisioned. Charged directly rather than shared.">Network</th>
-                            <th class="text-end">Overhead</th>
+                            <th class="text-end" title="This namespace's share of the platform namespaces and fixed fee on its cluster.">Shared</th>
                             <th class="text-end">Monthly</th>
                         </tr>
                     </thead>
                     <tbody>
-                        @foreach (NamespaceCost row in report.Namespaces.Take(100))
+                        @foreach (NamespaceCost row in billed.Take(100))
                         {
                             <tr>
                                 <td><code class="small">@row.Namespace</code></td>
@@ -192,7 +263,14 @@
                                         @row.CustomerName
                                         @if (row.AppName is not null)
                                         {
-                                            <div class="text-muted">@row.AppName</div>
+                                            <div class="text-muted">
+                                                @row.AppName
+                                                @if (row.IsMultiApp)
+                                                {
+                                                    <i class="bi bi-exclamation-circle ms-1"
+                                                       title="Several apps share this namespace, so its cost cannot be split between them."></i>
+                                                }
+                                            </div>
                                         }
                                     }
                                 </td>
@@ -216,19 +294,70 @@
                                         <span>—</span>
                                     }
                                 </td>
-                                <td class="text-end small text-muted">@Money(row.OverheadMonthlyCost)</td>
+                                <td class="text-end small text-muted">
+                                    @Money(row.SharedMonthlyCost)
+                                    <div>@((row.ShareOfCluster * 100).ToString("N1"))%</div>
+                                </td>
                                 <td class="text-end fw-semibold">@Money(row.TotalMonthlyCost)</td>
                             </tr>
                         }
                     </tbody>
                 </table>
-                @if (report.Namespaces.Count > 100)
+                @if (billed.Count > 100)
                 {
                     <p class="small text-muted mt-2 mb-0">
-                        Showing the 100 most expensive of @report.Namespaces.Count namespaces.
+                        Showing the 100 most expensive of @billed.Count namespaces.
                     </p>
                 }
             </div>
+
+            @if (report.SharedPool.Count > 0)
+            {
+                <h6 class="small text-muted fw-semibold mt-4">
+                    Shared pool — charged out to the apps above
+                </h6>
+                <p class="text-muted small mb-2">
+                    Namespaces EntKube holds no deployment record for. Their cost is <strong>already
+                    included</strong> in the figures above, spread across the apps by capacity share —
+                    it is listed here so the pool can be checked. A workload that does not belong here
+                    is being paid for by every customer, so an unfamiliar entry is worth chasing.
+                </p>
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead>
+                            <tr class="text-muted small">
+                                <th>Namespace</th>
+                                <th>Cluster</th>
+                                <th class="text-end">CPU</th>
+                                <th class="text-end">Memory</th>
+                                <th class="text-end">Storage</th>
+                                <th class="text-end">Network</th>
+                                <th class="text-end">Monthly</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (NamespaceCost row in report.SharedPool.Take(50))
+                            {
+                                <tr>
+                                    <td><code class="small">@row.Namespace</code></td>
+                                    <td class="small text-muted">@row.ClusterName</td>
+                                    <td class="text-end small text-muted">@row.CpuCores.ToString("N2")</td>
+                                    <td class="text-end small text-muted">@row.MemoryGiB.ToString("N1") Gi</td>
+                                    <td class="text-end small text-muted">@row.StorageGiB.ToString("N0") Gi</td>
+                                    <td class="text-end small text-muted">@Money(row.NetworkMonthlyCost)</td>
+                                    <td class="text-end fw-semibold text-muted">@Money(row.DirectMonthlyCost)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+                @if (report.SharedPool.Count > 50)
+                {
+                    <p class="small text-muted mt-2 mb-0">
+                        Showing the 50 most expensive of @report.SharedPool.Count pooled namespaces.
+                    </p>
+                }
+            }
         }
     </div>
 </div>
@@ -330,6 +459,14 @@
     private CostReport? report;
     private bool calculating;
     private string? error;
+
+    /// <summary>
+    /// The namespaces that carry a cost of their own, largest first. Pooled platform
+    /// namespaces are shown separately — their cost has already been charged out to
+    /// these, so listing them together would read as double the real bill.
+    /// </summary>
+    private List<NamespaceCost> billed =>
+        report is null ? [] : [.. report.Billed.OrderByDescending(n => n.TotalMonthlyCost)];
 
     private List<(Guid Id, string Name)> clusters = [];
     private readonly Dictionary<Guid, RateForm> forms = [];

@@ -402,12 +402,30 @@ public static class PublicApiEndpoints
                 totalMonthlyCost = report.TotalMonthlyCost,
                 totalHourlyCost = report.TotalHourlyCost,
                 unattributedMonthlyCost = report.UnattributedMonthlyCost,
+                sharedPoolMonthlyCost = report.SharedPoolMonthlyCost,
+                multiAppMonthlyCost = report.MultiAppMonthlyCost,
                 warnings = report.Warnings,
                 byCustomer = report.ByCustomer.Select(c => new
                 {
                     customerId = c.CustomerId,
                     customer = c.CustomerName,
                     monthlyCost = c.MonthlyCost,
+                }),
+                byApp = report.ByApp.Select(a => new
+                {
+                    appId = a.AppId,
+                    app = a.AppName,
+                    customerId = a.CustomerId,
+                    customer = a.CustomerName,
+                    environments = a.Environments,
+                    namespaces = a.Namespaces,
+                    cpuCores = a.CpuCores,
+                    memoryGiB = a.MemoryGiB,
+                    storageGiB = a.StorageGiB,
+                    directMonthlyCost = a.DirectMonthlyCost,
+                    sharedMonthlyCost = a.SharedMonthlyCost,
+                    monthlyCost = a.TotalMonthlyCost,
+                    shareOfBillable = a.ShareOfBillable,
                 }),
                 byEnvironment = report.ByEnvironment.Select(e => new
                 {
@@ -420,14 +438,21 @@ public static class PublicApiEndpoints
                     cluster = n.ClusterName,
                     customer = n.CustomerName,
                     app = n.AppName,
+                    appId = n.AppId,
                     environment = n.EnvironmentName,
                     cpuCores = n.CpuCores,
                     memoryGiB = n.MemoryGiB,
                     storageGiB = n.StorageGiB,
                     loadBalancers = n.LoadBalancers,
                     publicIps = n.PublicIps,
+                    directMonthlyCost = n.DirectMonthlyCost,
+                    sharedMonthlyCost = n.SharedMonthlyCost,
+                    shareOfCluster = n.ShareOfCluster,
                     monthlyCost = n.TotalMonthlyCost,
                     unattributed = n.IsUnattributed,
+                    // Its cost was pooled onto the billable namespaces; it is reported so
+                    // the pool can be audited, but it is not part of any total.
+                    redistributed = n.IsRedistributed,
                 }),
             });
         }).RequireApiScope(ApiScopes.OpsRead);
