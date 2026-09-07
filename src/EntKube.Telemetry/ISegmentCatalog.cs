@@ -41,6 +41,18 @@ public interface ISegmentCatalog
         Guid tenantId, string signal, DateTime cutoff, CancellationToken ct = default);
 
     /// <summary>
+    /// Removes the named segments and returns exactly the rows removed, so the caller can then free
+    /// their storage.
+    ///
+    /// Separate from <see cref="RemoveExpiredAsync"/> because the reason differs and the reason is what
+    /// makes it safe: expiry is "this data is past its retention", while this is "the volume cannot hold
+    /// what retention promised". The caller decides which segments those are; the catalog only unlists
+    /// them — rows first, as ever, so no query can resolve a segment whose archive is about to go.
+    /// </summary>
+    Task<IReadOnlyList<TelemetrySegment>> RemoveAsync(
+        Guid tenantId, string signal, IReadOnlyCollection<Guid> segmentIds, CancellationToken ct = default);
+
+    /// <summary>
     /// Earliest event timestamp across the signal's sealed segments, or null when it has none. Bounds how
     /// far back an index can answer for — the trace list uses it to decide when a window predates the
     /// trace-summary index and must fall back to aggregating raw spans.

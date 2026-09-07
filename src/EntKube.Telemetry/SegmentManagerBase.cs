@@ -15,6 +15,35 @@ public sealed class SegmentEngineOptions
     /// <summary>Root directory for the engine's local state (active indexes, cache). Default /app/Data/telemetry.</summary>
     public string DataPath { get; init; } = "/app/Data/telemetry";
 
+    /// <summary>
+    /// Used-percentage of the data volume at which the node starts reclaiming space. Default 85.
+    ///
+    /// This is the bound that was missing. Every other setting here limits one consumer of the volume —
+    /// the active index, the warm tier, the retention window — and none of them measured the volume, so a
+    /// node keeping its archives locally had no ceiling on its largest consumer at all. See
+    /// <c>VolumeGuardService</c>.
+    /// </summary>
+    public int VolumeHighWaterPercent { get; init; } = 85;
+
+    /// <summary>
+    /// Used-percentage the node reclaims back down to once it starts. Default 70.
+    ///
+    /// Deliberately below the high-water mark: reclaiming to exactly the trigger would leave the guard
+    /// firing again on the next tick, deleting a little more each time, which is a worse outcome than one
+    /// larger pass and a quiet disk.
+    /// </summary>
+    public int VolumeTargetPercent { get; init; } = 70;
+
+    /// <summary>
+    /// Whether a volume at its high-water mark, with nothing left to evict, may delete the OLDEST sealed
+    /// segments to keep recording. Default true, and it only ever applies when the archives are on this
+    /// same volume — with object storage configured, deleting them would free nothing here.
+    ///
+    /// Set false if you would genuinely rather the indexer stop than lose the far end of the window. It
+    /// will: a full volume fails writes, and the collector upstream then buffers and is OOM-killed.
+    /// </summary>
+    public bool DropOldestWhenVolumeFull { get; init; } = true;
+
     /// <summary>Seal the active index into a segment once it reaches this many docs. Default 1,000,000.</summary>
     public long RollMaxDocs { get; init; } = 1_000_000;
 
@@ -464,6 +493,78 @@ public abstract class SegmentManagerBase : IDisposable
         }
         _logger.LogInformation("Dropped {Count} expired {Signal} segment(s) older than {Cutoff:o}", expired.Count, Signal, cutoff);
         return expired.Count;
+    }
+
+    /// <summary>
+    /// Frees local space by deleting the OLDEST sealed segments outright — catalog row, archive and local
+    /// copy — until at least <paramref name="bytesToFree"/> has been reclaimed. Returns what went.
+    ///
+    /// <para><b>This destroys telemetry, and it is still the right thing to do.</b> It is called only when
+    /// the volume is at its high-water mark and everything evictable has already been evicted, which on a
+    /// node whose archives live on that same volume means the choice is no longer "keep or drop" but
+    /// "drop the oldest, or fill up". Filling up is worse in every dimension: writes fail, the ingest
+    /// endpoint answers 500, the collector upstream retries and buffers until it is OOM-killed, and the
+    /// data lost is the newest — the period somebody is trying to watch right now. Ageing out the far end
+    /// of the window keeps the system recording.</para>
+    ///
+    /// <para>Oldest by MaxTs, so a segment is judged on the newest event it contains: dropping by seal
+    /// time would evict a late-sealed backfill of old data ahead of genuinely older segments.</para>
+    /// </summary>
+    public async Task<(int Dropped, long BytesFreed)> DropOldestAsync(
+        long bytesToFree, CancellationToken ct = default)
+    {
+        if (bytesToFree <= 0) return (0, 0);
+
+        IReadOnlyList<TelemetrySegment> all = await _catalog.ListOverlappingAsync(TenantId, Signal, null, null, ct);
+        if (all.Count == 0) return (0, 0);
+
+        List<TelemetrySegment> oldestFirst = [.. all.OrderBy(seg => seg.MaxTs)];
+
+        List<Guid> victims = [];
+        long planned = 0;
+
+        foreach (TelemetrySegment seg in oldestFirst)
+        {
+            // Never leave the signal with nothing: an index that has deleted its way to empty answers
+            // every query with silence, which is indistinguishable from "nothing happened" and is how a
+            // disk problem turns into a monitoring problem nobody can see.
+            if (victims.Count == oldestFirst.Count - 1) break;
+
+            victims.Add(seg.Id);
+            planned += seg.SizeBytes;
+            if (planned >= bytesToFree) break;
+        }
+
+        if (victims.Count == 0) return (0, 0);
+
+        IReadOnlyList<TelemetrySegment> removed = await _catalog.RemoveAsync(TenantId, Signal, victims, ct);
+
+        long freed = 0;
+        foreach (TelemetrySegment seg in removed)
+        {
+            ct.ThrowIfCancellationRequested();
+            await ReleaseLocallyAsync(seg.Id);
+            try
+            {
+                await _blobs.DeleteAsync(seg.ObjectKey, ct);
+                freed += seg.SizeBytes;
+            }
+            catch (Exception ex)
+            {
+                // The row is already gone, so the segment is unqueryable either way; a failed object
+                // delete leaks bytes rather than data. Reported, not retried — the next pass measures the
+                // volume again and will simply choose more victims if this one did not help.
+                _logger.LogWarning(ex, "Could not delete archive {Key} while reclaiming disk", seg.ObjectKey);
+            }
+        }
+
+        _logger.LogWarning(
+            "Reclaimed disk on {Signal}: dropped {Count} of the oldest sealed segment(s), {Freed} bytes. "
+            + "This is data loss — the volume was at its high-water mark with nothing left to evict. "
+            + "Configure object storage, enlarge the volume, or shorten retention.",
+            Signal, removed.Count, freed);
+
+        return (removed.Count, freed);
     }
 
     /// <summary>

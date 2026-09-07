@@ -159,6 +159,71 @@ public sealed class SqliteSegmentCatalog : ISegmentCatalog
         return expired;
     }
 
+    public async Task<IReadOnlyList<TelemetrySegment>> RemoveAsync(
+        Guid tenantId, string signal, IReadOnlyCollection<Guid> segmentIds, CancellationToken ct = default)
+    {
+        if (segmentIds.Count == 0) return [];
+
+        await using SqliteConnection db = Open();
+        await using SqliteTransaction tx = (SqliteTransaction)await db.BeginTransactionAsync(ct);
+
+        // Ids are parameterised one by one rather than interpolated into an IN list: this runs with a
+        // caller-chosen set, and the one place a segment id could reach SQL as text is the one place it
+        // must not.
+        var placeholders = new List<string>(segmentIds.Count);
+        var parameters = new List<SqliteParameter>(segmentIds.Count);
+        int i = 0;
+        foreach (Guid id in segmentIds)
+        {
+            string name = $"$id{i++}";
+            placeholders.Add(name);
+            parameters.Add(new SqliteParameter(name, id.ToString("N")));
+        }
+
+        string idList = string.Join(", ", placeholders);
+        var removed = new List<TelemetrySegment>();
+
+        await using (SqliteCommand select = db.CreateCommand())
+        {
+            select.Transaction = tx;
+            select.CommandText = $"""
+                SELECT Id, TenantId, Signal, MinTs, MaxTs, DocCount, ObjectKey, SizeBytes, SealedAt
+                FROM Segments
+                WHERE TenantId = $tenant AND Signal = $signal AND Id IN ({idList});
+                """;
+            select.Parameters.AddWithValue("$tenant", tenantId.ToString("N"));
+            select.Parameters.AddWithValue("$signal", signal);
+            foreach (SqliteParameter p in parameters) select.Parameters.Add(Clone(p));
+            await using SqliteDataReader reader = await select.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) removed.Add(Read(reader));
+        }
+
+        if (removed.Count == 0)
+        {
+            await tx.RollbackAsync(ct);
+            return [];
+        }
+
+        await using (SqliteCommand delete = db.CreateCommand())
+        {
+            delete.Transaction = tx;
+            delete.CommandText = $"""
+                DELETE FROM Segments
+                WHERE TenantId = $tenant AND Signal = $signal AND Id IN ({idList});
+                """;
+            delete.Parameters.AddWithValue("$tenant", tenantId.ToString("N"));
+            delete.Parameters.AddWithValue("$signal", signal);
+            foreach (SqliteParameter p in parameters) delete.Parameters.Add(Clone(p));
+            await delete.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+        return removed;
+    }
+
+    /// <summary>A SqliteParameter belongs to one command, so the second statement needs its own copy.</summary>
+    private static SqliteParameter Clone(SqliteParameter p) => new(p.ParameterName, p.Value);
+
     public async Task<DateTime?> GetMinTsAsync(Guid tenantId, string signal, CancellationToken ct = default)
     {
         await using SqliteConnection db = Open();

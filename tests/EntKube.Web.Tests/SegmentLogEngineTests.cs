@@ -233,6 +233,98 @@ public sealed class SegmentLogEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task Reclaiming_disk_drops_the_oldest_segments_first()
+    {
+        // The volume guard's last resort. It takes by event time, not seal time: a late-sealed backfill of
+        // last month's logs is older data than something sealed before it, and dropping by seal order
+        // would keep the wrong one.
+        DateTime t0 = new(2026, 7, 7, 12, 0, 0, DateTimeKind.Utc);
+        LogSegmentManager mgr = NewManager(retentionDays: 90);
+
+        mgr.WriteLogs(_tenantId, _clusterId, [Log(t0.AddDays(-30), "prod", "api-1", 2, "oldest")]);
+        await mgr.RollAndSealAsync();
+        mgr.WriteLogs(_tenantId, _clusterId, [Log(t0.AddDays(-10), "prod", "api-1", 2, "middle")]);
+        await mgr.RollAndSealAsync();
+        mgr.WriteLogs(_tenantId, _clusterId, [Log(t0, "prod", "api-1", 2, "newest")]);
+        await mgr.RollAndSealAsync();
+
+        (int dropped, long freed) = await mgr.DropOldestAsync(bytesToFree: 1);
+
+        dropped.Should().Be(1);
+        freed.Should().BeGreaterThan(0);
+
+        await using ApplicationDbContext db = _factory.CreateDbContext();
+        List<DateTime> left = await db.TelemetrySegments.Select(s => s.MaxTs).OrderBy(t => t).ToListAsync();
+        left.Should().HaveCount(2);
+        left[0].Should().BeCloseTo(t0.AddDays(-10), TimeSpan.FromMinutes(1));
+    }
+
+    [Fact]
+    public async Task Reclaiming_disk_never_empties_a_signal_completely()
+    {
+        // An index that has deleted its way to empty answers every query with silence, which reads as
+        // "nothing happened" rather than "the disk filled up" — a storage problem turned into an
+        // invisible monitoring problem. However much is asked for, one segment stays.
+        DateTime t0 = new(2026, 7, 7, 12, 0, 0, DateTimeKind.Utc);
+        LogSegmentManager mgr = NewManager(retentionDays: 90);
+
+        mgr.WriteLogs(_tenantId, _clusterId, [Log(t0.AddDays(-2), "prod", "api-1", 2, "older")]);
+        await mgr.RollAndSealAsync();
+        mgr.WriteLogs(_tenantId, _clusterId, [Log(t0, "prod", "api-1", 2, "newer")]);
+        await mgr.RollAndSealAsync();
+
+        await mgr.DropOldestAsync(bytesToFree: long.MaxValue);
+
+        await using ApplicationDbContext db = _factory.CreateDbContext();
+        (await db.TelemetrySegments.CountAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Reclaiming_nothing_is_a_no_op()
+    {
+        DateTime t0 = new(2026, 7, 7, 12, 0, 0, DateTimeKind.Utc);
+        LogSegmentManager mgr = NewManager(retentionDays: 90);
+        mgr.WriteLogs(_tenantId, _clusterId, [Log(t0, "prod", "api-1", 2, "keep me")]);
+        await mgr.RollAndSealAsync();
+
+        (int dropped, long freed) = await mgr.DropOldestAsync(bytesToFree: 0);
+
+        dropped.Should().Be(0);
+        freed.Should().Be(0);
+        await using ApplicationDbContext db = _factory.CreateDbContext();
+        (await db.TelemetrySegments.CountAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_dropped_segment_stops_being_queryable_and_its_archive_goes()
+    {
+        // Catalog row and archive must go together. A row without an archive faults every query that
+        // plans around it; an archive without a row is bytes nothing will ever reclaim.
+        DateTime t0 = new(2026, 7, 7, 12, 0, 0, DateTimeKind.Utc);
+        LogSegmentManager mgr = NewManager(retentionDays: 90);
+
+        mgr.WriteLogs(_tenantId, _clusterId, [Log(t0.AddDays(-5), "prod", "api-1", 4, "ERROR ancient")]);
+        await mgr.RollAndSealAsync();
+        mgr.WriteLogs(_tenantId, _clusterId, [Log(t0, "prod", "api-1", 4, "ERROR recent")]);
+        await mgr.RollAndSealAsync();
+
+        string archives = Path.Combine(_tempDirs[^1], "blobs");
+        int before = Directory.EnumerateFiles(archives, "*", SearchOption.AllDirectories).Count();
+
+        await mgr.DropOldestAsync(bytesToFree: 1);
+
+        Directory.EnumerateFiles(archives, "*", SearchOption.AllDirectories).Count().Should().Be(before - 1);
+
+        SegmentLogService svc = NewService();
+        var result = await svc.QueryAsync(
+            _clusterId, new LogQueryFilter { Namespaces = ["prod"] }, t0.AddDays(-10), t0.AddMinutes(1));
+
+        List<LokiLogEntry> entries = result.Data!.SelectMany(seg => seg.Entries).ToList();
+        entries.Should().ContainSingle(e => e.Line.Contains("recent"));
+        entries.Should().NotContain(e => e.Line.Contains("ancient"));
+    }
+
+    [Fact]
     public async Task Search_Over_50k_Logs_Is_SubSecond()
     {
         DateTime t0 = new(2026, 7, 7, 0, 0, 0, DateTimeKind.Utc);

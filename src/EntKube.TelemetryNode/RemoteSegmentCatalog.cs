@@ -41,6 +41,12 @@ public sealed class RemoteSegmentCatalog(
             "Retention runs on the indexer, which owns the catalog and the objects. A querier deleting " +
             "either would race the indexer over shared state.");
 
+    public Task<IReadOnlyList<TelemetrySegment>> RemoveAsync(
+        Guid tenantId, string signal, IReadOnlyCollection<Guid> segmentIds, CancellationToken ct = default) =>
+        throw new NotSupportedException(
+            "Reclaiming disk by dropping segments runs on the indexer, which owns the catalog and the " +
+            "objects. A querier trims only its own read-through cache, which loses nothing.");
+
     public async Task<IReadOnlyList<TelemetrySegment>> ListOverlappingAsync(
         Guid tenantId, string signal, DateTime? from, DateTime? to, CancellationToken ct = default)
     {
