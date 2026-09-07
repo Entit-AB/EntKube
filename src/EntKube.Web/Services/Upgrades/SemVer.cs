@@ -225,6 +225,44 @@ public sealed class SemVer : IComparable<SemVer>, IEquatable<SemVer>
         return VersionLag.Patch;
     }
 
+    /// <summary>
+    /// True when <paramref name="candidateVersion"/> is a version
+    /// <paramref name="installedVersion"/> should move up to — the question the cluster
+    /// components view asks of the catalog pin.
+    ///
+    /// Compared as versions rather than as strings, because a release installed *ahead* of
+    /// the catalog (hand-pinned, or a catalog entry we have not refreshed yet) differs from
+    /// the pin without being behind it, and calling that an update advertises — and on click
+    /// performs — a downgrade. When either version is unparseable, nothing can be proven
+    /// about order, so any difference counts: an adopted release records no version at all,
+    /// and pinning it to the catalog is exactly what the operator wants.
+    /// </summary>
+    public static bool OffersUpgrade(string? installedVersion, string? candidateVersion)
+    {
+        if (string.IsNullOrWhiteSpace(candidateVersion))
+        {
+            return false;
+        }
+
+        SemVer? installed = Parse(installedVersion);
+        SemVer? candidate = Parse(candidateVersion);
+
+        if (installed is null || candidate is null)
+        {
+            return !string.Equals(
+                Normalize(installedVersion), Normalize(candidateVersion), StringComparison.OrdinalIgnoreCase);
+        }
+
+        return candidate > installed;
+    }
+
+    /// <summary>
+    /// Strips a leading "v" so versions compare on their numbers alone. Charts are
+    /// inconsistent about the prefix (jetstack publishes "v0.24.0", most publish "0.24.0")
+    /// and a prefix-only difference is not a version difference.
+    /// </summary>
+    public static string Normalize(string? version) => version?.Trim().TrimStart('v', 'V') ?? "";
+
     public bool Equals(SemVer? other) => CompareTo(other) == 0;
 
     public override bool Equals(object? obj) => obj is SemVer other && Equals(other);

@@ -309,6 +309,57 @@ public class ComponentUpgradeServiceTests
             .State.Should().Be(KubernetesSupportState.Unknown);
     }
 
+    // ── Catalog pin vs installed chart (the cluster components view's "Update available") ──
+
+    [Theory]
+    [InlineData("34.1.0", "34.2.0")]   // newer pin
+    [InlineData("v1.16.2", "1.17.0")]  // prefix on one side only
+    [InlineData("1.16", "1.16.1")]     // two-part installed version
+    public void A_newer_catalog_pin_is_an_update(string installed, string pinned)
+    {
+        SemVer.OffersUpgrade(installed, pinned).Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData("34.2.0", "34.1.0")]   // the reported bug: installed ahead of the catalog
+    [InlineData("v1.17.0", "1.16.2")]
+    [InlineData("2.0.0", "1.99.99")]
+    public void A_catalog_pin_older_than_the_installed_chart_is_not_an_update(string installed, string pinned)
+    {
+        SemVer.OffersUpgrade(installed, pinned).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("34.1.0", "34.1.0")]
+    [InlineData("v0.24.0", "0.24.0")]  // prefix-only difference
+    [InlineData("1.2", "1.2.0")]
+    public void An_equal_version_is_not_an_update(string installed, string pinned)
+    {
+        SemVer.OffersUpgrade(installed, pinned).Should().BeFalse();
+    }
+
+    [Fact]
+    public void An_adopted_release_with_no_recorded_version_is_offered_the_catalog_pin()
+    {
+        // Nothing to compare against, so pinning it to the catalog is still the right offer.
+        SemVer.OffersUpgrade(null, "34.1.0").Should().BeTrue();
+        SemVer.OffersUpgrade("", "34.1.0").Should().BeTrue();
+    }
+
+    [Fact]
+    public void A_catalog_that_pins_nothing_never_offers_an_update()
+    {
+        SemVer.OffersUpgrade("34.1.0", null).Should().BeFalse();
+        SemVer.OffersUpgrade("34.1.0", "  ").Should().BeFalse();
+    }
+
+    [Fact]
+    public void An_unparseable_version_falls_back_to_any_difference()
+    {
+        SemVer.OffersUpgrade("main-abc123", "34.1.0").Should().BeTrue();
+        SemVer.OffersUpgrade("main-abc123", "main-abc123").Should().BeFalse();
+    }
+
     [Fact]
     public void Counts_how_many_minor_releases_behind_the_newest_known_version()
     {

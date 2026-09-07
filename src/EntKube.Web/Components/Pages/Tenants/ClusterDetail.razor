@@ -849,13 +849,10 @@ else if (section == "components")
                                                     <i class="bi bi-tag me-1"></i>version unknown
                                                 </small>
                                             }
-                                            @if (headerCatalog is not null
-                                                && !string.IsNullOrEmpty(headerCatalog.HelmChartVersion)
-                                                && comp.Status == ComponentStatus.Installed
-                                                && comp.HelmChartVersion != headerCatalog.HelmChartVersion)
+                                            @if (HasCatalogUpdate(comp, headerCatalog))
                                             {
                                                 <span class="badge bg-info text-dark"
-                                                      title="Catalog version: @FormatChartVersion(headerCatalog.HelmChartVersion) — click Upgrade to move to it">
+                                                      title="Catalog version: @FormatChartVersion(headerCatalog!.HelmChartVersion) — click Upgrade to move to it">
                                                     <i class="bi bi-arrow-up-circle me-1"></i>Update available
                                                 </span>
                                             }
@@ -3338,22 +3335,19 @@ else if (section == "components")
         await UpgradeComponent(certManager.Id, noWait: true);
     }
 
+    /// <summary>
+    /// True when the catalog pins a chart version this installed release should move up to.
+    /// The version comparison itself lives in <see cref="EntKube.Web.Services.Upgrades.SemVer.OffersUpgrade"/>,
+    /// which refuses to call a catalog pin *older* than the installed chart an update.
+    /// </summary>
     private static bool HasCatalogUpdate(ClusterComponent comp, CatalogEntry? entry) =>
         entry is not null
-        && !string.IsNullOrEmpty(entry.HelmChartVersion)
         && comp.Status == ComponentStatus.Installed
-        && !string.Equals(
-            NormalizeChartVersion(comp.HelmChartVersion),
-            NormalizeChartVersion(entry.HelmChartVersion),
-            StringComparison.OrdinalIgnoreCase);
+        && EntKube.Web.Services.Upgrades.SemVer.OffersUpgrade(comp.HelmChartVersion, entry.HelmChartVersion);
 
-    /// <summary>
-    /// Strips a leading "v" so versions compare on their semver alone. Charts are
-    /// inconsistent about the prefix (jetstack publishes "v0.24.0", most publish
-    /// "0.24.0"), and a prefix-only difference is not an available upgrade.
-    /// </summary>
+    /// <summary>Strips a leading "v" so a version renders (and compares) on its numbers alone.</summary>
     private static string NormalizeChartVersion(string? version) =>
-        version?.Trim().TrimStart('v', 'V') ?? "";
+        EntKube.Web.Services.Upgrades.SemVer.Normalize(version);
 
     /// <summary>Renders a chart version with exactly one "v" prefix.</summary>
     private static string FormatChartVersion(string? version) =>

@@ -65,9 +65,24 @@ public class LogQueryService(ILogBackend native, LokiService loki, IDbContextFac
     /// <summary>Which log backends are usable for this cluster — drives the viewer's source picker.
     /// Native counts as usable when its collector is installed (it owns the cluster) or it already
     /// holds data; Loki when its component is installed.</summary>
+    /// <remarks>
+    /// The two probes run together. Neither depends on the other — the native one reads the component
+    /// list and, only if no collector is registered, asks the store whether it holds anything; the Loki
+    /// one resolves that cluster's Loki Service — and this call sits directly in front of the first
+    /// namespace query on every log view, so awaiting them one after the other put a whole round-trip
+    /// between opening the page and starting the work. Only the native probe touches this service's
+    /// caches, so there is nothing to synchronise.
+    /// </remarks>
     public async Task<(bool Native, bool Loki)> ProbeBackendsAsync(Guid clusterId, CancellationToken ct = default)
-        => (native.IsEnabled && (await NativeCollectorInstalledAsync(clusterId, ct) || await native.HasDataAsync(clusterId, ct)),
-            await loki.IsAvailableAsync(clusterId, ct));
+    {
+        Task<bool> nativeProbe = native.IsEnabled ? NativeUsableAsync(clusterId, ct) : Task.FromResult(false);
+        Task<bool> lokiProbe = loki.IsAvailableAsync(clusterId, ct);
+        await Task.WhenAll(nativeProbe, lokiProbe);
+        return (await nativeProbe, await lokiProbe);
+    }
+
+    private async Task<bool> NativeUsableAsync(Guid clusterId, CancellationToken ct)
+        => await NativeCollectorInstalledAsync(clusterId, ct) || await native.HasDataAsync(clusterId, ct);
 
     public async Task<bool> IsAvailableAsync(Guid clusterId, CancellationToken ct = default)
         => await UseNativeAsync(clusterId, LogBackendKind.Auto, ct) || await loki.IsAvailableAsync(clusterId, ct);

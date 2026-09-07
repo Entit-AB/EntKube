@@ -17,6 +17,7 @@
 #   scripts/release.sh --push                   # build everything, publish what has a home
 #   scripts/release.sh telemetry --push         # one target
 #   scripts/release.sh cli mcp --rid linux-x64  # two targets, one platform
+#   scripts/release.sh web --build-platform linux/arm64   # compile the images on that platform
 #   scripts/release.sh --list                   # what the targets are
 #
 # Targets:
@@ -77,6 +78,7 @@ VERSION=""
 CONFIGURATIONS="Release"
 RID_FILTER=""
 PLATFORMS_OVERRIDE=""
+BUILD_PLATFORM_OVERRIDE=""
 TARGETS=()
 
 # ── Argument parsing ─────────────────────────────────────────────────────────────────────────────────
@@ -92,6 +94,7 @@ while [[ $# -gt 0 ]]; do
     --rid)           RID_FILTER="${2:?--rid needs a value}"; shift 2 ;;
     --registry)      REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
     --platforms)     PLATFORMS_OVERRIDE="${2:?--platforms needs a value}"; shift 2 ;;
+    --build-platform) BUILD_PLATFORM_OVERRIDE="${2:?--build-platform needs a value}"; shift 2 ;;
     --list)          sed -n '/^#   web /,/^#   all /p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -h|--help)       usage; exit 0 ;;
     -*)              echo "Unknown option: $1" >&2; echo "Try --help." >&2; exit 2 ;;
@@ -495,9 +498,44 @@ effective_platforms() {
   fi
 }
 
+# Which platform the SDK stage compiles on. Empty means "whatever the builder runs on", which is the
+# Dockerfiles' own default and what every CI runner wants.
+#
+# An Apple M-series Mac is the exception, and it is not a small one: its Linux VM runs under
+# Hypervisor.framework, which advertises the ARMv9 SME2 CPU features to the guest and then cannot execute
+# them. The .NET toolchain detects them, emits them, and dies with SIGILL — `csc exited with code 132`,
+# or `Illegal instruction` when the crash takes the whole publish — a few seconds into compiling the
+# linux/arm64 leg. It is not intermittent and it is not this repository's code: the same commit compiles
+# on a native arm64 runner. Nothing inside the container avoids it either — with hardware intrinsics
+# disabled the crash simply moves from csc to the MSBuild worker (containers/podman#28312,
+# dotnet/runtime#122608).
+#
+# The way out is to not run an arm64 compiler at all: compile the amd64 way, under Rosetta, which works
+# here, and let `dotnet publish --arch` cross-publish for whichever architecture the image is for. The
+# runtime stage still runs natively as its own architecture — it only unpacks tarballs and runs apt.
+compiler_platform() {
+  [[ -n "$BUILD_PLATFORM_OVERRIDE" ]] && { echo "$BUILD_PLATFORM_OVERRIDE"; return; }
+  [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] && echo "linux/amd64"
+  return 0
+}
+
+# The same answer, phrased for someone reading the build output. Worth printing: a compile that does not
+# happen on the platform it is producing for is surprising, and finding that out from a build log beats
+# finding it out from this comment.
+compiler_platform_label() {
+  local platform
+  platform="$(compiler_platform)"
+  [[ -n "$platform" ]] && { echo "$platform"; return; }
+  echo "the builder's own platform"
+}
+
 build_image() {
   local dockerfile=$1 image=$2 platforms=$3
   local args=(build --file "$dockerfile" --tag "$image" --platform "$platforms")
+
+  local build_platform
+  build_platform="$(compiler_platform)"
+  [[ -n "$build_platform" ]] && args+=(--build-arg "BUILD_PLATFORM=$build_platform")
 
   # No provenance attestation: it adds a manifest entry with platform "unknown/unknown", which several
   # container runtimes report as a platform mismatch rather than ignoring. Nothing here consumes it.
@@ -505,47 +543,43 @@ build_image() {
   $PUSH && args+=(--push) || args+=(--load)
 
   if ! docker buildx "${args[@]}" . >> "$LOG" 2>&1; then
-    diagnose_sigill "$platforms"
+    diagnose_sigill
     fail_with_log "docker buildx build failed for $image."
   fi
 }
 
-# A cross-compile that dies with exit code 132 is a crashed process, not a broken build: 132 is 128+4,
-# SIGILL — the CPU refused an instruction the .NET JIT emitted. On an Apple M-series host running a
-# linux/arm64 leg under OrbStack it fires part-way through a large compile, lands on whichever project
-# happened to be building, and moves between runs.
+# A compile that dies with exit code 132 is a crashed process, not a broken build: 132 is 128+4, SIGILL —
+# the CPU refused an instruction the .NET toolchain emitted. The same crash surfaces in two shapes, and
+# matching only one of them is why this diagnostic used to stay silent on the runs that needed it most:
 #
-# The SAME crash surfaces in two different shapes, and matching only one of them is why this diagnostic
-# used to stay silent on the runs that needed it most:
-#
-#   MSBuild outlives the compiler   →  `"csc" exited with code 132.`, and buildx then reports exit code 1
+#   MSBuild outlives the compiler      →  `"csc" exited with code 132.`, and buildx then reports exit 1
 #   the crash takes the whole publish  →  no csc line at all, and buildx reports `exit code: 132`
 #
-# Either way it reads like a source problem and is not one — the same source compiles on a native arm64
-# runner in CI. Nothing in this repository can fix it, so the useful thing to print is what to do instead.
+# compiler_platform() above is what keeps this from happening on the host where it is expected, so
+# reaching here means the compile crashed somewhere that workaround does not cover. Print the knob.
 diagnose_sigill() {
-  local platforms=$1
   # `Illegal instruction` is what the shell inside the build prints when the compiler dies, and it is the
   # one marker present in both shapes; the exit codes are matched too because buildx does not always
   # forward that line.
   grep -qE 'Illegal instruction|exited with code 132|exit code: 132' "$LOG" || return 0
-  [[ "$platforms" == *linux/arm64* ]] || return 0
 
+  local where
+  where="$(compiler_platform_label)"
   cat >&2 <<EOF
 
-  ── the arm64 leg crashed the compiler ──────────────────────────────────────────
-  Exit code 132 is SIGILL: the .NET toolchain hit an illegal instruction building
-  linux/arm64. It is a host problem (Apple silicon + a Linux VM), not a code
-  problem, and it moves between projects from run to run.
+  ── the compiler crashed with SIGILL ────────────────────────────────────────────
+  Exit code 132 is SIGILL: the .NET toolchain hit an illegal instruction while
+  compiling. It is a host problem — the CPU features the container's VM advertises
+  are not ones it can execute — and not a problem with this code.
 
-  Publish the image from CI instead — .github/workflows/deploy.yml builds each
-  architecture on a native runner and merges the digests, which is the only path
-  that produces a correct multi-arch \`latest\`.
+  This build compiled on: $where
 
-  To build locally anyway, drop the arm64 leg:
-      scripts/release.sh <target> --push --platforms linux/amd64
-  That pushes a single-architecture image and will NOT move \`latest\` — arm64
-  hosts pull that tag, and an amd64-only \`latest\` fails them at pull time.
+  Try compiling on the other one:
+      scripts/release.sh <target> --build-platform linux/amd64
+      scripts/release.sh <target> --build-platform linux/arm64
+  The image still comes out for whatever --platforms asks for; only the compiler
+  moves. Failing that, publish from CI — .github/workflows/deploy.yml builds each
+  architecture on a native runner and merges the digests.
   ────────────────────────────────────────────────────────────────────────────────
 EOF
 }
@@ -605,6 +639,7 @@ build_web() {
   echo "▸ web — management-plane image"
   echo "    image:     $image"
   echo "    platforms: $platforms"
+  echo "    compiler:  $(compiler_platform_label)"
 
   step "build image"
   build_image "$WEB_DOCKERFILE" "$image" "$platforms"

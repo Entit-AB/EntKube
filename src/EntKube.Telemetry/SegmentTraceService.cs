@@ -72,7 +72,7 @@ public sealed class SegmentTraceService(
             Query scope = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, from, null, namespaces, podPattern);
             var sink = new HashSet<string>(StringComparer.Ordinal);
             await spans.For(tenantId.Value).QueryAsync(Scope, from, null,
-                s => { s.Search(scope, new DistinctCollector(SpanSegmentSchema.Service, sink)); return 0; }, ct);
+                s => { DistinctFieldValues.Collect(s, scope, SpanSegmentSchema.Service, sink); return 0; }, ct);
             List<string> result = sink.Where(v => v.Length > 0).OrderBy(v => v, StringComparer.Ordinal).ToList();
             ServiceListCache[cacheKey] = (DateTime.UtcNow, result);
             return KubernetesOperationResult<List<string>>.Success(result);
@@ -492,24 +492,4 @@ public sealed class SegmentTraceService(
 
     private static KubernetesOperationResult<T> Fail<T>(string message = "Segment telemetry store error.")
         => KubernetesOperationResult<T>.Failure(message);
-
-    // Distinct SortedDocValues of a field over matched docs (per leaf) — used for the service dropdown.
-    private sealed class DistinctCollector(string field, HashSet<string> sink) : ICollector
-    {
-        private SortedDocValues? _dv;
-        private readonly BytesRef _scratch = new();
-
-        public void SetScorer(Scorer scorer) { }
-        public void SetNextReader(AtomicReaderContext context) => _dv = context.AtomicReader.GetSortedDocValues(field);
-        public bool AcceptsDocsOutOfOrder => true;
-
-        public void Collect(int doc)
-        {
-            if (_dv is null) return;
-            int ord = _dv.GetOrd(doc);
-            if (ord < 0) return;
-            _dv.LookupOrd(ord, _scratch);
-            sink.Add(_scratch.Utf8ToString());
-        }
-    }
 }

@@ -854,6 +854,17 @@ public class ComponentLifecycleService(
         // which is why an istiod change lands while the same edit to a gateway does not.)
         valuesYaml = FillMissingCatalogDefaults(valuesYaml, valuesCatalog?.DefaultValues);
 
+        // trust-manager: `secretTargets.enabled: true` without the permission that goes with it produces a
+        // controller that watches Secrets it cannot list — a crash loop with nothing in any Bundle status to
+        // explain it. The fill-in above cannot repair that, because a component that already carries a
+        // `secretTargets` block has the key "present but different" and is left alone by design. Running
+        // after it means both a stored block and a just-filled one are corrected, and neither an absent
+        // block nor a disabled one is touched.
+        if (component.HelmChartName == "trust-manager")
+        {
+            valuesYaml = YamlFormMerger.EnsureTrustManagerSecretTargets(valuesYaml ?? "");
+        }
+
         string releaseName = component.ReleaseName ?? component.Name;
         string chartRef = !string.IsNullOrWhiteSpace(component.HelmRepoUrl)
             ? $"{component.HelmRepoUrl}/{component.HelmChartName}"
