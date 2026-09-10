@@ -44,9 +44,14 @@ public class CostAllocationTests
     private static IReadOnlyList<NamespaceCost> Allocate(
         IReadOnlyList<NamespaceConsumption> consumption,
         ClusterCostRate rate,
-        Func<string, NamespaceOwner>? attribute = null) =>
+        Func<string, NamespaceOwner>? attribute = null,
+        ClusterCapacity? capacity = null) =>
         CostAllocation.Allocate(
-            consumption, rate, Guid.NewGuid(), "prod-eu-west-1", attribute ?? Unattributed);
+            consumption, rate, Guid.NewGuid(), "prod-eu-west-1", attribute ?? Unattributed, capacity);
+
+    /// <summary>What the nodes provide: a two-node cluster of 8 cores and 32 GiB by default.</summary>
+    private static ClusterCapacity Capacity(double cpu = 8, double memory = 32, double nodes = 2) =>
+        new() { Nodes = nodes, CpuCores = cpu, MemoryGiB = memory };
 
     // ── The arithmetic ──
 
@@ -552,6 +557,156 @@ public class CostAllocationTests
     {
         // Kubernetes reports binary units; using 10^9 would under-count memory by ~7%.
         CostAllocation.BytesToGiB(1024d * 1024d * 1024d).Should().Be(1d);
+    }
+
+    // ── Idle capacity ──
+    //
+    // A cloud bills the nodes, not the pods on them. These pin the line that turns "what
+    // was requested" into "what is paid for" — without it a half-allocated cluster
+    // reports half its invoice.
+
+    [Fact]
+    public void Unallocated_node_capacity_is_priced_at_the_compute_rates()
+    {
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+            [new NamespaceConsumption { Namespace = "acme", CpuCores = 2, MemoryGiB = 8 }],
+            Rate(cpu: 0.03m, memory: 0.004m), AllOwned, Capacity(cpu: 8, memory: 32));
+
+        NamespaceCost idle = costs.Single(c => c.IsIdle);
+
+        // 6 unclaimed cores × $0.03 × 730 h; 24 unclaimed GiB × $0.004 × 730 h.
+        idle.CpuCores.Should().Be(6);
+        idle.MemoryGiB.Should().Be(24);
+        idle.CpuMonthlyCost.Should().Be(131.40m);
+        idle.MemoryMonthlyCost.Should().Be(70.08m);
+        idle.StorageMonthlyCost.Should().Be(0m);
+    }
+
+    [Fact]
+    public void A_clusters_allocated_total_is_what_its_nodes_cost_not_what_was_requested()
+    {
+        // Two apps hold a quarter of the cluster between them. Priced on requests alone
+        // the cluster would report a quarter of its invoice.
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+            [
+                new NamespaceConsumption { Namespace = "a", CpuCores = 1, MemoryGiB = 4 },
+                new NamespaceConsumption { Namespace = "b", CpuCores = 1, MemoryGiB = 4 },
+            ],
+            Rate(cpu: 0.03m, memory: 0.004m), AllOwned, Capacity(cpu: 8, memory: 32));
+
+        // 8 cores × $0.03 × 730 h + 32 GiB × $0.004 × 730 h = $175.20 + $93.44
+        costs.Where(c => !c.IsRedistributed).Sum(c => c.TotalMonthlyCost).Should().Be(268.64m);
+    }
+
+    [Fact]
+    public void Idle_capacity_is_pooled_and_charged_out_like_a_platform_namespace()
+    {
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+            [
+                new NamespaceConsumption { Namespace = "big", CpuCores = 3 },
+                new NamespaceConsumption { Namespace = "small", CpuCores = 1 },
+            ],
+            Rate(cpu: 0.03m, memory: 0m), AllOwned, Capacity(cpu: 8, memory: 0));
+
+        NamespaceCost idle = costs.Single(c => c.IsIdle);
+        idle.IsRedistributed.Should().BeTrue();
+        idle.IsUnattributed.Should().BeTrue();
+
+        // 4 idle cores = $87.60, split 3:1 by what each holds.
+        costs.Single(c => c.Namespace == "big").SharedMonthlyCost.Should().Be(65.70m);
+        costs.Single(c => c.Namespace == "small").SharedMonthlyCost.Should().Be(21.90m);
+    }
+
+    [Fact]
+    public void Idle_capacity_is_not_charged_when_the_price_sheet_says_not_to()
+    {
+        // Hardware that is a sunk cost: nobody should be invoiced for the empty half.
+        ClusterCostRate rate = Rate();
+        rate.ChargeIdleCapacity = false;
+
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+            [new NamespaceConsumption { Namespace = "acme", CpuCores = 2 }], rate, AllOwned, Capacity());
+
+        costs.Should().NotContain(c => c.IsIdle);
+        costs.Single().SharedMonthlyCost.Should().Be(0m);
+    }
+
+    [Fact]
+    public void No_capacity_reading_means_no_idle_line()
+    {
+        // An honest under-statement, flagged in the report's warnings, rather than a guess.
+        Allocate([new NamespaceConsumption { Namespace = "acme", CpuCores = 2 }], Rate(), AllOwned, capacity: null)
+            .Should().NotContain(c => c.IsIdle);
+    }
+
+    [Fact]
+    public void A_fully_allocated_cluster_has_no_idle_line()
+    {
+        Allocate(
+            [new NamespaceConsumption { Namespace = "acme", CpuCores = 8, MemoryGiB = 32 }],
+            Rate(), AllOwned, Capacity(cpu: 8, memory: 32))
+            .Should().NotContain(c => c.IsIdle);
+    }
+
+    [Fact]
+    public void Idle_capacity_is_never_negative()
+    {
+        // On a usage basis a cluster can briefly burn more CPU than it nominally has.
+        // That is not a credit: the CPU is simply not idle, and the memory still is.
+        NamespaceCost idle = Allocate(
+            [new NamespaceConsumption { Namespace = "acme", CpuCores = 10, MemoryGiB = 8 }],
+            Rate(), AllOwned, Capacity(cpu: 8, memory: 32)).Single(c => c.IsIdle);
+
+        idle.CpuCores.Should().Be(0);
+        idle.MemoryGiB.Should().Be(24);
+    }
+
+    [Fact]
+    public void Idle_capacity_stays_in_the_total_when_there_is_nobody_to_charge_it_to()
+    {
+        IReadOnlyList<NamespaceCost> costs = Allocate(
+            [new NamespaceConsumption { Namespace = "kube-system", CpuCores = 2 }],
+            Rate(cpu: 0.03m, memory: 0m), Unattributed, Capacity(cpu: 8, memory: 0));
+
+        NamespaceCost idle = costs.Single(c => c.IsIdle);
+        idle.IsRedistributed.Should().BeFalse();
+        idle.IsUnattributed.Should().BeTrue();
+
+        // The whole 8-core cluster, whoever is or is not paying for it.
+        costs.Where(c => !c.IsRedistributed).Sum(c => c.TotalMonthlyCost).Should().Be(175.20m);
+    }
+
+    [Fact]
+    public void The_idle_line_is_never_offered_for_attribution()
+    {
+        // Even an attribution function that claims everything must not be handed the
+        // idle line — it belongs to nobody by construction.
+        List<string> asked = [];
+        Allocate(
+            [new NamespaceConsumption { Namespace = "acme", CpuCores = 2 }],
+            Rate(), ns => { asked.Add(ns); return Owned(app: ns); }, Capacity());
+
+        asked.Should().Equal("acme");
+    }
+
+    [Fact]
+    public void The_idle_line_cannot_collide_with_a_real_namespace()
+    {
+        // A namespace is a DNS label; the idle line's name is deliberately not one.
+        CostAllocation.IdleNamespace.Should().NotMatchRegex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$");
+    }
+
+    [Fact]
+    public void Report_totals_the_idle_capacity_for_display_without_counting_it_twice()
+    {
+        CostReport report = Report(
+            Cost("acme-prod", 60m, Guid.NewGuid(), "Acme", sharedCost: 40m),
+            Cost(CostAllocation.IdleNamespace, 40m, redistributed: true));
+
+        report.IdleMonthlyCost.Should().Be(40m);
+        report.SharedPoolMonthlyCost.Should().Be(40m);
+        report.TotalMonthlyCost.Should().Be(100m);
+        report.SharedPool.Should().ContainSingle(n => n.IsIdle);
     }
 }
 

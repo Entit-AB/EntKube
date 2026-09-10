@@ -403,8 +403,29 @@ public static class PublicApiEndpoints
                 totalHourlyCost = report.TotalHourlyCost,
                 unattributedMonthlyCost = report.UnattributedMonthlyCost,
                 sharedPoolMonthlyCost = report.SharedPoolMonthlyCost,
+                // Node capacity nothing holds, priced. Inside the shared pool and the
+                // total; reported apart because it is what makes the total approach
+                // the invoice rather than the sum of what was requested.
+                idleMonthlyCost = report.IdleMonthlyCost,
                 multiAppMonthlyCost = report.MultiAppMonthlyCost,
                 warnings = report.Warnings,
+                capacity = report.Capacity.Select(c => new
+                {
+                    clusterId = c.ClusterId,
+                    cluster = c.ClusterName,
+                    hasCapacity = c.HasCapacity,
+                    nodes = c.Nodes,
+                    cpuCapacity = c.CpuCapacity,
+                    cpuAllocated = c.CpuAllocated,
+                    memoryCapacityGiB = c.MemoryCapacityGiB,
+                    memoryAllocatedGiB = c.MemoryAllocatedGiB,
+                    // What the nodes cost at the compute rates whatever runs on them —
+                    // the figure to hold up against the provider's invoice.
+                    nodeMonthlyCost = c.NodeMonthlyCost,
+                    idleMonthlyCost = c.IdleMonthlyCost,
+                    idleCharged = c.IdleCharged,
+                    monthlyCost = c.TotalMonthlyCost,
+                }),
                 byCustomer = report.ByCustomer.Select(c => new
                 {
                     customerId = c.CustomerId,
@@ -453,6 +474,9 @@ public static class PublicApiEndpoints
                     // Its cost was pooled onto the billable namespaces; it is reported so
                     // the pool can be audited, but it is not part of any total.
                     redistributed = n.IsRedistributed,
+                    // Not a namespace: the cluster's unallocated node capacity, carried
+                    // as a line so it can be pooled and audited like one.
+                    idle = n.IsIdle,
                 }),
             });
         }).RequireApiScope(ApiScopes.OpsRead);

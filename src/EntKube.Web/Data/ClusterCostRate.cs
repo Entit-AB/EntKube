@@ -59,6 +59,17 @@ public class ClusterCostRate
     /// </summary>
     public bool ChargeOnRequests { get; set; } = true;
 
+    /// <summary>
+    /// Charge for the node capacity nothing has claimed. A cloud bills the nodes, not the
+    /// pods on them, so capacity no namespace has requested is a real charge with nobody
+    /// to cause it — left out, the report adds up to what was asked for rather than what
+    /// is paid for, and lands at a fraction of the invoice. On, the idle capacity is
+    /// carried as a line of its own and pooled like a platform namespace, so the total
+    /// approaches the bill. Off is for a fleet whose hardware is a sunk cost that should
+    /// not be charged to anyone.
+    /// </summary>
+    public bool ChargeIdleCapacity { get; set; } = true;
+
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
     public string? UpdatedBy { get; set; }
 
