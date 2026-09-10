@@ -22,10 +22,36 @@ there is nothing extra to pay for, patch, back up, or explain.
 **Registering an existing cluster by kubeconfig stays exactly as it is.** It is how EntKube adopts
 clusters it did not build, and nothing here changes it.
 
+## The hard constraint: upstream Kubernetes, kubeadm, everywhere
+
+Every cluster this design creates is bootstrapped by kubeadm and is plain upstream Kubernetes.
+That includes the throwaway management cluster — **k3s is not used anywhere**, and the current
+bootstrap VM, which cloud-inits `get.k3s.io`, has to be replaced before anything else here is
+built.
+
+The target clusters were never the problem: CAPI's `KubeadmControlPlane` is kubeadm by definition.
+It is the ephemeral plane that has to change, and it costs more than swapping an installer, because
+k3s bundles what kubeadm does not:
+
+| | k3s gave us | kubeadm needs |
+|---|---|---|
+| Bootstrap | one `curl \| sh` | `kubeadm init --apiserver-cert-extra-sans <floating ip>`, from an image that already has kubeadm, kubelet and containerd |
+| Scheduling | workloads run on the single node | the control-plane `NoSchedule` taint removed, or the CAPI controllers never start |
+| Networking | flannel, built in | a CNI applied before anything else — `clusterctl init` installs cert-manager, whose webhooks must actually answer |
+| Kubeconfig | `/etc/rancher/k3s/k3s.yaml`, world-readable by flag | `/etc/kubernetes/admin.conf`, root-only, fetched over `sudo cat` |
+| Readiness | seconds | longer, and the poll must wait for the node to go Ready rather than for a file to appear |
+
+The consequence worth noticing: **the bootstrap VM should boot the same machine image as the
+cluster nodes.** They need exactly the same things — kubeadm, kubelet, containerd, the control-plane
+images pre-pulled — and one image serving both means the ephemeral plane needs no internet access
+at boot either. That turns [the image question](#from-scratch-means-owning-the-image) from an
+upgrade concern into the foundation of the whole path.
+
 ## Where we actually are
 
 `ClusterProvisioningService` (555 lines, one public method) already stands a cluster up:
-authenticate → application credential + `clouds.yaml` → SSH keypair → ephemeral k3s bootstrap VM →
+authenticate → application credential + `clouds.yaml` → SSH keypair → ephemeral bootstrap VM (k3s
+today, kubeadm per the constraint above) →
 `clusterctl init` CAPO → `clusterctl generate cluster` → apply → wait for the control plane →
 Calico → write the `cloud-config` secret → `clusterctl init` on the target → `clusterctl move` into
 it → register the kubeconfig → record node inventory → destroy the bootstrap VM.
@@ -35,6 +61,7 @@ That is a real from-zero path and the shape below keeps it. What it is not yet:
 | | today |
 |---|---|
 | **Worker pools** | `WorkerPools` is a list in the config, but `BuildEnv` sends `WORKER_MACHINE_COUNT = TotalWorkerCount` and `OPENSTACK_NODE_MACHINE_FLAVOR = WorkerPools[0].Flavor`. Every worker lands in one `md-0` MachineDeployment with the first pool's flavor. Multi-pool is declared, not delivered. |
+| **Bootstrap cluster** | k3s, installed from `get.k3s.io` at boot. Has to become a single-node kubeadm cluster, which also means shipping it a CNI and untainting its control-plane node. |
 | **Machine image** | `OPENSTACK_IMAGE_NAME` must already name a kubeadm-ready image in Glance. Nothing builds or uploads one, so "from credentials alone" is not yet true. |
 | **Day-2** | Nothing. No scale, no pool changes, no version upgrade, no repair, no delete. A self-managed cluster cannot delete itself, so today its floating IPs, volumes, load balancers and security groups leak when it goes. |
 | **Sizing inputs** | Flavors, images, networks and AZs are free text typed by hand. Nothing lists what the cloud actually offers. |
@@ -76,10 +103,11 @@ Two things a cluster cannot do to itself:
 - **Repair a control plane that is already broken.** If the API server is down, so is the CAPI
   that would replace the machine.
 
-For those, EntKube boots the same ephemeral k3s VM the initial bootstrap uses, `clusterctl init`s
-CAPO on it, `clusterctl move`s the cluster's CAPI state *out* to it, performs the operation, and
-then either moves the state back (repair) or destroys everything including itself (delete). The
-plane exists for the length of one operation and leaves nothing behind.
+For those, EntKube boots the same ephemeral VM the initial bootstrap uses — one machine, the shared
+node image, `kubeadm init`, untainted, a CNI applied — `clusterctl init`s CAPO on it, `clusterctl
+move`s the cluster's CAPI state *out* to it, performs the operation, and then either moves the state
+back (repair) or destroys everything including itself (delete). The plane exists for the length of
+one operation and leaves nothing behind.
 
 This is the piece that pays for having no seed, and it is honest about the cost: a delete takes
 minutes rather than seconds, and it needs the cloud reachable. The alternative — sweeping Nova,
@@ -91,8 +119,9 @@ pass afterwards that reports anything left behind rather than deleting it.**
 ## From scratch means owning the image
 
 A kubeadm-ready Glance image is the one prerequisite that cannot be wished away: CAPI's whole model
-is "boot this image, run this cloud-init". Three ways to have one, and this is the design's biggest
-open decision:
+is "boot this image, run this cloud-init". With k3s ruled out, the same image also boots the
+ephemeral management plane, so **one image is now on the critical path twice** — nothing gets built
+without it. Three ways to have one:
 
 **(a) EntKube builds it.** A one-off job — a temporary VM, `image-builder` or a scripted
 `cloud-init` + `qemu-img`, upload to Glance, tag it with the Kubernetes version. Costs one build
@@ -103,13 +132,16 @@ Gardener does and it is the only one of the three that makes upgrades sane.
 **(b) Plain Ubuntu plus cloud-init that installs kubeadm at boot.** Nothing to build, works
 immediately. Every node boot then depends on package repositories and registries being reachable
 and unchanged — slower, and a node that comes up in six months gets different bits than its
-siblings. Fine for a lab, wrong for the thing that replaces Gardener.
+siblings. This is what the k3s bootstrap was doing, and it is precisely the property being ruled
+out. Not built.
 
 **(c) The operator supplies one.** Today's behaviour. Keeps working as an override and should
 stay, because some clouds ship a blessed image.
 
-**Recommendation: (a), with (c) as an override and (b) not built at all.** The image builder is a
-self-contained piece of work that can land before anything else and is independently useful.
+**Recommendation: (a), with (c) as an override.** The image builder is a self-contained piece of
+work that can land before anything else, and it is no longer only about upgrades: it is what makes
+a kubeadm bootstrap possible in a closed network, and what guarantees the ephemeral plane and the
+cluster it creates are running identical bits.
 
 ## The cluster spec
 
@@ -234,8 +266,10 @@ earlier.
 1. **Cloud discovery.** List flavors, images, networks, AZs, and detect Octavia and Cinder volume
    types from the connection. Turns every free-text field in the wizard into a picker, and is
    worth having on its own.
-2. **Machine images.** Build, upload, tag by Kubernetes version. The prerequisite for upgrades and
-   for closed networks.
+2. **Machine images, and the kubeadm bootstrap.** Build, upload and tag an image by Kubernetes
+   version, then rebuild the ephemeral plane on it: `kubeadm init`, untaint, CNI, wait for Ready.
+   These are one phase because they are one problem — the image is what the bootstrap VM boots, and
+   replacing k3s without it just moves the internet dependency around.
 3. **Own the manifests.** Replace `clusterctl generate cluster` with EntKube-authored manifests, so
    worker pools stop collapsing into one. First point at which the config stops lying.
 4. **The spec as data.** `ProvisionedCluster` + `ProvisionedWorkerPool`, migrated from the existing
@@ -246,13 +280,16 @@ earlier.
 8. **Foundation verification.** Every foundation step asserts its own success.
 9. **etcd backup**, certificate-expiry findings, credential and kubeconfig rotation.
 
-Phase 3 is the first one that cannot be skipped, and phases 1–3 together are what make "connect a
-cloud and get whatever machines are required" true.
+Phases 2 and 3 are the ones that cannot be skipped — 2 because k3s has to go and nothing else can
+be tested honestly until it has, 3 because until we author the manifests the worker pools in the
+spec are fiction. Together with 1 they are what make "connect a cloud and get whatever machines are
+required" true.
 
 ## Decisions still open
 
-1. **Machine images: build them?** Recommended yes (a). Everything about upgrades and closed
-   networks gets easier; costs a build pipeline.
+1. **Machine images: build them?** Recommended yes (a) — and with k3s ruled out this is close to
+   forced, since the ephemeral plane needs the same image. The remaining question is whether to run
+   `image-builder` or a scripted `cloud-init` + `qemu-img`, and where the build itself runs.
 2. **Control-plane default.** 3 nodes across 3 AZs, or 1 for cheapness with an obvious warning?
    Recommended: 3 is the default, 1 is offered and labelled non-production.
 3. **API endpoint on clouds without Octavia.** Fall back to kube-vip on a floating IP, or refuse
