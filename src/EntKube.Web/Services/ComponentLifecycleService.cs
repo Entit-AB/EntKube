@@ -688,8 +688,14 @@ public class ComponentLifecycleService(
 
         if (TelemetryIngestDefaults.IsCollector(valuesCatalog))
         {
+            // Resolved BEFORE the placeholders are filled, because it is now the only address they can be
+            // filled with. With no indexer on the cluster, FillPlaceholders throws and names the component
+            // to install, rather than quietly addressing the management plane.
+            string? inClusterIngest = await entKubeTelemetry.GetInClusterIngestUrlAsync(component.ClusterId, ct);
+
             (string? healed, string? mintedToken) = TelemetryIngestDefaults.FillPlaceholders(
-                valuesYaml, component.ClusterId, component.Cluster.TenantId, ingestTokens, configuration);
+                valuesYaml, component.ClusterId, component.Cluster.TenantId, ingestTokens, configuration,
+                inClusterIngest);
             valuesYaml = healed;
 
             // The vault can hold the placeholder itself: InjectSecretsIntoValuesAsync recovers a missing
@@ -702,12 +708,10 @@ public class ComponentLifecycleService(
                     TelemetryIngestDefaults.TokenSecretName(valuesCatalog!), mintedToken, ct);
             }
 
-            // Once this cluster runs its own telemetry indexer, that is where the collector should ship —
-            // keeping the data in the cluster is the whole reason the indexer is there, and a collector
-            // still pointed at the management plane leaves the indexer empty. It cannot be decided when
-            // the collector is registered: the indexer DEPENDS on the collector, so it is always installed
-            // second. Deciding it here means re-applying the collector is what moves it.
-            string? inClusterIngest = await entKubeTelemetry.GetInClusterIngestUrlAsync(component.ClusterId, ct);
+            // The migration path for collectors registered before the management plane stopped being a
+            // destination at all: anything still addressed there is moved to this cluster's indexer on
+            // the next apply. New installs never take that route — the endpoint is the indexer's from
+            // registration onwards — so this only ever heals an existing one.
             (string? repointed, bool didRepoint) =
                 TelemetryIngestDefaults.RepointToInCluster(valuesYaml, inClusterIngest, configuration);
             valuesYaml = repointed;

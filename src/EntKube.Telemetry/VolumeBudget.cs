@@ -97,3 +97,44 @@ public static class VolumeBudget
     /// </summary>
     private static double Clamp(int percent) => Math.Clamp(percent, 50, 99);
 }
+
+/// <summary>
+/// Decides how much each signal must give up when the telemetry BUCKET is over its size budget.
+///
+/// <para>Separated from the service that acts on it for the same reason as <see cref="VolumeBudget"/>:
+/// the part with the rules in it should be readable and testable without a bucket, a catalog or a clock.</para>
+/// </summary>
+public static class ObjectStorageBudget
+{
+    /// <summary>
+    /// Bytes each signal should shed, in the same order as <paramref name="bytesPerSignal"/>. Empty when
+    /// the total is inside the budget, when no budget is set, or when there is nothing stored.
+    ///
+    /// <para>The overage is split in proportion to what each signal actually holds. Draining one signal
+    /// before touching the next would trade all of a cluster's log history for a week of span waterfalls
+    /// — or the reverse — decided by nothing more than iteration order. Proportional shedding keeps every
+    /// signal's window the same shape, so what an operator loses is uniformly "the far end", which is the
+    /// only kind of loss that can be reasoned about after the fact.</para>
+    /// </summary>
+    public static IReadOnlyList<long> Plan(
+        IReadOnlyList<long> bytesPerSignal, long budgetBytes, int targetPercent)
+    {
+        if (budgetBytes <= 0 || bytesPerSignal.Count == 0) return [];
+
+        long total = 0;
+        foreach (long b in bytesPerSignal) total += Math.Max(0, b);
+        if (total <= budgetBytes || total == 0) return [];
+
+        // Integer division first, so the target can never exceed the budget through rounding.
+        long target = budgetBytes / 100 * Math.Clamp(targetPercent, 10, 99);
+        long excess = total - target;
+
+        long[] plan = new long[bytesPerSignal.Count];
+        for (int i = 0; i < bytesPerSignal.Count; i++)
+        {
+            long held = Math.Max(0, bytesPerSignal[i]);
+            plan[i] = held == 0 ? 0 : (long)((double)excess * held / total);
+        }
+        return plan;
+    }
+}

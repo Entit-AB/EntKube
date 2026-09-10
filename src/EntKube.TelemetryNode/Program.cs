@@ -33,6 +33,9 @@ SegmentEngineOptions engine = new()
     VerboseLogRetentionDays = builder.Configuration.GetValue<int?>("Telemetry:VerboseLogRetentionDays") ?? 14,
     WarmRetentionDays = builder.Configuration.GetValue<int?>("Telemetry:WarmRetentionDays") ?? 3,
     WarmMaxBytes = builder.Configuration.GetValue<long?>("Telemetry:WarmMaxBytes") ?? 8L * 1024 * 1024 * 1024,
+    MaxCachedReaders = builder.Configuration.GetValue<int?>("Telemetry:MaxCachedReaders") ?? 64,
+    ObjectStorageMaxBytes = builder.Configuration.GetValue<long?>("Telemetry:ObjectStorageMaxBytes") ?? 0,
+    ObjectStorageTargetPercent = builder.Configuration.GetValue<int?>("Telemetry:ObjectStorageTargetPercent") ?? 90,
     VolumeHighWaterPercent = builder.Configuration.GetValue<int?>("Telemetry:VolumeHighWaterPercent") ?? 85,
     VolumeTargetPercent = builder.Configuration.GetValue<int?>("Telemetry:VolumeTargetPercent") ?? 70,
     DropOldestWhenVolumeFull =
@@ -180,6 +183,20 @@ if (node.Role == NodeRole.Indexer)
         ],
         sp.GetRequiredService<ISegmentBlobStore>(), engine,
         sp.GetRequiredService<ILogger<VolumeGuardService>>()));
+
+    // And this one measures the BUCKET. Retention bounds telemetry in time; nothing bounded what that
+    // costs in object storage, which is the one consumer whose overrun shows up on an invoice rather
+    // than in an alert. Unbounded by default (Telemetry:ObjectStorageMaxBytes = 0).
+    builder.Services.AddHostedService(sp => new ObjectStorageBudgetService(
+        [
+            sp.GetRequiredService<SegmentManagerRegistry<LogSegmentManager>>(),
+            sp.GetRequiredService<SegmentManagerRegistry<VerboseLogSegmentManager>>(),
+            sp.GetRequiredService<SegmentManagerRegistry<SpanSegmentManager>>(),
+            sp.GetRequiredService<SegmentManagerRegistry<RumSegmentManager>>(),
+            sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(),
+        ],
+        sp.GetRequiredService<ISegmentBlobStore>(), engine,
+        sp.GetRequiredService<ILogger<ObjectStorageBudgetService>>()));
 }
 
 else

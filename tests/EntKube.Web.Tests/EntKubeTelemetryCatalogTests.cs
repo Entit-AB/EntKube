@@ -1,5 +1,6 @@
 using EntKube.Web.Data;
 using EntKube.Web.Services;
+using EntKube.Web.Services.Telemetry;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -142,10 +143,17 @@ public class EntKubeTelemetryCatalogTests
     }
 
     [Fact]
-    public void The_indexer_requires_a_collector_to_feed_it()
+    public void The_collector_requires_the_indexer_and_not_the_other_way_round()
     {
         CatalogEntry indexer = ComponentCatalog.GetByKey(EntKubeTelemetryService.IndexerKey)!;
-        indexer.Dependencies.Should().Contain("otel-collector");
+        CatalogEntry collector = ComponentCatalog.GetByKey(TelemetryIngestDefaults.CollectorKey)!;
+
+        // The direction is the architecture. The indexer is where a cluster's telemetry lives, so it has
+        // to exist before the collector that fills it — with the dependency the other way the collector
+        // was always installed first, with nowhere in-cluster to ship, and that is exactly how the
+        // management plane became its default destination.
+        collector.Dependencies.Should().Contain(EntKubeTelemetryService.IndexerKey);
+        indexer.Dependencies.Should().NotContain(TelemetryIngestDefaults.CollectorKey);
     }
 
     [Theory]

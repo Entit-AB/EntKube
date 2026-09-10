@@ -50,7 +50,9 @@ public sealed class SegmentLogService(
         DateTime from = DateTime.UtcNow.AddDays(-7);
         foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value))
         {
-            bool any = await segments.QueryAsync(scope, from, null,
+            // AnyAsync, not QueryAsync: an existence check must not open (and, for a cold segment,
+            // download) the whole week before it can answer. See SegmentManagerBase.AnyAsync.
+            bool any = await segments.AnyAsync(scope, from, null,
                 s => s.Search(ScopeQuery(tenantId.Value, clusterId), 1).TotalHits > 0, ct);
             if (any) return true;
         }

@@ -70,6 +70,10 @@ exactly why this is easy to miss until someone raises a limit.
   value: /data/telemetry
 - name: Telemetry__RetentionDays
   value: {{ .Values.telemetry.retentionDays | int64 | quote }}
+- name: Telemetry__ObjectStorageMaxBytes
+  value: {{ .Values.telemetry.objectStorageMaxBytes | int64 | quote }}
+- name: Telemetry__ObjectStorageTargetPercent
+  value: {{ .Values.telemetry.objectStorageTargetPercent | int64 | quote }}
 - name: Telemetry__WarmMaxBytes
   value: {{ .Values.telemetry.warmMaxBytes | int64 | quote }}
 - name: Telemetry__TieredLogRetention

@@ -1431,7 +1431,7 @@ public static class ComponentCatalog
         {
             Key = "otel-collector",
             DisplayName = "EntKube Telemetry Collector",
-            Description = "Node-level telemetry collector built on the OpenTelemetry Collector (Apache 2.0). Runs as a DaemonSet, tails container logs on every node, and ships them to the EntKube native telemetry store over OTLP/JSON (Bearer-authenticated with a per-cluster ingest token) — no Loki required. Also exposes OTLP receivers (4317/4318) so instrumented apps can send traces and metrics to the platform. For a Loki-backed setup instead, use Grafana Alloy.",
+            Description = "Node-level telemetry collector built on the OpenTelemetry Collector (Apache 2.0). Runs as a DaemonSet, tails container logs on every node, and ships them to the EntKube Telemetry Indexer IN THIS CLUSTER over OTLP/JSON (Bearer-authenticated with a per-cluster ingest token) — no Loki required. The cluster's telemetry never leaves it: the indexer holds it on a volume and seals it into the object-storage bucket you assign at install, and EntKube queries that on demand rather than receiving a copy. Also exposes OTLP receivers (4317/4318) so instrumented apps can send traces to the same place. For a Loki-backed setup instead, use Grafana Alloy.",
             Icon = "bi-arrow-down-up",
             Category = "Monitoring",
             HelmRepoUrl = "https://open-telemetry.github.io/opentelemetry-helm-charts",
@@ -1442,8 +1442,13 @@ public static class ComponentCatalog
             DefaultReleaseName = "otel-collector",
             // DaemonSet rollout (one pod per node) can be slow on busy clusters — give --wait headroom.
             InstallTimeout = "30m0s",
-            // No component dependency: it ships to the EntKube management plane, not an in-cluster
-            // backend. Requires only the Ingest URL + per-cluster token (form fields below).
+            // The indexer is a hard dependency, and the direction is deliberate: the collector has
+            // somewhere to ship only if this cluster runs its own telemetry node. It used to be the other
+            // way round — the indexer depended on the collector, so the collector was installed first with
+            // nowhere in-cluster to send, defaulted to the management plane's public ingest URL, and only
+            // moved in-cluster if somebody later re-applied it. That default is gone: a cluster's telemetry
+            // stays in the cluster, so the destination must exist before the thing that fills it.
+            Dependencies = ["entkube-telemetry-indexer"],
             FormFields =
             [
                 new ComponentFormField
@@ -1483,8 +1488,8 @@ public static class ComponentCatalog
                 {
                     Key = "ingest-endpoint", Label = "Telemetry Ingest URL",
                     YamlPath = "config.exporters.otlphttp/entkube.endpoint", Type = FormFieldType.Text,
-                    DefaultValue = "", Placeholder = "https://entkube.example.com/ingest/otlp",
-                    HelpText = "Where this collector ships logs and traces (ending in /ingest/otlp — the collector appends /v1/logs and /v1/traces). Two valid destinations: the EntKube Telemetry Indexer in THIS cluster, if one is installed, which keeps the data in the cluster; or EntKube's own public ingest URL. Filled in automatically — and repointed at the in-cluster indexer when you install one and re-apply this collector."
+                    DefaultValue = "", Placeholder = "http://entkube-telemetry-indexer.monitoring:8080/ingest/otlp",
+                    HelpText = "Where this collector ships logs and traces (ending in /ingest/otlp — the collector appends /v1/logs and /v1/traces). Filled in automatically from the EntKube Telemetry Indexer installed on this cluster; there is no management-plane fallback, because a cluster's telemetry is not EntKube's to hold. Point it somewhere else only if you run your own OTLP endpoint."
                 },
                 new ComponentFormField
                 {
@@ -1532,6 +1537,24 @@ public static class ComponentCatalog
                   repository: otel/opentelemetry-collector-contrib
                 command:
                   name: otelcol-contrib
+
+                # NB no GOMEMLIMIT here: this chart already derives one from resources.limits.memory
+                # (80% of it) and sets it on the container. Adding our own produced a duplicate env var
+                # AND froze the value, so raising the memory limit would no longer raise the Go heap's
+                # ceiling with it. The eBPF component needs the equivalent set by hand; this one does not.
+
+                # The chart opens a hostPort per receiver it ships, on every node. We use OTLP; Jaeger
+                # and Zipkin are three more listening ports on every node in the cluster, for protocols
+                # nothing here speaks.
+                ports:
+                  jaeger-compact:
+                    enabled: false
+                  jaeger-grpc:
+                    enabled: false
+                  jaeger-thrift:
+                    enabled: false
+                  zipkin:
+                    enabled: false
 
                 presets:
                   logsCollection:
@@ -1617,6 +1640,13 @@ public static class ComponentCatalog
                       create_directory: false
 
                   receivers:
+                    # Explicit nulls, because config is a MAP MERGE and omission is not removal: the
+                    # chart ships jaeger, zipkin and a self-scraping prometheus receiver in its defaults,
+                    # and a values file that simply doesn't mention them keeps every one. Each is a
+                    # listener held open on every node for a protocol this platform does not use.
+                    jaeger: null
+                    zipkin: null
+                    prometheus: null
                     # The chart preset builds the filelog receiver (include globs, container
                     # parser, hostPath mounts); these two keys are merged into it.
                     #
@@ -1680,6 +1710,10 @@ public static class ComponentCatalog
                         - { action: insert, key: app,       from_attribute: app.kubernetes.io/name }
 
                   exporters:
+                    # Same reason as the receivers above: the chart's default `debug` exporter is what
+                    # the inherited metrics pipeline writes to, and leaving it declared invites the
+                    # pipeline back. Every batch it prints is also a log line this collector then tails.
+                    debug: null
                     # EntKube native telemetry ingest. JSON encoding (no protobuf dep on the ingest
                     # side); gzip is applied by default. The base endpoint is set via the "EntKube
                     # Ingest URL" field; the otlphttp exporter appends /v1/logs and /v1/traces. Auth via
@@ -1723,17 +1757,18 @@ public static class ComponentCatalog
                         receivers: [filelog, otlp]
                         processors: [memory_limiter, k8sattributes, resource/short-labels, batch]
                         exporters: [otlphttp/entkube]
-                      # Traces from instrumented apps (OTLP receiver) → EntKube for APM/trace view.
+                      # Traces from instrumented apps (OTLP receiver) → the in-cluster indexer.
                       traces:
                         receivers: [otlp]
                         processors: [memory_limiter, k8sattributes, batch]
                         exporters: [otlphttp/entkube]
-                      # NB: no metrics pipeline. EntKube has no native metrics ingest — app/host
-                      # metrics go straight to Prometheus (there is no /ingest/otlp/v1/metrics
-                      # endpoint). A metrics pipeline here just POSTs to a dead URL and the whole
-                      # batch is rejected (HTTP 400), spamming "Exporting failed" and dropping data.
-                      # OTLP metrics the receiver accepts (e.g. from eBPF/apps) are simply not
-                      # forwarded; scrape those via Prometheus instead.
+                      # No metrics pipeline — and saying so is not enough, which is the point of this
+                      # line. `pipelines` is a map, so declaring logs and traces LEAVES the chart's own
+                      # metrics pipeline in place: otlp + a self-scrape every 10s, through
+                      # k8sattributes and batch, into the debug exporter — i.e. held in memory, then
+                      # printed to stdout, for nobody. `null` is how a map merge deletes a key.
+                      # EntKube has no native metrics ingest; app and host metrics go to Prometheus.
+                      metrics: null
                 """
         },
 
@@ -1802,7 +1837,39 @@ public static class ComponentCatalog
                     Key = "memory-limit", Label = "Memory Limit",
                     YamlPath = "resources.limits.memory", Type = FormFieldType.Text,
                     DefaultValue = "1Gi", Placeholder = "e.g. 1Gi, 2Gi",
-                    HelpText = "OBI holds per-process state for every workload it instruments, so memory tracks the number of processes on the node rather than traffic. Raise this on dense nodes — an OOMKill costs the node's tracing until the pod restarts."
+                    HelpText = "Budget roughly 20–30Mi per instrumented process, plus ~100Mi of agent baseline — so this tracks pod density on the node, not traffic. If it OOMKills, narrowing what is instrumented (the exclusions below) buys far more than raising the ceiling."
+                },
+                // The two settings that decide whether this fits in a node's memory at all: the Go
+                // heap's own ceiling, and the size of the eBPF maps the kernel charges to this pod.
+                new ComponentFormField
+                {
+                    Key = "go-mem-limit", Label = "Go Heap Soft Limit",
+                    YamlPath = "env.GOMEMLIMIT", Type = FormFieldType.Text,
+                    DefaultValue = "700MiB", Placeholder = "e.g. 700MiB, 1500MiB",
+                    HelpText = "Keep at roughly 70% of the memory limit above. Without it Go lets the heap grow to twice the live set before collecting, and under a container limit that is not a GC pause — it is an OOMKill. The remaining 30% is for the eBPF maps, which live in kernel memory and are charged to this pod's cgroup where the Go runtime cannot see or free them."
+                },
+                new ComponentFormField
+                {
+                    Key = "bpf-map-scale", Label = "eBPF Map Scale Factor",
+                    YamlPath = "config.data.ebpf.maps_config.global_scale_factor", Type = FormFieldType.Number,
+                    DefaultValue = "-1",
+                    HelpText = "Powers of two applied to every eBPF map size: -1 halves them, -2 quarters them, 0 is upstream's default, and the valid range is -3..3. Maps are preallocated, so this is a direct and deterministic cut in the kernel memory charged to the pod. Too small shows up as dropped events under load, not as wrong data."
+                },
+                // RED metrics are off by default (see the config below) because nothing scraped
+                // them. These two fields are how you turn them on — together, or not at all.
+                new ComponentFormField
+                {
+                    Key = "prometheus-port", Label = "RED Metrics Port (0 = off)",
+                    YamlPath = "config.data.prometheus_export.port", Type = FormFieldType.Number,
+                    DefaultValue = "0",
+                    HelpText = "Opens OBI's Prometheus endpoint (9090 is the convention). Generating these metrics costs heap in proportion to services × routes on the node, so it is off unless something scrapes it — turn on the ServiceMonitor below at the same time."
+                },
+                new ComponentFormField
+                {
+                    Key = "service-monitor", Label = "Create ServiceMonitor",
+                    YamlPath = "serviceMonitor.enabled", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Registers the RED metrics endpoint above with a Prometheus Operator install. Pointless without a port; and a port without this is memory spent on metrics no one reads."
                 },
                 // The Kubernetes metadata cache Deployment (k8sCache.replicas is 1 below), which
                 // holds cluster object metadata and so scales with cluster size, not node size.
@@ -1838,6 +1905,12 @@ public static class ComponentCatalog
             // exact export paths here — the EntKube collector is a ClusterIP Service, not a
             // hostPort, so the chart default would silently ship spans into the void. The
             // chart already defaults securityContext.privileged=true, RBAC, and ServiceAccount.
+            // On memory, which is what decides whether this component is deployable at all:
+            // OBI's cost is per INSTRUMENTED PROCESS (roughly 20-30Mi each), not per request. It
+            // is also split across two budgets the pod's single limit has to cover — the Go heap,
+            // and the eBPF maps, which are kernel memory charged to this pod's cgroup since Linux
+            // 5.11 and which the Go runtime can neither see nor release. Every default below is
+            // chosen to keep both inside one node-sized budget rather than to maximise coverage.
             DefaultValues = """
                 # The chart defaults to `resources: {}` for both workloads, which leaves them
                 # BestEffort — unschedulable-aware and first to be evicted under node pressure.
@@ -1848,14 +1921,28 @@ public static class ComponentCatalog
                     memory: 256Mi
                   limits:
                     cpu: 500m
-                    # OBI keeps per-process state for everything it instruments, so this tracks
-                    # process count on the node, not traffic. Raise on dense nodes.
+                    # Roughly 20-30Mi per instrumented process plus the agent's baseline, so this
+                    # tracks pod density on the node. The exclusions below are what keep it here.
                     memory: 1Gi
+
+                # Go's default is to let the heap reach twice the live set before collecting. Under
+                # a container memory limit that is not a pause, it is an OOMKill — and the classic
+                # shape of it is a pod dying at 1Gi with a 300Mi live heap. GOMEMLIMIT makes the
+                # container's ceiling the collector's target instead. It is deliberately well below
+                # limits.memory: the rest of that budget belongs to the eBPF maps, which are kernel
+                # memory charged to this cgroup and invisible to the Go runtime.
+                env:
+                  GOMEMLIMIT: "700MiB"
+                  # Collect at 50% heap growth rather than 100%. More GC cycles, roughly half the
+                  # peak — the right trade on an agent, which is not the workload being measured.
+                  GOGC: "50"
 
                 # Enable the in-cluster K8s metadata cache (decorates spans/metrics with
                 # namespace/pod/deployment). Chart default is 0 (disabled).
                 k8sCache:
                   replicas: 1
+                  env:
+                    GOMEMLIMIT: "350MiB"
                   # Scales with the number of objects in the CLUSTER, not with node size.
                   resources:
                     requests:
@@ -1867,32 +1954,77 @@ public static class ComponentCatalog
 
                 config:
                   data:
-                    # Auto-discover and instrument EVERY workload in EVERY namespace. OBI
-                    # excludes itself and apps already carrying an OTel SDK.
                     discovery:
+                      # Auto-discover across all namespaces — but only processes inside containers,
+                      # and not the platform's own. A node runs kubelet, containerd, systemd, the
+                      # CNI and the CSI drivers; instrumenting them costs a full per-process budget
+                      # each and produces spans nobody reads. OBI's own default exclusions already
+                      # cover kube-system, cert-manager and monitoring, so this list adds the rest
+                      # of a typical EntKube platform. Delete an entry to instrument that namespace.
                       instrument:
                         - k8s_namespace: "*"
+                          containers_only: true
+                      exclude_instrument:
+                        - k8s_namespace: istio-system
+                        - k8s_namespace: kube-public
+                        - k8s_namespace: vault
+                        - k8s_namespace: longhorn-system
+                        - k8s_namespace: rook-ceph
+                        - k8s_namespace: velero
+                        - k8s_namespace: harbor
                       exclude_otel_instrumented_services: true
                     # Decorate telemetry with Kubernetes resource attributes.
                     attributes:
                       kubernetes:
                         enable: true
-                    # All protocol instrumentations (http, grpc, sql, redis, kafka, ...).
-                    instrumentations:
-                      - "*"
-                    # eBPF context propagation so spans link into connected distributed
-                    # traces where the kernel allows it (network-level path needs 5.17+).
                     ebpf:
-                      context_propagation: all
-                    # Override the chart's ${HOST_IP} defaults → the EntKube collector's
-                    # OTLP gRPC receiver. The collector enriches (k8sattributes) and forwards
-                    # to the EntKube native store. Both signals go to :4317 (gRPC).
+                      # Halve every eBPF map. The maps are PREALLOCATED at their maximum size when
+                      # the programs load, per instrumented executable, and that allocation is
+                      # charged to this pod — so it is paid whether or not the traffic ever arrives.
+                      # Range -3..3, each step a power of two. Overshooting shows up as dropped
+                      # events under peak load, never as incorrect spans; raise toward 0 if the
+                      # agent reports drops on a busy node.
+                      maps_config:
+                        global_scale_factor: -1
+                      # Header-based propagation only. `all` adds the TCP/packet-level path, which
+                      # attaches traffic-control and socket programs to every socket on the node
+                      # and needs kernel 5.17+; it buys context across TLS between OBI-instrumented
+                      # services, at a per-connection memory cost on all of them. Set it back to
+                      # `all` on a cluster that genuinely needs that and can afford it.
+                      context_propagation: headers
+                    # Metrics off, on BOTH paths, and both have to be said out loud: config.data is
+                    # a map merge, so the chart's own defaults — an OTLP metrics endpoint at
+                    # ${HOST_IP}:4318 and a Prometheus endpoint on :9090 — survive simply omitting
+                    # them here. Together they had OBI aggregating RED metrics per service and per
+                    # route, holding that state in its heap for the whole export interval, and
+                    # sending it to a collector with no metrics pipeline (it drops them) and to a
+                    # scrape endpoint with no scraper (the chart's ServiceMonitor is off). That is
+                    # a large share of this pod's heap spent on data with no reader.
+                    #
+                    # To get RED metrics back: set prometheus_export.port to 9090 AND turn on the
+                    # ServiceMonitor field above, so something actually reads what they cost.
+                    otel_metrics_export:
+                      endpoint: ""
+                    prometheus_export:
+                      port: 0
+
+                    # Override the chart's ${HOST_IP} default → the EntKube collector's OTLP gRPC
+                    # receiver. The collector enriches (k8sattributes) and forwards to the native
+                    # store.
                     otel_traces_export:
                       endpoint: http://otel-collector.monitoring:4317
                       protocol: grpc
-                    otel_metrics_export:
-                      endpoint: http://otel-collector.monitoring:4317
-                      protocol: grpc
+                      # The protocols to load probes for. The default is a dozen (redis, kafka,
+                      # mqtt, nats, amqp, mongo, couchbase, memcached, sunrpc...), and each one is
+                      # another program plus its maps on every instrumented executable. These three
+                      # cover what a web workload actually shows in the trace view; add the ones
+                      # you run. NB this key belongs to the EXPORTER section — at the top level of
+                      # the config it is silently ignored, which is how a cluster ends up paying
+                      # for every protocol while its config appears to select one.
+                      instrumentations:
+                        - http
+                        - grpc
+                        - sql
                 """
         },
 
@@ -1907,11 +2039,15 @@ public static class ComponentCatalog
             Category = "Monitoring",
             HelmRepoUrl = "oci://entit.azurecr.io/helm",
             HelmChartName = "entkube-telemetry",
-            HelmChartVersion = "0.4.0",
+            HelmChartVersion = "0.5.0",
             ImageRegistryHost = "entit.azurecr.io",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "entkube-telemetry",
-            Dependencies = ["otel-collector"],
+            // No dependency on the collector, and that reversal is the point: the indexer is the
+            // DESTINATION, so it has to exist before the thing that fills it. The old direction forced
+            // the collector to be installed first with nowhere in-cluster to ship, which is precisely
+            // how the management plane became its default address. The collector now depends on this.
+            Dependencies = [],
             FormFields =
             [
                 new ComponentFormField
@@ -1981,7 +2117,7 @@ public static class ComponentCatalog
                 {
                     Key = "storage-link", Label = "Segment Object Storage",
                     YamlPath = "entkube-telemetry:storage-link-id", Type = FormFieldType.StorageLink,
-                    HelpText = "S3-compatible bucket for sealed log/trace segments. Strongly recommended: without one the node seals to its own volume, so sealed history dies with the volume and a separate query component cannot read it at all."
+                    HelpText = "S3-compatible bucket for sealed log/trace segments — this cluster's telemetry lives here, and EntKube reads it from here rather than being sent a copy. Assign one at install: without a bucket the node seals to its own volume, so sealed history dies with the volume, a separate query component cannot read it at all, and the size budget below cannot be enforced (the volume guard bounds the disk instead)."
                 },
                 // Hidden — written by EntKubeTelemetryService and injected at install time.
                 new ComponentFormField
@@ -2007,6 +2143,13 @@ public static class ComponentCatalog
                     Key = "telemetry-query-token", Label = "Query Token",
                     YamlPath = "node.queryToken", Type = FormFieldType.Password,
                     StoreAsSecret = true, SecretName = "telemetry-query-token", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "object-storage-max-bytes", Label = "Object storage size budget (bytes, 0 = unlimited)",
+                    YamlPath = "telemetry.objectStorageMaxBytes", Type = FormFieldType.Number,
+                    DefaultValue = "0",
+                    HelpText = "Total bytes of sealed archives this cluster may hold in its bucket, across logs, spans and RUM. Retention (below) bounds telemetry in TIME, which bounds the bucket only if you already know the cluster's log rate — this bounds the bill. Past the ceiling the oldest segments are deleted, oldest-first and proportionally across signals, down to 90% of it. 0 keeps today's behaviour: age alone decides. 53687091200 is 50 GiB."
                 },
                 new ComponentFormField
                 {
@@ -2048,7 +2191,7 @@ public static class ComponentCatalog
             Category = "Monitoring",
             HelmRepoUrl = "oci://entit.azurecr.io/helm",
             HelmChartName = "entkube-telemetry",
-            HelmChartVersion = "0.4.0",
+            HelmChartVersion = "0.5.0",
             ImageRegistryHost = "entit.azurecr.io",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "entkube-telemetry-query",
@@ -2122,7 +2265,7 @@ public static class ComponentCatalog
                 {
                     Key = "storage-link", Label = "Segment Object Storage",
                     YamlPath = "entkube-telemetry:storage-link-id", Type = FormFieldType.StorageLink,
-                    HelpText = "S3-compatible bucket for sealed log/trace segments. Strongly recommended: without one the node seals to its own volume, so sealed history dies with the volume and a separate query component cannot read it at all."
+                    HelpText = "S3-compatible bucket for sealed log/trace segments — this cluster's telemetry lives here, and EntKube reads it from here rather than being sent a copy. Assign one at install: without a bucket the node seals to its own volume, so sealed history dies with the volume, a separate query component cannot read it at all, and the size budget below cannot be enforced (the volume guard bounds the disk instead)."
                 },
                 // Hidden — written by EntKubeTelemetryService and injected at install time.
                 new ComponentFormField

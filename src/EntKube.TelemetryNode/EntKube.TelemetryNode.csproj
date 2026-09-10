@@ -7,6 +7,21 @@
     <RootNamespace>EntKube.TelemetryNode</RootNamespace>
     <AssemblyName>entkube-telemetry</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!--
+      Workstation GC, deliberately, on a web SDK project that would otherwise get Server GC.
+
+      Server GC keeps one heap and one budget PER CORE and returns memory to the OS reluctantly by
+      design — it trades footprint for throughput. That is the right trade for the management plane's
+      web front end and the wrong one here: this pod is a memory-bound indexer sharing a node with the
+      workloads it observes, its ceiling is a cgroup limit rather than the machine, and on a 16-core
+      node Server GC turns a modest live set into an RSS several times larger and then holds it. The
+      indexing work is not throughput-bound enough to notice the difference; the memory limit is.
+
+      Set DOTNET_gcServer=1 in the pod to put it back on a node with cores to spare and RAM to burn.
+    -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <!--
