@@ -80,7 +80,11 @@ public sealed class OpenStackProvisioningConfig
 
     // ── Ephemeral bootstrap VM ──
 
-    /// <summary>Glance image for the throwaway k3s bootstrap VM (Ubuntu 22.04+ with cloud-init).</summary>
+    /// <summary>
+    /// Glance image for the throwaway bootstrap VM. Left empty it follows the node image, which is
+    /// the intended arrangement: the bootstrap node runs kubeadm exactly as a cluster node does, so
+    /// the same baked image serves both and neither has to install a distribution at boot.
+    /// </summary>
     public string BootstrapImageName { get; set; } = "";
 
     /// <summary>Flavor for the throwaway bootstrap VM (a small 2c/4gb flavor is plenty).</summary>
@@ -93,6 +97,14 @@ public sealed class OpenStackProvisioningConfig
     public string BootstrapSshUser { get; set; } = "ubuntu";
 
     public int TotalWorkerCount => WorkerPools.Sum(p => p.Count);
+
+    /// <summary>
+    /// The image the bootstrap VM boots. Falls back to the node image, which is the arrangement
+    /// this is designed around: one baked image serves the cluster's nodes and the throwaway
+    /// kubeadm control plane that creates them.
+    /// </summary>
+    public string EffectiveBootstrapImageName =>
+        string.IsNullOrWhiteSpace(BootstrapImageName) ? NodeImageName : BootstrapImageName;
 
     // ── (De)serialization ──
 
@@ -129,7 +141,8 @@ public sealed class OpenStackProvisioningConfig
                 errors.Add($"Worker pool '{p.Name}': autoscale bounds must satisfy 0 ≤ min ≤ max and max ≥ 1.");
         }
         if (string.IsNullOrWhiteSpace(ExternalNetworkId)) errors.Add("External network ID is required.");
-        if (string.IsNullOrWhiteSpace(BootstrapImageName)) errors.Add("Bootstrap VM image name is required.");
+        // Not required: an empty bootstrap image follows the node image, which is the norm.
+        if (string.IsNullOrWhiteSpace(EffectiveBootstrapImageName)) errors.Add("Bootstrap VM image name is required.");
         if (string.IsNullOrWhiteSpace(BootstrapFlavor)) errors.Add("Bootstrap VM flavor is required.");
         if (string.IsNullOrWhiteSpace(BootstrapNetworkId)) errors.Add("Bootstrap VM network ID is required.");
         return errors;

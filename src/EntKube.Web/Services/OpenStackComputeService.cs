@@ -20,7 +20,7 @@ public sealed class BootstrapVm
 
 /// <summary>
 /// Thin Nova/Neutron/Glance client scoped to what provisioning needs: standing up
-/// (and tearing down) the throwaway k3s bootstrap VM. All calls use the public
+/// (and tearing down) ephemeral VMs and node images. All calls use the public
 /// service-catalog endpoints from a <see cref="KeystoneSession"/> and the token as
 /// <c>X-Auth-Token</c>. This is deliberately not a general-purpose OpenStack SDK.
 /// </summary>
@@ -28,8 +28,9 @@ public class OpenStackComputeService(OpenStackHttpFactory httpFactory, ILogger<O
 {
     /// <summary>
     /// Allocates an unassociated floating IP from the external network. Done before
-    /// boot so the address can be baked into the bootstrap VM's cloud-init (k3s
-    /// <c>--tls-san</c>), then associated once the server is ACTIVE.
+    /// boot so the address can be baked into the bootstrap VM's cloud-init as a kubeadm
+    /// <c>certSAN</c>, then associated once the server is ACTIVE. Without it in the certificate,
+    /// the kubeconfig we fetch cannot be pointed at an address we can reach.
     /// </summary>
     public async Task<(string Id, string Address)> AllocateFloatingIpAsync(
         KeystoneSession session, string externalNetworkId, CancellationToken ct = default)
@@ -43,7 +44,7 @@ public class OpenStackComputeService(OpenStackHttpFactory httpFactory, ILogger<O
 
     /// <summary>
     /// Boots a bootstrap VM: imports the SSH public key, creates a security group
-    /// opening SSH (22) and the k3s API (6443), boots the server with the given
+    /// opening SSH (22) and the API server port (6443), boots the server with the given
     /// cloud-init, waits until it is ACTIVE, and associates the pre-allocated
     /// floating IP.
     /// </summary>
@@ -55,36 +56,64 @@ public class OpenStackComputeService(OpenStackHttpFactory httpFactory, ILogger<O
         string floatingIpId,
         string floatingIpAddress,
         CancellationToken ct = default)
+        => await CreateEphemeralVmAsync(
+            session,
+            name: $"{config.ClusterName}-bootstrap",
+            imageName: config.EffectiveBootstrapImageName,
+            flavor: config.BootstrapFlavor,
+            networkId: config.BootstrapNetworkId,
+            sshPublicKey: sshPublicKey,
+            cloudInitUserData: cloudInitUserData,
+            // 22 to fetch admin.conf, 6443 because this node is a management cluster we drive.
+            ingressPorts: [22, 6443],
+            floatingIpId: floatingIpId,
+            floatingIpAddress: floatingIpAddress,
+            ct: ct);
+
+    /// <summary>
+    /// Boots a short-lived VM with its own keypair, security group and floating IP: imports the
+    /// key, opens the given ports, boots with the supplied cloud-init, waits for ACTIVE and
+    /// associates the address. Used for the bootstrap cluster and for the VM a node image is baked
+    /// on — both are machines EntKube creates, reaches over SSH, and destroys.
+    /// </summary>
+    public async Task<BootstrapVm> CreateEphemeralVmAsync(
+        KeystoneSession session,
+        string name,
+        string imageName,
+        string flavor,
+        string networkId,
+        string sshPublicKey,
+        string cloudInitUserData,
+        IReadOnlyList<int> ingressPorts,
+        string floatingIpId,
+        string floatingIpAddress,
+        CancellationToken ct = default)
     {
         string compute = session.RequireEndpoint("compute");
         string network = session.RequireEndpoint("network");
 
-        string name = $"{config.ClusterName}-bootstrap";
         string keypairName = $"{name}-key";
 
-        // 1. Import the SSH keypair so we can fetch the k3s kubeconfig later.
         await CreateKeypairAsync(compute, session, keypairName, sshPublicKey, ct);
 
-        // 2. Security group allowing inbound SSH + k3s API.
         string sgId = await CreateSecurityGroupAsync(network, session, name, ct);
-        await AddIngressRuleAsync(network, session, sgId, 22, ct);
-        await AddIngressRuleAsync(network, session, sgId, 6443, ct);
+        foreach (int port in ingressPorts)
+        {
+            await AddIngressRuleAsync(network, session, sgId, port, ct);
+        }
 
-        // 3. Resolve image + boot the server.
-        string imageId = await ResolveImageIdAsync(session, config.BootstrapImageName, ct);
+        string imageId = await ResolveImageIdAsync(session, imageName, ct);
         string serverId = await CreateServerAsync(
-            compute, session, name, imageId, config.BootstrapFlavor,
-            config.BootstrapNetworkId, keypairName, sgId, cloudInitUserData, ct);
+            compute, session, name, imageId, flavor, networkId, keypairName, sgId, cloudInitUserData, ct);
 
-        logger.LogInformation("Bootstrap VM {ServerId} created; waiting for ACTIVE", serverId);
+        logger.LogInformation("Ephemeral VM {ServerId} ({Name}) created; waiting for ACTIVE", serverId, name);
 
-        // 4. Wait for ACTIVE, then associate the pre-allocated floating IP.
         await WaitForServerActiveAsync(compute, session, serverId, ct);
 
-        string portId = await GetServerPortIdAsync(network, session, serverId, config.BootstrapNetworkId, ct);
+        string portId = await GetServerPortIdAsync(network, session, serverId, networkId, ct);
         await AssociateFloatingIpAsync(network, session, floatingIpId, portId, ct);
 
-        logger.LogInformation("Bootstrap VM {ServerId} ACTIVE with floating IP {Ip}", serverId, floatingIpAddress);
+        logger.LogInformation("Ephemeral VM {ServerId} ACTIVE with floating IP {Ip}", serverId, floatingIpAddress);
 
         return new BootstrapVm
         {
@@ -94,6 +123,138 @@ public class OpenStackComputeService(OpenStackHttpFactory httpFactory, ILogger<O
             SecurityGroupId = sgId,
             KeypairName = keypairName
         };
+    }
+
+    /// <summary>
+    /// Stops a server and waits for SHUTOFF. A snapshot of a running machine catches whatever was
+    /// mid-write, which for a node image means a package database that may or may not be coherent.
+    /// </summary>
+    public async Task StopServerAsync(KeystoneSession session, string serverId, CancellationToken ct = default)
+    {
+        string compute = session.RequireEndpoint("compute");
+        await SendAsync(HttpMethod.Post, $"{compute}/servers/{serverId}/action", session, new { os_stop = (object?)null }, ct);
+
+        for (int attempt = 0; attempt < 60; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            using JsonDocument doc = await SendJsonAsync(HttpMethod.Get, $"{compute}/servers/{serverId}", session, null, ct);
+            string status = doc!.RootElement.GetProperty("server").GetProperty("status").GetString() ?? "";
+            if (status.Equals("SHUTOFF", StringComparison.OrdinalIgnoreCase)) return;
+            if (status.Equals("ERROR", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"Server {serverId} entered ERROR while stopping.");
+            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+        }
+        throw new TimeoutException($"Server {serverId} did not stop within 5 minutes.");
+    }
+
+    /// <summary>
+    /// Snapshots a stopped server into a Glance image and returns its id once the image is active.
+    ///
+    /// <para>Nova reports the new image's id in a <c>Location</c> header, or in the body only from
+    /// microversion 2.45. Rather than negotiate a microversion, the image is found by the name we
+    /// gave it — which is unique because image names carry a build timestamp.</para>
+    /// </summary>
+    public async Task<string> SnapshotServerAsync(
+        KeystoneSession session, string serverId, string imageName, CancellationToken ct = default)
+    {
+        string compute = session.RequireEndpoint("compute");
+        await SendAsync(HttpMethod.Post, $"{compute}/servers/{serverId}/action", session,
+            new { createImage = new { name = imageName, metadata = new { } } }, ct);
+
+        string imageId = await FindImageIdByNameAsync(session, imageName, ct);
+        await WaitForImageActiveAsync(session, imageId, ct);
+        return imageId;
+    }
+
+    /// <summary>
+    /// Attaches EntKube's metadata to a finished image. Glance takes a JSON-patch dialect of its
+    /// own, and "add" fails on a property that already exists — so each is replaced when present.
+    /// </summary>
+    public async Task SetImagePropertiesAsync(
+        KeystoneSession session, string imageId, IReadOnlyDictionary<string, string> properties, CancellationToken ct = default)
+    {
+        string image = session.RequireEndpoint("image");
+
+        HashSet<string> existing = [];
+        using (JsonDocument current = await SendJsonAsync(HttpMethod.Get, $"{image}/v2/images/{imageId}", session, null, ct))
+        {
+            foreach (JsonProperty prop in current!.RootElement.EnumerateObject())
+            {
+                existing.Add(prop.Name);
+            }
+        }
+
+        List<object> patch = properties
+            .Select(kv => (object)new
+            {
+                op = existing.Contains(kv.Key) ? "replace" : "add",
+                path = $"/{kv.Key}",
+                value = kv.Value
+            })
+            .ToList();
+
+        using HttpClient client = httpFactory.CreateClient(session.Egress);
+        using HttpRequestMessage request = new(HttpMethod.Patch, $"{image}/v2/images/{imageId}");
+        request.Headers.Add("X-Auth-Token", session.Token);
+        request.Content = new StringContent(
+            JsonSerializer.Serialize(patch), Encoding.UTF8, "application/openstack-images-v2.1-json-patch");
+
+        using HttpResponseMessage response = await client.SendAsync(request, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            string body = await response.Content.ReadAsStringAsync(ct);
+            throw new InvalidOperationException(
+                $"Setting image properties on {imageId} failed ({(int)response.StatusCode}): {body}");
+        }
+    }
+
+    /// <summary>Deletes a Glance image. Used to retire a superseded node image.</summary>
+    public async Task DeleteImageAsync(KeystoneSession session, string imageId, CancellationToken ct = default)
+    {
+        string image = session.RequireEndpoint("image");
+        await SendAsync(HttpMethod.Delete, $"{image}/v2/images/{imageId}", session, null, ct);
+    }
+
+    private async Task<string> FindImageIdByNameAsync(KeystoneSession session, string imageName, CancellationToken ct)
+    {
+        string image = session.RequireEndpoint("image");
+
+        // The snapshot is queued asynchronously, so the image may not exist for a moment.
+        for (int attempt = 0; attempt < 30; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            using JsonDocument doc = await SendJsonAsync(
+                HttpMethod.Get, $"{image}/v2/images?name={Uri.EscapeDataString(imageName)}", session, null, ct);
+
+            foreach (JsonElement img in doc!.RootElement.GetProperty("images").EnumerateArray())
+            {
+                return img.GetProperty("id").GetString()!;
+            }
+            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+        }
+        throw new TimeoutException($"Snapshot image '{imageName}' never appeared in Glance.");
+    }
+
+    private async Task WaitForImageActiveAsync(KeystoneSession session, string imageId, CancellationToken ct)
+    {
+        string image = session.RequireEndpoint("image");
+
+        // Uploading a multi-gigabyte snapshot is not quick; this is the long pole of a build.
+        for (int attempt = 0; attempt < 120; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            using JsonDocument doc = await SendJsonAsync(HttpMethod.Get, $"{image}/v2/images/{imageId}", session, null, ct);
+            string status = doc!.RootElement.GetProperty("status").GetString() ?? "";
+
+            if (status.Equals("active", StringComparison.OrdinalIgnoreCase)) return;
+            if (status.Equals("killed", StringComparison.OrdinalIgnoreCase)
+                || status.Equals("deleted", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Image {imageId} ended in status '{status}'.");
+            }
+            await Task.Delay(TimeSpan.FromSeconds(15), ct);
+        }
+        throw new TimeoutException($"Image {imageId} did not become active within 30 minutes.");
     }
 
     /// <summary>

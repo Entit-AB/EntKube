@@ -21,7 +21,7 @@ public sealed class ProvisioningResult
 ///
 /// Strategy — ephemeral bootstrap + pivot (no permanent management cluster):
 ///   1. Mint a scoped application credential + an SSH keypair (persisted to the vault).
-///   2. Boot a throwaway k3s VM (cloud-init) as the bootstrap management cluster.
+///   2. Boot a throwaway single-node kubeadm VM (cloud-init) as the bootstrap management cluster.
 ///   3. clusterctl init CAPO on it, generate + apply the target Cluster manifests.
 ///   4. Once the target API is reachable, install a CNI so its controllers schedule,
 ///      then clusterctl init + move the CAPI state INTO the target (self-managed).
@@ -39,6 +39,8 @@ public class ClusterProvisioningService(
     VaultService vaultService,
     OpenStackKeystoneClient keystone,
     OpenStackComputeService compute,
+    MachineImageBuilder imageBuilder,
+    CommandRunner runner,
     ILogger<ClusterProvisioningService> logger)
 {
     // Cluster-scoped vault secret names for provisioning artifacts.
@@ -100,15 +102,19 @@ public class ClusterProvisioningService(
             // ── 3. SSH keypair (idempotent) ──
             (string sshPrivateKey, string sshPublicKey) = await EnsureSshKeyAsync(tenantId, clusterId, ct);
             string keyPath = Path.Combine(workDir, "id_rsa");
-            await WritePrivateKeyFileAsync(keyPath, sshPrivateKey, ct);
+            await SshKeyFactory.WritePrivateKeyFileAsync(keyPath, sshPrivateKey, ct);
 
             // ── 4. Bootstrap VM (resume if already created) ──
             bootstrapVm = await LoadBootstrapStateAsync(clusterId, ct);
             if (bootstrapVm is null)
             {
-                Log("Allocating floating IP + booting ephemeral k3s bootstrap VM…");
+                Log("Allocating floating IP + booting the ephemeral kubeadm bootstrap VM…");
                 (string fipId, string fipAddr) = await compute.AllocateFloatingIpAsync(session, config.ExternalNetworkId, ct);
-                string cloudInit = BuildK3sCloudInit(fipAddr);
+                // The bootstrap node boots the same image the cluster's own nodes do — it needs
+                // exactly the same things, and baking them once is what lets it come up without
+                // fetching a distribution from the internet.
+                string cloudInit = NodeImageRecipe.BootstrapCloudInit(
+                    config.KubernetesVersion, fipAddr, config.PodCidr, CalicoManifestUrl);
                 bootstrapVm = await compute.CreateBootstrapVmAsync(session, config, sshPublicKey, cloudInit, fipId, fipAddr, ct);
                 await SaveBootstrapStateAsync(clusterId, bootstrapVm, ct);
                 Log($"Bootstrap VM active at {bootstrapVm.FloatingIp}.");
@@ -118,9 +124,9 @@ public class ClusterProvisioningService(
                 Log($"Re-attached to existing bootstrap VM at {bootstrapVm.FloatingIp}.");
             }
 
-            // ── 5. Fetch the k3s kubeconfig over SSH ──
+            // ── 5. Wait for kubeadm, then fetch the bootstrap kubeconfig over SSH ──
             string bootstrapKubeconfigPath = Path.Combine(workDir, "bootstrap.kubeconfig");
-            await FetchK3sKubeconfigAsync(config.BootstrapSshUser, bootstrapVm.FloatingIp, keyPath, bootstrapKubeconfigPath, Log, ct);
+            await FetchBootstrapKubeconfigAsync(config.BootstrapSshUser, bootstrapVm.FloatingIp, keyPath, bootstrapKubeconfigPath, Log, ct);
             Log("Bootstrap cluster reachable.");
 
             // ── 6. clusterctl init CAPO on the bootstrap cluster ──
@@ -223,64 +229,90 @@ public class ClusterProvisioningService(
         string? pub = await vaultService.GetClusterSecretValueAsync(tenantId, clusterId, SshPublicKeySecret, ct);
         if (priv is not null && pub is not null) return (priv, pub);
 
-        using RSA rsa = RSA.Create(3072);
-        string privatePem = rsa.ExportPkcs8PrivateKeyPem();
-        string publicOpenSsh = ToOpenSshPublicKey(rsa, "entkube-bootstrap");
+        SshKeyPair generated = SshKeyFactory.Create("entkube-bootstrap");
+        string privatePem = generated.PrivateKeyPem;
+        string publicOpenSsh = generated.PublicKeyOpenSsh;
 
         await vaultService.SetClusterSecretAsync(tenantId, clusterId, SshPrivateKeySecret, privatePem, ct);
         await vaultService.SetClusterSecretAsync(tenantId, clusterId, SshPublicKeySecret, publicOpenSsh, ct);
         return (privatePem, publicOpenSsh);
     }
 
-    private static async Task WritePrivateKeyFileAsync(string path, string pem, CancellationToken ct)
-    {
-        await File.WriteAllTextAsync(path, pem, ct);
-        // ssh refuses world-readable private keys.
-        if (!OperatingSystem.IsWindows())
-        {
-            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        }
-    }
-
     // ──────── Bootstrap VM cloud-init & SSH ────────
 
-    private static string BuildK3sCloudInit(string floatingIp) =>
-        // Single-node k3s; traefik/servicelb disabled (unused for a management cluster);
-        // the floating IP is added as a TLS SAN so our fetched kubeconfig validates.
-        $"""
-        #cloud-config
-        runcmd:
-          - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable traefik --disable servicelb --write-kubeconfig-mode 644 --tls-san {floatingIp}" sh -
-        """;
 
-    private async Task FetchK3sKubeconfigAsync(
+    /// <summary>
+    /// Waits for the bootstrap node to finish <c>kubeadm init</c>, untaint itself and bring up a
+    /// CNI, then fetches its admin kubeconfig.
+    ///
+    /// <para>Three things differ from the k3s bootstrap this replaces, and each was a way to get a
+    /// cluster that looks up and is not: kubeadm's kubeconfig is root-only so it comes through
+    /// <c>sudo</c>; it names the node's private address, which is unreachable from here, so it is
+    /// rewritten to the floating IP that the certificate was issued to cover; and the marker is
+    /// only written after the CNI is up, because a control plane with no pod network accepts
+    /// <c>clusterctl init</c> and then never schedules cert-manager.</para>
+    /// </summary>
+    private async Task FetchBootstrapKubeconfigAsync(
         string sshUser, string floatingIp, string keyPath, string outPath, Action<string> log, CancellationToken ct)
     {
-        string sshArgs =
-            $"-i {keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null " +
-            $"-o ConnectTimeout=15 -o BatchMode=yes {sshUser}@{floatingIp} sudo cat /etc/rancher/k3s/k3s.yaml";
+        string ssh = $"{CommandRunner.SshOptions(keyPath)} {sshUser}@{floatingIp}";
+        string workDir = Path.GetDirectoryName(keyPath)!;
 
-        // k3s + cloud-init take a while; poll until the kubeconfig is available.
-        for (int attempt = 0; attempt < 40; attempt++)
+        // kubeadm init plus image pulls plus the CNI going Ready: minutes, not seconds.
+        for (int attempt = 0; attempt < 60; attempt++)
         {
             ct.ThrowIfCancellationRequested();
-            CliResult r = await RunAsync("ssh", sshArgs, Path.GetDirectoryName(keyPath)!, new(), _ => { }, ct,
-                timeout: TimeSpan.FromSeconds(30), quiet: true);
 
-            if (r.Success && r.Stdout.Contains("apiVersion", StringComparison.Ordinal))
+            CliResult ready = await runner.RunAsync(
+                "ssh", $"{ssh} \"test -f {NodeImageRecipe.BootstrapReadyMarker} && echo READY\"",
+                workDir, new(), _ => { }, ct, timeout: TimeSpan.FromSeconds(30), quiet: true);
+
+            if (ready.Success && ready.Stdout.Contains("READY", StringComparison.Ordinal))
             {
-                // k3s writes the kubeconfig with server https://127.0.0.1:6443 — point it at the floating IP.
-                string rewritten = r.Stdout
-                    .Replace("127.0.0.1", floatingIp)
-                    .Replace("localhost", floatingIp);
-                await File.WriteAllTextAsync(outPath, rewritten, ct);
+                CliResult conf = await runner.RunAsync(
+                    "ssh", $"{ssh} sudo cat {NodeImageRecipe.AdminConfPath}",
+                    workDir, new(), _ => { }, ct, timeout: TimeSpan.FromSeconds(30), quiet: true);
+
+                if (!conf.Success || !conf.Stdout.Contains("apiVersion", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"The bootstrap node reported ready but {NodeImageRecipe.AdminConfPath} could not be read.");
+                }
+
+                await File.WriteAllTextAsync(outPath, RewriteServerAddress(conf.Stdout, floatingIp), ct);
                 return;
             }
 
-            if (attempt % 5 == 0) log($"Waiting for k3s on the bootstrap VM… (attempt {attempt + 1})");
+            if (attempt % 4 == 0 && attempt > 0)
+            {
+                log($"Waiting for kubeadm on the bootstrap VM… ({attempt / 4} minutes)");
+            }
             await Task.Delay(TimeSpan.FromSeconds(15), ct);
         }
-        throw new TimeoutException("Bootstrap k3s cluster did not become reachable over SSH within 10 minutes.");
+
+        throw new TimeoutException(
+            "The kubeadm bootstrap cluster did not become ready within 15 minutes. "
+            + $"Check /var/log/entkube-bootstrap.log on {floatingIp}.");
+    }
+
+    /// <summary>
+    /// Points a kubeconfig's server at an address we can actually reach. Only the server line is
+    /// touched: a blanket string replace would corrupt any certificate data that happened to
+    /// contain the same bytes.
+    /// </summary>
+    public static string RewriteServerAddress(string kubeconfig, string address)
+    {
+        string[] lines = kubeconfig.Replace("\r\n", "\n").Split('\n');
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string trimmed = lines[i].TrimStart();
+            if (trimmed.StartsWith("server:", StringComparison.Ordinal))
+            {
+                string indent = lines[i][..(lines[i].Length - trimmed.Length)];
+                lines[i] = $"{indent}server: https://{address}:6443";
+            }
+        }
+        return string.Join('\n', lines);
     }
 
     private async Task WaitForTargetKubeconfigAsync(
@@ -480,60 +512,17 @@ public class ClusterProvisioningService(
 
     // ──────── CLI plumbing ────────
 
-    private sealed record CliResult(bool Success, int ExitCode, string Stdout, string Stderr);
-
     private static Dictionary<string, string> EnvFor(string kubeconfigPath) => new() { ["KUBECONFIG"] = kubeconfigPath };
 
-    private async Task<CliResult> RunAsync(
+    /// <summary>
+    /// Thin pass-through to the shared <see cref="CommandRunner"/>. Kept as a local name because
+    /// this file drives external tools on nearly every line, and the indirection reads worse than
+    /// the call does.
+    /// </summary>
+    private Task<CliResult> RunAsync(
         string program, string arguments, string workDir, Dictionary<string, string> env,
         Action<string> log, CancellationToken ct, TimeSpan? timeout = null, bool quiet = false)
-    {
-        ProcessStartInfo psi = new()
-        {
-            FileName = program,
-            Arguments = arguments,
-            WorkingDirectory = workDir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        psi.EnvironmentVariables["HOME"] = workDir;
-        foreach ((string k, string v) in env) psi.EnvironmentVariables[k] = v;
-
-        using Process process = new() { StartInfo = psi };
-        using CancellationTokenSource timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(timeout ?? TimeSpan.FromMinutes(5));
-
-        try
-        {
-            process.Start();
-            Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(timeoutCts.Token);
-            Task<string> stderrTask = process.StandardError.ReadToEndAsync(timeoutCts.Token);
-            await process.WaitForExitAsync(timeoutCts.Token);
-
-            string stdout = await stdoutTask;
-            string stderr = await stderrTask;
-
-            if (!quiet)
-            {
-                string tail = (stdout.Trim() + "\n" + stderr.Trim()).Trim();
-                if (tail.Length > 0) log($"$ {program} {Redact(arguments)}\n{tail}");
-                else log($"$ {program} {Redact(arguments)}");
-            }
-
-            return new CliResult(process.ExitCode == 0, process.ExitCode, stdout, stderr);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            try { process.Kill(entireProcessTree: true); } catch { /* already gone */ }
-            throw new TimeoutException($"'{program} {Redact(arguments)}' timed out.");
-        }
-    }
-
-    private static string Redact(string arguments) =>
-        // Arguments here never carry secrets (creds go via files/env), but keep tokens out of logs defensively.
-        arguments.Length > 400 ? arguments[..400] + "…" : arguments;
+        => runner.RunAsync(program, arguments, workDir, env, log, ct, timeout, quiet);
 
     // ──────── Small helpers ────────
 
@@ -546,42 +535,6 @@ public class ClusterProvisioningService(
                 return t["server:".Length..].Trim();
         }
         return null;
-    }
-
-    /// <summary>Encodes an RSA public key in OpenSSH authorized_keys ("ssh-rsa AAAA… comment") format.</summary>
-    private static string ToOpenSshPublicKey(RSA rsa, string comment)
-    {
-        RSAParameters p = rsa.ExportParameters(false);
-        using MemoryStream ms = new();
-
-        void WriteBytes(byte[] b)
-        {
-            Span<byte> len = stackalloc byte[4];
-            len[0] = (byte)(b.Length >> 24);
-            len[1] = (byte)(b.Length >> 16);
-            len[2] = (byte)(b.Length >> 8);
-            len[3] = (byte)b.Length;
-            ms.Write(len);
-            ms.Write(b);
-        }
-
-        static byte[] ToMpint(byte[] b)
-        {
-            // SSH mpint: prepend a zero byte if the MSB is set, to keep it non-negative.
-            if (b.Length > 0 && (b[0] & 0x80) != 0)
-            {
-                byte[] padded = new byte[b.Length + 1];
-                Array.Copy(b, 0, padded, 1, b.Length);
-                return padded;
-            }
-            return b;
-        }
-
-        WriteBytes(Encoding.ASCII.GetBytes("ssh-rsa"));
-        WriteBytes(ToMpint(p.Exponent!));
-        WriteBytes(ToMpint(p.Modulus!));
-
-        return $"ssh-rsa {Convert.ToBase64String(ms.ToArray())} {comment}";
     }
 
     private void TryDeleteDirectory(string dir)

@@ -138,6 +138,29 @@ public class OpenStackKeystoneClient(
     /// Authenticates against Keystone v3 with password auth and returns a
     /// project-scoped session including the discovered service catalog.
     /// </summary>
+    /// <summary>Vault key holding the OpenStack account password for a connection.</summary>
+    public const string PasswordSecretName = "OS_PASSWORD";
+
+    /// <summary>
+    /// Authenticates against a stored connection, loading the connection row and its vaulted
+    /// password. The three callers that need a session all did this by hand, and the copy that
+    /// forgot the tenant filter would have been a cross-tenant read.
+    /// </summary>
+    public async Task<KeystoneSession> AuthenticateAsync(
+        Guid tenantId, Guid connectionId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        OpenStackConnection connection = await db.Set<OpenStackConnection>()
+            .FirstOrDefaultAsync(c => c.Id == connectionId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("OpenStack connection not found for this tenant.");
+
+        string password = await vaultService.GetOpenStackSecretValueAsync(tenantId, connection.Id, PasswordSecretName, ct)
+            ?? throw new InvalidOperationException(
+                $"No password in the vault for OpenStack connection '{connection.Name}'.");
+
+        return await AuthenticateAsync(connection, password, ct);
+    }
+
     public async Task<KeystoneSession> AuthenticateAsync(
         OpenStackConnection connection, string password, CancellationToken ct = default)
     {

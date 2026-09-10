@@ -447,6 +447,9 @@ public class Program
         builder.Services.AddScoped<OpenStackKeystoneClient>();
         builder.Services.AddScoped<OpenStackS3Service>();
         builder.Services.AddScoped<OpenStackComputeService>();
+        builder.Services.AddSingleton<CommandRunner>();
+        builder.Services.AddScoped<OpenStackDiscoveryService>();
+        builder.Services.AddScoped<MachineImageBuilder>();
         builder.Services.AddScoped<ClusterProvisioningService>();
         builder.Services.AddScoped<StorageService>();
         builder.Services.AddScoped<StorageLinkClientFactory>();
