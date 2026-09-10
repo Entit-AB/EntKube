@@ -28,6 +28,36 @@ public sealed class WorkerPool
     /// <summary>True when this pool is configured to autoscale (both bounds set and Max ≥ Min ≥ 0).</summary>
     [JsonIgnore]
     public bool Autoscale => MinCount is int min && MaxCount is int max && min >= 0 && max >= min && max > 0;
+
+    /// <summary>Root disk in GiB. 0 uses the flavor's own disk, which is what most flavors provide.</summary>
+    public int DiskGb { get; set; }
+
+    /// <summary>
+    /// Availability zone for this pool's nodes. Per-pool rather than per-cluster, because spreading
+    /// pools across zones is how a cluster survives one of them — and because some flavors only
+    /// exist in some zones.
+    /// </summary>
+    public string? FailureDomain { get; set; }
+
+    /// <summary>
+    /// Kubernetes version for this pool's nodes. Null follows the control plane. It only differs
+    /// during an upgrade, where the control plane goes first and pools follow one at a time.
+    /// </summary>
+    public string? KubernetesVersion { get; set; }
+
+    /// <summary>Node labels, applied at registration so a scheduler never sees the node without them.</summary>
+    public Dictionary<string, string> Labels { get; set; } = [];
+
+    /// <summary>Node taints, applied at registration for the same reason.</summary>
+    public List<NodeTaint> Taints { get; set; } = [];
+}
+
+/// <summary>A node taint. Effect is Kubernetes' own spelling: NoSchedule, PreferNoSchedule, NoExecute.</summary>
+public sealed class NodeTaint
+{
+    public string Key { get; set; } = "";
+    public string Value { get; set; } = "";
+    public string Effect { get; set; } = "NoSchedule";
 }
 
 /// <summary>
@@ -50,11 +80,27 @@ public sealed class OpenStackProvisioningConfig
 
     // ── Target cluster nodes ──
 
-    /// <summary>Glance image the control-plane/worker nodes boot from (kubeadm-ready, cloud-init).</summary>
+    /// <summary>
+    /// Glance image the control-plane and worker nodes boot from. Left empty, an image for
+    /// <see cref="KubernetesVersion"/> is found or baked from <see cref="BaseImageName"/> — which is
+    /// what makes "give me a v1.31.4 cluster" answerable without anyone knowing an image name.
+    /// </summary>
     public string NodeImageName { get; set; } = "";
 
-    public int ControlPlaneCount { get; set; } = 1;
+    /// <summary>
+    /// The stock Ubuntu cloud image a node image is baked from, when one has to be built. Not the
+    /// image nodes boot: this one has no Kubernetes on it yet.
+    /// </summary>
+    public string BaseImageName { get; set; } = "";
+
+    public int ControlPlaneCount { get; set; } = 3;
     public string ControlPlaneFlavor { get; set; } = "";
+
+    /// <summary>
+    /// Root disk in GiB for control-plane nodes. 0 uses the flavor's own disk. Worth setting: etcd
+    /// is the thing that fills a control-plane disk, and a full one takes the cluster with it.
+    /// </summary>
+    public int ControlPlaneDiskGb { get; set; }
 
     public List<WorkerPool> WorkerPools { get; set; } = [];
 
@@ -128,11 +174,19 @@ public sealed class OpenStackProvisioningConfig
         List<string> errors = [];
         if (OpenStackConnectionId == Guid.Empty) errors.Add("An OpenStack connection is required.");
         if (string.IsNullOrWhiteSpace(ClusterName)) errors.Add("Cluster name is required.");
-        if (string.IsNullOrWhiteSpace(NodeImageName)) errors.Add("Node image name is required.");
+        if (string.IsNullOrWhiteSpace(NodeImageName) && string.IsNullOrWhiteSpace(BaseImageName))
+            errors.Add("Either a node image, or a base image to bake one from, is required.");
         if (string.IsNullOrWhiteSpace(ControlPlaneFlavor)) errors.Add("Control-plane flavor is required.");
         if (ControlPlaneCount < 1) errors.Add("At least one control-plane node is required.");
         if (WorkerPools.Count == 0) errors.Add("At least one worker pool is required.");
         if (WorkerPools.Any(p => string.IsNullOrWhiteSpace(p.Flavor))) errors.Add("Every worker pool needs a flavor.");
+        if (WorkerPools.Any(p => string.IsNullOrWhiteSpace(p.Name))) errors.Add("Every worker pool needs a name.");
+        // Pool names become CAPI resource names, so duplicates would silently collapse two pools
+        // into one — which is the failure this whole phase exists to remove.
+        if (WorkerPools.Select(p => p.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() != WorkerPools.Count)
+            errors.Add("Worker pool names must be unique.");
+        if (ControlPlaneCount % 2 == 0)
+            errors.Add("Control-plane count must be odd — etcd needs a majority to keep quorum.");
         foreach (WorkerPool p in WorkerPools.Where(p => p.MinCount is not null || p.MaxCount is not null))
         {
             if (p.MinCount is null || p.MaxCount is null)
@@ -157,6 +211,13 @@ public sealed class OpenStackProvisioningConfig
 public static class CapiTemplateInputs
 {
     public const string CloudName = "openstack";
+
+    /// <summary>
+    /// Secret holding clouds.yaml on the management plane, which the OpenStackCluster's identityRef
+    /// names. CAPO reads its credentials from here rather than from the environment, which is what
+    /// lets the cluster keep reconciling after the pivot.
+    /// </summary>
+    public const string CloudSecretName = "openstack-cloud-config";
 
     /// <summary>
     /// Renders a clouds.yaml for the given connection using an application credential
@@ -206,29 +267,4 @@ public static class CapiTemplateInputs
         return sb.ToString();
     }
 
-    /// <summary>
-    /// The <c>OPENSTACK_*</c> / cluster env vars consumed by <c>clusterctl generate cluster</c>.
-    /// </summary>
-    public static Dictionary<string, string> BuildEnv(
-        OpenStackProvisioningConfig config, string cloudsYaml)
-    {
-        string cloudsB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(cloudsYaml));
-        return new Dictionary<string, string>
-        {
-            ["CLUSTER_NAME"] = config.ClusterName,
-            ["KUBERNETES_VERSION"] = config.KubernetesVersion,
-            ["CONTROL_PLANE_MACHINE_COUNT"] = config.ControlPlaneCount.ToString(),
-            ["WORKER_MACHINE_COUNT"] = config.TotalWorkerCount.ToString(),
-            ["OPENSTACK_CLOUD"] = CloudName,
-            ["OPENSTACK_CLOUD_YAML_B64"] = cloudsB64,
-            ["OPENSTACK_CLOUD_CACERT_B64"] = Convert.ToBase64String(Encoding.UTF8.GetBytes("\n")),
-            ["OPENSTACK_CONTROL_PLANE_MACHINE_FLAVOR"] = config.ControlPlaneFlavor,
-            ["OPENSTACK_NODE_MACHINE_FLAVOR"] = config.WorkerPools.FirstOrDefault()?.Flavor ?? config.ControlPlaneFlavor,
-            ["OPENSTACK_IMAGE_NAME"] = config.NodeImageName,
-            ["OPENSTACK_EXTERNAL_NETWORK_ID"] = config.ExternalNetworkId,
-            ["OPENSTACK_DNS_NAMESERVERS"] = config.DnsNameservers,
-            ["OPENSTACK_FAILURE_DOMAIN"] = config.FailureDomain ?? "nova",
-            ["OPENSTACK_SSH_KEY_NAME"] = $"{config.ClusterName}-key",
-        };
-    }
 }

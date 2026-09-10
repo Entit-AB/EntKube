@@ -125,29 +125,6 @@ public class OpenStackProvisioningConfigTests
     }
 
     [Fact]
-    public void BuildEnv_ProducesClusterctlTemplateVariables()
-    {
-        OpenStackProvisioningConfig config = ValidConfig();
-        string cloudsYaml = "clouds:\n  openstack: {}\n";
-
-        Dictionary<string, string> env = CapiTemplateInputs.BuildEnv(config, cloudsYaml);
-
-        env["CLUSTER_NAME"].Should().Be("prod-eu-1");
-        env["KUBERNETES_VERSION"].Should().Be("v1.31.4");
-        env["CONTROL_PLANE_MACHINE_COUNT"].Should().Be("3");
-        env["WORKER_MACHINE_COUNT"].Should().Be("4");
-        env["OPENSTACK_CONTROL_PLANE_MACHINE_FLAVOR"].Should().Be("b.4c8gb");
-        env["OPENSTACK_NODE_MACHINE_FLAVOR"].Should().Be("b.8c16gb");
-        env["OPENSTACK_IMAGE_NAME"].Should().Be("ubuntu-2204-kube-v1.31.4");
-        env["OPENSTACK_EXTERNAL_NETWORK_ID"].Should().Be("ext-net-123");
-        env["OPENSTACK_SSH_KEY_NAME"].Should().Be("prod-eu-1-key");
-
-        // clouds.yaml is passed base64-encoded to the CAPO template.
-        string decoded = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(env["OPENSTACK_CLOUD_YAML_B64"]));
-        decoded.Should().Be(cloudsYaml);
-    }
-
-    [Fact]
     public void NormalizeV3_AddsVersionSegmentOnlyWhenMissing()
     {
         OpenStackKeystoneClient.NormalizeV3("https://id.example.com:5000").Should().Be("https://id.example.com:5000/v3");

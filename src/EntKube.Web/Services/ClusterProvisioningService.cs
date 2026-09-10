@@ -40,6 +40,7 @@ public class ClusterProvisioningService(
     OpenStackKeystoneClient keystone,
     OpenStackComputeService compute,
     MachineImageBuilder imageBuilder,
+    OpenStackDiscoveryService discovery,
     CommandRunner runner,
     ILogger<ClusterProvisioningService> logger)
 {
@@ -95,6 +96,35 @@ public class ClusterProvisioningService(
             session = await keystone.AuthenticateAsync(connection, password, ct);
             Log($"Authenticated to OpenStack project {connection.ProjectName ?? connection.ProjectId}.");
 
+            // What this cloud can do decides how the API server is reached. Asked once, here,
+            // rather than assumed by a template that only knows one answer.
+            OpenStackInventory inventory = await discovery.DiscoverAsync(session, ct);
+            OpenStackCapabilities capabilities = inventory.Capabilities;
+            if (!capabilities.HasOctavia)
+            {
+                Log("This cloud advertises no load-balancer service, so the API server will ride a "
+                    + "floating IP rather than an Octavia load balancer.");
+            }
+
+            // A Kubernetes version is what the operator asked for; an image is what boots. Build
+            // one if this cloud has none for that version yet.
+            if (string.IsNullOrWhiteSpace(config.NodeImageName))
+            {
+                OpenStackImage image = await imageBuilder.EnsureImageAsync(new MachineImageBuildRequest
+                {
+                    TenantId = tenantId,
+                    OpenStackConnectionId = config.OpenStackConnectionId,
+                    KubernetesVersion = config.KubernetesVersion,
+                    BaseImageName = config.BaseImageName,
+                    BuildFlavor = config.BootstrapFlavor,
+                    NetworkId = config.BootstrapNetworkId,
+                    ExternalNetworkId = config.ExternalNetworkId,
+                    SshUser = config.BootstrapSshUser
+                }, Log, ct);
+
+                config.NodeImageName = image.Name;
+            }
+
             // ── 2. Application credential + clouds.yaml (idempotent) ──
             string cloudsYaml = await EnsureCloudsYamlAsync(tenantId, clusterId, connection, session, config, ct);
             Log("Application credential + clouds.yaml ready.");
@@ -133,19 +163,31 @@ public class ClusterProvisioningService(
             await RunAsync("clusterctl", "init --infrastructure openstack", workDir,
                 EnvFor(bootstrapKubeconfigPath), Log, ct, timeout: TimeSpan.FromMinutes(10));
 
-            // ── 7. Generate + apply the target Cluster ──
+            // ── 7. Author + apply the target Cluster ──
+            //
+            // Authored here rather than by `clusterctl generate cluster`, which emits exactly one
+            // MachineDeployment — every worker pool then collapsed into one of the wrong flavor.
+            // It also fetches its templates over the network, which a closed customer network
+            // cannot do.
             string clusterYamlPath = Path.Combine(workDir, "cluster.yaml");
-            Dictionary<string, string> capiEnv = EnvFor(bootstrapKubeconfigPath);
-            foreach ((string k, string v) in CapiTemplateInputs.BuildEnv(config, cloudsYaml)) capiEnv[k] = v;
 
-            string generateArgs =
-                $"generate cluster {config.ClusterName} " +
-                $"--kubernetes-version {config.KubernetesVersion} " +
-                $"--control-plane-machine-count {config.ControlPlaneCount} " +
-                $"--worker-machine-count {config.TotalWorkerCount}";
-            CliResult generated = await RunAsync("clusterctl", generateArgs, workDir, capiEnv, Log, ct);
-            if (!generated.Success) throw new InvalidOperationException("clusterctl generate cluster failed — see log.");
-            await File.WriteAllTextAsync(clusterYamlPath, generated.Stdout, ct);
+            ClusterManifestInputs manifestInputs = new()
+            {
+                NodeImageName = config.NodeImageName,
+                CloudSecretName = CapiTemplateInputs.CloudSecretName,
+                CloudName = CapiTemplateInputs.CloudName,
+                ApiEndpoint = capabilities.ApiEndpoint,
+                ControlPlaneDiskGb = config.ControlPlaneDiskGb
+            };
+
+            await File.WriteAllTextAsync(clusterYamlPath, CapiManifestBuilder.Build(config, manifestInputs), ct);
+            Log($"Authored manifests for {config.ControlPlaneCount} control-plane node(s) and "
+                + $"{config.WorkerPools.Count} worker pool(s): "
+                + string.Join(", ", config.WorkerPools.Select(pl => $"{pl.Name}×{pl.Count} ({pl.Flavor})")));
+
+            // CAPO authenticates as the cluster's own application credential, from a secret the
+            // identityRef in those manifests points at.
+            await ApplyCloudIdentitySecretAsync(cloudsYaml, bootstrapKubeconfigPath, workDir, Log, ct);
 
             await RunAsync("kubectl", $"apply -f {clusterYamlPath}", workDir, EnvFor(bootstrapKubeconfigPath), Log, ct);
             Log("Target Cluster manifests applied; waiting for the control plane to come up…");
@@ -168,9 +210,6 @@ public class ClusterProvisioningService(
             await RunAsync("clusterctl", $"move --to-kubeconfig {targetKubeconfigPath}", workDir, EnvFor(bootstrapKubeconfigPath), Log, ct,
                 timeout: TimeSpan.FromMinutes(10));
             Log("CAPI state pivoted into the target cluster (self-managed).");
-
-            // Annotate autoscaling worker pools so a cluster-autoscaler add-on can drive them.
-            await AnnotateWorkerAutoscalingAsync(config, targetKubeconfigPath, workDir, Log, ct);
 
             // ── 9. Register the target cluster ──
             string targetKubeconfig = await File.ReadAllTextAsync(targetKubeconfigPath, ct);
@@ -236,6 +275,34 @@ public class ClusterProvisioningService(
         await vaultService.SetClusterSecretAsync(tenantId, clusterId, SshPrivateKeySecret, privatePem, ct);
         await vaultService.SetClusterSecretAsync(tenantId, clusterId, SshPublicKeySecret, publicOpenSsh, ct);
         return (privatePem, publicOpenSsh);
+    }
+
+    /// <summary>
+    /// Puts clouds.yaml on the management plane as the secret the OpenStackCluster's identityRef
+    /// names. CAPO reads its credentials from there rather than from the environment the generator
+    /// ran in, which is what lets the cluster keep reconciling itself after the pivot.
+    /// </summary>
+    private async Task ApplyCloudIdentitySecretAsync(
+        string cloudsYaml, string kubeconfigPath, string workDir, Action<string> log, CancellationToken ct)
+    {
+        string cloudsPath = Path.Combine(workDir, "clouds.yaml");
+        await File.WriteAllTextAsync(cloudsPath, cloudsYaml, ct);
+
+        string secretPath = Path.Combine(workDir, "cloud-identity.yaml");
+        CliResult rendered = await RunAsync(
+            "kubectl",
+            $"create secret generic {CapiTemplateInputs.CloudSecretName} "
+            + $"--namespace {CapiManifestBuilder.Namespace} "
+            + $"--from-file=clouds.yaml={cloudsPath} --dry-run=client -o yaml",
+            workDir, EnvFor(kubeconfigPath), _ => { }, ct, quiet: true);
+
+        if (!rendered.Success)
+        {
+            throw new InvalidOperationException("Could not render the CAPO cloud identity secret — see log.");
+        }
+
+        await File.WriteAllTextAsync(secretPath, rendered.Stdout, ct);
+        await RunAsync("kubectl", $"apply -f {secretPath}", workDir, EnvFor(kubeconfigPath), log, ct);
     }
 
     // ──────── Bootstrap VM cloud-init & SSH ────────
@@ -430,40 +497,6 @@ public class ClusterProvisioningService(
         catch (Exception ex)
         {
             log($"Node inventory skipped: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Annotates the worker MachineDeployment(s) with cluster-autoscaler node-group bounds for any
-    /// pool that opted into autoscaling. The cluster-autoscaler add-on (installed day-2 as a baseline
-    /// component) reads these annotations to size each group. Best-effort: a failure here does not
-    /// fail provisioning — the operator can re-annotate or set fixed sizing instead.
-    ///
-    /// clusterctl's default template emits one MachineDeployment named <c>{cluster}-md-0</c> in the
-    /// <c>default</c> namespace; pool names map to that suffix (the first pool defaults to "md-0").
-    /// </summary>
-    private async Task AnnotateWorkerAutoscalingAsync(
-        OpenStackProvisioningConfig config, string targetKubeconfig, string workDir, Action<string> log, CancellationToken ct)
-    {
-        List<WorkerPool> pools = config.WorkerPools.Where(p => p.Autoscale).ToList();
-        if (pools.Count == 0) return;
-
-        const string minKey = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size";
-        const string maxKey = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size";
-
-        foreach (WorkerPool pool in pools)
-        {
-            string mdName = $"{config.ClusterName}-{pool.Name}";
-            CliResult r = await RunAsync(
-                "kubectl",
-                $"annotate machinedeployment {mdName} -n default --overwrite " +
-                $"{minKey}={pool.MinCount} {maxKey}={pool.MaxCount}",
-                workDir, EnvFor(targetKubeconfig), _ => { }, ct, timeout: TimeSpan.FromSeconds(30), quiet: true);
-
-            if (r.Success)
-                log($"Enabled autoscaling on {mdName} ({pool.MinCount}–{pool.MaxCount} nodes).");
-            else
-                log($"Could not annotate {mdName} for autoscaling (continuing): {r.Stderr.Trim()}");
         }
     }
 
