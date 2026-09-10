@@ -1374,6 +1374,11 @@ public class Program
         {
             try
             {
+                // A migration whose objects exist but whose history row does not will fail here on
+                // every start, forever, and the fix is SQL nobody has to hand in production. So the
+                // schema and the history table are brought back into agreement first.
+                MigrationReconciler.Reconcile(db, logger);
+
                 IEnumerable<string> pending = db.Database.GetPendingMigrations().ToList();
                 if (pending.Any())
                     logger.LogInformation("Applying {Count} pending migration(s): {Migrations}",
@@ -1382,6 +1387,12 @@ public class Program
                 db.Database.Migrate();
                 logger.LogInformation("Database migrations applied successfully.");
                 return;
+            }
+            catch (SchemaReconciliationException)
+            {
+                // Not the database being slow to come up — a schema only a person can settle.
+                // Retrying delays the report by a minute and changes nothing.
+                throw;
             }
             catch (Exception ex) when (attempt < maxRetries)
             {
