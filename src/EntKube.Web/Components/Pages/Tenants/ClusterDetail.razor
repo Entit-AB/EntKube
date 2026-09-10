@@ -18,6 +18,10 @@
 @inject TempoService TempoService
 @inject EntKube.Web.Services.Dr.VeleroService VeleroService
 @inject StorageService StorageService
+@inject RedisService RedisService
+@inject StalwartService StalwartService
+@inject NavigationManager Nav
+@inject IEnumerable<IComponentFormValueProvider> FormValueProviders
 @inject HeadscaleService HeadscaleService
 @inject IngestTokenService IngestTokens
 @inject EntKubeTelemetryService EntKubeTelemetry
@@ -331,6 +335,17 @@ else if (section == "components")
                     </div>
 
                     <p class="text-muted small mb-3">@selectedCatalogEntry.Description</p>
+                    @if (selectedCatalogEntry.ConfiguredIn is { } configuredIn)
+                    {
+                        <div class="alert alert-info py-2 small d-flex align-items-start gap-2">
+                            <i class="bi bi-signpost-2-fill mt-1"></i>
+                            <div>
+                                <strong>This only starts the pod.</strong> The server itself is configured and
+                                applied from <a href="@ServicesLink(configuredIn.Key)">@configuredIn.Label</a> —
+                                until you apply there it runs with no domains, no listeners and no administrator.
+                            </div>
+                        </div>
+                    }
 
                     @* ── Dependency status ── *@
                     @if (!GetDependencyCheck(selectedCatalogEntry).IsSatisfied)
@@ -445,6 +460,75 @@ else if (section == "components")
                                                    placeholder="@(field.Placeholder ?? "letsencrypt-prod")"
                                                    value="@GetFormFieldValue(field.Key)"
                                                    @onchange="@(e => OnRegFieldChanged(field.Key, e))" />
+                                        }
+                                    }
+                                    else if (field.Type == FormFieldType.KeycloakRealmSelector)
+                                    {
+                                        @if (keycloakRealms is { Count: > 0 })
+                                        {
+                                            <select class="form-select form-select-sm"
+                                                    value="@GetFormFieldValue(field.Key)"
+                                                    @onchange="@(e => OnRegFieldChanged(field.Key, e))">
+                                                <option value="">-- Not via this cluster's Keycloak --</option>
+                                                @foreach (KeycloakRealm realm in keycloakRealms)
+                                                {
+                                                    <option value="@realm.Id">@realm.DisplayName (@realm.RealmName)</option>
+                                                }
+                                            </select>
+                                        }
+                                        else
+                                        {
+                                            <div class="form-text small text-muted">
+                                                No Keycloak realm on this cluster — install Keycloak and create a realm on the Identity tab,
+                                                or fill in the issuer, client ID and secret below by hand.
+                                            </div>
+                                        }
+                                    }
+                                    else if (field.Type == FormFieldType.OidcAppRegistrationSelector)
+                                    {
+                                        @if (oidcRegistrations is { Count: > 0 })
+                                        {
+                                            <select class="form-select form-select-sm"
+                                                    value="@GetFormFieldValue(field.Key)"
+                                                    @onchange="@(e => OnRegFieldChanged(field.Key, e))">
+                                                <option value="">-- Not via a stored app registration --</option>
+                                                @foreach (StalwartService.OidcRegistration reg in oidcRegistrations)
+                                                {
+                                                    <option value="@reg.SecretId">@reg.Name (@reg.Provider)</option>
+                                                }
+                                            </select>
+                                        }
+                                        else
+                                        {
+                                            <div class="form-text small text-muted">
+                                                No stored OIDC app registration for this tenant — add one in the vault (Microsoft Entra, …),
+                                                pick a Keycloak realm above, or fill in the OIDC fields below by hand.
+                                            </div>
+                                        }
+                                    }
+                                    else if (field.Type == FormFieldType.RedisSelector)
+                                    {
+                                        @if (redisEndpoints is { Count: > 0 })
+                                        {
+                                            <select class="form-select form-select-sm"
+                                                    value="@GetFormFieldValue(field.Key)"
+                                                    @onchange="@(e => OnRegRedisSelected(field.Key, e))">
+                                                <option value="">-- Select a Redis --</option>
+                                                @foreach (RedisEndpointOption redis in redisEndpoints)
+                                                {
+                                                    <option value="@redis.Endpoint">@redis.Label — @redis.Endpoint</option>
+                                                }
+                                            </select>
+                                        }
+                                        else
+                                        {
+                                            <input type="text" class="form-control form-control-sm"
+                                                   placeholder="@(field.Placeholder ?? "redis.redis.svc.cluster.local:6379")"
+                                                   value="@GetFormFieldValue(field.Key)"
+                                                   @onchange="@(e => OnRegFieldChanged(field.Key, e))" />
+                                            <div class="form-text small text-muted">
+                                                No Redis Service found on this cluster — create one on the Cache tab, or type an endpoint.
+                                            </div>
                                         }
                                     }
                                     else if (field.Type == FormFieldType.GatewaySelector)
@@ -1059,6 +1143,19 @@ else if (section == "components")
 
                                 @if (compDetailTab == "config")
                                 {
+                                    @if (ResolveCatalog(comp)?.ConfiguredIn is { } configuredIn)
+                                    {
+                                        <div class="alert alert-warning py-2 small d-flex align-items-start gap-2 mb-3">
+                                            <i class="bi bi-signpost-2-fill mt-1"></i>
+                                            <div>
+                                                <strong>The pod is not the configuration.</strong> This component is
+                                                configured and applied from
+                                                <a href="@ServicesLink(configuredIn.Key)">@configuredIn.Label</a>.
+                                                The fields below shape the pod; nothing reaches the running server
+                                                until you use <em>Apply configuration</em> there.
+                                            </div>
+                                        </div>
+                                    }
                                     @* ── Configuration ── *@
 
                                     @* Form fields first (if catalog component) *@
@@ -1126,6 +1223,70 @@ else if (section == "components")
                                                         {
                                                             <input type="text" class="form-control form-control-sm"
                                                                    placeholder="@(field.Placeholder ?? "letsencrypt-prod")"
+                                                                   value="@GetEditFormFieldValue(field.Key)"
+                                                                   @onchange="@(e => OnEditFieldChanged(field.Key, e))" />
+                                                        }
+                                                    }
+                                                    else if (field.Type == FormFieldType.KeycloakRealmSelector)
+                                                    {
+                                                        @if (keycloakRealms is { Count: > 0 })
+                                                        {
+                                                            <select class="form-select form-select-sm"
+                                                                    value="@GetEditFormFieldValue(field.Key)"
+                                                                    @onchange="@(e => OnEditFieldChanged(field.Key, e))">
+                                                                <option value="">-- Not via this cluster's Keycloak --</option>
+                                                                @foreach (KeycloakRealm realm in keycloakRealms)
+                                                                {
+                                                                    <option value="@realm.Id">@realm.DisplayName (@realm.RealmName)</option>
+                                                                }
+                                                            </select>
+                                                        }
+                                                        else
+                                                        {
+                                                            <div class="form-text small text-muted">
+                                                                No Keycloak realm on this cluster — fill in the OIDC fields below by hand.
+                                                            </div>
+                                                        }
+                                                    }
+                                                    else if (field.Type == FormFieldType.OidcAppRegistrationSelector)
+                                                    {
+                                                        @if (oidcRegistrations is { Count: > 0 })
+                                                        {
+                                                            <select class="form-select form-select-sm"
+                                                                    value="@GetEditFormFieldValue(field.Key)"
+                                                                    @onchange="@(e => OnEditFieldChanged(field.Key, e))">
+                                                                <option value="">-- Not via a stored app registration --</option>
+                                                                @foreach (StalwartService.OidcRegistration reg in oidcRegistrations)
+                                                                {
+                                                                    <option value="@reg.SecretId">@reg.Name (@reg.Provider)</option>
+                                                                }
+                                                            </select>
+                                                        }
+                                                        else
+                                                        {
+                                                            <div class="form-text small text-muted">
+                                                                No stored OIDC app registration for this tenant — fill in the OIDC fields below by hand.
+                                                            </div>
+                                                        }
+                                                    }
+                                                    else if (field.Type == FormFieldType.RedisSelector)
+                                                    {
+                                                        @if (redisEndpoints is { Count: > 0 })
+                                                        {
+                                                            <select class="form-select form-select-sm"
+                                                                    value="@GetEditFormFieldValue(field.Key)"
+                                                                    @onchange="@(e => OnEditRedisSelected(field.Key, e))">
+                                                                <option value="">-- Select a Redis --</option>
+                                                                @foreach (RedisEndpointOption redis in redisEndpoints)
+                                                                {
+                                                                    <option value="@redis.Endpoint">@redis.Label — @redis.Endpoint</option>
+                                                                }
+                                                            </select>
+                                                        }
+                                                        else
+                                                        {
+                                                            <input type="text" class="form-control form-control-sm"
+                                                                   placeholder="@(field.Placeholder ?? "redis.redis.svc.cluster.local:6379")"
                                                                    value="@GetEditFormFieldValue(field.Key)"
                                                                    @onchange="@(e => OnEditFieldChanged(field.Key, e))" />
                                                         }
@@ -1724,6 +1885,17 @@ else if (section == "components")
     private Guid? confirmDeleteComponentId;
     private Guid? selectedComponentId;
     private string compDetailTab = "config";
+
+    /// <summary>
+    /// A link into a section of the tenant's Services tree for this cluster's environment. Query-only
+    /// on purpose: this component is hosted at /tenants/{slug}, which it does not know, and
+    /// TenantExplorer reacts to ?section=/?env= on the page it is already showing.
+    /// </summary>
+    private string ServicesLink(string section) =>
+        Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["app"] = null, ["cluster"] = null, ["section"] = section, ["env"] = Cluster.EnvironmentId,
+        });
     /// <summary>An apply that is waiting for the operator to accept the downtime it needs.</summary>
     private (Guid ComponentId, bool NoWait)? pendingUpgrade;
     private EntKube.Web.Services.Upgrades.VolumePreflight? pendingUpgradePreflight;
@@ -1757,6 +1929,14 @@ else if (section == "components")
     private Dictionary<string, string> editFormFieldValues = new();
     private List<CnpgDatabase>? keycloakDatabases;
     private List<string>? keycloakAvailableIssuers;
+
+    // The Redis endpoints this cluster offers, loaded only for entries that ask for one.
+    private List<RedisEndpointOption>? redisEndpoints;
+
+    // The Keycloak realms on this cluster, for entries that can provision their own OIDC client.
+    private List<KeycloakRealm>? keycloakRealms;
+    // The tenant's stored OIDC app registrations (Entra, …), for entries that can point straight at one.
+    private List<StalwartService.OidcRegistration>? oidcRegistrations;
     private List<StorageLink>? harborStorageLinks;
 
     // Gateway LoadBalancer IP detected when a GatewaySelector field is chosen.
@@ -2104,6 +2284,18 @@ else if (section == "components")
         harborStorageLinks = entry.FormFields.Any(f => f.Type == FormFieldType.StorageLink)
             ? await StorageService.GetStorageLinksAsync(TenantId)
             : null;
+
+        redisEndpoints = entry.FormFields.Any(f => f.Type == FormFieldType.RedisSelector)
+            ? await RedisService.DiscoverEndpointsAsync(Cluster.Id)
+            : null;
+
+        keycloakRealms = entry.FormFields.Any(f => f.Type == FormFieldType.KeycloakRealmSelector)
+            ? await KeycloakService.GetRealmsForClusterAsync(TenantId, Cluster.Id)
+            : null;
+
+        oidcRegistrations = entry.FormFields.Any(f => f.Type == FormFieldType.OidcAppRegistrationSelector)
+            ? await StalwartService.GetOidcRegistrationsAsync(TenantId)
+            : null;
     }
 
     private async Task RegisterCatalogComponent()
@@ -2158,6 +2350,11 @@ else if (section == "components")
 
             // Configure the in-cluster telemetry components: identity, tokens, and the segment bucket.
             await SaveEntKubeTelemetryConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
+
+            // Render the mail components' manifests. These are Manifest-type components whose stored
+            // values ARE the manifest, so this is not a nicety — without it they are registered holding
+            // the catalog's placeholder comment and the install applies a document with no objects in it.
+            await SaveMailConfigIfNeeded(created.Id, regFormFieldValues, selectedCatalogEntry);
 
 
             showRegisterForm = false;
@@ -2253,6 +2450,23 @@ else if (section == "components")
                 }
             }
 
+            // Fields whose YamlPath is a pseudo-path are kept out of the stored YAML on purpose, so
+            // neither the YAML extraction above nor the vault loop can recover them. The service that
+            // owns the component's configuration hands them back here instead. Deliberately outside
+            // the block below: that one only runs for components with a database, issuer or
+            // storage-link field, and a component needing this may have none of the three.
+            IComponentFormValueProvider? formValueProvider = FormValueProviders
+                .FirstOrDefault(p => p.CatalogKey == secretCatalog?.Key);
+
+            if (formValueProvider is not null)
+            {
+                foreach (KeyValuePair<string, string> stored in
+                         await formValueProvider.ReadFormValuesAsync(TenantId, componentId))
+                {
+                    editFormFieldValues[stored.Key] = stored.Value;
+                }
+            }
+
             // For components with a CnpgDatabase field (e.g. Keycloak), load available
             // databases and pre-populate config fields from the existing KeycloakComponentConfig.
 
@@ -2260,6 +2474,19 @@ else if (section == "components")
             bool hasCnpgField = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.CnpgDatabase) == true;
             bool hasIssuerField = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.ClusterIssuer) == true;
             bool hasStorageLinkField = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.StorageLink) == true;
+            bool hasRedisField = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.RedisSelector) == true;
+
+            redisEndpoints = hasRedisField
+                ? await RedisService.DiscoverEndpointsAsync(Cluster.Id)
+                : null;
+
+            keycloakRealms = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.KeycloakRealmSelector) == true
+                ? await KeycloakService.GetRealmsForClusterAsync(TenantId, Cluster.Id)
+                : null;
+
+            oidcRegistrations = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.OidcAppRegistrationSelector) == true
+                ? await StalwartService.GetOidcRegistrationsAsync(TenantId)
+                : null;
 
             if (catalogMatch is not null && (hasCnpgField || hasIssuerField || hasStorageLinkField))
             {
@@ -2340,16 +2567,23 @@ else if (section == "components")
                     }
                 }
 
-                // Pre-populate hostname and TLS fields from the existing external route.
-                List<ExternalRoute> routes = await RouteService.GetRoutesAsync(componentId);
-                ExternalRoute? route = routes.FirstOrDefault();
-                if (route is not null)
+                // Pre-populate hostname and TLS fields from the existing external route — only for a
+                // component whose form actually describes that route (it has a "hostname" field).
+                // OpenLDAP's routes belong to its bundled web UIs, so the route's public issuer must not
+                // land in the tls-mode / cluster-issuer fields that configure the directory's own cert.
+                bool hasRouteHostnameField = catalogMatch?.FormFields.Any(f => f.Key == "hostname") == true;
+                if (hasRouteHostnameField)
                 {
-                    editFormFieldValues["hostname"] = route.Hostname;
-                    editFormFieldValues["tls-mode"] = route.TlsMode == TlsMode.Manual ? "Manual" : "ClusterIssuer";
-                    if (!string.IsNullOrEmpty(route.ClusterIssuerName))
+                    List<ExternalRoute> routes = await RouteService.GetRoutesAsync(componentId);
+                    ExternalRoute? route = routes.FirstOrDefault();
+                    if (route is not null)
                     {
-                        editFormFieldValues["cluster-issuer"] = route.ClusterIssuerName;
+                        editFormFieldValues["hostname"] = route.Hostname;
+                        editFormFieldValues["tls-mode"] = route.TlsMode == TlsMode.Manual ? "Manual" : "ClusterIssuer";
+                        if (!string.IsNullOrEmpty(route.ClusterIssuerName))
+                        {
+                            editFormFieldValues["cluster-issuer"] = route.ClusterIssuerName;
+                        }
                     }
                 }
             }
@@ -2430,6 +2664,10 @@ else if (section == "components")
 
             await SaveTempoConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
             await SaveVeleroConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
+
+            // Re-render the mail manifests from what was just edited, for the same reason as on the
+            // register path: for these components the manifest IS the configuration.
+            await SaveMailConfigIfNeeded(componentId, editFormFieldValues, GetCatalogMatchForSelected());
 
             await LoadComponents();
         }
@@ -2796,6 +3034,39 @@ else if (section == "components")
             await AutoDetectAndFillHostEdit(releaseName);
     }
 
+    // Choosing a Redis fills the endpoint AND, when EntKube manages that Redis, its password — the
+    // credential is already in the tenant vault, and making an operator copy it out by hand is how a
+    // component ends up pointed at a Redis it cannot authenticate to. An unmanaged Redis leaves the
+    // password field alone: EntKube does not know it, and blanking a value the operator typed would be
+    // worse than leaving it.
+    private async Task OnRegRedisSelected(string fieldKey, ChangeEventArgs e)
+    {
+        string endpoint = e.Value?.ToString() ?? "";
+        regFormFieldValues[fieldKey] = endpoint;
+
+        if (await ResolveRedisPasswordAsync(endpoint) is string password)
+            regFormFieldValues["redis-password"] = password;
+    }
+
+    private async Task OnEditRedisSelected(string fieldKey, ChangeEventArgs e)
+    {
+        string endpoint = e.Value?.ToString() ?? "";
+        editFormFieldValues[fieldKey] = endpoint;
+
+        if (await ResolveRedisPasswordAsync(endpoint) is string password)
+            editFormFieldValues["redis-password"] = password;
+    }
+
+    private async Task<string?> ResolveRedisPasswordAsync(string endpoint)
+    {
+        RedisEndpointOption? chosen = redisEndpoints?
+            .FirstOrDefault(r => r.Endpoint == endpoint && r.Managed && r.RedisClusterId.HasValue);
+        if (chosen is null) return null;
+
+        (string? password, _, _) = await RedisService.GetCredentialsAsync(TenantId, chosen.RedisClusterId!.Value);
+        return string.IsNullOrEmpty(password) ? null : password;
+    }
+
     private async Task AutoDetectAndFillHostReg(string gatewayReleaseName)
     {
         string? ip = await LifecycleService.GetServiceExternalIpAsync(
@@ -2918,10 +3189,9 @@ else if (section == "components")
                 continue;
             }
 
-            if (field.YamlPath.StartsWith("cnpg:", StringComparison.Ordinal)
-                || field.YamlPath.StartsWith("harbor:", StringComparison.Ordinal)
-                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal)
-)
+            // cnpg:/harbor:/ldap:/loki:/mimir:/tempo:/velero:/headscale: pseudo-paths belong to the
+            // component's side config (SaveKeycloak/Harbor/OpenLdap/... below), not to the values YAML.
+            if (field.IsPseudoPath)
             {
                 continue;
             }
@@ -2986,10 +3256,9 @@ else if (section == "components")
                 continue;
             }
 
-            if (field.YamlPath.StartsWith("cnpg:", StringComparison.Ordinal)
-                || field.YamlPath.StartsWith("harbor:", StringComparison.Ordinal)
-                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal)
-)
+            // cnpg:/harbor:/ldap:/loki:/mimir:/tempo:/velero:/headscale: pseudo-paths belong to the
+            // component's side config (SaveKeycloak/Harbor/OpenLdap/... below), not to the values YAML.
+            if (field.IsPseudoPath)
             {
                 continue;
             }
@@ -3170,12 +3439,10 @@ else if (section == "components")
                     continue;
                 }
 
-                // cnpg:/harbor:/loki:/headscale: fields are not in YAML — loaded from component configs in ToggleComponentDetail.
+                // cnpg:/harbor:/ldap:/loki:/headscale:/... pseudo-path fields are not in the YAML —
+                // they are loaded from the component's side config in ToggleComponentDetail.
 
-                if (field.YamlPath.StartsWith("cnpg:", StringComparison.Ordinal)
-                    || field.YamlPath.StartsWith("harbor:", StringComparison.Ordinal)
-                    || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal)
-    )
+                if (field.IsPseudoPath)
                 {
                     continue;
                 }
@@ -3480,6 +3747,32 @@ else if (section == "components")
         // storage, TLS, replication and bundled-UI settings into the config so BuildHelmValues
         // renders global.ldapDomain / persistence.size / phpldapadmin / ltb-passwd from them.
         await OpenLdapService.ConfigureFromFormAsync(TenantId, componentId, fieldValues);
+    }
+
+    /// <summary>
+    /// Configures the mail stack. Mirrors CatalogComponentRegistrar.SaveMailConfigIfNeededAsync, which is
+    /// the blueprint path — and the fact that these two lists had drifted is exactly how the mail server
+    /// came to install from a blueprint and fail from this page: Stalwart, rspamd and the webmail clients
+    /// are Manifest components whose stored values are the rendered manifest, and nothing here rendered it.
+    /// </summary>
+    private async Task SaveMailConfigIfNeeded(
+        Guid componentId, Dictionary<string, string> fieldValues, CatalogEntry? catalogEntry)
+    {
+        switch (catalogEntry?.Key)
+        {
+            case StalwartService.CatalogKey:
+                await StalwartService.ConfigureFromFormAsync(TenantId, componentId, fieldValues);
+                break;
+            case StalwartService.RspamdCatalogKey:
+                await StalwartService.RefreshRspamdManifestAsync(TenantId, componentId);
+                break;
+            case StalwartService.RoundcubeCatalogKey:
+                await StalwartService.RefreshRoundcubeManifestAsync(TenantId, componentId);
+                break;
+            case StalwartService.SnappyMailCatalogKey:
+                await StalwartService.RefreshSnappyMailManifestAsync(TenantId, componentId);
+                break;
+        }
     }
 
     private async Task SaveHarborConfigIfNeeded(

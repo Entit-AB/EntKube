@@ -185,6 +185,24 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         }
     }
 
+    public async Task<string> GetPodLogsAsync(
+        string target, string ns, string kubeconfig, int tailLines = 200, CancellationToken ct = default)
+    {
+        string kubeconfigPath = Path.GetTempFileName();
+
+        try
+        {
+            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+
+            return await RunKubectlAsync(
+                $"logs {target} -n {ns} --kubeconfig={kubeconfigPath} --tail={tailLines}", ct);
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+        }
+    }
+
     public async Task<string> GetJsonAllNamespacesAsync(
         string resource, string kubeconfig, string labelSelector = "", CancellationToken ct = default)
     {
@@ -412,7 +430,7 @@ public class KubernetesClientFactory : IKubernetesClientFactory
 
     public async Task<string> RunCommandOnPodWithStdinAsync(
         string podName, string ns, IReadOnlyList<string> command, string stdin, string kubeconfig,
-        CancellationToken ct = default)
+        CancellationToken ct = default, string? container = null)
     {
         string kubeconfigPath = Path.GetTempFileName();
 
@@ -435,6 +453,11 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             startInfo.ArgumentList.Add(podName);
             startInfo.ArgumentList.Add("-n");
             startInfo.ArgumentList.Add(ns);
+            if (!string.IsNullOrWhiteSpace(container))
+            {
+                startInfo.ArgumentList.Add("-c");
+                startInfo.ArgumentList.Add(container);
+            }
             startInfo.ArgumentList.Add($"--kubeconfig={kubeconfigPath}");
             startInfo.ArgumentList.Add("--");
 

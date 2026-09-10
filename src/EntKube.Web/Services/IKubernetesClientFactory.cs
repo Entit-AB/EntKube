@@ -47,6 +47,14 @@ public interface IKubernetesClientFactory
     Task<string> GetJsonAsync(string resource, string ns, string kubeconfig, string labelSelector = "", CancellationToken ct = default);
 
     /// <summary>
+    /// Reads the tail of a workload's logs (kubectl logs {target}). The target can be a pod name or
+    /// any selector kubectl accepts — "job/foo" and "deployment/bar" both work, which is what makes
+    /// this usable for a one-shot Job whose pod name is generated.
+    /// </summary>
+    Task<string> GetPodLogsAsync(string target, string ns, string kubeconfig, int tailLines = 200,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Lists a resource type across all namespaces (kubectl get {resource} -A -o json).
     /// </summary>
     Task<string> GetJsonAllNamespacesAsync(string resource, string kubeconfig, string labelSelector = "", CancellationToken ct = default);
@@ -117,6 +125,10 @@ public interface IKubernetesClientFactory
     /// Runs a command on a pod with content piped via stdin, returning stdout.
     /// Used for commands that consume stdin (e.g. rabbitmqctl import_definitions -).
     /// </summary>
+    /// <param name="container">
+    /// Container to exec into. Null lets kubectl pick the first one — which works, but prints a
+    /// "Defaulted container" notice on stderr that then leads every error message.
+    /// </param>
     Task<string> RunCommandOnPodWithStdinAsync(string podName, string ns, IReadOnlyList<string> command,
-        string stdin, string kubeconfig, CancellationToken ct = default);
+        string stdin, string kubeconfig, CancellationToken ct = default, string? container = null);
 }

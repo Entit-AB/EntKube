@@ -106,6 +106,19 @@ public class CatalogEntry
     public IReadOnlyList<ConditionalDependency> ConditionalDependencies { get; init; } = [];
 
     /// <summary>
+    /// The Services section this component is actually configured and applied from, when the
+    /// Components tab is not where its configuration lives.
+    ///
+    /// <para>For a component like Stalwart the Components tab only starts the pod. Domains, the
+    /// directory, the administrator and the listeners are authored in a Services tab and converged
+    /// onto the running server by an explicit apply there — and a pod that has been installed but
+    /// never applied is a running server with nothing configured. Without this pointer that fact
+    /// is invisible: the install reports success, the pod is Ready, and nothing on the screen says
+    /// there is a second step. (An operator spent a day inside that gap.)</para>
+    /// </summary>
+    public ServicesSection? ConfiguredIn { get; init; }
+
+    /// <summary>
     /// Form fields that provide a user-friendly way to configure the most common
     /// Helm values. These render as simple form controls (text boxes, selects,
     /// toggles) so operators don't need to understand YAML for routine settings.
@@ -113,6 +126,13 @@ public class CatalogEntry
     /// </summary>
     public IReadOnlyList<ComponentFormField> FormFields { get; init; } = [];
 }
+
+/// <summary>
+/// A section of the tenant's Services tree, as the Components tab links to it.
+/// </summary>
+/// <param name="Key">The TenantExplorer section key (its <c>?section=</c> value), e.g. "mail".</param>
+/// <param name="Label">What to call it in a sentence, e.g. "Services › Mail".</param>
+public sealed record ServicesSection(string Key, string Label);
 
 /// <summary>
 /// Identifies a cluster-scoped custom resource whose live instances signal that a
@@ -2671,6 +2691,7 @@ public static class ComponentCatalog
         {
             Key = "openldap",
             DisplayName = "OpenLDAP",
+            ConfiguredIn = new ServicesSection("ldap", "Services › Directory (LDAP)"),
             Description = "Managed LDAP directory (openldap-stack-ha). Provides a central directory of users, groups and service accounts over LDAP/LDAPS with optional multi-master replication. The directory (OUs, users, groups) is authored in EntKube's Directory (LDAP) tab and seeded declaratively via the chart's customLdifFiles.",
             Icon = "bi-person-vcard",
             Category = "Identity",
@@ -2773,6 +2794,573 @@ public static class ComponentCatalog
                 persistence:
                   enabled: true
                   size: 8Gi
+                """
+        },
+
+        // ── Mail ──
+
+        new CatalogEntry
+        {
+            Key = "stalwart",
+            DisplayName = "Stalwart Mail Server",
+            ConfiguredIn = new ServicesSection("mail", "Services › Mail"),
+            Description = "All-in-one mail server: SMTP, IMAP, JMAP, POP3, ManageSieve, CalDAV and CardDAV in one process. "
+                + "Installing only starts the pod: domains, mailboxes, the directory and the administrator are authored "
+                + "in Services › Mail and written to the server by Apply configuration there. Runs as a single replica — "
+                + "the embedded RocksDB store is single-writer; scaling out needs a shared datastore and a coordinator, "
+                + "which this catalog entry does not yet set up. Authenticates against the cluster's OpenLDAP directory, or against Keycloak over OIDC so webmail can sign in with single sign-on. The mail ports get their own LoadBalancer address (mail needs matching forward and reverse DNS); the admin UI and JMAP are published through the cluster's gateway. Domains, mailboxes, listeners and the rspamd hook are authored in EntKube's Mail tab and applied declaratively.",
+            Icon = "bi-envelope-at",
+            Category = "Mail",
+            ComponentType = "Manifest",
+            HelmRepoUrl = "",
+            HelmChartName = "",
+            DefaultNamespace = "stalwart",
+            DefaultReleaseName = "stalwart",
+            // cert-manager only when it is the one issuing the mail certificate. In ACME mode
+            // Stalwart obtains it itself, and a manual certificate needs nothing installed.
+            ConditionalDependencies = [new ConditionalDependency("cert-manager", "tls-mode", "ClusterIssuer")],
+            // Deliberately no ingress requirement. The mail ports reach the world through their own
+            // LoadBalancer, and the web surfaces are optional — a server with no web hostname is a
+            // perfectly good internal relay. The webmail components do require a gateway, because a
+            // webmail nobody can reach is not one.
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    // Deliberately not keyed "hostname": that key is treated across the Components
+                    // tab as "the hostname of this component's external route", and the route here
+                    // belongs to admin-hostname. Sharing the key made the form re-open showing the
+                    // admin hostname as the mail hostname, and saving it renamed the mail server.
+                    Key = "mail-hostname", Label = "Mail Hostname",
+                    YamlPath = "stalwart:mail-hostname", Type = FormFieldType.Text,
+                    Placeholder = "mail.example.com",
+                    HelpText = "The server's own name: its SMTP greeting, the name on its certificate, and what every MX record points at. It needs an A record on the mail LoadBalancer's address and a matching PTR, or a lot of receivers will refuse the mail."
+                },
+                new ComponentFormField
+                {
+                    Key = "admin-hostname", Label = "Web Hostname",
+                    YamlPath = "stalwart:admin-hostname", Type = FormFieldType.Text,
+                    Placeholder = "mailadmin.example.com",
+                    HelpText = "Publishes the admin UI, JMAP, autoconfig and the OAuth endpoints through the cluster gateway. Leave blank to keep them reachable only inside the cluster."
+                },
+                new ComponentFormField
+                {
+                    Key = "admin-username", Label = "Administrator",
+                    YamlPath = "stalwart:admin-username", Type = FormFieldType.Text,
+                    DefaultValue = "admin"
+                },
+                new ComponentFormField
+                {
+                    Key = "admin-password", Label = "Administrator Password",
+                    YamlPath = "stalwart:admin-password", Type = FormFieldType.Password,
+                    HelpText = "Stored in the vault. EntKube uses it as the recovery administrator when applying configuration, which is the only credential that works before a directory exists."
+                },
+                new ComponentFormField
+                {
+                    Key = "auth-mode", Label = "Authentication",
+                    YamlPath = "stalwart:auth-mode", Type = FormFieldType.Select,
+                    DefaultValue = "Ldap",
+                    Options = ["Ldap", "Oidc", "Internal"],
+                    HelpText = "LDAP: every mail client works and mailboxes follow the directory. OIDC: Keycloak tokens, so webmail gets single sign-on — but mailboxes must be provisioned in advance and clients without OAUTHBEARER need app passwords. Stalwart accepts one directory at a time."
+                },
+                new ComponentFormField
+                {
+                    Key = "ldap-url", Label = "LDAP URL",
+                    YamlPath = "stalwart:ldap-url", Type = FormFieldType.Text,
+                    Placeholder = "ldap://openldap.openldap.svc.cluster.local:389",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Ldap",
+                    HelpText = "Leave blank and link an EntKube-managed OpenLDAP directory in the Mail tab instead — the URL, base DN and bind DN are then derived from it."
+                },
+                new ComponentFormField
+                {
+                    Key = "ldap-base-dn", Label = "LDAP Base DN",
+                    YamlPath = "stalwart:ldap-base-dn", Type = FormFieldType.Text,
+                    Placeholder = "dc=example,dc=com",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Ldap"
+                },
+                new ComponentFormField
+                {
+                    Key = "ldap-bind-dn", Label = "LDAP Bind DN",
+                    YamlPath = "stalwart:ldap-bind-dn", Type = FormFieldType.Text,
+                    Placeholder = "cn=admin,dc=example,dc=com",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Ldap"
+                },
+                new ComponentFormField
+                {
+                    Key = "ldap-bind-password", Label = "LDAP Bind Password",
+                    YamlPath = "stalwart:ldap-bind-password", Type = FormFieldType.Password,
+                    DependsOnKey = "auth-mode", DependsOnValue = "Ldap",
+                    HelpText = "Stored in the vault and reaches the server as an environment variable, so it never appears in the applied configuration."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-realm", Label = "Keycloak Realm",
+                    YamlPath = "stalwart:oidc-realm", Type = FormFieldType.KeycloakRealmSelector,
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc",
+                    HelpText = "Pick a realm on this cluster's Keycloak and the issuer URL below is filled in from it. Stalwart validates tokens rather than issuing them, so it needs no client of its own — the webmail's client is the one that gets registered."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-issuer", Label = "Keycloak Realm URL",
+                    YamlPath = "stalwart:oidc-issuer", Type = FormFieldType.Text,
+                    Placeholder = "https://login.example.com/auth/realms/mail",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc",
+                    HelpText = "Stalwart validates access tokens against this issuer's discovery document. Filled in from the realm above when one is selected."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-username-domain", Label = "Username Domain",
+                    YamlPath = "stalwart:oidc-username-domain", Type = FormFieldType.Text,
+                    Placeholder = "example.com",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc",
+                    HelpText = "Appended when the username claim carries no @. Account names are full email addresses, so a realm with bare usernames needs this or no login resolves."
+                },
+                new ComponentFormField
+                {
+                    Key = "tls-mode", Label = "Mail TLS",
+                    YamlPath = "stalwart:tls-mode", Type = FormFieldType.Select,
+                    DefaultValue = "ClusterIssuer",
+                    Options = ["ClusterIssuer", "Acme", "Manual"],
+                    HelpText = "ClusterIssuer reuses the cluster's cert-manager issuer, including its DNS-01 solver, so the mail address never has to serve a challenge. Acme lets Stalwart obtain the certificate itself, which needs the mail LoadBalancer reachable on 443 or 80."
+                },
+                new ComponentFormField
+                {
+                    Key = "cluster-issuer", Label = "Cluster Issuer",
+                    YamlPath = "stalwart:cluster-issuer", Type = FormFieldType.ClusterIssuer,
+                    DefaultValue = "letsencrypt-prod",
+                    DependsOnKey = "tls-mode", DependsOnValue = "ClusterIssuer"
+                },
+                new ComponentFormField
+                {
+                    Key = "acme-contact", Label = "ACME Contact",
+                    YamlPath = "stalwart:acme-contact", Type = FormFieldType.Text,
+                    Placeholder = "hostmaster@example.com",
+                    DependsOnKey = "tls-mode", DependsOnValue = "Acme"
+                },
+                new ComponentFormField
+                {
+                    Key = "tls-cert", Label = "TLS Certificate (PEM)",
+                    YamlPath = "stalwart:tls-cert", Type = FormFieldType.Password,
+                    Placeholder = "-----BEGIN CERTIFICATE-----",
+                    DependsOnKey = "tls-mode", DependsOnValue = "Manual"
+                },
+                new ComponentFormField
+                {
+                    Key = "tls-key", Label = "TLS Private Key (PEM)",
+                    YamlPath = "stalwart:tls-key", Type = FormFieldType.Password,
+                    Placeholder = "-----BEGIN PRIVATE KEY-----",
+                    DependsOnKey = "tls-mode", DependsOnValue = "Manual"
+                },
+                new ComponentFormField
+                {
+                    Key = "expose-mode", Label = "Mail Ports",
+                    YamlPath = "stalwart:expose-mode", Type = FormFieldType.Select,
+                    DefaultValue = "LoadBalancer",
+                    Options = ["LoadBalancer", "ClusterIp"],
+                    HelpText = "A LoadBalancer gives the mail ports their own address, which is what an MX record and a PTR need. ClusterIp keeps them inside the cluster."
+                },
+                new ComponentFormField
+                {
+                    Key = "load-balancer-ip", Label = "LoadBalancer Address",
+                    YamlPath = "stalwart:load-balancer-ip", Type = FormFieldType.Text,
+                    Placeholder = "203.0.113.25",
+                    DependsOnKey = "expose-mode", DependsOnValue = "LoadBalancer",
+                    HelpText = "Requests a specific address, where the cloud provider honours one. Leave blank to take whatever is allocated."
+                },
+                new ComponentFormField
+                {
+                    Key = "rspamd-enabled", Label = "Scan mail with rspamd",
+                    YamlPath = "stalwart:rspamd-enabled", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Hands every incoming message to rspamd over the milter protocol. Install the rspamd component first."
+                },
+                new ComponentFormField
+                {
+                    Key = "rspamd-host", Label = "rspamd Host",
+                    YamlPath = "stalwart:rspamd-host", Type = FormFieldType.Text,
+                    DefaultValue = "rspamd.rspamd.svc.cluster.local",
+                    DependsOnKey = "rspamd-enabled", DependsOnValue = "true"
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-size", Label = "Storage Size",
+                    YamlPath = "stalwart:storage-size", Type = FormFieldType.Text,
+                    DefaultValue = "20Gi",
+                    HelpText = "Holds messages, indexes and the entire server configuration."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-class", Label = "Storage Class",
+                    YamlPath = "stalwart:storage-class", Type = FormFieldType.Text,
+                    Placeholder = "Cluster default"
+                }
+            ],
+            // Every field above is a stalwart: pseudo-path, so none of them merge into this YAML.
+            // EntKube regenerates the whole manifest from the saved configuration before each
+            // install, which is why there is nothing to render here — and why an install that
+            // somehow reached kubectl with this text would fail loudly rather than deploy something
+            // half-configured.
+            DefaultValues = """
+                # Replaced by EntKube with the rendered manifest once the mail server is configured
+                # (hostname, storage, TLS and exposure are all projections of that configuration).
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "rspamd",
+            DisplayName = "Rspamd (spam filter)",
+            Description = "Spam and phishing filter for Stalwart, connected over the milter protocol. Uses the cluster's Redis for the Bayes classifier, greylisting, rate limits and reputation, so that state survives the pod and is shared if the filter is ever scaled out. The web UI shows per-message scores and the rules that fired.",
+            Icon = "bi-shield-check",
+            Category = "Mail",
+            ComponentType = "Manifest",
+            HelmRepoUrl = "",
+            HelmChartName = "",
+            DefaultNamespace = "rspamd",
+            DefaultReleaseName = "rspamd",
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "redis-servers", Label = "Redis",
+                    YamlPath = "rspamd:redis-servers", Type = FormFieldType.RedisSelector,
+                    Placeholder = "redis.redis.svc.cluster.local:6379",
+                    StoreAsSecret = true, SecretName = "RSPAMD_REDIS_SERVERS",
+                    HelpText = "The Redis this filter keeps its learned state in — the Bayes classifier, greylisting, rate limits and reputation. Picked from what is actually running on this cluster; choosing one EntKube manages fills in its password too."
+                },
+                new ComponentFormField
+                {
+                    Key = "redis-password", Label = "Redis Password",
+                    YamlPath = "rspamd:redis-password", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "RSPAMD_REDIS_PASSWORD",
+                    HelpText = "Leave blank for a Redis with no authentication."
+                },
+                new ComponentFormField
+                {
+                    Key = "controller-password", Label = "Web UI Password",
+                    YamlPath = "rspamd:controller-password", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "RSPAMD_CONTROLLER_PASSWORD",
+                    HelpText = "Protects the rspamd web UI, which can also retrain the classifier. Leave blank only if the UI is not published."
+                },
+                new ComponentFormField
+                {
+                    Key = "hostname", Label = "Web UI Hostname",
+                    YamlPath = "rspamd:hostname", Type = FormFieldType.Text,
+                    Placeholder = "rspamd.example.com",
+                    StoreAsSecret = true, SecretName = "RSPAMD_HOSTNAME",
+                    HelpText = "Publishes the web UI through the cluster gateway. Leave blank to keep it internal."
+                },
+                // Single sign-on for the web UI. rspamd itself has no OIDC — its controller authenticates
+                // with a password and nothing else — so this puts an OIDC proxy in front of it inside the
+                // same pod and has the controller trust loopback. The password stays as the credential for
+                // anything reaching the controller directly.
+                new ComponentFormField
+                {
+                    Key = "oidc-app-registration", Label = "Single Sign-On App Registration",
+                    YamlPath = "rspamd:oidc-app-registration", Type = FormFieldType.OidcAppRegistrationSelector,
+                    StoreAsSecret = true, SecretName = "RSPAMD_OIDC_APP_REGISTRATION",
+                    HelpText = "Point straight at a stored identity provider (Microsoft Entra, …). EntKube fills the issuer, client ID and secret from it — with the provider-correct audience and scopes — on every apply. Register this redirect URI at the provider: https://<Web UI Hostname>/oauth2/callback. Takes precedence over the realm and the manual fields below."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-realm", Label = "Single Sign-On Realm",
+                    YamlPath = "rspamd:oidc-realm", Type = FormFieldType.KeycloakRealmSelector,
+                    StoreAsSecret = true, SecretName = "RSPAMD_OIDC_REALM",
+                    HelpText = "Pick a realm on this cluster's Keycloak and EntKube registers the client for you — issuer, client ID, secret and redirect URI, kept correct on every apply. Leave it unset to point at an identity provider elsewhere using the three fields below."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-issuer", Label = "Single Sign-On Issuer URL",
+                    YamlPath = "rspamd:oidc-issuer", Type = FormFieldType.Text,
+                    Placeholder = "https://sso.example.com/realms/mail",
+                    StoreAsSecret = true, SecretName = "RSPAMD_OIDC_ISSUER",
+                    HelpText = "Only for an identity provider EntKube does not manage — filled in automatically when a realm is selected above. Leave everything blank to keep password-only login. Either way this needs the Web UI Hostname, because the sign-in round trip needs a public address to return to."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-client-id", Label = "Single Sign-On Client ID",
+                    YamlPath = "rspamd:oidc-client-id", Type = FormFieldType.Text,
+                    Placeholder = "rspamd",
+                    StoreAsSecret = true, SecretName = "RSPAMD_OIDC_CLIENT_ID",
+                    HelpText = "A confidential client registered with that issuer, whose redirect URI is https://<web UI hostname>/oauth2/callback."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-client-secret", Label = "Single Sign-On Client Secret",
+                    YamlPath = "rspamd:oidc-client-secret", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = RspamdManifestBuilder.SsoClientSecretName,
+                    HelpText = "That client's secret. Stored in the tenant vault and synced into the Secret the proxy reads."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-email-domain", Label = "Allowed Email Domain",
+                    YamlPath = "rspamd:oidc-email-domain", Type = FormFieldType.Text,
+                    DefaultValue = "*",
+                    StoreAsSecret = true, SecretName = "RSPAMD_OIDC_EMAIL_DOMAIN",
+                    HelpText = "Restricts who may sign in to addresses in this domain. * accepts anyone the issuer authenticates, which is only as narrow as the client's own access rules."
+                },
+                new ComponentFormField
+                {
+                    Key = "cluster-issuer", Label = "Cluster Issuer",
+                    YamlPath = "rspamd:cluster-issuer", Type = FormFieldType.ClusterIssuer,
+                    DefaultValue = "letsencrypt-prod",
+                    StoreAsSecret = true, SecretName = "RSPAMD_CLUSTER_ISSUER"
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-size", Label = "Storage Size",
+                    YamlPath = "rspamd:storage-size", Type = FormFieldType.Text,
+                    DefaultValue = "2Gi",
+                    StoreAsSecret = true, SecretName = "RSPAMD_STORAGE_SIZE"
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-class", Label = "Storage Class",
+                    YamlPath = "rspamd:storage-class", Type = FormFieldType.Text,
+                    Placeholder = "Cluster default",
+                    StoreAsSecret = true, SecretName = "RSPAMD_STORAGE_CLASS"
+                }
+            ],
+            DefaultValues = """
+                # Replaced by EntKube with the rendered manifest. The optional settings (Redis
+                # password, web UI password) have to be absent rather than empty when unset, which a
+                # substituted template cannot express — so the manifest is generated, not patched.
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "roundcube",
+            DisplayName = "Roundcube (webmail)",
+            Description = "Full-featured webmail for Stalwart, published through the cluster's gateway. This is the client that carries single sign-on: it performs the OpenID Connect login against Keycloak and then authenticates to IMAP and SMTP with XOAUTH2, so the mail server validates the token itself and never sees a password.",
+            Icon = "bi-envelope-open",
+            Category = "Mail",
+            ComponentType = "Manifest",
+            HelmRepoUrl = "",
+            HelmChartName = "",
+            DefaultNamespace = "roundcube",
+            DefaultReleaseName = "roundcube",
+            RequiresOneOf =
+            [
+                new DependencyRequirement
+                {
+                    Label = "Ingress Controller",
+                    Options = ["traefik", "istio"]
+                }
+            ],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "hostname", Label = "Public Hostname",
+                    YamlPath = "roundcube:hostname", Type = FormFieldType.Text,
+                    Placeholder = "webmail.example.com",
+                    StoreAsSecret = true, SecretName = "RC_HOSTNAME"
+                },
+                new ComponentFormField
+                {
+                    Key = "cluster-issuer", Label = "Cluster Issuer",
+                    YamlPath = "roundcube:cluster-issuer", Type = FormFieldType.ClusterIssuer,
+                    DefaultValue = "letsencrypt-prod",
+                    StoreAsSecret = true, SecretName = "RC_CLUSTER_ISSUER"
+                },
+                new ComponentFormField
+                {
+                    Key = "imap-host", Label = "IMAP Host",
+                    YamlPath = "roundcube:imap-host", Type = FormFieldType.Text,
+                    DefaultValue = "tls://stalwart.stalwart.svc.cluster.local",
+                    StoreAsSecret = true, SecretName = "RC_IMAP_HOST",
+                    HelpText = "The mail server's IMAP endpoint. The in-cluster Service name is the default; use the public mail hostname instead if you would rather the certificate verified."
+                },
+                new ComponentFormField
+                {
+                    Key = "imap-port", Label = "IMAP Port",
+                    YamlPath = "roundcube:imap-port", Type = FormFieldType.Number,
+                    DefaultValue = "143",
+                    StoreAsSecret = true, SecretName = "RC_IMAP_PORT"
+                },
+                new ComponentFormField
+                {
+                    Key = "smtp-host", Label = "SMTP Host",
+                    YamlPath = "roundcube:smtp-host", Type = FormFieldType.Text,
+                    DefaultValue = "tls://stalwart.stalwart.svc.cluster.local",
+                    StoreAsSecret = true, SecretName = "RC_SMTP_HOST"
+                },
+                new ComponentFormField
+                {
+                    Key = "smtp-port", Label = "SMTP Port",
+                    YamlPath = "roundcube:smtp-port", Type = FormFieldType.Number,
+                    DefaultValue = "587",
+                    StoreAsSecret = true, SecretName = "RC_SMTP_PORT"
+                },
+                new ComponentFormField
+                {
+                    Key = "auth-mode", Label = "Sign-in",
+                    YamlPath = "roundcube:auth-mode", Type = FormFieldType.Select,
+                    DefaultValue = "Password",
+                    Options = ["Password", "Oidc"],
+                    StoreAsSecret = true, SecretName = "RC_AUTH_MODE",
+                    HelpText = "OIDC requires the mail server's own authentication to be set to OIDC as well — the token Roundcube forwards is only accepted by a server that validates that issuer."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-app-registration", Label = "OIDC App Registration",
+                    YamlPath = "roundcube:oidc-app-registration", Type = FormFieldType.OidcAppRegistrationSelector,
+                    StoreAsSecret = true, SecretName = "RC_OIDC_APP_REGISTRATION",
+                    HelpText = "Point straight at a stored identity provider (Microsoft Entra, …). EntKube fills the issuer, client ID and secret from it — with the provider-correct audience and scopes — on every apply. Register this redirect URI at the provider: https://<Web UI Hostname>/index.php/login/oauth. Takes precedence over the realm and the manual fields below.",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc"
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-realm", Label = "Keycloak Realm",
+                    YamlPath = "roundcube:oidc-realm", Type = FormFieldType.KeycloakRealmSelector,
+                    StoreAsSecret = true, SecretName = "RC_OIDC_REALM",
+                    HelpText = "Pick a realm on this cluster's Keycloak and EntKube registers the webmail client for you, with the redirect URI Roundcube actually uses. Leave unset to configure an external provider by hand below.",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc"
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-issuer", Label = "Keycloak Realm URL",
+                    YamlPath = "roundcube:oidc-issuer", Type = FormFieldType.Text,
+                    Placeholder = "https://login.example.com/auth/realms/mail",
+                    StoreAsSecret = true, SecretName = "RC_OIDC_ISSUER",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc"
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-client-id", Label = "OAuth Client ID",
+                    YamlPath = "roundcube:oidc-client-id", Type = FormFieldType.Text,
+                    Placeholder = "roundcube",
+                    StoreAsSecret = true, SecretName = "RC_OIDC_CLIENT_ID",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc",
+                    HelpText = "A confidential client in Keycloak whose redirect URI is https://<hostname>/index.php/login/oauth."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-client-secret", Label = "OAuth Client Secret",
+                    YamlPath = "roundcube:oidc-client-secret", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "ROUNDCUBEMAIL_OAUTH_CLIENT_SECRET",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc"
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-provider-name", Label = "Sign-in Button Label",
+                    YamlPath = "roundcube:oidc-provider-name", Type = FormFieldType.Text,
+                    DefaultValue = "Single sign-on",
+                    StoreAsSecret = true, SecretName = "RC_OIDC_PROVIDER_NAME",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc"
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-skip-form", Label = "Skip the login form",
+                    YamlPath = "roundcube:oidc-skip-form", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    StoreAsSecret = true, SecretName = "RC_OIDC_SKIP_FORM",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc",
+                    HelpText = "Sends users straight to Keycloak. Leave off while setting SSO up, so a password login is still available if the flow breaks."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-size", Label = "Storage Size",
+                    YamlPath = "roundcube:storage-size", Type = FormFieldType.Text,
+                    DefaultValue = "2Gi",
+                    StoreAsSecret = true, SecretName = "RC_STORAGE_SIZE",
+                    HelpText = "Holds the SQLite database of user preferences, contacts and the OAuth cache."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-class", Label = "Storage Class",
+                    YamlPath = "roundcube:storage-class", Type = FormFieldType.Text,
+                    Placeholder = "Cluster default",
+                    StoreAsSecret = true, SecretName = "RC_STORAGE_CLASS"
+                }
+            ],
+            DefaultValues = """
+                # Replaced by EntKube with the rendered manifest once the webmail is configured.
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "snappymail",
+            DisplayName = "SnappyMail (webmail)",
+            Description = "Lightweight webmail for Stalwart, published through the cluster's gateway. Signs in with a username and password checked by the mail server. Its OIDC support is partial and built around Nextcloud, so choose Roundcube instead when single sign-on matters.",
+            Icon = "bi-envelope",
+            Category = "Mail",
+            ComponentType = "Manifest",
+            HelmRepoUrl = "",
+            HelmChartName = "",
+            DefaultNamespace = "snappymail",
+            DefaultReleaseName = "snappymail",
+            RequiresOneOf =
+            [
+                new DependencyRequirement
+                {
+                    Label = "Ingress Controller",
+                    Options = ["traefik", "istio"]
+                }
+            ],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "hostname", Label = "Public Hostname",
+                    YamlPath = "snappymail:hostname", Type = FormFieldType.Text,
+                    Placeholder = "mail.example.com",
+                    StoreAsSecret = true, SecretName = "SM_HOSTNAME"
+                },
+                new ComponentFormField
+                {
+                    Key = "cluster-issuer", Label = "Cluster Issuer",
+                    YamlPath = "snappymail:cluster-issuer", Type = FormFieldType.ClusterIssuer,
+                    DefaultValue = "letsencrypt-prod",
+                    StoreAsSecret = true, SecretName = "SM_CLUSTER_ISSUER"
+                },
+                new ComponentFormField
+                {
+                    Key = "imap-host", Label = "IMAP Host",
+                    YamlPath = "snappymail:imap-host", Type = FormFieldType.Text,
+                    DefaultValue = "stalwart.stalwart.svc.cluster.local",
+                    StoreAsSecret = true, SecretName = "SM_IMAP_HOST"
+                },
+                new ComponentFormField
+                {
+                    Key = "imap-port", Label = "IMAP Port",
+                    YamlPath = "snappymail:imap-port", Type = FormFieldType.Number,
+                    DefaultValue = "143",
+                    StoreAsSecret = true, SecretName = "SM_IMAP_PORT"
+                },
+                new ComponentFormField
+                {
+                    Key = "smtp-host", Label = "SMTP Host",
+                    YamlPath = "snappymail:smtp-host", Type = FormFieldType.Text,
+                    DefaultValue = "stalwart.stalwart.svc.cluster.local",
+                    StoreAsSecret = true, SecretName = "SM_SMTP_HOST"
+                },
+                new ComponentFormField
+                {
+                    Key = "smtp-port", Label = "SMTP Port",
+                    YamlPath = "snappymail:smtp-port", Type = FormFieldType.Number,
+                    DefaultValue = "587",
+                    StoreAsSecret = true, SecretName = "SM_SMTP_PORT"
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-size", Label = "Storage Size",
+                    YamlPath = "snappymail:storage-size", Type = FormFieldType.Text,
+                    DefaultValue = "2Gi",
+                    StoreAsSecret = true, SecretName = "SM_STORAGE_SIZE"
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-class", Label = "Storage Class",
+                    YamlPath = "snappymail:storage-class", Type = FormFieldType.Text,
+                    Placeholder = "Cluster default",
+                    StoreAsSecret = true, SecretName = "SM_STORAGE_CLASS"
+                }
+            ],
+            DefaultValues = """
+                # Replaced by EntKube with the rendered manifest once the webmail is configured.
                 """
         },
 

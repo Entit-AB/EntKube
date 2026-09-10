@@ -426,4 +426,289 @@ public class OpenLdapServiceTests
         root.Should().Contain("o: Corp Inc");
         root.Should().Contain("dc: corp"); // first RDN value only
     }
+
+    // ── ApplyFormValues (catalog install/edit form → directory config) ────────
+
+    [Fact]
+    public void ApplyFormValues_CapturesEveryFieldOfTheInstallForm()
+    {
+        OpenLdapComponentConfig cfg = new()
+        {
+            Id = Guid.NewGuid(), TenantId = Guid.NewGuid(), BaseDn = "dc=example,dc=com",
+        };
+
+        OpenLdapService.ApplyFormValues(cfg, new Dictionary<string, string>
+        {
+            ["base-dn"] = "dc=acme,dc=io",
+            ["organization"] = "Acme AB",
+            ["tls-mode"] = "ClusterIssuer",
+            ["cluster-issuer"] = "internal-ca",
+            ["replica-count"] = "3",
+            ["storage-size"] = "20Gi",
+            ["phpldapadmin-enabled"] = "true",
+            ["phpldapadmin-hostname"] = "ldapadmin.acme.io",
+        });
+
+        cfg.BaseDn.Should().Be("dc=acme,dc=io");
+        cfg.Organization.Should().Be("Acme AB");
+        cfg.TlsMode.Should().Be(OpenLdapTlsMode.ClusterIssuer);
+        cfg.ClusterIssuer.Should().Be("internal-ca");
+        cfg.ReplicaCount.Should().Be(3);
+        cfg.ReplicationEnabled.Should().BeTrue();
+        cfg.StorageSize.Should().Be("20Gi");
+        cfg.PhpLdapAdminEnabled.Should().BeTrue();
+        cfg.PhpLdapAdminHostname.Should().Be("ldapadmin.acme.io");
+    }
+
+    [Fact]
+    public void ApplyFormValues_LeavesSettingsTheFormDoesNotCarryAlone()
+    {
+        // The component form has no say over the LTB portal, the overlays or the ppolicy —
+        // those are authored in the Directory (LDAP) tab. Saving the component form must not
+        // reset them, and must not reset the base DN just because the field arrived blank.
+        OpenLdapComponentConfig cfg = new()
+        {
+            Id = Guid.NewGuid(), TenantId = Guid.NewGuid(), BaseDn = "dc=acme,dc=io",
+            Organization = "Acme AB",
+            LtbPasswdEnabled = true, LtbPasswdHostname = "passwd.acme.io", LtbPasswdImage = "acme/ssp:1.5",
+            PpolicyMinLength = 14, MemberOfEnabled = false, StorageSize = "20Gi",
+        };
+
+        OpenLdapService.ApplyFormValues(cfg, new Dictionary<string, string>
+        {
+            ["base-dn"] = "",
+            ["tls-mode"] = "SelfSigned",
+        });
+
+        cfg.BaseDn.Should().Be("dc=acme,dc=io");
+        cfg.Organization.Should().Be("Acme AB");
+        cfg.StorageSize.Should().Be("20Gi");
+        cfg.LtbPasswdEnabled.Should().BeTrue();
+        cfg.LtbPasswdHostname.Should().Be("passwd.acme.io");
+        cfg.PpolicyMinLength.Should().Be(14);
+        cfg.MemberOfEnabled.Should().BeFalse();
+    }
+
+    [Fact]
+    public void ApplyFormValues_DisablingPhpLdapAdmin_ClearsItsHostname()
+    {
+        OpenLdapComponentConfig cfg = new()
+        {
+            Id = Guid.NewGuid(), TenantId = Guid.NewGuid(), BaseDn = "dc=acme,dc=io",
+            PhpLdapAdminEnabled = true, PhpLdapAdminHostname = "ldapadmin.acme.io",
+        };
+
+        OpenLdapService.ApplyFormValues(cfg, new Dictionary<string, string>
+        {
+            ["phpldapadmin-enabled"] = "false",
+            ["phpldapadmin-hostname"] = "ldapadmin.acme.io",
+        });
+
+        cfg.PhpLdapAdminEnabled.Should().BeFalse();
+        cfg.PhpLdapAdminHostname.Should().BeNull();
+    }
+
+    [Fact]
+    public void ApplyFormValues_LeavingClusterIssuerMode_DropsTheIssuer()
+    {
+        OpenLdapComponentConfig cfg = new()
+        {
+            Id = Guid.NewGuid(), TenantId = Guid.NewGuid(), BaseDn = "dc=acme,dc=io",
+            TlsMode = OpenLdapTlsMode.ClusterIssuer, ClusterIssuer = "internal-ca",
+        };
+
+        OpenLdapService.ApplyFormValues(cfg, new Dictionary<string, string> { ["tls-mode"] = "SelfSigned" });
+
+        cfg.TlsMode.Should().Be(OpenLdapTlsMode.SelfSigned);
+        cfg.ClusterIssuer.Should().BeNull();
+    }
+
+    // ── Pseudo-paths never reach the values YAML ──────────────────────────────
+
+    [Fact]
+    public void MergeFormValues_DoesNotWriteLdapPseudoPathsOrPasswordsIntoTheYaml()
+    {
+        CatalogEntry entry = ComponentCatalog.GetByKey(OpenLdapService.CatalogKey)!;
+
+        string values = CatalogComponentRegistrar.MergeFormValues(entry, new Dictionary<string, string>
+        {
+            ["base-dn"] = "dc=acme,dc=io",
+            ["admin-password"] = "sup3rs3cret",
+            ["config-password"] = "c0nfigs3cret",
+            ["storage-size"] = "20Gi",
+        }, []);
+
+        values.Should().NotContain("ldap:");
+        values.Should().NotContain("sup3rs3cret");
+        values.Should().NotContain("c0nfigs3cret");
+    }
+
+    // ── The form has to survive being reopened ────────────────────────────────
+
+    [Fact]
+    public void EveryFormFieldSurvivesAReopenOfTheComponentsTab()
+    {
+        // The fields are ldap: pseudo-paths, so the stored Helm values hold none of them and the
+        // Components tab has nothing to re-read except BuildFormValues. Without it the form reopens
+        // on catalog defaults and saving writes a fresh base DN over a live directory.
+        OpenLdapComponentConfig saved = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = Guid.NewGuid(),
+            BaseDn = "dc=acme,dc=io",
+            Organization = "Acme",
+            TlsMode = OpenLdapTlsMode.ClusterIssuer,
+            ClusterIssuer = "internal-ca",
+            ReplicaCount = 3,
+            StorageSize = "40Gi",
+            PhpLdapAdminEnabled = true,
+            PhpLdapAdminHostname = "ldapadmin.acme.io",
+        };
+
+        OpenLdapComponentConfig reopened = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = saved.TenantId,
+            BaseDn = "dc=example,dc=com",
+        };
+
+        OpenLdapService.ApplyFormValues(reopened, OpenLdapService.BuildFormValues(saved));
+
+        reopened.BaseDn.Should().Be(saved.BaseDn);
+        reopened.Organization.Should().Be(saved.Organization);
+        reopened.TlsMode.Should().Be(saved.TlsMode);
+        reopened.ClusterIssuer.Should().Be(saved.ClusterIssuer);
+        reopened.ReplicaCount.Should().Be(saved.ReplicaCount);
+        // ReplicaCount > 1 is what replication means, so the round trip has to carry it too.
+        reopened.ReplicationEnabled.Should().BeTrue();
+        reopened.StorageSize.Should().Be(saved.StorageSize);
+        reopened.PhpLdapAdminEnabled.Should().Be(saved.PhpLdapAdminEnabled);
+        reopened.PhpLdapAdminHostname.Should().Be(saved.PhpLdapAdminHostname);
+    }
+
+    [Fact]
+    public void EveryNonSecretFormFieldHasAReadBack()
+    {
+        // The hand-written read-back this replaced was complete when it was written. What it lacked
+        // was anything to stop the next field added to the catalog entry from silently resetting to
+        // its default on every reopen — which is exactly how the mail server's oidc-realm slipped in.
+        CatalogEntry entry = ComponentCatalog.GetByKey(OpenLdapService.CatalogKey)!;
+        Dictionary<string, string> readBack = OpenLdapService.BuildFormValues(new OpenLdapComponentConfig
+        {
+            Id = Guid.NewGuid(),
+            TenantId = Guid.NewGuid(),
+            BaseDn = "dc=example,dc=com",
+        });
+
+        List<string> missing = entry.FormFields
+            .Select(f => f.Key)
+            .Where(k => !OpenLdapService.SecretFormKeys.Contains(k))
+            .Where(k => !readBack.ContainsKey(k))
+            .ToList();
+
+        missing.Should().BeEmpty(
+            "every non-secret OpenLDAP form field must be readable back out of the stored config");
+
+        // A password must never be echoed into the form, and a blank one on re-save must leave the
+        // stored value alone rather than clearing it.
+        readBack.Keys.Should().NotIntersectWith(OpenLdapService.SecretFormKeys);
+
+        // The exemption list must name fields that exist, or a rename leaves a stale exemption
+        // quietly excusing the next real omission.
+        entry.FormFields.Select(f => f.Key).Should().Contain(OpenLdapService.SecretFormKeys);
+    }
+
+    [Fact]
+    public void TheDirectoryFormDoesNotClaimTheReservedRouteHostnameKey()
+    {
+        // A field keyed "hostname" is treated across the Components tab as this component's external
+        // route hostname, and is overwritten from the stored route along with tls-mode and
+        // cluster-issuer. OpenLDAP's routes belong to its bundled web UIs, so claiming that key would
+        // put a web UI's public issuer into the fields that configure the directory's own certificate.
+        CatalogEntry entry = ComponentCatalog.GetByKey(OpenLdapService.CatalogKey)!;
+
+        entry.FormFields.Should().NotContain(f => f.Key == "hostname");
+    }
+
+    [Fact]
+    public void CatalogFormFields_EveryPseudoPathBelongsToASideConfigThatHandlesIt()
+    {
+        // A pseudo-path is only inert in the values YAML because something else consumes it.
+        // A new prefix that nothing handles would be dropped from the YAML *and* never stored.
+        string[] handled =
+        [
+            "subchart:", "cnpg:", "harbor:", "ldap:", "loki:", "mimir:",
+            "tempo:", "velero:", "headscale:", "entkube-telemetry:",
+            // The mail components, all via CatalogComponentRegistrar.SaveMailConfigIfNeededAsync:
+            // stalwart: reaches StalwartService.ApplyFormValues and its config record, while the
+            // other three are secret-backed and are read out of the vault when their manifest is
+            // rendered.
+            "stalwart:", "rspamd:", "roundcube:", "snappymail:",
+        ];
+
+        foreach (CatalogEntry entry in ComponentCatalog.Entries)
+        {
+            foreach (ComponentFormField field in entry.FormFields.Where(f => f.IsPseudoPath))
+            {
+                handled.Should().Contain(p => field.YamlPath.StartsWith(p, StringComparison.Ordinal),
+                    $"{entry.Key}/{field.Key} ({field.YamlPath}) must be handled by a side config");
+
+                // A pseudo-path must never also look like a dot-notation Helm values path.
+                field.YamlPath.Should().NotContain(".", $"{entry.Key}/{field.Key}");
+            }
+        }
+    }
+
+    // ── The admin DN the container creates must match the one the UI binds ────
+
+    [Fact]
+    public void BuildHelmValues_PassesAdminUsernameToTheContainer()
+    {
+        OpenLdapComponentConfig cfg = new()
+        {
+            Id = Guid.NewGuid(), TenantId = Guid.NewGuid(), BaseDn = "dc=entit,dc=se",
+            AdminUsername = "directory-admin",
+        };
+
+        string values = OpenLdapService.BuildHelmValues(cfg, "", "openldap-credentials");
+
+        // global.adminUser only builds phpLDAPadmin's bind DN; LDAP_ADMIN_USERNAME is what the
+        // container creates the account from. They must agree or no password can ever bind.
+        values.Should().Contain("adminUser: \"directory-admin\"");
+        values.Should().Contain("LDAP_ADMIN_USERNAME: \"directory-admin\"");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void BuildHelmValues_BlankAdminUsername_FallsBackToAdmin(string adminUser)
+    {
+        OpenLdapComponentConfig cfg = new()
+        {
+            Id = Guid.NewGuid(), TenantId = Guid.NewGuid(), BaseDn = "dc=entit,dc=se",
+            AdminUsername = adminUser,
+        };
+
+        string values = OpenLdapService.BuildHelmValues(cfg, "", "openldap-credentials");
+
+        // "cn=,dc=entit,dc=se" is rejected by the server as invalid DN syntax.
+        values.Should().Contain("adminUser: \"admin\"");
+        values.Should().Contain("LDAP_ADMIN_USERNAME: \"admin\"");
+    }
+
+    // ── Replication credential substitution ──────────────────────────────────
+
+    [Theory]
+    [InlineData("plainPassw0rd", false)]
+    [InlineData("has$dollar*and^caret", false)]
+    [InlineData("amp&ersand", true)]
+    [InlineData("slash/es", true)]
+    [InlineData("back\\slash", true)]
+    [InlineData("", false)]
+    public void PasswordBreaksReplicationCredentials_FlagsWhatSedRewrites(string password, bool expected)
+    {
+        // sed's replacement treats & as the whole match and / as the delimiter, so the chart's
+        // "s/%%ADMIN_PASSWORD%%/$LDAP_ADMIN_PASSWORD/g" silently corrupts those passwords.
+        OpenLdapService.PasswordBreaksReplicationCredentials(password).Should().Be(expected);
+    }
 }

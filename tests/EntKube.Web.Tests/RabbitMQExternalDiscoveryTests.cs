@@ -530,8 +530,9 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         k8s.Setup(f => f.RunCommandOnPodWithStdinAsync(
                 "mq-rabbitmq-0", "messaging",
                 It.Is<IReadOnlyList<string>>(c => c.Contains("import_definitions")),
-                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Callback((string _, string _, IReadOnlyList<string> _, string s, string _, CancellationToken _) =>
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>(), It.IsAny<string?>()))
+            // The trailing parameter selects a container; Moq needs the callback to carry it too.
+            .Callback((string _, string _, IReadOnlyList<string> _, string s, string _, CancellationToken _, string? _) =>
                 stdin = s)
             .ReturnsAsync("");
 

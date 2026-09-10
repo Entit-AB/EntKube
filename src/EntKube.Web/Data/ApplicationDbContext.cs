@@ -138,6 +138,9 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<OpenLdapUser> OpenLdapUsers => Set<OpenLdapUser>();
     public DbSet<OpenLdapGroup> OpenLdapGroups => Set<OpenLdapGroup>();
     public DbSet<OpenLdapGroupMember> OpenLdapGroupMembers => Set<OpenLdapGroupMember>();
+    public DbSet<StalwartComponentConfig> StalwartComponentConfigs => Set<StalwartComponentConfig>();
+    public DbSet<StalwartMailDomain> StalwartMailDomains => Set<StalwartMailDomain>();
+    public DbSet<StalwartMailAccount> StalwartMailAccounts => Set<StalwartMailAccount>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
@@ -1173,6 +1176,92 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(m => m.User)
                 .WithMany()
                 .HasForeignKey(m => m.UserId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // Stalwart mail — the server's whole configuration is authored here and converged onto the
+        // running deployment by regenerating its manifest and replaying a declarative apply plan.
+        // Admin credentials and the LDAP bind password live in the vault, never in these columns.
+
+        builder.Entity<StalwartComponentConfig>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.DisplayName).HasMaxLength(200);
+            entity.Property(c => c.Hostname).HasMaxLength(253).IsRequired();
+            entity.Property(c => c.AdminHostname).HasMaxLength(253);
+            entity.Property(c => c.AdminUsername).HasMaxLength(100).IsRequired();
+            entity.Property(c => c.StorageSize).HasMaxLength(20).IsRequired();
+            entity.Property(c => c.StorageClass).HasMaxLength(100);
+            entity.Property(c => c.AuthMode).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.LdapUrl).HasMaxLength(400);
+            entity.Property(c => c.LdapBaseDn).HasMaxLength(400);
+            entity.Property(c => c.LdapBindDn).HasMaxLength(400);
+            entity.Property(c => c.LdapLoginFilter).HasMaxLength(600).IsRequired();
+            entity.Property(c => c.LdapMailboxFilter).HasMaxLength(600).IsRequired();
+            entity.Property(c => c.LdapMemberOfFilter).HasMaxLength(600).IsRequired();
+            entity.Property(c => c.OidcIssuerUrl).HasMaxLength(400);
+            entity.Property(c => c.OidcClaimUsername).HasMaxLength(100).IsRequired();
+            entity.Property(c => c.OidcUsernameDomain).HasMaxLength(253);
+            entity.Property(c => c.OidcClaimGroups).HasMaxLength(100);
+            entity.Property(c => c.OidcRequireAudience).HasMaxLength(200);
+            entity.Property(c => c.OidcRequireScopes).HasMaxLength(400).IsRequired();
+            entity.Property(c => c.TlsMode).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.AcmeChallenge).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.ClusterIssuer).HasMaxLength(200);
+            entity.Property(c => c.WebClusterIssuer).HasMaxLength(200);
+            entity.Property(c => c.AcmeContact).HasMaxLength(320);
+            entity.Property(c => c.ExposeMode).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.LoadBalancerIp).HasMaxLength(100);
+            entity.Property(c => c.LoadBalancerAnnotations).HasMaxLength(2000);
+            entity.Property(c => c.RspamdHost).HasMaxLength(253);
+            entity.Property(c => c.CoordinatorRedisHost).HasMaxLength(253);
+
+            entity.HasOne(c => c.Tenant)
+                .WithMany()
+                .HasForeignKey(c => c.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(c => c.ClusterComponent)
+                .WithMany()
+                .HasForeignKey(c => c.ClusterComponentId)
+                .IsRequired(false)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<StalwartMailDomain>(entity =>
+        {
+            entity.HasKey(d => d.Id);
+            entity.Property(d => d.Name).HasMaxLength(253).IsRequired();
+            entity.Property(d => d.Description).HasMaxLength(500);
+            entity.Property(d => d.CatchAllLocalPart).HasMaxLength(100);
+            entity.HasIndex(d => new { d.ConfigId, d.Name }).IsUnique();
+
+            entity.HasOne(d => d.Config)
+                .WithMany(c => c.Domains)
+                .HasForeignKey(d => d.ConfigId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<StalwartMailAccount>(entity =>
+        {
+            entity.HasKey(a => a.Id);
+            entity.Property(a => a.LocalPart).HasMaxLength(100).IsRequired();
+            entity.Property(a => a.DisplayName).HasMaxLength(200);
+            entity.Property(a => a.Description).HasMaxLength(500);
+            entity.Property(a => a.Aliases).HasMaxLength(2000);
+            entity.HasIndex(a => new { a.DomainId, a.LocalPart }).IsUnique();
+
+            entity.HasOne(a => a.Config)
+                .WithMany(c => c.Accounts)
+                .HasForeignKey(a => a.ConfigId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Both FKs cascade from the same config root, which SQL Server rejects as multiple
+            // cascade paths. The config path cascades; deleting a domain is blocked while it still
+            // has mailboxes, and the service removes them first.
+            entity.HasOne(a => a.Domain)
+                .WithMany()
+                .HasForeignKey(a => a.DomainId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
