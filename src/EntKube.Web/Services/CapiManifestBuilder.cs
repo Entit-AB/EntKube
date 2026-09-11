@@ -53,8 +53,7 @@ public static class CapiManifestBuilder
 
         foreach (WorkerPool pool in config.WorkerPools)
         {
-            Append(sb, WorkerTemplateDocument(config, inputs, pool));
-            Append(sb, MachineDeploymentDocument(config, pool));
+            Append(sb, BuildPool(config, inputs, pool));
         }
 
         // One health check per cluster, matching every worker. Nodes fail, and a cluster that does
@@ -62,6 +61,48 @@ public static class CapiManifestBuilder
         Append(sb, MachineHealthCheckDocument(config));
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// The documents for one worker pool: its machine template, its MachineDeployment and the
+    /// kubeadm config that joins its nodes. Public because day-2 applies pools individually —
+    /// adding one should not re-apply the control plane, and re-applying a control plane to add a
+    /// pool is how an unrelated rollout gets started.
+    /// </summary>
+    public static string BuildPool(OpenStackProvisioningConfig config, ClusterManifestInputs inputs, WorkerPool pool)
+    {
+        StringBuilder sb = new();
+        Append(sb, WorkerTemplateDocument(config, inputs, pool, MachineTemplateName(config, pool, inputs)));
+        Append(sb, MachineDeploymentDocument(config, pool, MachineTemplateName(config, pool, inputs)));
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The machine template's name, which carries a fingerprint of the machine's shape.
+    ///
+    /// <para>CAPI treats an OpenStackMachineTemplate as immutable — changing a flavor in place is
+    /// rejected by the webhook. Reshaping a pool therefore means creating a differently-named
+    /// template and pointing the MachineDeployment at it, which is also what makes CAPI roll the
+    /// machines. Deriving the name from the shape means the same shape always resolves to the same
+    /// template, so re-applying an unchanged pool rolls nothing.</para>
+    /// </summary>
+    public static string MachineTemplateName(
+        OpenStackProvisioningConfig config, WorkerPool pool, ClusterManifestInputs inputs)
+    {
+        string fingerprint = ShapeFingerprint(pool.Flavor, pool.DiskGb, inputs.NodeImageName);
+        return $"{PoolResourceName(config, pool)}-{fingerprint}";
+    }
+
+    /// <summary>
+    /// Eight hex characters of the things that force a machine to be replaced. Short enough to keep
+    /// resource names legible, and a collision only means a reshape that should have rolled does
+    /// not — which the observed state then shows as a pool already at its target.
+    /// </summary>
+    public static string ShapeFingerprint(string flavor, int diskGb, string imageName)
+    {
+        string shape = $"{flavor}|{diskGb}|{imageName}";
+        byte[] hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(shape));
+        return Convert.ToHexStringLower(hash)[..8];
     }
 
     // ──────── Cluster ────────
@@ -206,9 +247,9 @@ public static class CapiManifestBuilder
     // ──────── Worker pools ────────
 
     private static string WorkerTemplateDocument(
-        OpenStackProvisioningConfig config, ClusterManifestInputs inputs, WorkerPool pool)
+        OpenStackProvisioningConfig config, ClusterManifestInputs inputs, WorkerPool pool, string templateName)
     {
-        string name = PoolResourceName(config, pool);
+        string name = templateName;
         StringBuilder sb = new();
 
         sb.Append($"""
@@ -230,7 +271,8 @@ public static class CapiManifestBuilder
         return sb.ToString();
     }
 
-    private static string MachineDeploymentDocument(OpenStackProvisioningConfig config, WorkerPool pool)
+    private static string MachineDeploymentDocument(
+        OpenStackProvisioningConfig config, WorkerPool pool, string templateName)
     {
         string name = PoolResourceName(config, pool);
         string version = MachineImageNaming.Normalize(pool.KubernetesVersion ?? config.KubernetesVersion);
@@ -274,7 +316,9 @@ public static class CapiManifestBuilder
             "      infrastructureRef:",
             "        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1",
             "        kind: OpenStackMachineTemplate",
-            $"        name: {name}",
+            // The fingerprinted template, not the pool's own name: pointing a MachineDeployment at
+            // a new template is what makes CAPI roll the machines onto a new shape.
+            $"        name: {templateName}",
             "      bootstrap:",
             "        configRef:",
             "          apiVersion: bootstrap.cluster.x-k8s.io/v1beta1",

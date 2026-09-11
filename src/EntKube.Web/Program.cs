@@ -452,6 +452,7 @@ public class Program
         builder.Services.AddScoped<MachineImageBuilder>();
         builder.Services.AddScoped<ClusterStateReader>();
         builder.Services.AddScoped<ClusterReconciler>();
+        builder.Services.AddScoped<ClusterOperationsService>();
         builder.Services.AddHostedService<ClusterReconcilerService>();
         builder.Services.AddScoped<ProvisionedClusterService>();
         builder.Services.AddScoped<ClusterProvisioningService>();

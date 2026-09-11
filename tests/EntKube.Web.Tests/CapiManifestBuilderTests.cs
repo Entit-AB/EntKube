@@ -79,11 +79,11 @@ public class CapiManifestBuilderTests
         YamlMappingNode memory = OfKind(manifest, "MachineDeployment").Single(d => Name(d) == "prod-eu-1-memory");
         ((YamlMappingNode)memory["spec"])["replicas"].ToString().Should().Be("2");
 
-        YamlMappingNode memoryTemplate = OfKind(manifest, "OpenStackMachineTemplate").Single(d => Name(d) == "prod-eu-1-memory");
+        YamlMappingNode memoryTemplate = OfKind(manifest, "OpenStackMachineTemplate").Single(d => Name(d).StartsWith("prod-eu-1-memory-"));
         YamlMappingNode spec = (YamlMappingNode)((YamlMappingNode)((YamlMappingNode)memoryTemplate["spec"])["template"])["spec"];
         spec["flavor"].ToString().Should().Be("b.8c32gb");
 
-        YamlMappingNode general = OfKind(manifest, "OpenStackMachineTemplate").Single(d => Name(d) == "prod-eu-1-general");
+        YamlMappingNode general = OfKind(manifest, "OpenStackMachineTemplate").Single(d => Name(d).StartsWith("prod-eu-1-general-"));
         YamlMappingNode generalSpec = (YamlMappingNode)((YamlMappingNode)((YamlMappingNode)general["spec"])["template"])["spec"];
         generalSpec["flavor"].ToString().Should().Be("b.4c8gb");
     }
@@ -96,11 +96,11 @@ public class CapiManifestBuilderTests
         string manifest = CapiManifestBuilder.Build(Config(), Inputs());
 
         // Navigated, so a rootVolume that landed at the wrong depth cannot pass as present.
-        YamlMappingNode memory = OfKind(manifest, "OpenStackMachineTemplate").Single(d => Name(d) == "prod-eu-1-memory");
+        YamlMappingNode memory = OfKind(manifest, "OpenStackMachineTemplate").Single(d => Name(d).StartsWith("prod-eu-1-memory-"));
         YamlMappingNode memorySpec = (YamlMappingNode)((YamlMappingNode)((YamlMappingNode)memory["spec"])["template"])["spec"];
         ((YamlMappingNode)memorySpec["rootVolume"])["sizeGiB"].ToString().Should().Be("200");
 
-        YamlMappingNode general = OfKind(manifest, "OpenStackMachineTemplate").Single(d => Name(d) == "prod-eu-1-general");
+        YamlMappingNode general = OfKind(manifest, "OpenStackMachineTemplate").Single(d => Name(d).StartsWith("prod-eu-1-general-"));
         YamlMappingNode spec = (YamlMappingNode)((YamlMappingNode)((YamlMappingNode)general["spec"])["template"])["spec"];
         spec.Children.Should().NotContainKey(new YamlScalarNode("rootVolume"));
     }
@@ -236,6 +236,74 @@ public class CapiManifestBuilderTests
     }
 
     // ── Shape of the whole ──
+
+    // ── Machine templates are immutable, so their names carry the shape ──
+
+    [Fact]
+    public void A_machine_templates_name_changes_when_the_shape_does()
+    {
+        // CAPI rejects an edit to an OpenStackMachineTemplate, so a reshape has to arrive as a new
+        // template — and pointing the MachineDeployment at it is what starts the rollout.
+        string before = CapiManifestBuilder.Build(Config(), Inputs());
+        string after = CapiManifestBuilder.Build(
+            Config(c => c.WorkerPools[1].Flavor = "b.16c64gb"), Inputs());
+
+        string templateBefore = OfKind(before, "OpenStackMachineTemplate")
+            .Select(Name).Single(n => n.StartsWith("prod-eu-1-memory-"));
+        string templateAfter = OfKind(after, "OpenStackMachineTemplate")
+            .Select(Name).Single(n => n.StartsWith("prod-eu-1-memory-"));
+
+        templateAfter.Should().NotBe(templateBefore);
+    }
+
+    [Fact]
+    public void An_unchanged_pool_resolves_to_the_same_template_so_re_applying_rolls_nothing()
+    {
+        // Re-applying the spec is routine — every reconcile could do it. If the name moved each
+        // time, every pass would replace every machine in the cluster.
+        string first = CapiManifestBuilder.Build(Config(), Inputs());
+        string second = CapiManifestBuilder.Build(Config(), Inputs());
+
+        OfKind(first, "OpenStackMachineTemplate").Select(Name)
+            .Should().BeEquivalentTo(OfKind(second, "OpenStackMachineTemplate").Select(Name));
+    }
+
+    [Fact]
+    public void The_deployment_points_at_the_fingerprinted_template_not_the_pool_name()
+    {
+        string manifest = CapiManifestBuilder.Build(Config(), Inputs());
+
+        YamlMappingNode deployment = OfKind(manifest, "MachineDeployment").Single(d => Name(d) == "prod-eu-1-memory");
+        YamlMappingNode infra = (YamlMappingNode)
+            ((YamlMappingNode)((YamlMappingNode)((YamlMappingNode)deployment["spec"])["template"])["spec"])["infrastructureRef"];
+
+        string referenced = infra["name"].ToString();
+        referenced.Should().StartWith("prod-eu-1-memory-");
+        referenced.Should().NotBe("prod-eu-1-memory");
+
+        // And it must name a template that is actually in the same manifest.
+        OfKind(manifest, "OpenStackMachineTemplate").Select(Name).Should().Contain(referenced);
+    }
+
+    [Fact]
+    public void The_image_is_part_of_the_shape()
+    {
+        // An upgrade changes the image behind a pool, and that has to replace machines too — a pool
+        // left on the old image is a pool still running the old kubelet.
+        string first = CapiManifestBuilder.ShapeFingerprint("b.4c8gb", 0, "entkube-k8s-v1.31.4-1");
+        string second = CapiManifestBuilder.ShapeFingerprint("b.4c8gb", 0, "entkube-k8s-v1.32.0-1");
+
+        second.Should().NotBe(first);
+    }
+
+    [Fact]
+    public void A_pool_that_only_changes_count_keeps_its_template()
+    {
+        // Scaling adds machines of the shape that is already there; it must not roll the ones
+        // running.
+        CapiManifestBuilder.ShapeFingerprint("b.4c8gb", 0, "img")
+            .Should().Be(CapiManifestBuilder.ShapeFingerprint("b.4c8gb", 0, "img"));
+    }
 
     [Fact]
     public void The_manifest_is_valid_yaml_with_every_document_it_needs()
