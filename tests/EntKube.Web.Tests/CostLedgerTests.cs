@@ -352,6 +352,56 @@ public class CostLedgerTests : IDisposable
     }
 
     [Fact]
+    public async Task Idle_capacity_accrues_as_platform_cost_not_as_a_namespace_of_its_own()
+    {
+        // The idle line rides the same path as a pooled platform namespace: booked under
+        // its sentinel name, flagged redistributed, and therefore inside the apps' shared
+        // cost rather than counted beside it.
+        CostReport report = new()
+        {
+            GeneratedAt = Noon,
+            Namespaces =
+            [
+                new NamespaceCost
+                {
+                    Namespace = "acme-prod",
+                    ClusterId = clusterId,
+                    ClusterName = "prod",
+                    CustomerId = customerId,
+                    CustomerName = "Acme Ltd",
+                    Apps = [new AppRef(appId, "checkout")],
+                    EnvironmentName = "Production",
+                    CpuMonthlyCost = 730m,
+                    SharedMonthlyCost = 1460m,
+                },
+                new NamespaceCost
+                {
+                    Namespace = CostAllocation.IdleNamespace,
+                    ClusterId = clusterId,
+                    ClusterName = "prod",
+                    CpuMonthlyCost = 1460m,
+                    IsRedistributed = true,
+                },
+            ],
+        };
+
+        await RecordAsync(Noon, report);
+        await RecordAsync(Noon.AddHours(1), report);
+
+        CostHistoryReport history = await this.history.GetHistoryAsync(
+            tenantId, Noon, Noon, CostGroupBy.Namespace, Noon.AddHours(1));
+
+        // One hour: $1 direct + $2 shared to the app; the $2 idle line is the platform cost.
+        history.TotalCost.Should().Be(3m);
+        history.PlatformCost.Should().Be(2m);
+        history.Groups.Should().ContainSingle().Which.Label.Should().Be("prod/acme-prod");
+
+        CostLedgerEntry idle = await db.CostLedgerEntries.SingleAsync(e => e.Namespace == CostAllocation.IdleNamespace);
+        idle.IsRedistributed.Should().BeTrue();
+        idle.CustomerId.Should().BeNull();
+    }
+
+    [Fact]
     public async Task Redistributed_platform_rows_are_excluded_from_the_total_and_reported_apart()
     {
         await SeedDayAsync(Noon.AddDays(-1), cost: 20m);

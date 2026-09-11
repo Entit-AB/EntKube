@@ -1744,6 +1744,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("ChargeIdleCapacity")
+                        .HasColumnType("INTEGER");
+
                     b.Property<bool>("ChargeOnRequests")
                         .HasColumnType("INTEGER");
 
@@ -5442,6 +5445,302 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("SlaTargets");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.StalwartComponentConfig", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AcmeChallenge")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AcmeContact")
+                        .HasMaxLength(320)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AdminHostname")
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AdminUsername")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AuthMode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("BlobStorageLinkId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("ClusterComponentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ClusterIssuer")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("CnpgDatabaseId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CoordinatorRedisHost")
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("CoordinatorRedisPort")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DisplayName")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ExposeMode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("HighAvailability")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Hostname")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("ImapEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("LastAppliedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("LdapAllowInvalidCerts")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LdapBaseDn")
+                        .HasMaxLength(400)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LdapBindDn")
+                        .HasMaxLength(400)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LdapLoginFilter")
+                        .IsRequired()
+                        .HasMaxLength(600)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LdapMailboxFilter")
+                        .IsRequired()
+                        .HasMaxLength(600)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LdapMemberOfFilter")
+                        .IsRequired()
+                        .HasMaxLength(600)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LdapUrl")
+                        .HasMaxLength(400)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("LdapUseTls")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LoadBalancerAnnotations")
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LoadBalancerIp")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("ManageSieveEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("OidcAppRegistrationSecretId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OidcClaimGroups")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OidcClaimUsername")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OidcIssuerUrl")
+                        .HasMaxLength(400)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OidcRequireAudience")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OidcRequireScopes")
+                        .IsRequired()
+                        .HasMaxLength(400)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OidcUsernameDomain")
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("OpenLdapConfigId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Pop3Enabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Replicas")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("RspamdEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RspamdHost")
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("RspamdPort")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("RspamdTempFailOnError")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("SmtpEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("StorageClass")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("StorageSize")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("SubmissionEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TlsMode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WebClusterIssuer")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterComponentId");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("StalwartComponentConfigs");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.StalwartMailAccount", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Aliases")
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ConfigId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DisplayName")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("DomainId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LocalPart")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConfigId");
+
+                    b.HasIndex("DomainId", "LocalPart")
+                        .IsUnique();
+
+                    b.ToTable("StalwartMailAccounts");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.StalwartMailDomain", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("AllowRelaying")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("AutomaticDkim")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CatchAllLocalPart")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ConfigId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsPrimary")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("SubAddressing")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConfigId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("StalwartMailDomains");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.StorageBinding", b =>
                 {
                     b.Property<Guid>("Id")
@@ -7985,6 +8284,54 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.StalwartComponentConfig", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ClusterComponent", "ClusterComponent")
+                        .WithMany()
+                        .HasForeignKey("ClusterComponentId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ClusterComponent");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.StalwartMailAccount", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.StalwartComponentConfig", "Config")
+                        .WithMany("Accounts")
+                        .HasForeignKey("ConfigId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.StalwartMailDomain", "Domain")
+                        .WithMany()
+                        .HasForeignKey("DomainId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Config");
+
+                    b.Navigation("Domain");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.StalwartMailDomain", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.StalwartComponentConfig", "Config")
+                        .WithMany("Domains")
+                        .HasForeignKey("ConfigId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Config");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.StorageBinding", b =>
                 {
                     b.HasOne("EntKube.Web.Data.AppDeployment", "AppDeployment")
@@ -8614,6 +8961,13 @@ namespace EntKube.Web.Data.Migrations.Sqlite
             modelBuilder.Entity("EntKube.Web.Data.SecretVault", b =>
                 {
                     b.Navigation("Secrets");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.StalwartComponentConfig", b =>
+                {
+                    b.Navigation("Accounts");
+
+                    b.Navigation("Domains");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.StorageLink", b =>

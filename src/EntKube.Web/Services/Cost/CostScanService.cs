@@ -211,6 +211,7 @@ public class CostRateService(IDbContextFactory<ApplicationDbContext> dbFactory)
         rate.PublicIpMonthlyCost = Math.Max(0m, values.PublicIpMonthlyCost);
         rate.Currency = string.IsNullOrWhiteSpace(values.Currency) ? "USD" : values.Currency.Trim().ToUpperInvariant();
         rate.ChargeOnRequests = values.ChargeOnRequests;
+        rate.ChargeIdleCapacity = values.ChargeIdleCapacity;
         rate.UpdatedAt = DateTime.UtcNow;
         rate.UpdatedBy = updatedBy;
 

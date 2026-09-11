@@ -162,6 +162,38 @@ public sealed class SegmentLogEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task HasData_AnswersPerCluster_AcrossActiveAndSealedSegments()
+    {
+        // The read-routing probe, which runs in front of every log view: "does the management-plane store
+        // hold this cluster's logs?" A second cluster of the same tenant shares the segments, so the
+        // answer cannot come from the segment list — and a cluster that stores its logs elsewhere (Loki,
+        // or its own in-cluster node) must get a clean "no" rather than a scan that never ends.
+        Guid clusterB = Guid.NewGuid();
+        _context.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = clusterB,
+            TenantId = _tenantId,
+            EnvironmentId = _context.Environments.First().Id,
+            Name = "c2",
+            ApiServerUrl = "https://k8s.example.com",
+        });
+        _context.SaveChanges();
+
+        // Recent, because routing asks where telemetry is arriving now, not where it once did.
+        DateTime now = DateTime.UtcNow;
+        LogSegmentManager mgr = ManagerWith(Log(now.AddMinutes(-5), "prod", "api-1", 2, "cluster A only"));
+        SegmentLogService svc = NewService();
+
+        (await svc.HasDataAsync(_clusterId)).Should().BeTrue();    // from the active index
+        (await svc.HasDataAsync(clusterB)).Should().BeFalse();
+
+        await mgr.RollAndSealAsync();                              // now it is only in a sealed segment
+
+        (await svc.HasDataAsync(_clusterId)).Should().BeTrue();
+        (await svc.HasDataAsync(clusterB)).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task Labels_And_Histogram_AreComputed()
     {
         DateTime t0 = new(2026, 7, 7, 12, 0, 0, DateTimeKind.Utc);

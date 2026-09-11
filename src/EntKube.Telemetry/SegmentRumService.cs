@@ -18,7 +18,10 @@ public sealed class SegmentRumService(SegmentManagerRegistry<RumSegmentManager> 
     public async Task<bool> HasDataAsync(Guid tenantId, Guid siteId, CancellationToken ct = default)
     {
         Query scope = RumSegmentSchema.BuildScope(tenantId, siteId, RumSegmentSchema.PageView, null, null);
-        return await rum.For(tenantId).QueryAsync(null, null, s => s.Search(scope, 1).TotalHits > 0, ct);
+        // Existence check, so: newest segment first, stop on the first hit, and never open the whole
+        // retention window to prove a site has never sent anything (see SegmentManagerBase.AnyAsync).
+        return await rum.For(tenantId).AnyAsync(
+            SegmentScope.All, null, null, s => s.Search(scope, 1).TotalHits > 0, ct);
     }
 
     public async Task<RumSiteOverview?> GetOverviewAsync(Guid tenantId, Guid siteId, DateTime from, DateTime to, CancellationToken ct = default)

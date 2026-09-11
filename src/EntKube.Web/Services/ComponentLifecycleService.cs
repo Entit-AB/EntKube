@@ -627,6 +627,23 @@ public class ComponentLifecycleService(
             string manifestYaml = await SubstituteManifestPlaceholdersAsync(
                 component.HelmValues ?? "", component, ct);
 
+            // Refuse a manifest with nothing in it, here, rather than letting kubectl say
+            // "error: no objects passed to apply" — which is true, unhelpful, and names neither the
+            // component nor the reason.
+            //
+            // The state it catches is real and specific: several catalog entries (the mail stack) ship a
+            // COMMENT as their default values, because their manifest is rendered from configuration
+            // rather than merged from form fields. Register one down a path that forgets to render it and
+            // this is exactly what is stored — a document that parses fine and declares no objects.
+            if (!ContainsKubernetesObjects(manifestYaml))
+            {
+                throw new InvalidOperationException(
+                    $"'{component.Name}' has no manifest to apply — its stored configuration contains no "
+                    + "Kubernetes objects. For components whose manifest is generated from their settings "
+                    + "(the mail stack), open the component's settings and save them once; that is what "
+                    + "renders the manifest.");
+            }
+
             // Do not pass Namespace — every resource in a Manifest already declares its own
             // namespace in metadata. Passing --namespace would cause kubectl to reject any
             // resource whose metadata.namespace differs from the component's default namespace.
@@ -688,8 +705,14 @@ public class ComponentLifecycleService(
 
         if (TelemetryIngestDefaults.IsCollector(valuesCatalog))
         {
+            // Resolved BEFORE the placeholders are filled, because it is now the only address they can be
+            // filled with. With no indexer on the cluster, FillPlaceholders throws and names the component
+            // to install, rather than quietly addressing the management plane.
+            string? inClusterIngest = await entKubeTelemetry.GetInClusterIngestUrlAsync(component.ClusterId, ct);
+
             (string? healed, string? mintedToken) = TelemetryIngestDefaults.FillPlaceholders(
-                valuesYaml, component.ClusterId, component.Cluster.TenantId, ingestTokens, configuration);
+                valuesYaml, component.ClusterId, component.Cluster.TenantId, ingestTokens, configuration,
+                inClusterIngest);
             valuesYaml = healed;
 
             // The vault can hold the placeholder itself: InjectSecretsIntoValuesAsync recovers a missing
@@ -702,12 +725,10 @@ public class ComponentLifecycleService(
                     TelemetryIngestDefaults.TokenSecretName(valuesCatalog!), mintedToken, ct);
             }
 
-            // Once this cluster runs its own telemetry indexer, that is where the collector should ship —
-            // keeping the data in the cluster is the whole reason the indexer is there, and a collector
-            // still pointed at the management plane leaves the indexer empty. It cannot be decided when
-            // the collector is registered: the indexer DEPENDS on the collector, so it is always installed
-            // second. Deciding it here means re-applying the collector is what moves it.
-            string? inClusterIngest = await entKubeTelemetry.GetInClusterIngestUrlAsync(component.ClusterId, ct);
+            // The migration path for collectors registered before the management plane stopped being a
+            // destination at all: anything still addressed there is moved to this cluster's indexer on
+            // the next apply. New installs never take that route — the endpoint is the indexer's from
+            // registration onwards — so this only ever heals an existing one.
             (string? repointed, bool didRepoint) =
                 TelemetryIngestDefaults.RepointToInCluster(valuesYaml, inClusterIngest, configuration);
             valuesYaml = repointed;
@@ -1434,9 +1455,17 @@ public class ComponentLifecycleService(
                 // The pod needs the secret at startup, which may be before Helm creates the namespace.
                 await RunProcessAsync("kubectl", $"create namespace {ns} --kubeconfig {tempKubeconfig}", ct);
 
-                // Decrypt each secret value and build --from-literal args.
+                // Decrypt each secret value and stage it in a temp file.
+                //
+                // NEVER --from-literal: RunProcessAsync passes one argument STRING, which .NET splits
+                // itself, so a value with a space becomes several arguments (kubectl then rejects the
+                // whole command) and a value with a double quote has the quote eaten and the rest of
+                // the command line swallowed into it — a Secret that applies cleanly while holding the
+                // wrong password. Process arguments are also world-readable in `ps` and routinely land
+                // in logs. --from-file passes only paths we generate; the file holds the value verbatim.
 
                 List<string> literals = [];
+                List<string> stagedFiles = [];
 
                 foreach (VaultSecret vaultSecret in group)
                 {
@@ -1454,7 +1483,14 @@ public class ComponentLifecycleService(
                             plainValue = BCrypt.Net.BCrypt.HashPassword(plainValue, workFactor: 12);
                         }
 
-                        literals.Add($"--from-literal={vaultSecret.Name}={plainValue}");
+                        string valuePath = Path.Combine(Path.GetTempPath(), $"entkube-val-{Guid.NewGuid()}");
+                        await File.WriteAllTextAsync(valuePath, plainValue, ct);
+                        if (!OperatingSystem.IsWindows())
+                        {
+                            File.SetUnixFileMode(valuePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                        }
+                        stagedFiles.Add(valuePath);
+                        literals.Add($"--from-file={vaultSecret.Name}={valuePath}");
                     }
                 }
 
@@ -1471,6 +1507,11 @@ public class ComponentLifecycleService(
 
                 string createArgs = $"create secret generic {k8sSecretName} --namespace {ns} {string.Join(" ", literals)} --kubeconfig {tempKubeconfig}";
                 HelmExecutionResult createResult = await RunProcessAsync("kubectl", createArgs, ct);
+
+                foreach (string staged in stagedFiles)
+                {
+                    if (File.Exists(staged)) File.Delete(staged);
+                }
 
                 if (createResult.Success)
                 {
@@ -1505,6 +1546,26 @@ public class ComponentLifecycleService(
     /// <summary>
     /// Executes a Helm or kubectl command against a cluster using the stored kubeconfig.
     /// For Helm operations: runs helm CLI with repo add, upgrade --install, or uninstall.
+    /// <summary>
+    /// Whether a manifest document actually declares a Kubernetes object, as opposed to being empty,
+    /// whitespace, comments, or document separators. Deliberately a cheap textual check rather than a YAML
+    /// parse: this runs on the apply path, and the only question is "is there anything here at all".
+    /// </summary>
+    public static bool ContainsKubernetesObjects(string? manifestYaml)
+    {
+        if (string.IsNullOrWhiteSpace(manifestYaml)) return false;
+
+        foreach (string raw in manifestYaml.Split('\n'))
+        {
+            string line = raw.Trim();
+            if (line.Length == 0) continue;
+            if (line.StartsWith('#')) continue;
+            if (line is "---" or "...") continue;
+            return true;
+        }
+        return false;
+    }
+
     /// For Manifest operations: runs kubectl apply/delete with the YAML content.
     /// Writes a temporary kubeconfig file, runs the CLI, and cleans up.
     /// </summary>

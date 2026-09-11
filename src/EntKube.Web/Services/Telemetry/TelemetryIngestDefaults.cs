@@ -31,12 +31,13 @@ public static class TelemetryIngestDefaults
     /// <summary>The bearer-token placeholder in <c>config.extensions.bearertokenauth.token</c>.</summary>
     public const string TokenPlaceholder = "REPLACE_WITH_INGEST_TOKEN";
 
-    /// <summary>Shown when the ingest URL cannot be derived — the one case an operator must fix by hand.</summary>
+    /// <summary>Shown when there is no in-cluster destination — the one case an operator must fix by hand.</summary>
     public const string MissingUrlMessage =
-        "The EntKube Telemetry Collector has no ingest URL: Telemetry:PublicIngestUrl is not configured, so "
-        + "the collector would export to a placeholder host and every batch would be dropped. Set "
-        + "Telemetry:PublicIngestUrl to the URL clusters use to reach this server (docker-compose derives it "
-        + "from DOMAIN), or fill the component's \"EntKube Ingest URL\" field in by hand.";
+        "The EntKube Telemetry Collector has no ingest URL: this cluster has no EntKube Telemetry Indexer, "
+        + "and the collector no longer falls back to the management plane — a cluster's telemetry stays in "
+        + "the cluster and is read from its own object storage. Install the EntKube Telemetry Indexer on "
+        + "this cluster first (it is listed as a dependency), or set the component's \"Telemetry Ingest URL\" "
+        + "field to an OTLP endpoint you run yourself.";
 
     /// <summary>True when this catalog entry is the telemetry collector.</summary>
     public static bool IsCollector(CatalogEntry? entry) => entry?.Key == CollectorKey;
@@ -47,8 +48,13 @@ public static class TelemetryIngestDefaults
         entry.FormFields.FirstOrDefault(f => f.Key == TokenFieldKey)?.SecretName ?? TokenFieldKey;
 
     /// <summary>
-    /// The collector's ingest base URL (<c>{PublicIngestUrl}/ingest/otlp</c>, which the otlphttp exporter
-    /// extends with /v1/logs and /v1/traces), or null when Telemetry:PublicIngestUrl is unset.
+    /// The management plane's own ingest base URL (<c>{PublicIngestUrl}/ingest/otlp</c>), or null when
+    /// Telemetry:PublicIngestUrl is unset.
+    ///
+    /// <para>RECOGNITION ONLY. Nothing is configured to point here any more: a collector ships to the
+    /// indexer in its own cluster, and this address exists so an older collector still pointed at the
+    /// management plane can be identified — to repoint it, and to know that the data it sent is in the
+    /// management plane's store rather than the cluster's. Do not reintroduce it as a destination.</para>
     /// </summary>
     public static string? IngestUrl(IConfiguration config)
     {
@@ -75,8 +81,12 @@ public static class TelemetryIngestDefaults
     {
         if (!IsCollector(entry)) return;
 
+        // Only ever the cluster's own indexer. There is deliberately no fallback to the management
+        // plane's public ingest URL: filling one in is what made shipping telemetry out of the cluster
+        // the default, silently, at registration time. With no indexer the field is left blank and the
+        // install refuses with MissingUrlMessage, which names the component to install.
         formValues.TryGetValue(EndpointFieldKey, out string? endpoint);
-        if (IsBlankOrPlaceholder(endpoint) && (inClusterIngestUrl ?? IngestUrl(config)) is string url)
+        if (IsBlankOrPlaceholder(endpoint) && inClusterIngestUrl is { Length: > 0 } url)
             formValues[EndpointFieldKey] = url;
 
         formValues.TryGetValue(TokenFieldKey, out string? existingToken);
@@ -92,7 +102,8 @@ public static class TelemetryIngestDefaults
     /// the caller can repair the vault copy too.
     /// </summary>
     public static (string? Yaml, string? MintedToken) FillPlaceholders(
-        string? valuesYaml, Guid clusterId, Guid tenantId, IngestTokenService tokens, IConfiguration config)
+        string? valuesYaml, Guid clusterId, Guid tenantId, IngestTokenService tokens, IConfiguration config,
+        string? inClusterIngestUrl = null)
     {
         if (string.IsNullOrEmpty(valuesYaml)) return (valuesYaml, null);
 
@@ -102,9 +113,12 @@ public static class TelemetryIngestDefaults
 
         if (needsUrl)
         {
-            // Fail loudly rather than install a collector that cannot reach anything: this is the only
-            // part an operator must supply, and a silent placeholder is exactly the failure being fixed.
-            string url = IngestUrl(config) ?? throw new InvalidOperationException(MissingUrlMessage);
+            // Fail loudly rather than install a collector that cannot reach anything — and fail rather
+            // than substitute the management plane, which is what this used to do. The placeholder is
+            // resolved to one address only: the indexer running in this cluster.
+            string url = inClusterIngestUrl is { Length: > 0 } inCluster
+                ? inCluster
+                : throw new InvalidOperationException(MissingUrlMessage);
             valuesYaml = valuesYaml.Replace(EndpointPlaceholder, url, StringComparison.Ordinal);
             // A hand-edited endpoint line may keep only the bare host marker; its scheme is whatever the
             // document already carries, so substitute just the authority.

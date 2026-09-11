@@ -1749,6 +1749,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<bool>("ChargeIdleCapacity")
+                        .HasColumnType("boolean");
+
                     b.Property<bool>("ChargeOnRequests")
                         .HasColumnType("boolean");
 
@@ -5447,6 +5450,302 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("SlaTargets");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.StalwartComponentConfig", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AcmeChallenge")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("AcmeContact")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
+                    b.Property<string>("AdminHostname")
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<string>("AdminUsername")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("AuthMode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<Guid?>("BlobStorageLinkId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ClusterComponentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ClusterIssuer")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<Guid?>("CnpgDatabaseId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CoordinatorRedisHost")
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<int>("CoordinatorRedisPort")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DisplayName")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("ExposeMode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<bool>("HighAvailability")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Hostname")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<bool>("ImapEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("LastAppliedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("LdapAllowInvalidCerts")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("LdapBaseDn")
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<string>("LdapBindDn")
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<string>("LdapLoginFilter")
+                        .IsRequired()
+                        .HasMaxLength(600)
+                        .HasColumnType("character varying(600)");
+
+                    b.Property<string>("LdapMailboxFilter")
+                        .IsRequired()
+                        .HasMaxLength(600)
+                        .HasColumnType("character varying(600)");
+
+                    b.Property<string>("LdapMemberOfFilter")
+                        .IsRequired()
+                        .HasMaxLength(600)
+                        .HasColumnType("character varying(600)");
+
+                    b.Property<string>("LdapUrl")
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<bool>("LdapUseTls")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("LoadBalancerAnnotations")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("LoadBalancerIp")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<bool>("ManageSieveEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid?>("OidcAppRegistrationSecretId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("OidcClaimGroups")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("OidcClaimUsername")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("OidcIssuerUrl")
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<string>("OidcRequireAudience")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("OidcRequireScopes")
+                        .IsRequired()
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<string>("OidcUsernameDomain")
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<Guid?>("OpenLdapConfigId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("Pop3Enabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("Replicas")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("RspamdEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("RspamdHost")
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<int>("RspamdPort")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("RspamdTempFailOnError")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("SmtpEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("StorageClass")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("StorageSize")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<bool>("SubmissionEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("TlsMode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("WebClusterIssuer")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClusterComponentId");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("StalwartComponentConfigs");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.StalwartMailAccount", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Aliases")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<Guid>("ConfigId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("DisplayName")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<Guid>("DomainId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("LocalPart")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConfigId");
+
+                    b.HasIndex("DomainId", "LocalPart")
+                        .IsUnique();
+
+                    b.ToTable("StalwartMailAccounts");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.StalwartMailDomain", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("AllowRelaying")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("AutomaticDkim")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("CatchAllLocalPart")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<Guid>("ConfigId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<bool>("IsPrimary")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<bool>("SubAddressing")
+                        .HasColumnType("boolean");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConfigId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("StalwartMailDomains");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.StorageBinding", b =>
                 {
                     b.Property<Guid>("Id")
@@ -7994,6 +8293,54 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.StalwartComponentConfig", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ClusterComponent", "ClusterComponent")
+                        .WithMany()
+                        .HasForeignKey("ClusterComponentId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ClusterComponent");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.StalwartMailAccount", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.StalwartComponentConfig", "Config")
+                        .WithMany("Accounts")
+                        .HasForeignKey("ConfigId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.StalwartMailDomain", "Domain")
+                        .WithMany()
+                        .HasForeignKey("DomainId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Config");
+
+                    b.Navigation("Domain");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.StalwartMailDomain", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.StalwartComponentConfig", "Config")
+                        .WithMany("Domains")
+                        .HasForeignKey("ConfigId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Config");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.StorageBinding", b =>
                 {
                     b.HasOne("EntKube.Web.Data.AppDeployment", "AppDeployment")
@@ -8623,6 +8970,13 @@ namespace EntKube.Web.Data.Migrations.Postgres
             modelBuilder.Entity("EntKube.Web.Data.SecretVault", b =>
                 {
                     b.Navigation("Secrets");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.StalwartComponentConfig", b =>
+                {
+                    b.Navigation("Accounts");
+
+                    b.Navigation("Domains");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.StorageLink", b =>

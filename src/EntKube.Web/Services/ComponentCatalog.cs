@@ -106,6 +106,19 @@ public class CatalogEntry
     public IReadOnlyList<ConditionalDependency> ConditionalDependencies { get; init; } = [];
 
     /// <summary>
+    /// The Services section this component is actually configured and applied from, when the
+    /// Components tab is not where its configuration lives.
+    ///
+    /// <para>For a component like Stalwart the Components tab only starts the pod. Domains, the
+    /// directory, the administrator and the listeners are authored in a Services tab and converged
+    /// onto the running server by an explicit apply there — and a pod that has been installed but
+    /// never applied is a running server with nothing configured. Without this pointer that fact
+    /// is invisible: the install reports success, the pod is Ready, and nothing on the screen says
+    /// there is a second step. (An operator spent a day inside that gap.)</para>
+    /// </summary>
+    public ServicesSection? ConfiguredIn { get; init; }
+
+    /// <summary>
     /// Form fields that provide a user-friendly way to configure the most common
     /// Helm values. These render as simple form controls (text boxes, selects,
     /// toggles) so operators don't need to understand YAML for routine settings.
@@ -113,6 +126,13 @@ public class CatalogEntry
     /// </summary>
     public IReadOnlyList<ComponentFormField> FormFields { get; init; } = [];
 }
+
+/// <summary>
+/// A section of the tenant's Services tree, as the Components tab links to it.
+/// </summary>
+/// <param name="Key">The TenantExplorer section key (its <c>?section=</c> value), e.g. "mail".</param>
+/// <param name="Label">What to call it in a sentence, e.g. "Services › Mail".</param>
+public sealed record ServicesSection(string Key, string Label);
 
 /// <summary>
 /// Identifies a cluster-scoped custom resource whose live instances signal that a
@@ -1431,7 +1451,7 @@ public static class ComponentCatalog
         {
             Key = "otel-collector",
             DisplayName = "EntKube Telemetry Collector",
-            Description = "Node-level telemetry collector built on the OpenTelemetry Collector (Apache 2.0). Runs as a DaemonSet, tails container logs on every node, and ships them to the EntKube native telemetry store over OTLP/JSON (Bearer-authenticated with a per-cluster ingest token) — no Loki required. Also exposes OTLP receivers (4317/4318) so instrumented apps can send traces and metrics to the platform. For a Loki-backed setup instead, use Grafana Alloy.",
+            Description = "Node-level telemetry collector built on the OpenTelemetry Collector (Apache 2.0). Runs as a DaemonSet, tails container logs on every node, and ships them to the EntKube Telemetry Indexer IN THIS CLUSTER over OTLP/JSON (Bearer-authenticated with a per-cluster ingest token) — no Loki required. The cluster's telemetry never leaves it: the indexer holds it on a volume and seals it into the object-storage bucket you assign at install, and EntKube queries that on demand rather than receiving a copy. Also exposes OTLP receivers (4317/4318) so instrumented apps can send traces to the same place. For a Loki-backed setup instead, use Grafana Alloy.",
             Icon = "bi-arrow-down-up",
             Category = "Monitoring",
             HelmRepoUrl = "https://open-telemetry.github.io/opentelemetry-helm-charts",
@@ -1442,8 +1462,13 @@ public static class ComponentCatalog
             DefaultReleaseName = "otel-collector",
             // DaemonSet rollout (one pod per node) can be slow on busy clusters — give --wait headroom.
             InstallTimeout = "30m0s",
-            // No component dependency: it ships to the EntKube management plane, not an in-cluster
-            // backend. Requires only the Ingest URL + per-cluster token (form fields below).
+            // The indexer is a hard dependency, and the direction is deliberate: the collector has
+            // somewhere to ship only if this cluster runs its own telemetry node. It used to be the other
+            // way round — the indexer depended on the collector, so the collector was installed first with
+            // nowhere in-cluster to send, defaulted to the management plane's public ingest URL, and only
+            // moved in-cluster if somebody later re-applied it. That default is gone: a cluster's telemetry
+            // stays in the cluster, so the destination must exist before the thing that fills it.
+            Dependencies = ["entkube-telemetry-indexer"],
             FormFields =
             [
                 new ComponentFormField
@@ -1483,8 +1508,8 @@ public static class ComponentCatalog
                 {
                     Key = "ingest-endpoint", Label = "Telemetry Ingest URL",
                     YamlPath = "config.exporters.otlphttp/entkube.endpoint", Type = FormFieldType.Text,
-                    DefaultValue = "", Placeholder = "https://entkube.example.com/ingest/otlp",
-                    HelpText = "Where this collector ships logs and traces (ending in /ingest/otlp — the collector appends /v1/logs and /v1/traces). Two valid destinations: the EntKube Telemetry Indexer in THIS cluster, if one is installed, which keeps the data in the cluster; or EntKube's own public ingest URL. Filled in automatically — and repointed at the in-cluster indexer when you install one and re-apply this collector."
+                    DefaultValue = "", Placeholder = "http://entkube-telemetry-indexer.monitoring:8080/ingest/otlp",
+                    HelpText = "Where this collector ships logs and traces (ending in /ingest/otlp — the collector appends /v1/logs and /v1/traces). Filled in automatically from the EntKube Telemetry Indexer installed on this cluster; there is no management-plane fallback, because a cluster's telemetry is not EntKube's to hold. Point it somewhere else only if you run your own OTLP endpoint."
                 },
                 new ComponentFormField
                 {
@@ -1532,6 +1557,24 @@ public static class ComponentCatalog
                   repository: otel/opentelemetry-collector-contrib
                 command:
                   name: otelcol-contrib
+
+                # NB no GOMEMLIMIT here: this chart already derives one from resources.limits.memory
+                # (80% of it) and sets it on the container. Adding our own produced a duplicate env var
+                # AND froze the value, so raising the memory limit would no longer raise the Go heap's
+                # ceiling with it. The eBPF component needs the equivalent set by hand; this one does not.
+
+                # The chart opens a hostPort per receiver it ships, on every node. We use OTLP; Jaeger
+                # and Zipkin are three more listening ports on every node in the cluster, for protocols
+                # nothing here speaks.
+                ports:
+                  jaeger-compact:
+                    enabled: false
+                  jaeger-grpc:
+                    enabled: false
+                  jaeger-thrift:
+                    enabled: false
+                  zipkin:
+                    enabled: false
 
                 presets:
                   logsCollection:
@@ -1617,6 +1660,13 @@ public static class ComponentCatalog
                       create_directory: false
 
                   receivers:
+                    # Explicit nulls, because config is a MAP MERGE and omission is not removal: the
+                    # chart ships jaeger, zipkin and a self-scraping prometheus receiver in its defaults,
+                    # and a values file that simply doesn't mention them keeps every one. Each is a
+                    # listener held open on every node for a protocol this platform does not use.
+                    jaeger: null
+                    zipkin: null
+                    prometheus: null
                     # The chart preset builds the filelog receiver (include globs, container
                     # parser, hostPath mounts); these two keys are merged into it.
                     #
@@ -1680,6 +1730,10 @@ public static class ComponentCatalog
                         - { action: insert, key: app,       from_attribute: app.kubernetes.io/name }
 
                   exporters:
+                    # Same reason as the receivers above: the chart's default `debug` exporter is what
+                    # the inherited metrics pipeline writes to, and leaving it declared invites the
+                    # pipeline back. Every batch it prints is also a log line this collector then tails.
+                    debug: null
                     # EntKube native telemetry ingest. JSON encoding (no protobuf dep on the ingest
                     # side); gzip is applied by default. The base endpoint is set via the "EntKube
                     # Ingest URL" field; the otlphttp exporter appends /v1/logs and /v1/traces. Auth via
@@ -1723,17 +1777,18 @@ public static class ComponentCatalog
                         receivers: [filelog, otlp]
                         processors: [memory_limiter, k8sattributes, resource/short-labels, batch]
                         exporters: [otlphttp/entkube]
-                      # Traces from instrumented apps (OTLP receiver) → EntKube for APM/trace view.
+                      # Traces from instrumented apps (OTLP receiver) → the in-cluster indexer.
                       traces:
                         receivers: [otlp]
                         processors: [memory_limiter, k8sattributes, batch]
                         exporters: [otlphttp/entkube]
-                      # NB: no metrics pipeline. EntKube has no native metrics ingest — app/host
-                      # metrics go straight to Prometheus (there is no /ingest/otlp/v1/metrics
-                      # endpoint). A metrics pipeline here just POSTs to a dead URL and the whole
-                      # batch is rejected (HTTP 400), spamming "Exporting failed" and dropping data.
-                      # OTLP metrics the receiver accepts (e.g. from eBPF/apps) are simply not
-                      # forwarded; scrape those via Prometheus instead.
+                      # No metrics pipeline — and saying so is not enough, which is the point of this
+                      # line. `pipelines` is a map, so declaring logs and traces LEAVES the chart's own
+                      # metrics pipeline in place: otlp + a self-scrape every 10s, through
+                      # k8sattributes and batch, into the debug exporter — i.e. held in memory, then
+                      # printed to stdout, for nobody. `null` is how a map merge deletes a key.
+                      # EntKube has no native metrics ingest; app and host metrics go to Prometheus.
+                      metrics: null
                 """
         },
 
@@ -1802,7 +1857,39 @@ public static class ComponentCatalog
                     Key = "memory-limit", Label = "Memory Limit",
                     YamlPath = "resources.limits.memory", Type = FormFieldType.Text,
                     DefaultValue = "1Gi", Placeholder = "e.g. 1Gi, 2Gi",
-                    HelpText = "OBI holds per-process state for every workload it instruments, so memory tracks the number of processes on the node rather than traffic. Raise this on dense nodes — an OOMKill costs the node's tracing until the pod restarts."
+                    HelpText = "Budget roughly 20–30Mi per instrumented process, plus ~100Mi of agent baseline — so this tracks pod density on the node, not traffic. If it OOMKills, narrowing what is instrumented (the exclusions below) buys far more than raising the ceiling."
+                },
+                // The two settings that decide whether this fits in a node's memory at all: the Go
+                // heap's own ceiling, and the size of the eBPF maps the kernel charges to this pod.
+                new ComponentFormField
+                {
+                    Key = "go-mem-limit", Label = "Go Heap Soft Limit",
+                    YamlPath = "env.GOMEMLIMIT", Type = FormFieldType.Text,
+                    DefaultValue = "700MiB", Placeholder = "e.g. 700MiB, 1500MiB",
+                    HelpText = "Keep at roughly 70% of the memory limit above. Without it Go lets the heap grow to twice the live set before collecting, and under a container limit that is not a GC pause — it is an OOMKill. The remaining 30% is for the eBPF maps, which live in kernel memory and are charged to this pod's cgroup where the Go runtime cannot see or free them."
+                },
+                new ComponentFormField
+                {
+                    Key = "bpf-map-scale", Label = "eBPF Map Scale Factor",
+                    YamlPath = "config.data.ebpf.maps_config.global_scale_factor", Type = FormFieldType.Number,
+                    DefaultValue = "-1",
+                    HelpText = "Powers of two applied to every eBPF map size: -1 halves them, -2 quarters them, 0 is upstream's default, and the valid range is -3..3. Maps are preallocated, so this is a direct and deterministic cut in the kernel memory charged to the pod. Too small shows up as dropped events under load, not as wrong data."
+                },
+                // RED metrics are off by default (see the config below) because nothing scraped
+                // them. These two fields are how you turn them on — together, or not at all.
+                new ComponentFormField
+                {
+                    Key = "prometheus-port", Label = "RED Metrics Port (0 = off)",
+                    YamlPath = "config.data.prometheus_export.port", Type = FormFieldType.Number,
+                    DefaultValue = "0",
+                    HelpText = "Opens OBI's Prometheus endpoint (9090 is the convention). Generating these metrics costs heap in proportion to services × routes on the node, so it is off unless something scrapes it — turn on the ServiceMonitor below at the same time."
+                },
+                new ComponentFormField
+                {
+                    Key = "service-monitor", Label = "Create ServiceMonitor",
+                    YamlPath = "serviceMonitor.enabled", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Registers the RED metrics endpoint above with a Prometheus Operator install. Pointless without a port; and a port without this is memory spent on metrics no one reads."
                 },
                 // The Kubernetes metadata cache Deployment (k8sCache.replicas is 1 below), which
                 // holds cluster object metadata and so scales with cluster size, not node size.
@@ -1838,6 +1925,12 @@ public static class ComponentCatalog
             // exact export paths here — the EntKube collector is a ClusterIP Service, not a
             // hostPort, so the chart default would silently ship spans into the void. The
             // chart already defaults securityContext.privileged=true, RBAC, and ServiceAccount.
+            // On memory, which is what decides whether this component is deployable at all:
+            // OBI's cost is per INSTRUMENTED PROCESS (roughly 20-30Mi each), not per request. It
+            // is also split across two budgets the pod's single limit has to cover — the Go heap,
+            // and the eBPF maps, which are kernel memory charged to this pod's cgroup since Linux
+            // 5.11 and which the Go runtime can neither see nor release. Every default below is
+            // chosen to keep both inside one node-sized budget rather than to maximise coverage.
             DefaultValues = """
                 # The chart defaults to `resources: {}` for both workloads, which leaves them
                 # BestEffort — unschedulable-aware and first to be evicted under node pressure.
@@ -1848,14 +1941,28 @@ public static class ComponentCatalog
                     memory: 256Mi
                   limits:
                     cpu: 500m
-                    # OBI keeps per-process state for everything it instruments, so this tracks
-                    # process count on the node, not traffic. Raise on dense nodes.
+                    # Roughly 20-30Mi per instrumented process plus the agent's baseline, so this
+                    # tracks pod density on the node. The exclusions below are what keep it here.
                     memory: 1Gi
+
+                # Go's default is to let the heap reach twice the live set before collecting. Under
+                # a container memory limit that is not a pause, it is an OOMKill — and the classic
+                # shape of it is a pod dying at 1Gi with a 300Mi live heap. GOMEMLIMIT makes the
+                # container's ceiling the collector's target instead. It is deliberately well below
+                # limits.memory: the rest of that budget belongs to the eBPF maps, which are kernel
+                # memory charged to this cgroup and invisible to the Go runtime.
+                env:
+                  GOMEMLIMIT: "700MiB"
+                  # Collect at 50% heap growth rather than 100%. More GC cycles, roughly half the
+                  # peak — the right trade on an agent, which is not the workload being measured.
+                  GOGC: "50"
 
                 # Enable the in-cluster K8s metadata cache (decorates spans/metrics with
                 # namespace/pod/deployment). Chart default is 0 (disabled).
                 k8sCache:
                   replicas: 1
+                  env:
+                    GOMEMLIMIT: "350MiB"
                   # Scales with the number of objects in the CLUSTER, not with node size.
                   resources:
                     requests:
@@ -1867,32 +1974,77 @@ public static class ComponentCatalog
 
                 config:
                   data:
-                    # Auto-discover and instrument EVERY workload in EVERY namespace. OBI
-                    # excludes itself and apps already carrying an OTel SDK.
                     discovery:
+                      # Auto-discover across all namespaces — but only processes inside containers,
+                      # and not the platform's own. A node runs kubelet, containerd, systemd, the
+                      # CNI and the CSI drivers; instrumenting them costs a full per-process budget
+                      # each and produces spans nobody reads. OBI's own default exclusions already
+                      # cover kube-system, cert-manager and monitoring, so this list adds the rest
+                      # of a typical EntKube platform. Delete an entry to instrument that namespace.
                       instrument:
                         - k8s_namespace: "*"
+                          containers_only: true
+                      exclude_instrument:
+                        - k8s_namespace: istio-system
+                        - k8s_namespace: kube-public
+                        - k8s_namespace: vault
+                        - k8s_namespace: longhorn-system
+                        - k8s_namespace: rook-ceph
+                        - k8s_namespace: velero
+                        - k8s_namespace: harbor
                       exclude_otel_instrumented_services: true
                     # Decorate telemetry with Kubernetes resource attributes.
                     attributes:
                       kubernetes:
                         enable: true
-                    # All protocol instrumentations (http, grpc, sql, redis, kafka, ...).
-                    instrumentations:
-                      - "*"
-                    # eBPF context propagation so spans link into connected distributed
-                    # traces where the kernel allows it (network-level path needs 5.17+).
                     ebpf:
-                      context_propagation: all
-                    # Override the chart's ${HOST_IP} defaults → the EntKube collector's
-                    # OTLP gRPC receiver. The collector enriches (k8sattributes) and forwards
-                    # to the EntKube native store. Both signals go to :4317 (gRPC).
+                      # Halve every eBPF map. The maps are PREALLOCATED at their maximum size when
+                      # the programs load, per instrumented executable, and that allocation is
+                      # charged to this pod — so it is paid whether or not the traffic ever arrives.
+                      # Range -3..3, each step a power of two. Overshooting shows up as dropped
+                      # events under peak load, never as incorrect spans; raise toward 0 if the
+                      # agent reports drops on a busy node.
+                      maps_config:
+                        global_scale_factor: -1
+                      # Header-based propagation only. `all` adds the TCP/packet-level path, which
+                      # attaches traffic-control and socket programs to every socket on the node
+                      # and needs kernel 5.17+; it buys context across TLS between OBI-instrumented
+                      # services, at a per-connection memory cost on all of them. Set it back to
+                      # `all` on a cluster that genuinely needs that and can afford it.
+                      context_propagation: headers
+                    # Metrics off, on BOTH paths, and both have to be said out loud: config.data is
+                    # a map merge, so the chart's own defaults — an OTLP metrics endpoint at
+                    # ${HOST_IP}:4318 and a Prometheus endpoint on :9090 — survive simply omitting
+                    # them here. Together they had OBI aggregating RED metrics per service and per
+                    # route, holding that state in its heap for the whole export interval, and
+                    # sending it to a collector with no metrics pipeline (it drops them) and to a
+                    # scrape endpoint with no scraper (the chart's ServiceMonitor is off). That is
+                    # a large share of this pod's heap spent on data with no reader.
+                    #
+                    # To get RED metrics back: set prometheus_export.port to 9090 AND turn on the
+                    # ServiceMonitor field above, so something actually reads what they cost.
+                    otel_metrics_export:
+                      endpoint: ""
+                    prometheus_export:
+                      port: 0
+
+                    # Override the chart's ${HOST_IP} default → the EntKube collector's OTLP gRPC
+                    # receiver. The collector enriches (k8sattributes) and forwards to the native
+                    # store.
                     otel_traces_export:
                       endpoint: http://otel-collector.monitoring:4317
                       protocol: grpc
-                    otel_metrics_export:
-                      endpoint: http://otel-collector.monitoring:4317
-                      protocol: grpc
+                      # The protocols to load probes for. The default is a dozen (redis, kafka,
+                      # mqtt, nats, amqp, mongo, couchbase, memcached, sunrpc...), and each one is
+                      # another program plus its maps on every instrumented executable. These three
+                      # cover what a web workload actually shows in the trace view; add the ones
+                      # you run. NB this key belongs to the EXPORTER section — at the top level of
+                      # the config it is silently ignored, which is how a cluster ends up paying
+                      # for every protocol while its config appears to select one.
+                      instrumentations:
+                        - http
+                        - grpc
+                        - sql
                 """
         },
 
@@ -1907,11 +2059,15 @@ public static class ComponentCatalog
             Category = "Monitoring",
             HelmRepoUrl = "oci://entit.azurecr.io/helm",
             HelmChartName = "entkube-telemetry",
-            HelmChartVersion = "0.4.0",
+            HelmChartVersion = "0.5.0",
             ImageRegistryHost = "entit.azurecr.io",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "entkube-telemetry",
-            Dependencies = ["otel-collector"],
+            // No dependency on the collector, and that reversal is the point: the indexer is the
+            // DESTINATION, so it has to exist before the thing that fills it. The old direction forced
+            // the collector to be installed first with nowhere in-cluster to ship, which is precisely
+            // how the management plane became its default address. The collector now depends on this.
+            Dependencies = [],
             FormFields =
             [
                 new ComponentFormField
@@ -1981,7 +2137,7 @@ public static class ComponentCatalog
                 {
                     Key = "storage-link", Label = "Segment Object Storage",
                     YamlPath = "entkube-telemetry:storage-link-id", Type = FormFieldType.StorageLink,
-                    HelpText = "S3-compatible bucket for sealed log/trace segments. Strongly recommended: without one the node seals to its own volume, so sealed history dies with the volume and a separate query component cannot read it at all."
+                    HelpText = "S3-compatible bucket for sealed log/trace segments — this cluster's telemetry lives here, and EntKube reads it from here rather than being sent a copy. Assign one at install: without a bucket the node seals to its own volume, so sealed history dies with the volume, a separate query component cannot read it at all, and the size budget below cannot be enforced (the volume guard bounds the disk instead)."
                 },
                 // Hidden — written by EntKubeTelemetryService and injected at install time.
                 new ComponentFormField
@@ -2007,6 +2163,13 @@ public static class ComponentCatalog
                     Key = "telemetry-query-token", Label = "Query Token",
                     YamlPath = "node.queryToken", Type = FormFieldType.Password,
                     StoreAsSecret = true, SecretName = "telemetry-query-token", Hidden = true
+                },
+                new ComponentFormField
+                {
+                    Key = "object-storage-max-bytes", Label = "Object storage size budget (bytes, 0 = unlimited)",
+                    YamlPath = "telemetry.objectStorageMaxBytes", Type = FormFieldType.Number,
+                    DefaultValue = "0",
+                    HelpText = "Total bytes of sealed archives this cluster may hold in its bucket, across logs, spans and RUM. Retention (below) bounds telemetry in TIME, which bounds the bucket only if you already know the cluster's log rate — this bounds the bill. Past the ceiling the oldest segments are deleted, oldest-first and proportionally across signals, down to 90% of it. 0 keeps today's behaviour: age alone decides. 53687091200 is 50 GiB."
                 },
                 new ComponentFormField
                 {
@@ -2048,7 +2211,7 @@ public static class ComponentCatalog
             Category = "Monitoring",
             HelmRepoUrl = "oci://entit.azurecr.io/helm",
             HelmChartName = "entkube-telemetry",
-            HelmChartVersion = "0.4.0",
+            HelmChartVersion = "0.5.0",
             ImageRegistryHost = "entit.azurecr.io",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "entkube-telemetry-query",
@@ -2122,7 +2285,7 @@ public static class ComponentCatalog
                 {
                     Key = "storage-link", Label = "Segment Object Storage",
                     YamlPath = "entkube-telemetry:storage-link-id", Type = FormFieldType.StorageLink,
-                    HelpText = "S3-compatible bucket for sealed log/trace segments. Strongly recommended: without one the node seals to its own volume, so sealed history dies with the volume and a separate query component cannot read it at all."
+                    HelpText = "S3-compatible bucket for sealed log/trace segments — this cluster's telemetry lives here, and EntKube reads it from here rather than being sent a copy. Assign one at install: without a bucket the node seals to its own volume, so sealed history dies with the volume, a separate query component cannot read it at all, and the size budget below cannot be enforced (the volume guard bounds the disk instead)."
                 },
                 // Hidden — written by EntKubeTelemetryService and injected at install time.
                 new ComponentFormField
@@ -2671,6 +2834,7 @@ public static class ComponentCatalog
         {
             Key = "openldap",
             DisplayName = "OpenLDAP",
+            ConfiguredIn = new ServicesSection("ldap", "Services › Directory (LDAP)"),
             Description = "Managed LDAP directory (openldap-stack-ha). Provides a central directory of users, groups and service accounts over LDAP/LDAPS with optional multi-master replication. The directory (OUs, users, groups) is authored in EntKube's Directory (LDAP) tab and seeded declaratively via the chart's customLdifFiles.",
             Icon = "bi-person-vcard",
             Category = "Identity",
@@ -2773,6 +2937,573 @@ public static class ComponentCatalog
                 persistence:
                   enabled: true
                   size: 8Gi
+                """
+        },
+
+        // ── Mail ──
+
+        new CatalogEntry
+        {
+            Key = "stalwart",
+            DisplayName = "Stalwart Mail Server",
+            ConfiguredIn = new ServicesSection("mail", "Services › Mail"),
+            Description = "All-in-one mail server: SMTP, IMAP, JMAP, POP3, ManageSieve, CalDAV and CardDAV in one process. "
+                + "Installing only starts the pod: domains, mailboxes, the directory and the administrator are authored "
+                + "in Services › Mail and written to the server by Apply configuration there. Runs as a single replica — "
+                + "the embedded RocksDB store is single-writer; scaling out needs a shared datastore and a coordinator, "
+                + "which this catalog entry does not yet set up. Authenticates against the cluster's OpenLDAP directory, or against Keycloak over OIDC so webmail can sign in with single sign-on. The mail ports get their own LoadBalancer address (mail needs matching forward and reverse DNS); the admin UI and JMAP are published through the cluster's gateway. Domains, mailboxes, listeners and the rspamd hook are authored in EntKube's Mail tab and applied declaratively.",
+            Icon = "bi-envelope-at",
+            Category = "Mail",
+            ComponentType = "Manifest",
+            HelmRepoUrl = "",
+            HelmChartName = "",
+            DefaultNamespace = "stalwart",
+            DefaultReleaseName = "stalwart",
+            // cert-manager only when it is the one issuing the mail certificate. In ACME mode
+            // Stalwart obtains it itself, and a manual certificate needs nothing installed.
+            ConditionalDependencies = [new ConditionalDependency("cert-manager", "tls-mode", "ClusterIssuer")],
+            // Deliberately no ingress requirement. The mail ports reach the world through their own
+            // LoadBalancer, and the web surfaces are optional — a server with no web hostname is a
+            // perfectly good internal relay. The webmail components do require a gateway, because a
+            // webmail nobody can reach is not one.
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    // Deliberately not keyed "hostname": that key is treated across the Components
+                    // tab as "the hostname of this component's external route", and the route here
+                    // belongs to admin-hostname. Sharing the key made the form re-open showing the
+                    // admin hostname as the mail hostname, and saving it renamed the mail server.
+                    Key = "mail-hostname", Label = "Mail Hostname",
+                    YamlPath = "stalwart:mail-hostname", Type = FormFieldType.Text,
+                    Placeholder = "mail.example.com",
+                    HelpText = "The server's own name: its SMTP greeting, the name on its certificate, and what every MX record points at. It needs an A record on the mail LoadBalancer's address and a matching PTR, or a lot of receivers will refuse the mail."
+                },
+                new ComponentFormField
+                {
+                    Key = "admin-hostname", Label = "Web Hostname",
+                    YamlPath = "stalwart:admin-hostname", Type = FormFieldType.Text,
+                    Placeholder = "mailadmin.example.com",
+                    HelpText = "Publishes the admin UI, JMAP, autoconfig and the OAuth endpoints through the cluster gateway. Leave blank to keep them reachable only inside the cluster."
+                },
+                new ComponentFormField
+                {
+                    Key = "admin-username", Label = "Administrator",
+                    YamlPath = "stalwart:admin-username", Type = FormFieldType.Text,
+                    DefaultValue = "admin"
+                },
+                new ComponentFormField
+                {
+                    Key = "admin-password", Label = "Administrator Password",
+                    YamlPath = "stalwart:admin-password", Type = FormFieldType.Password,
+                    HelpText = "Stored in the vault. EntKube uses it as the recovery administrator when applying configuration, which is the only credential that works before a directory exists."
+                },
+                new ComponentFormField
+                {
+                    Key = "auth-mode", Label = "Authentication",
+                    YamlPath = "stalwart:auth-mode", Type = FormFieldType.Select,
+                    DefaultValue = "Ldap",
+                    Options = ["Ldap", "Oidc", "Internal"],
+                    HelpText = "LDAP: every mail client works and mailboxes follow the directory. OIDC: Keycloak tokens, so webmail gets single sign-on — but mailboxes must be provisioned in advance and clients without OAUTHBEARER need app passwords. Stalwart accepts one directory at a time."
+                },
+                new ComponentFormField
+                {
+                    Key = "ldap-url", Label = "LDAP URL",
+                    YamlPath = "stalwart:ldap-url", Type = FormFieldType.Text,
+                    Placeholder = "ldap://openldap.openldap.svc.cluster.local:389",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Ldap",
+                    HelpText = "Leave blank and link an EntKube-managed OpenLDAP directory in the Mail tab instead — the URL, base DN and bind DN are then derived from it."
+                },
+                new ComponentFormField
+                {
+                    Key = "ldap-base-dn", Label = "LDAP Base DN",
+                    YamlPath = "stalwart:ldap-base-dn", Type = FormFieldType.Text,
+                    Placeholder = "dc=example,dc=com",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Ldap"
+                },
+                new ComponentFormField
+                {
+                    Key = "ldap-bind-dn", Label = "LDAP Bind DN",
+                    YamlPath = "stalwart:ldap-bind-dn", Type = FormFieldType.Text,
+                    Placeholder = "cn=admin,dc=example,dc=com",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Ldap"
+                },
+                new ComponentFormField
+                {
+                    Key = "ldap-bind-password", Label = "LDAP Bind Password",
+                    YamlPath = "stalwart:ldap-bind-password", Type = FormFieldType.Password,
+                    DependsOnKey = "auth-mode", DependsOnValue = "Ldap",
+                    HelpText = "Stored in the vault and reaches the server as an environment variable, so it never appears in the applied configuration."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-realm", Label = "Keycloak Realm",
+                    YamlPath = "stalwart:oidc-realm", Type = FormFieldType.KeycloakRealmSelector,
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc",
+                    HelpText = "Pick a realm on this cluster's Keycloak and the issuer URL below is filled in from it. Stalwart validates tokens rather than issuing them, so it needs no client of its own — the webmail's client is the one that gets registered."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-issuer", Label = "Keycloak Realm URL",
+                    YamlPath = "stalwart:oidc-issuer", Type = FormFieldType.Text,
+                    Placeholder = "https://login.example.com/auth/realms/mail",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc",
+                    HelpText = "Stalwart validates access tokens against this issuer's discovery document. Filled in from the realm above when one is selected."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-username-domain", Label = "Username Domain",
+                    YamlPath = "stalwart:oidc-username-domain", Type = FormFieldType.Text,
+                    Placeholder = "example.com",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc",
+                    HelpText = "Appended when the username claim carries no @. Account names are full email addresses, so a realm with bare usernames needs this or no login resolves."
+                },
+                new ComponentFormField
+                {
+                    Key = "tls-mode", Label = "Mail TLS",
+                    YamlPath = "stalwart:tls-mode", Type = FormFieldType.Select,
+                    DefaultValue = "ClusterIssuer",
+                    Options = ["ClusterIssuer", "Acme", "Manual"],
+                    HelpText = "ClusterIssuer reuses the cluster's cert-manager issuer, including its DNS-01 solver, so the mail address never has to serve a challenge. Acme lets Stalwart obtain the certificate itself, which needs the mail LoadBalancer reachable on 443 or 80."
+                },
+                new ComponentFormField
+                {
+                    Key = "cluster-issuer", Label = "Cluster Issuer",
+                    YamlPath = "stalwart:cluster-issuer", Type = FormFieldType.ClusterIssuer,
+                    DefaultValue = "letsencrypt-prod",
+                    DependsOnKey = "tls-mode", DependsOnValue = "ClusterIssuer"
+                },
+                new ComponentFormField
+                {
+                    Key = "acme-contact", Label = "ACME Contact",
+                    YamlPath = "stalwart:acme-contact", Type = FormFieldType.Text,
+                    Placeholder = "hostmaster@example.com",
+                    DependsOnKey = "tls-mode", DependsOnValue = "Acme"
+                },
+                new ComponentFormField
+                {
+                    Key = "tls-cert", Label = "TLS Certificate (PEM)",
+                    YamlPath = "stalwart:tls-cert", Type = FormFieldType.Password,
+                    Placeholder = "-----BEGIN CERTIFICATE-----",
+                    DependsOnKey = "tls-mode", DependsOnValue = "Manual"
+                },
+                new ComponentFormField
+                {
+                    Key = "tls-key", Label = "TLS Private Key (PEM)",
+                    YamlPath = "stalwart:tls-key", Type = FormFieldType.Password,
+                    Placeholder = "-----BEGIN PRIVATE KEY-----",
+                    DependsOnKey = "tls-mode", DependsOnValue = "Manual"
+                },
+                new ComponentFormField
+                {
+                    Key = "expose-mode", Label = "Mail Ports",
+                    YamlPath = "stalwart:expose-mode", Type = FormFieldType.Select,
+                    DefaultValue = "LoadBalancer",
+                    Options = ["LoadBalancer", "ClusterIp"],
+                    HelpText = "A LoadBalancer gives the mail ports their own address, which is what an MX record and a PTR need. ClusterIp keeps them inside the cluster."
+                },
+                new ComponentFormField
+                {
+                    Key = "load-balancer-ip", Label = "LoadBalancer Address",
+                    YamlPath = "stalwart:load-balancer-ip", Type = FormFieldType.Text,
+                    Placeholder = "203.0.113.25",
+                    DependsOnKey = "expose-mode", DependsOnValue = "LoadBalancer",
+                    HelpText = "Requests a specific address, where the cloud provider honours one. Leave blank to take whatever is allocated."
+                },
+                new ComponentFormField
+                {
+                    Key = "rspamd-enabled", Label = "Scan mail with rspamd",
+                    YamlPath = "stalwart:rspamd-enabled", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Hands every incoming message to rspamd over the milter protocol. Install the rspamd component first."
+                },
+                new ComponentFormField
+                {
+                    Key = "rspamd-host", Label = "rspamd Host",
+                    YamlPath = "stalwart:rspamd-host", Type = FormFieldType.Text,
+                    DefaultValue = "rspamd.rspamd.svc.cluster.local",
+                    DependsOnKey = "rspamd-enabled", DependsOnValue = "true"
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-size", Label = "Storage Size",
+                    YamlPath = "stalwart:storage-size", Type = FormFieldType.Text,
+                    DefaultValue = "20Gi",
+                    HelpText = "Holds messages, indexes and the entire server configuration."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-class", Label = "Storage Class",
+                    YamlPath = "stalwart:storage-class", Type = FormFieldType.Text,
+                    Placeholder = "Cluster default"
+                }
+            ],
+            // Every field above is a stalwart: pseudo-path, so none of them merge into this YAML.
+            // EntKube regenerates the whole manifest from the saved configuration before each
+            // install, which is why there is nothing to render here — and why an install that
+            // somehow reached kubectl with this text would fail loudly rather than deploy something
+            // half-configured.
+            DefaultValues = """
+                # Replaced by EntKube with the rendered manifest once the mail server is configured
+                # (hostname, storage, TLS and exposure are all projections of that configuration).
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "rspamd",
+            DisplayName = "Rspamd (spam filter)",
+            Description = "Spam and phishing filter for Stalwart, connected over the milter protocol. Uses the cluster's Redis for the Bayes classifier, greylisting, rate limits and reputation, so that state survives the pod and is shared if the filter is ever scaled out. The web UI shows per-message scores and the rules that fired.",
+            Icon = "bi-shield-check",
+            Category = "Mail",
+            ComponentType = "Manifest",
+            HelmRepoUrl = "",
+            HelmChartName = "",
+            DefaultNamespace = "rspamd",
+            DefaultReleaseName = "rspamd",
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "redis-servers", Label = "Redis",
+                    YamlPath = "rspamd:redis-servers", Type = FormFieldType.RedisSelector,
+                    Placeholder = "redis.redis.svc.cluster.local:6379",
+                    StoreAsSecret = true, SecretName = "RSPAMD_REDIS_SERVERS",
+                    HelpText = "The Redis this filter keeps its learned state in — the Bayes classifier, greylisting, rate limits and reputation. Picked from what is actually running on this cluster; choosing one EntKube manages fills in its password too."
+                },
+                new ComponentFormField
+                {
+                    Key = "redis-password", Label = "Redis Password",
+                    YamlPath = "rspamd:redis-password", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "RSPAMD_REDIS_PASSWORD",
+                    HelpText = "Leave blank for a Redis with no authentication."
+                },
+                new ComponentFormField
+                {
+                    Key = "controller-password", Label = "Web UI Password",
+                    YamlPath = "rspamd:controller-password", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "RSPAMD_CONTROLLER_PASSWORD",
+                    HelpText = "Protects the rspamd web UI, which can also retrain the classifier. Leave blank only if the UI is not published."
+                },
+                new ComponentFormField
+                {
+                    Key = "hostname", Label = "Web UI Hostname",
+                    YamlPath = "rspamd:hostname", Type = FormFieldType.Text,
+                    Placeholder = "rspamd.example.com",
+                    StoreAsSecret = true, SecretName = "RSPAMD_HOSTNAME",
+                    HelpText = "Publishes the web UI through the cluster gateway. Leave blank to keep it internal."
+                },
+                // Single sign-on for the web UI. rspamd itself has no OIDC — its controller authenticates
+                // with a password and nothing else — so this puts an OIDC proxy in front of it inside the
+                // same pod and has the controller trust loopback. The password stays as the credential for
+                // anything reaching the controller directly.
+                new ComponentFormField
+                {
+                    Key = "oidc-app-registration", Label = "Single Sign-On App Registration",
+                    YamlPath = "rspamd:oidc-app-registration", Type = FormFieldType.OidcAppRegistrationSelector,
+                    StoreAsSecret = true, SecretName = "RSPAMD_OIDC_APP_REGISTRATION",
+                    HelpText = "Point straight at a stored identity provider (Microsoft Entra, …). EntKube fills the issuer, client ID and secret from it — with the provider-correct audience and scopes — on every apply. Register this redirect URI at the provider: https://<Web UI Hostname>/oauth2/callback. Takes precedence over the realm and the manual fields below."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-realm", Label = "Single Sign-On Realm",
+                    YamlPath = "rspamd:oidc-realm", Type = FormFieldType.KeycloakRealmSelector,
+                    StoreAsSecret = true, SecretName = "RSPAMD_OIDC_REALM",
+                    HelpText = "Pick a realm on this cluster's Keycloak and EntKube registers the client for you — issuer, client ID, secret and redirect URI, kept correct on every apply. Leave it unset to point at an identity provider elsewhere using the three fields below."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-issuer", Label = "Single Sign-On Issuer URL",
+                    YamlPath = "rspamd:oidc-issuer", Type = FormFieldType.Text,
+                    Placeholder = "https://sso.example.com/realms/mail",
+                    StoreAsSecret = true, SecretName = "RSPAMD_OIDC_ISSUER",
+                    HelpText = "Only for an identity provider EntKube does not manage — filled in automatically when a realm is selected above. Leave everything blank to keep password-only login. Either way this needs the Web UI Hostname, because the sign-in round trip needs a public address to return to."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-client-id", Label = "Single Sign-On Client ID",
+                    YamlPath = "rspamd:oidc-client-id", Type = FormFieldType.Text,
+                    Placeholder = "rspamd",
+                    StoreAsSecret = true, SecretName = "RSPAMD_OIDC_CLIENT_ID",
+                    HelpText = "A confidential client registered with that issuer, whose redirect URI is https://<web UI hostname>/oauth2/callback."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-client-secret", Label = "Single Sign-On Client Secret",
+                    YamlPath = "rspamd:oidc-client-secret", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = RspamdManifestBuilder.SsoClientSecretName,
+                    HelpText = "That client's secret. Stored in the tenant vault and synced into the Secret the proxy reads."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-email-domain", Label = "Allowed Email Domain",
+                    YamlPath = "rspamd:oidc-email-domain", Type = FormFieldType.Text,
+                    DefaultValue = "*",
+                    StoreAsSecret = true, SecretName = "RSPAMD_OIDC_EMAIL_DOMAIN",
+                    HelpText = "Restricts who may sign in to addresses in this domain. * accepts anyone the issuer authenticates, which is only as narrow as the client's own access rules."
+                },
+                new ComponentFormField
+                {
+                    Key = "cluster-issuer", Label = "Cluster Issuer",
+                    YamlPath = "rspamd:cluster-issuer", Type = FormFieldType.ClusterIssuer,
+                    DefaultValue = "letsencrypt-prod",
+                    StoreAsSecret = true, SecretName = "RSPAMD_CLUSTER_ISSUER"
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-size", Label = "Storage Size",
+                    YamlPath = "rspamd:storage-size", Type = FormFieldType.Text,
+                    DefaultValue = "2Gi",
+                    StoreAsSecret = true, SecretName = "RSPAMD_STORAGE_SIZE"
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-class", Label = "Storage Class",
+                    YamlPath = "rspamd:storage-class", Type = FormFieldType.Text,
+                    Placeholder = "Cluster default",
+                    StoreAsSecret = true, SecretName = "RSPAMD_STORAGE_CLASS"
+                }
+            ],
+            DefaultValues = """
+                # Replaced by EntKube with the rendered manifest. The optional settings (Redis
+                # password, web UI password) have to be absent rather than empty when unset, which a
+                # substituted template cannot express — so the manifest is generated, not patched.
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "roundcube",
+            DisplayName = "Roundcube (webmail)",
+            Description = "Full-featured webmail for Stalwart, published through the cluster's gateway. This is the client that carries single sign-on: it performs the OpenID Connect login against Keycloak and then authenticates to IMAP and SMTP with XOAUTH2, so the mail server validates the token itself and never sees a password.",
+            Icon = "bi-envelope-open",
+            Category = "Mail",
+            ComponentType = "Manifest",
+            HelmRepoUrl = "",
+            HelmChartName = "",
+            DefaultNamespace = "roundcube",
+            DefaultReleaseName = "roundcube",
+            RequiresOneOf =
+            [
+                new DependencyRequirement
+                {
+                    Label = "Ingress Controller",
+                    Options = ["traefik", "istio"]
+                }
+            ],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "hostname", Label = "Public Hostname",
+                    YamlPath = "roundcube:hostname", Type = FormFieldType.Text,
+                    Placeholder = "webmail.example.com",
+                    StoreAsSecret = true, SecretName = "RC_HOSTNAME"
+                },
+                new ComponentFormField
+                {
+                    Key = "cluster-issuer", Label = "Cluster Issuer",
+                    YamlPath = "roundcube:cluster-issuer", Type = FormFieldType.ClusterIssuer,
+                    DefaultValue = "letsencrypt-prod",
+                    StoreAsSecret = true, SecretName = "RC_CLUSTER_ISSUER"
+                },
+                new ComponentFormField
+                {
+                    Key = "imap-host", Label = "IMAP Host",
+                    YamlPath = "roundcube:imap-host", Type = FormFieldType.Text,
+                    DefaultValue = "tls://stalwart.stalwart.svc.cluster.local",
+                    StoreAsSecret = true, SecretName = "RC_IMAP_HOST",
+                    HelpText = "The mail server's IMAP endpoint. The in-cluster Service name is the default; use the public mail hostname instead if you would rather the certificate verified."
+                },
+                new ComponentFormField
+                {
+                    Key = "imap-port", Label = "IMAP Port",
+                    YamlPath = "roundcube:imap-port", Type = FormFieldType.Number,
+                    DefaultValue = "143",
+                    StoreAsSecret = true, SecretName = "RC_IMAP_PORT"
+                },
+                new ComponentFormField
+                {
+                    Key = "smtp-host", Label = "SMTP Host",
+                    YamlPath = "roundcube:smtp-host", Type = FormFieldType.Text,
+                    DefaultValue = "tls://stalwart.stalwart.svc.cluster.local",
+                    StoreAsSecret = true, SecretName = "RC_SMTP_HOST"
+                },
+                new ComponentFormField
+                {
+                    Key = "smtp-port", Label = "SMTP Port",
+                    YamlPath = "roundcube:smtp-port", Type = FormFieldType.Number,
+                    DefaultValue = "587",
+                    StoreAsSecret = true, SecretName = "RC_SMTP_PORT"
+                },
+                new ComponentFormField
+                {
+                    Key = "auth-mode", Label = "Sign-in",
+                    YamlPath = "roundcube:auth-mode", Type = FormFieldType.Select,
+                    DefaultValue = "Password",
+                    Options = ["Password", "Oidc"],
+                    StoreAsSecret = true, SecretName = "RC_AUTH_MODE",
+                    HelpText = "OIDC requires the mail server's own authentication to be set to OIDC as well — the token Roundcube forwards is only accepted by a server that validates that issuer."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-app-registration", Label = "OIDC App Registration",
+                    YamlPath = "roundcube:oidc-app-registration", Type = FormFieldType.OidcAppRegistrationSelector,
+                    StoreAsSecret = true, SecretName = "RC_OIDC_APP_REGISTRATION",
+                    HelpText = "Point straight at a stored identity provider (Microsoft Entra, …). EntKube fills the issuer, client ID and secret from it — with the provider-correct audience and scopes — on every apply. Register this redirect URI at the provider: https://<Web UI Hostname>/index.php/login/oauth. Takes precedence over the realm and the manual fields below.",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc"
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-realm", Label = "Keycloak Realm",
+                    YamlPath = "roundcube:oidc-realm", Type = FormFieldType.KeycloakRealmSelector,
+                    StoreAsSecret = true, SecretName = "RC_OIDC_REALM",
+                    HelpText = "Pick a realm on this cluster's Keycloak and EntKube registers the webmail client for you, with the redirect URI Roundcube actually uses. Leave unset to configure an external provider by hand below.",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc"
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-issuer", Label = "Keycloak Realm URL",
+                    YamlPath = "roundcube:oidc-issuer", Type = FormFieldType.Text,
+                    Placeholder = "https://login.example.com/auth/realms/mail",
+                    StoreAsSecret = true, SecretName = "RC_OIDC_ISSUER",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc"
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-client-id", Label = "OAuth Client ID",
+                    YamlPath = "roundcube:oidc-client-id", Type = FormFieldType.Text,
+                    Placeholder = "roundcube",
+                    StoreAsSecret = true, SecretName = "RC_OIDC_CLIENT_ID",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc",
+                    HelpText = "A confidential client in Keycloak whose redirect URI is https://<hostname>/index.php/login/oauth."
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-client-secret", Label = "OAuth Client Secret",
+                    YamlPath = "roundcube:oidc-client-secret", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "ROUNDCUBEMAIL_OAUTH_CLIENT_SECRET",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc"
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-provider-name", Label = "Sign-in Button Label",
+                    YamlPath = "roundcube:oidc-provider-name", Type = FormFieldType.Text,
+                    DefaultValue = "Single sign-on",
+                    StoreAsSecret = true, SecretName = "RC_OIDC_PROVIDER_NAME",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc"
+                },
+                new ComponentFormField
+                {
+                    Key = "oidc-skip-form", Label = "Skip the login form",
+                    YamlPath = "roundcube:oidc-skip-form", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    StoreAsSecret = true, SecretName = "RC_OIDC_SKIP_FORM",
+                    DependsOnKey = "auth-mode", DependsOnValue = "Oidc",
+                    HelpText = "Sends users straight to Keycloak. Leave off while setting SSO up, so a password login is still available if the flow breaks."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-size", Label = "Storage Size",
+                    YamlPath = "roundcube:storage-size", Type = FormFieldType.Text,
+                    DefaultValue = "2Gi",
+                    StoreAsSecret = true, SecretName = "RC_STORAGE_SIZE",
+                    HelpText = "Holds the SQLite database of user preferences, contacts and the OAuth cache."
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-class", Label = "Storage Class",
+                    YamlPath = "roundcube:storage-class", Type = FormFieldType.Text,
+                    Placeholder = "Cluster default",
+                    StoreAsSecret = true, SecretName = "RC_STORAGE_CLASS"
+                }
+            ],
+            DefaultValues = """
+                # Replaced by EntKube with the rendered manifest once the webmail is configured.
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "snappymail",
+            DisplayName = "SnappyMail (webmail)",
+            Description = "Lightweight webmail for Stalwart, published through the cluster's gateway. Signs in with a username and password checked by the mail server. Its OIDC support is partial and built around Nextcloud, so choose Roundcube instead when single sign-on matters.",
+            Icon = "bi-envelope",
+            Category = "Mail",
+            ComponentType = "Manifest",
+            HelmRepoUrl = "",
+            HelmChartName = "",
+            DefaultNamespace = "snappymail",
+            DefaultReleaseName = "snappymail",
+            RequiresOneOf =
+            [
+                new DependencyRequirement
+                {
+                    Label = "Ingress Controller",
+                    Options = ["traefik", "istio"]
+                }
+            ],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "hostname", Label = "Public Hostname",
+                    YamlPath = "snappymail:hostname", Type = FormFieldType.Text,
+                    Placeholder = "mail.example.com",
+                    StoreAsSecret = true, SecretName = "SM_HOSTNAME"
+                },
+                new ComponentFormField
+                {
+                    Key = "cluster-issuer", Label = "Cluster Issuer",
+                    YamlPath = "snappymail:cluster-issuer", Type = FormFieldType.ClusterIssuer,
+                    DefaultValue = "letsencrypt-prod",
+                    StoreAsSecret = true, SecretName = "SM_CLUSTER_ISSUER"
+                },
+                new ComponentFormField
+                {
+                    Key = "imap-host", Label = "IMAP Host",
+                    YamlPath = "snappymail:imap-host", Type = FormFieldType.Text,
+                    DefaultValue = "stalwart.stalwart.svc.cluster.local",
+                    StoreAsSecret = true, SecretName = "SM_IMAP_HOST"
+                },
+                new ComponentFormField
+                {
+                    Key = "imap-port", Label = "IMAP Port",
+                    YamlPath = "snappymail:imap-port", Type = FormFieldType.Number,
+                    DefaultValue = "143",
+                    StoreAsSecret = true, SecretName = "SM_IMAP_PORT"
+                },
+                new ComponentFormField
+                {
+                    Key = "smtp-host", Label = "SMTP Host",
+                    YamlPath = "snappymail:smtp-host", Type = FormFieldType.Text,
+                    DefaultValue = "stalwart.stalwart.svc.cluster.local",
+                    StoreAsSecret = true, SecretName = "SM_SMTP_HOST"
+                },
+                new ComponentFormField
+                {
+                    Key = "smtp-port", Label = "SMTP Port",
+                    YamlPath = "snappymail:smtp-port", Type = FormFieldType.Number,
+                    DefaultValue = "587",
+                    StoreAsSecret = true, SecretName = "SM_SMTP_PORT"
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-size", Label = "Storage Size",
+                    YamlPath = "snappymail:storage-size", Type = FormFieldType.Text,
+                    DefaultValue = "2Gi",
+                    StoreAsSecret = true, SecretName = "SM_STORAGE_SIZE"
+                },
+                new ComponentFormField
+                {
+                    Key = "storage-class", Label = "Storage Class",
+                    YamlPath = "snappymail:storage-class", Type = FormFieldType.Text,
+                    Placeholder = "Cluster default",
+                    StoreAsSecret = true, SecretName = "SM_STORAGE_CLASS"
+                }
+            ],
+            DefaultValues = """
+                # Replaced by EntKube with the rendered manifest once the webmail is configured.
                 """
         },
 

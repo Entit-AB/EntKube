@@ -22,6 +22,23 @@ public sealed record NamespaceConsumption
     public int PublicIps { get; init; }
 }
 
+/// <summary>
+/// What a cluster's nodes provide in total, averaged over the sample window. This is
+/// the capacity the cloud bills for, whether or not anything is scheduled on it —
+/// which is why it is measured separately from what the namespaces hold.
+/// </summary>
+public sealed record ClusterCapacity
+{
+    /// <summary>Nodes in the cluster over the window. Fractional while one is joining or leaving.</summary>
+    public double Nodes { get; init; }
+
+    /// <summary>CPU cores across all nodes.</summary>
+    public double CpuCores { get; init; }
+
+    /// <summary>Memory in GiB across all nodes.</summary>
+    public double MemoryGiB { get; init; }
+}
+
 /// <summary>An app that a namespace's cost rolls up to.</summary>
 public readonly record struct AppRef(Guid AppId, string AppName);
 
@@ -129,6 +146,13 @@ public sealed record NamespaceCost
     /// </summary>
     public bool IsRedistributed { get; init; }
 
+    /// <summary>
+    /// True for the row that carries the cluster's unallocated node capacity — not a
+    /// namespace at all, but priced and pooled like one. See
+    /// <see cref="CostAllocation.IdleNamespace"/>.
+    /// </summary>
+    public bool IsIdle => Namespace == CostAllocation.IdleNamespace;
+
     public decimal TotalMonthlyCost => DirectMonthlyCost + SharedMonthlyCost;
 
     /// <summary>Run-rate per hour, derived from the monthly figure by the same 730-hour month.</summary>
@@ -157,6 +181,19 @@ public static class CostAllocation
     /// cloud providers publish their monthly prices on.
     /// </summary>
     public const decimal HoursPerMonth = 730m;
+
+    /// <summary>
+    /// The name under which a cluster's unallocated node capacity is carried.
+    ///
+    /// A cloud bills the nodes, not the pods on them. Pricing only what the namespaces
+    /// hold therefore adds up to what was <em>asked for</em>, not what is <em>paid for</em>,
+    /// and a half-allocated cluster reports half its invoice. The difference is a real
+    /// charge that no namespace caused, so it gets a row of its own: priced at the same
+    /// rates, pooled and charged out exactly like a platform namespace, and listed with
+    /// the pool so it can be audited. Parentheses and a space cannot appear in a
+    /// Kubernetes namespace name, so this can never collide with a real one.
+    /// </summary>
+    public const string IdleNamespace = "(idle capacity)";
 
     /// <summary>One namespace after pass one: priced, and with its owner resolved.</summary>
     private sealed record Priced(
@@ -192,24 +229,36 @@ public static class CostAllocation
     /// On a cluster where nothing is attributed there is nobody to bill, so only the fixed
     /// fee is spread — across everything — and the result stays unattributed rather than
     /// disappearing from the total.
+    ///
+    /// When <paramref name="capacity"/> is given and the price sheet charges for it, the
+    /// node capacity nothing holds joins the pool as <see cref="IdleNamespace"/>, so a
+    /// cluster's allocated total is what its nodes cost rather than what was requested
+    /// of them.
     /// </summary>
     public static IReadOnlyList<NamespaceCost> Allocate(
         IReadOnlyList<NamespaceConsumption> consumption,
         Data.ClusterCostRate rate,
         Guid clusterId,
         string clusterName,
-        Func<string, NamespaceOwner> attribute)
+        Func<string, NamespaceOwner> attribute,
+        ClusterCapacity? capacity = null)
     {
         if (consumption.Count == 0)
         {
             return [];
         }
 
+        IEnumerable<NamespaceConsumption> lines = consumption;
+        if (rate.ChargeIdleCapacity && capacity is not null && Idle(consumption, capacity) is { } idle)
+        {
+            lines = consumption.Append(idle);
+        }
+
         // ── Pass one: what each namespace consumed in its own right ──
 
         List<Priced> priced = [];
 
-        foreach (NamespaceConsumption ns in consumption)
+        foreach (NamespaceConsumption ns in lines)
         {
             decimal cpu = (decimal)ns.CpuCores * rate.CpuCoreHourCost * HoursPerMonth;
             decimal memory = (decimal)ns.MemoryGiB * rate.MemoryGiBHourCost * HoursPerMonth;
@@ -220,9 +269,14 @@ public static class CostAllocation
             decimal network = ns.LoadBalancers * rate.LoadBalancerMonthlyCost
                             + ns.PublicIps * rate.PublicIpMonthlyCost;
 
+            // The idle line belongs to nobody by construction; it is not offered for
+            // attribution, so no deployment record could ever claim it.
+            NamespaceOwner owner = ns.Namespace == IdleNamespace
+                ? NamespaceOwner.None
+                : attribute(ns.Namespace) ?? NamespaceOwner.None;
+
             priced.Add(new Priced(
-                ns, attribute(ns.Namespace) ?? NamespaceOwner.None,
-                Round(cpu), Round(memory), Round(storage), Round(network)));
+                ns, owner, Round(cpu), Round(memory), Round(storage), Round(network)));
         }
 
         // ── Pass two: pool the shared cost and charge it out ──
@@ -305,6 +359,27 @@ public static class CostAllocation
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// The capacity nothing has claimed: what the nodes provide, less what the namespaces
+    /// hold. Null when there is none.
+    ///
+    /// Clamped at zero per resource. On a usage basis a cluster can briefly burn more CPU
+    /// than it nominally has, and a negative idle line would turn that into a credit.
+    /// </summary>
+    public static NamespaceConsumption? Idle(
+        IReadOnlyList<NamespaceConsumption> consumption, ClusterCapacity capacity)
+    {
+        double cpu = Math.Max(0d, capacity.CpuCores - consumption.Sum(n => n.CpuCores));
+        double memory = Math.Max(0d, capacity.MemoryGiB - consumption.Sum(n => n.MemoryGiB));
+
+        if (cpu <= 0d && memory <= 0d)
+        {
+            return null;
+        }
+
+        return new NamespaceConsumption { Namespace = IdleNamespace, CpuCores = cpu, MemoryGiB = memory };
     }
 
     /// <summary>

@@ -36,6 +36,7 @@ public class ComponentInstallOrchestrator(
     HarborService harborService,
     OpenLdapService openLdapService,
     Dr.VeleroService veleroService,
+    StalwartService stalwartService,
     HeadscaleService headscaleService)
 {
     /// <summary>
@@ -81,6 +82,15 @@ public class ComponentInstallOrchestrator(
         await openLdapService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId);
         // Refresh Velero's S3 backup-target values + credentials before install/upgrade.
         await veleroService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId, ct);
+        // Regenerate the mail components' manifests from what the operator authored, so an install
+        // deploys the current configuration rather than whatever was rendered when it was added.
+        await stalwartService.RefreshManifestIfConfiguredAsync(tenantId, componentId);
+        await stalwartService.RefreshRspamdManifestAsync(tenantId, componentId, ct);
+        await stalwartService.RefreshRoundcubeManifestAsync(tenantId, componentId, ct);
+        await stalwartService.RefreshSnappyMailManifestAsync(tenantId, componentId, ct);
+        // Same reason as OpenLDAP: the StatefulSet mounts the TLS Secret, so a pod started before
+        // cert-manager has issued it sits in ContainerCreating until somebody looks.
+        await stalwartService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId, ct);
 
         HelmCommand command = await lifecycleService.GetInstallCommandAsync(componentId, ct);
         command.NoWait = options.NoWait;

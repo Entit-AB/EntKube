@@ -33,13 +33,22 @@ public sealed class SegmentTraceService(
     private const int MaxSpansPerQuery = 200_000;
     private const int MaxPartialsPerQuery = 200_000;
 
+    /// <summary>How far back <see cref="HasDataAsync"/> looks. Routing asks where a cluster's telemetry is
+    /// arriving, which is a question about recent data; matching the log probe's window keeps the two
+    /// signals routing the same way.</summary>
+    private const int RoutingProbeDays = 7;
+
     public async Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
     {
         Guid? tenantId = await tenants.ResolveAsync(clusterId, ct);
         if (tenantId is null) return false;
         // Named "filter", not "scope": SegmentScope now means which index TIER to read.
         Query filter = SpanSegmentSchema.BuildScopeQuery(tenantId.Value, clusterId, null, null);
-        return await spans.For(tenantId.Value).QueryAsync(Scope, null, null, s => s.Search(filter, 1).TotalHits > 0, ct);
+        // Bounded and early-exiting, like the log probe: this is the read-routing question, asked in front
+        // of every trace view, and unbounded it opened every span segment in the whole retention window —
+        // the largest store there is — to answer a yes/no.
+        return await spans.For(tenantId.Value).AnyAsync(
+            Scope, DateTime.UtcNow.AddDays(-RoutingProbeDays), null, s => s.Search(filter, 1).TotalHits > 0, ct);
     }
 
     // The distinct-service scan touches every span in the window, so it's the page's most expensive

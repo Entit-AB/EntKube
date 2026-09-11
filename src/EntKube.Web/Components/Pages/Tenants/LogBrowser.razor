@@ -11,6 +11,14 @@
         <span class="bi bi-journal-x me-1"></span>
         No log backend is available for this cluster. Deploy the EntKube telemetry collector (or a Loki component) to enable log browsing.
     </div>
+    @* A backend that could not be reached looks exactly like one that was never installed, and only this
+       says which it was. *@
+    @if (!string.IsNullOrEmpty(loadError))
+    {
+        <div class="alert alert-warning small py-2">
+            <span class="bi bi-exclamation-triangle me-1"></span>@loadError
+        </div>
+    }
 }
 else
 {
@@ -250,28 +258,42 @@ else
         isLoading = true;
         StateHasChanged();   // paint the "Loading namespaces…" state immediately, before the scan
 
-        (nativeBackend, lokiBackend) = await Logs.ProbeBackendsAsync(ClusterId);
-        lokiAvailable = nativeBackend || lokiBackend;
-
-        // Default source: prefer whichever backend actually has data; the user can switch when
-        // both are present (a cluster can run EntKube telemetry AND Loki side by side).
-        backend = nativeBackend ? LogBackendKind.Native
-                : lokiBackend ? LogBackendKind.Loki
-                : LogBackendKind.Auto;
-
-        if (lokiAvailable)
+        // try/finally, because everything below reaches out of the process — a cluster's API server, a
+        // Loki pod, the segment store. Without it a single throw leaves isLoading true and the picker
+        // reads "Loading namespaces…" for as long as the page is open, which says nothing about what
+        // failed. Whatever happens, the load ends and anything that went wrong is on screen.
+        try
         {
-            await LoadNamespacesAsync();
+            (nativeBackend, lokiBackend) = await Logs.ProbeBackendsAsync(ClusterId);
+            lokiAvailable = nativeBackend || lokiBackend;
 
-            if (!string.IsNullOrEmpty(PresetNamespace))
+            // Default source: prefer whichever backend actually has data; the user can switch when
+            // both are present (a cluster can run EntKube telemetry AND Loki side by side).
+            backend = nativeBackend ? LogBackendKind.Native
+                    : lokiBackend ? LogBackendKind.Loki
+                    : LogBackendKind.Auto;
+
+            if (lokiAvailable)
             {
-                selectedNamespace = PresetNamespace;
-                await OnNamespaceChanged();
+                await LoadNamespacesAsync();
+
+                if (!string.IsNullOrEmpty(PresetNamespace))
+                {
+                    selectedNamespace = PresetNamespace;
+                    await OnNamespaceChanged();
+                }
+                if (!string.IsNullOrEmpty(PresetPod))
+                    selectedPod = PresetPod;
             }
-            if (!string.IsNullOrEmpty(PresetPod))
-                selectedPod = PresetPod;
         }
-        isLoading = false;
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+        }
+        finally
+        {
+            isLoading = false;
+        }
     }
 
     private async Task LoadNamespacesAsync()
