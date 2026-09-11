@@ -1,5 +1,6 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
+@inject OpenStackDiscoveryService Discovery
 
 @* Shared editor for an OpenStackProvisioningConfig (Cluster API + CAPO). Used both by the
    blueprint editor and the New Cluster wizard so the sizing form lives in one place. The
@@ -31,7 +32,9 @@
 
     <div class="col-md-4">
         <label class="form-label small mb-0">Node image (Glance)</label>
-        <input class="form-control form-control-sm" @bind="Config.NodeImageName" />
+        <input class="form-control form-control-sm" list="entkube-node-images"
+               placeholder="Leave empty to build one for this version"
+               @bind="Config.NodeImageName" />
     </div>
     <div class="col-md-2">
         <label class="form-label small mb-0">CP count</label>
@@ -39,11 +42,12 @@
     </div>
     <div class="col-md-3">
         <label class="form-label small mb-0">CP flavor</label>
-        <input class="form-control form-control-sm" @bind="Config.ControlPlaneFlavor" />
+        <input class="form-control form-control-sm" list="entkube-flavors" placeholder="@FlavorPlaceholder"
+               @bind="Config.ControlPlaneFlavor" />
     </div>
     <div class="col-md-3">
         <label class="form-label small mb-0">Failure domain / AZ</label>
-        <input class="form-control form-control-sm" @bind="Config.FailureDomain" />
+        <input class="form-control form-control-sm" list="entkube-zones" @bind="Config.FailureDomain" />
     </div>
 
     <div class="col-12"><hr class="my-1" /><span class="small text-muted">Worker pool</span></div>
@@ -53,11 +57,13 @@
     </div>
     <div class="col-md-4">
         <label class="form-label small mb-0">Worker flavor</label>
-        <input class="form-control form-control-sm" @bind="workerPool.Flavor" @bind:after="SyncPool" />
+        <input class="form-control form-control-sm" list="entkube-flavors" placeholder="@FlavorPlaceholder"
+               @bind="workerPool.Flavor" @bind:after="SyncPool" />
     </div>
     <div class="col-md-6">
         <label class="form-label small mb-0">External network ID (floating IPs / API LB)</label>
-        <input class="form-control form-control-sm" @bind="Config.ExternalNetworkId" />
+        <input class="form-control form-control-sm" list="entkube-external-networks"
+               @bind="Config.ExternalNetworkId" />
     </div>
 
     <div class="col-12">
@@ -88,17 +94,91 @@
     <div class="col-12"><hr class="my-1" /><span class="small text-muted">Ephemeral bootstrap VM</span></div>
     <div class="col-md-4">
         <label class="form-label small mb-0">Bootstrap image</label>
-        <input class="form-control form-control-sm" @bind="Config.BootstrapImageName" />
+        <input class="form-control form-control-sm" list="entkube-images" placeholder="Follows the node image"
+               @bind="Config.BootstrapImageName" />
     </div>
     <div class="col-md-3">
         <label class="form-label small mb-0">Bootstrap flavor</label>
-        <input class="form-control form-control-sm" @bind="Config.BootstrapFlavor" />
+        <input class="form-control form-control-sm" list="entkube-flavors" placeholder="@FlavorPlaceholder"
+               @bind="Config.BootstrapFlavor" />
     </div>
     <div class="col-md-5">
         <label class="form-label small mb-0">Bootstrap network ID</label>
-        <input class="form-control form-control-sm" @bind="Config.BootstrapNetworkId" />
+        <input class="form-control form-control-sm" list="entkube-tenant-networks"
+               @bind="Config.BootstrapNetworkId" />
     </div>
 </div>
+
+@* Datalists rather than selects, deliberately. A select would make a cloud that did not answer —
+   an unreachable API, a project without permission to list flavors — impossible to fill in at all.
+   This way discovery turns typing into choosing when it works, and changes nothing when it does not. *@
+@if (inventory is not null)
+{
+    <datalist id="entkube-flavors">
+        @foreach (OpenStackFlavor flavor in inventory.Flavors)
+        {
+            <option value="@flavor.Name">@flavor.Label</option>
+        }
+    </datalist>
+    <datalist id="entkube-images">
+        @foreach (OpenStackImage image in inventory.Images.Where(i => i.IsUsable))
+        {
+            <option value="@image.Name"></option>
+        }
+    </datalist>
+    <datalist id="entkube-node-images">
+        @foreach (OpenStackImage image in inventory.Images.Where(i => i.IsUsable && i.IsEntKubeBuilt))
+        {
+            <option value="@image.Name">Kubernetes @image.KubernetesVersion</option>
+        }
+    </datalist>
+    <datalist id="entkube-external-networks">
+        @foreach (OpenStackNetwork network in inventory.ExternalNetworks)
+        {
+            <option value="@network.Id">@network.Name</option>
+        }
+    </datalist>
+    <datalist id="entkube-tenant-networks">
+        @foreach (OpenStackNetwork network in inventory.TenantNetworks)
+        {
+            <option value="@network.Id">@network.Name</option>
+        }
+    </datalist>
+    <datalist id="entkube-zones">
+        @foreach (string zone in inventory.Capabilities.AvailabilityZones)
+        {
+            <option value="@zone"></option>
+        }
+    </datalist>
+}
+
+@if (discovering)
+{
+    <div class="form-text small mt-2">
+        <span class="spinner-border spinner-border-sm me-1"></span>Reading what this cloud offers…
+    </div>
+}
+else if (inventory is not null)
+{
+    <div class="form-text small mt-2">
+        @inventory.Flavors.Count flavor(s), @inventory.ExternalNetworks.Count() external network(s),
+        @inventory.Capabilities.AvailabilityZones.Count zone(s).
+        @if (!inventory.Capabilities.HasOctavia)
+        {
+            @* Worth saying here rather than at provisioning time: it changes what the cluster is. *@
+            <span class="text-warning">
+                This cloud has no load-balancer service, so the API server will use a floating IP
+                rather than an Octavia load balancer.
+            </span>
+        }
+    </div>
+}
+else if (discoveryError is not null)
+{
+    <div class="form-text small mt-2 text-muted">
+        The cloud could not be read (@discoveryError), so the fields above are free text.
+    </div>
+}
 
 @code {
     /// <summary>The config being edited. The parent owns it; this form mutates it in place.</summary>
@@ -110,10 +190,24 @@
     /// <summary>Whether to render the connection picker (the wizard picks it in an earlier step).</summary>
     [Parameter] public bool ShowConnection { get; set; } = true;
 
+    /// <summary>
+    /// The tenant whose cloud credentials to read the inventory with. Left empty the form still
+    /// works — every field falls back to free text — which is what the blueprint editor does when
+    /// it has no tenant context to hand.
+    /// </summary>
+    [Parameter] public Guid TenantId { get; set; }
+
     // The single worker-pool editor, bound to the first pool (created if absent), then synced
     // back into Config.WorkerPools on every change so the parent can read Config directly.
     private WorkerPool workerPool = new();
     private bool autoscale;
+
+    private OpenStackInventory? inventory;
+    private bool discovering;
+    private string? discoveryError;
+    private Guid discoveredFor;
+
+    private string FlavorPlaceholder => inventory is null ? "b.4c8gb" : "Pick or type a flavor";
 
     private Guid ConnectionId
     {
@@ -121,11 +215,44 @@
         set => Config.OpenStackConnectionId = value;
     }
 
-    protected override void OnParametersSet()
+    protected override async Task OnParametersSetAsync()
     {
         workerPool = Config.WorkerPools.FirstOrDefault() ?? new WorkerPool();
         autoscale = workerPool.Autoscale;
         SyncPool();
+
+        // Read once per connection. The form re-renders on every keystroke, and this reaches across
+        // the network to four OpenStack services.
+        if (TenantId != Guid.Empty
+            && Config.OpenStackConnectionId != Guid.Empty
+            && Config.OpenStackConnectionId != discoveredFor)
+        {
+            discoveredFor = Config.OpenStackConnectionId;
+            await DiscoverAsync(discoveredFor);
+        }
+    }
+
+    private async Task DiscoverAsync(Guid connectionId)
+    {
+        discovering = true;
+        discoveryError = null;
+        inventory = null;
+
+        try
+        {
+            inventory = await Discovery.DiscoverAsync(TenantId, connectionId);
+        }
+        catch (Exception ex)
+        {
+            // Not fatal: the fields stay free text, which is what they were before discovery
+            // existed. A cloud that cannot be listed must not become a cluster that cannot be
+            // described.
+            discoveryError = ex.Message;
+        }
+        finally
+        {
+            discovering = false;
+        }
     }
 
     private void OnToggleAutoscale(ChangeEventArgs e)

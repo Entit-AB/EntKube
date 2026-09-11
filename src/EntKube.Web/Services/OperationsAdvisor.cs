@@ -167,6 +167,7 @@ public class OperationsAdvisorService(
         findings.AddRange(BuildDriftFindings(tenantId, now));
         findings.AddRange(BuildSupplyChainFindings(tenantId, now));
         findings.AddRange(BuildDrFindings(tenantId, now));
+        findings.AddRange(await BuildClusterCertificateFindingsAsync(tenantId, now, ct));
 
         var merged = await MergeStateAsync(tenantId, findings, now, ct);
 
@@ -1308,6 +1309,77 @@ public class OperationsAdvisorService(
                     Source = "dr",
                 });
             }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Certificates on clusters EntKube provisioned.
+    ///
+    /// <para>kubeadm issues them with a one-year life and Cluster API renews them whenever the
+    /// control plane rolls — so the cluster this kills is the stable one nobody touches, precisely
+    /// because it works. It belongs here rather than only on the cluster's own page for exactly
+    /// that reason: the failure mode is that nobody is looking at that page.</para>
+    ///
+    /// <para>Read from the stored kubeconfig's own client certificate, which the same CA issues and
+    /// the same rollout renews, so no cluster has to be reachable for this to be answerable.</para>
+    /// </summary>
+    private async Task<List<OperationsFinding>> BuildClusterCertificateFindingsAsync(
+        Guid tenantId, DateTime now, CancellationToken ct)
+    {
+        var result = new List<OperationsFinding>();
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<ProvisionedCluster> specs = await db.ProvisionedClusters
+            .Where(c => c.TenantId == tenantId
+                && c.KubernetesClusterId != null
+                && c.DesiredState == ProvisionedClusterState.Running)
+            .ToListAsync(ct);
+
+        foreach (ProvisionedCluster spec in specs)
+        {
+            // Materialized rather than projected: the kubeconfig is not a column.
+            KubernetesCluster? cluster = await db.KubernetesClusters
+                .FirstOrDefaultAsync(c => c.Id == spec.KubernetesClusterId, ct);
+
+            CertificateStatus status = ClusterCertificateExpiry.FromKubeconfig(cluster?.Kubeconfig, now);
+            if (status.Urgency == CertificateUrgency.Fine)
+            {
+                continue;
+            }
+
+            result.Add(new OperationsFinding
+            {
+                Id = $"cluster-certs:{spec.Id}",
+                Category = AdvisorCategory.Security,
+                Severity = status.Urgency switch
+                {
+                    CertificateUrgency.Expired => AdvisorSeverity.Critical,
+                    CertificateUrgency.Urgent => AdvisorSeverity.Critical,
+                    _ => AdvisorSeverity.Warning,
+                },
+                // Expired is already an outage. Urgent is a date with no partial failure before it:
+                // everything works until the hour it does not, so it does not get to be a "later".
+                Horizon = status.Urgency switch
+                {
+                    CertificateUrgency.Expired => AdvisorHorizon.Overdue,
+                    CertificateUrgency.Urgent => AdvisorHorizon.ThisWeek,
+                    _ => AdvisorHorizon.Later,
+                },
+                Title = status.Urgency == CertificateUrgency.Expired
+                    ? $"{spec.Name}: Kubernetes certificates have expired"
+                    : $"{spec.Name}: Kubernetes certificates expire in {status.DaysRemaining} day(s)",
+                Detail = status.Message,
+                ScopeLabel = $"Cluster: {spec.Name}",
+                Remediation = "Roll the control plane from the cluster's Lifecycle tab — Cluster API "
+                    + "reissues the certificates as it replaces each control-plane machine.",
+                LinkSection = "lifecycle",
+                ClusterId = spec.KubernetesClusterId,
+                DueAt = status.NotAfter,
+                Source = "cluster-certs",
+            });
         }
 
         return result;

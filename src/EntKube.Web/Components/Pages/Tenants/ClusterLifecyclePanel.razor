@@ -6,6 +6,8 @@
 @inject ClusterTeardownService Teardown
 @inject ClusterCredentialRotationService Credentials
 @inject FoundationVerifier Verifier
+@inject EtcdBackupService EtcdBackups
+@inject StorageService Storage
 @inject ToastService Toasts
 
 @* Day-2 for a cluster EntKube built: what it is supposed to be, what it actually is, and the
@@ -226,6 +228,56 @@ else
         </div>
     </div>
 
+    @* ── etcd snapshots ── *@
+    <div class="card mb-3">
+        <div class="card-header py-2 fw-semibold">etcd snapshots</div>
+        <div class="card-body">
+            <p class="small text-muted mb-2">
+                Velero restores workloads into a cluster that still exists. This is what the cluster
+                itself is rebuilt from. The destination has to be storage this cluster does not
+                serve — snapshots kept on its own nodes die with it.
+            </p>
+
+            @if (etcd is { Installed: true })
+            {
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <span class="badge bg-success">Enabled</span>
+                    <span class="small">@etcd.Schedule · @etcd.Detail</span>
+                    <button class="btn btn-sm btn-outline-danger ms-auto" disabled="@busy" @onclick="DisableEtcd">
+                        Disable
+                    </button>
+                </div>
+            }
+            else
+            {
+                <div class="d-flex gap-2 align-items-end flex-wrap">
+                    <div>
+                        <label class="form-label small mb-0">Destination</label>
+                        <select class="form-select form-select-sm" style="width:16rem" @bind="etcdStorageLinkId">
+                            <option value="@Guid.Empty">— pick off-cluster storage —</option>
+                            @foreach (StorageLink link in storageLinks)
+                            {
+                                <option value="@link.Id">@link.Name (@link.BucketName)</option>
+                            }
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label small mb-0">Schedule (cron)</label>
+                        <input class="form-control form-control-sm" style="width:9rem" @bind="etcdSchedule" />
+                    </div>
+                    <button class="btn btn-sm btn-outline-primary" disabled="@(busy || etcdStorageLinkId == Guid.Empty)"
+                            @onclick="EnableEtcd">
+                        Enable snapshots
+                    </button>
+                </div>
+                @if (etcd?.Detail is not null)
+                {
+                    <div class="form-text small">@etcd.Detail</div>
+                }
+            }
+        </div>
+    </div>
+
     @* ── Verification results ── *@
     @if (checks is not null)
     {
@@ -307,6 +359,11 @@ else
     private int newPoolDiskGb;
 
     private readonly Dictionary<string, int> scaleTo = [];
+
+    private EtcdBackupStatus? etcd;
+    private List<StorageLink> storageLinks = [];
+    private Guid etcdStorageLinkId;
+    private string etcdSchedule = "0 2 * * *";
     private PendingConfirm? pendingConfirm;
 
     private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
@@ -332,6 +389,38 @@ else
         targetVersion = spec.KubernetesVersion;
         observation = ClusterObservation.FromJson(spec.ObservedStateJson);
         certificates = await Credentials.CheckKubeconfigExpiryAsync(ClusterId);
+
+        storageLinks = await Storage.GetStorageLinksAsync(TenantId);
+
+        string? kubeconfig = await Credentials.GetKubeconfigAsync(ClusterId);
+        etcd = string.IsNullOrWhiteSpace(kubeconfig)
+            ? null
+            : await EtcdBackups.GetStatusAsync(kubeconfig);
+    }
+
+    private async Task EnableEtcd()
+    {
+        if (spec is null) return;
+        ProvisionedCluster current = spec;
+
+        await Run(async () =>
+        {
+            string? kubeconfig = await Credentials.GetKubeconfigAsync(ClusterId);
+            return string.IsNullOrWhiteSpace(kubeconfig)
+                ? ClusterOperationResult.Failed("No kubeconfig is stored for this cluster.")
+                : await EtcdBackups.EnableAsync(TenantId, current, etcdStorageLinkId, etcdSchedule, kubeconfig);
+        });
+    }
+
+    private async Task DisableEtcd()
+    {
+        await Run(async () =>
+        {
+            string? kubeconfig = await Credentials.GetKubeconfigAsync(ClusterId);
+            return string.IsNullOrWhiteSpace(kubeconfig)
+                ? ClusterOperationResult.Failed("No kubeconfig is stored for this cluster.")
+                : await EtcdBackups.DisableAsync(kubeconfig);
+        });
     }
 
     /// <summary>Observes now rather than showing what the five-minute sweep last saw.</summary>

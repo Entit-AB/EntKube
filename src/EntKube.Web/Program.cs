@@ -456,6 +456,7 @@ public class Program
         builder.Services.AddScoped<ClusterTeardownService>();
         builder.Services.AddScoped<FoundationVerifier>();
         builder.Services.AddScoped<ClusterCredentialRotationService>();
+        builder.Services.AddScoped<EtcdBackupService>();
         builder.Services.AddHostedService<ClusterReconcilerService>();
         builder.Services.AddScoped<ProvisionedClusterService>();
         builder.Services.AddScoped<ClusterProvisioningService>();

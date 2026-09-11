@@ -291,7 +291,7 @@ All nine phases are built and unit-tested. None of it has run against an OpenSta
 
 | Phase | Built | Notes |
 |---|---|---|
-| 1 Cloud discovery | ✅ | `OpenStackDiscoveryService`. Not yet wired into the wizard's form fields — the pickers still render as free text. |
+| 1 Cloud discovery | ✅ | `OpenStackDiscoveryService`, feeding the sizing form's flavor, image, network and zone fields. Datalists rather than dropdowns, so a cloud that cannot be listed still leaves every field fillable. |
 | 2 Images + kubeadm bootstrap | ✅ | `MachineImageBuilder`, `NodeImageRecipe`. k3s is gone. |
 | 3 Authored manifests | ✅ | `CapiManifestBuilder`. Multi-pool is real. |
 | 4 Spec as data | ✅ | `ProvisionedCluster` + pools, migrations on all three providers. |
@@ -299,26 +299,26 @@ All nine phases are built and unit-tested. None of it has run against an OpenSta
 | 6 Day-2 | ✅ | `ClusterOperationsService`, with a Lifecycle tab on provisioned clusters. |
 | 7 Delete | ✅ | Summoned plane + leftover sweep, behind a type-the-name confirmation. |
 | 8 Foundation verification | ✅ | Runs after every bootstrap, recorded as a step of its own. Also on demand. |
-| 9 etcd backup, cert expiry, rotation | ✅ mostly | Kubeconfig and cloud-credential rotation shipped. The etcd CronJob is built but not yet scheduled by the production baseline, and certificate findings are surfaced on the Lifecycle tab rather than in the Operations Advisor. |
+| 9 etcd backup, cert expiry, rotation | ✅ | Kubeconfig and cloud-credential rotation, etcd snapshots enabled per cluster against off-cluster storage, and certificate expiry raised in the Operations Advisor as well as on the Lifecycle tab. |
 
-**Known gaps, in the order they matter:**
+**Known gaps:**
 
 1. **Nothing has touched a real cloud.** The tests cover judgement and document structure. They
    cannot tell you whether CAPO accepts these manifests, whether the bake script produces a
-   bootable image, or whether `clusterctl move` behaves as assumed during teardown. This is the
-   only item on this list that cannot be closed by writing more code.
-2. **Cloud discovery is not wired into the wizard's form.** `OpenStackDiscoveryService` reads
-   flavors, images, networks and zones, and the New Cluster wizard still asks an operator to type
-   them. Purely a UI job.
-3. **The etcd CronJob is not scheduled by the production baseline.** The manifest exists and is
-   tested; nothing installs it yet, so a cluster built today has Velero and no etcd snapshot.
-4. **Certificate expiry is shown on the Lifecycle tab, not in the Operations Advisor.** Someone
-   has to open the cluster to see it, which is the wrong way round for something whose whole
-   problem is that nobody is looking.
-5. **The reconciler's apply half is narrow on purpose.** Replica drift and missing pools only.
+   bootable image, or whether `clusterctl move` behaves as assumed during teardown. This is now the
+   only item that cannot be closed by writing more code, and the only one that matters much.
+2. **The reconciler's apply half is narrow on purpose.** Replica drift and missing pools only.
    Reshape, upgrade and removal stay operator-driven, and drift of that kind is reported rather
-   than corrected. Worth revisiting only after the read half has been watched against real
-   clusters for a while.
+   than corrected. Worth revisiting only after the read half has been watched against real clusters
+   for a while.
+
+**One decision worth recording, because it looks like a gap and is not.** etcd snapshots are
+*not* part of the production baseline, and should not be. Every other baseline step can choose a
+sensible default; this one cannot, because the destination must be storage the cluster does not
+serve — and the obvious default, the CubeFS the baseline has just installed on the cluster's own
+nodes, is exactly the circular arrangement that makes the snapshots worthless. So it is enabled
+deliberately, from the Lifecycle tab, against a storage link; picking one the cluster serves is
+refused outright. A cluster is told it has no etcd backup rather than quietly given a useless one.
 
 ## Decisions still open
 
