@@ -366,6 +366,10 @@ else
     [
         new("vault", "Vault", "bi-safe2"),
         new("certificates", "Certificates", "bi-award"),
+        // Tenant-scoped cloud credentials + egress routes. Canonical home for the panel
+        // StorageTab and NewClusterWizard also render: it is what a cluster is provisioned
+        // INTO, so burying it under Services → <env> → Storage made it unfindable for that job.
+        new("cloud-connections", "Cloud connections", "bi-cloud-haze2"),
     ];
     private static readonly TreeGroup[] OpsGroups =
     [
@@ -812,6 +816,7 @@ else
             case "ldap": OpenEnvScoped<LdapTab>(builder, tid); break;
             case "vault": builder.OpenComponent<VaultTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "certificates": builder.OpenComponent<CertificatesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "cloud-connections": builder.OpenComponent<CloudConnectionsPanel>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "overview":
                 builder.OpenComponent<TenantMonitoringOverview>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);

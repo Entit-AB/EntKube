@@ -100,23 +100,18 @@
                 </div>
             </div>
 
+            @* The shared panel, NOT a local form. This step used to carry its own eight-field
+               copy that hardcoded s3Endpoint/proxy/route to null, so a connection created here
+               could never reach a cloud behind an IP allowlist — and nothing said so. *@
             @if (showAddConnection)
             {
                 <div class="border rounded p-2 mb-2 bg-body-tertiary">
-                    <div class="small text-muted mb-2">New OpenStack connection (password is stored in the vault)</div>
-                    <div class="row g-2">
-                        <div class="col-md-4"><input class="form-control form-control-sm" placeholder="Name" @bind="cxName" /></div>
-                        <div class="col-md-8"><input class="form-control form-control-sm" placeholder="Auth URL (Keystone v3)" @bind="cxAuthUrl" /></div>
-                        <div class="col-md-3"><input class="form-control form-control-sm" placeholder="Region" @bind="cxRegion" /></div>
-                        <div class="col-md-3"><input class="form-control form-control-sm" placeholder="Project name" @bind="cxProjectName" /></div>
-                        <div class="col-md-3"><input class="form-control form-control-sm" placeholder="User domain" @bind="cxUserDomain" /></div>
-                        <div class="col-md-3"><input class="form-control form-control-sm" placeholder="Project domain" @bind="cxProjectDomain" /></div>
-                        <div class="col-md-6"><input class="form-control form-control-sm" placeholder="Username" @bind="cxUsername" /></div>
-                        <div class="col-md-6"><input type="password" class="form-control form-control-sm" placeholder="Password" @bind="cxPassword" /></div>
+                    <div class="small text-muted mb-2">
+                        Connections belong to the tenant and are managed at
+                        <strong>Platform → Cloud connections</strong>. Adding one here saves it there too.
                     </div>
-                    <div class="mt-2">
-                        <button class="btn btn-sm btn-primary" disabled="@busy" @onclick="AddConnection">Save connection</button>
-                    </div>
+                    <CloudConnectionsPanel TenantId="TenantId" ShowEgressAgents="false"
+                                           OnChanged="OnConnectionsChanged" />
                 </div>
             }
         }
@@ -290,9 +285,10 @@
     private OpenStackProvisioningConfig config = new() { WorkerPools = [new WorkerPool()] };
     private readonly HashSet<string> selectedBaseline = new(ProductionBaseline.DefaultSelectedKeys, StringComparer.OrdinalIgnoreCase);
 
-    // Inline connection add
+    // Whether the shared CloudConnectionsPanel is expanded on the Cloud step. The wizard holds
+    // no connection form fields of its own — that duplication is what dropped the proxy and
+    // egress-route settings from any connection created here.
     private bool showAddConnection;
-    private string cxName = "", cxAuthUrl = "", cxRegion = "", cxProjectName = "", cxUserDomain = "Default", cxProjectDomain = "Default", cxUsername = "", cxPassword = "";
 
     // Register existing
     private string regName = "", regApiUrl = "", regKubeconfig = "";
@@ -366,30 +362,26 @@
         }
     }
 
-    private async Task AddConnection()
+    /// <summary>
+    /// Raised by CloudConnectionsPanel after it saves. Reloads the list and selects whichever
+    /// connection is new, so adding one mid-wizard still lands in the dropdown above.
+    /// </summary>
+    private async Task OnConnectionsChanged()
     {
-        error = null;
-        if (string.IsNullOrWhiteSpace(cxName) || string.IsNullOrWhiteSpace(cxAuthUrl))
+        HashSet<Guid> before = connections.Select(c => c.Id).ToHashSet();
+        connections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
+
+        OpenStackConnection? added = connections.FirstOrDefault(c => !before.Contains(c.Id));
+        if (added is not null)
         {
-            error = "Connection name and auth URL are required.";
-            return;
-        }
-        busy = true;
-        try
-        {
-            OpenStackConnection c = await StorageService.CreateOpenStackConnectionAsync(
-                TenantId, cxName.Trim(), cxAuthUrl.Trim(), NullIfBlank(cxRegion),
-                NullIfBlank(cxProjectName), null, NullIfBlank(cxUserDomain), NullIfBlank(cxProjectDomain),
-                NullIfBlank(cxUsername), NullIfBlank(cxPassword),
-                s3Endpoint: null, proxyUrl: null, proxyUsername: null, proxyPassword: null,
-                routeViaClusterId: null, routeViaAgentId: null);
-            connections = await StorageService.GetOpenStackConnectionsAsync(TenantId);
-            config.OpenStackConnectionId = c.Id;
+            config.OpenStackConnectionId = added.Id;
             showAddConnection = false;
-            Toasts.Success($"Added connection \"{c.Name}\".");
         }
-        catch (Exception ex) { error = $"Could not add connection: {ex.Message}"; }
-        finally { busy = false; }
+        else if (!connections.Any(c => c.Id == config.OpenStackConnectionId))
+        {
+            // The selected connection was deleted from the panel.
+            config.OpenStackConnectionId = Guid.Empty;
+        }
     }
 
     private async Task Launch()
