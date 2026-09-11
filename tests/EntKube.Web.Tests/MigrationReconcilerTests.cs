@@ -20,6 +20,13 @@ public class MigrationReconcilerTests : IDisposable
     /// <summary>The migration under test: the most recent one, so re-applying it is what EF would do.</summary>
     private readonly string lastMigrationId;
 
+    /// <summary>
+    /// A migration that only adds a column, so the column-shaped cases can be exercised against a
+    /// real one rather than a fixture. It sits immediately before <see cref="lastMigrationId"/>,
+    /// which is the order the two of them wedged a production database in.
+    /// </summary>
+    private readonly string columnMigrationId;
+
     public MigrationReconcilerTests()
     {
         connection = new SqliteConnection("DataSource=:memory:");
@@ -30,6 +37,7 @@ public class MigrationReconcilerTests : IDisposable
             .Options);
 
         lastMigrationId = db.Database.GetMigrations().Last();
+        columnMigrationId = db.Database.GetMigrations().Single(m => m.EndsWith("AddIdleCapacityCharge"));
     }
 
     public void Dispose()
@@ -51,6 +59,15 @@ public class MigrationReconcilerTests : IDisposable
 
     private bool IsRecorded(string migrationId) =>
         !db.Database.GetPendingMigrations().Contains(migrationId);
+
+    /// <summary>
+    /// Via pragma_table_info rather than by selecting the column: SQLite reads a double-quoted
+    /// identifier it cannot resolve as a string literal, so selecting one would say yes either way.
+    /// </summary>
+    private bool ColumnExists(string table, string column) =>
+        db.Database.SqlQueryRaw<int>(
+            $"SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('{table}') WHERE name = '{column}'")
+          .AsEnumerable().Single() > 0;
 
     /// <summary>A config row, so a table can be shown to be holding data worth keeping.</summary>
     private void SeedMailConfig()
@@ -148,5 +165,67 @@ public class MigrationReconcilerTests : IDisposable
             .Which.Message.Should().Contain("StalwartMailAccounts");
 
         db.Set<StalwartComponentConfig>().Count().Should().Be(1, "a refusal must not be destructive");
+    }
+
+    [Fact]
+    public void An_added_column_that_is_already_there_is_recorded_rather_than_re_added()
+    {
+        // The second time this went wrong in production: a migration that only adds a column, whose
+        // column exists and whose history row does not. EF re-runs it and gets 42701 forever. There
+        // is no undo here — dropping the column would take its value for every existing row — so the
+        // only move is to record what the schema already says.
+        db.Database.Migrate();
+        Forget(columnMigrationId);
+
+        Reconcile();
+
+        IsRecorded(columnMigrationId).Should().BeTrue();
+        ColumnExists("ClusterCostRates", "ChargeIdleCapacity").Should().BeTrue();
+
+        db.Database.Migrate();
+        IsRecorded(columnMigrationId).Should().BeTrue();
+    }
+
+    [Fact]
+    public void An_added_column_that_is_genuinely_missing_is_left_to_EF()
+    {
+        // The column is absent, so the migration really has not run and there is nothing to repair.
+        // Touching it here would rob EF of the one case it handles perfectly well on its own.
+        db.Database.Migrate();
+        Forget(columnMigrationId);
+        db.Database.ExecuteSqlRaw("ALTER TABLE \"ClusterCostRates\" DROP COLUMN \"ChargeIdleCapacity\"");
+
+        Reconcile();
+
+        IsRecorded(columnMigrationId).Should().BeFalse("the reconciler must not claim a migration that did not run");
+
+        db.Database.Migrate();
+
+        ColumnExists("ClusterCostRates", "ChargeIdleCapacity").Should().BeTrue();
+        IsRecorded(columnMigrationId).Should().BeTrue();
+    }
+
+    [Fact]
+    public void A_column_migration_does_not_stop_the_scan_reaching_the_one_behind_it()
+    {
+        // Exactly how the production database stood: a column-only migration and the table migration
+        // after it had both lost their history rows. Judging the first one has to leave the second
+        // reachable, or the table leftovers are never cleaned up and the boot loop continues.
+        db.Database.Migrate();
+        Forget(columnMigrationId);
+        Forget(lastMigrationId);
+        db.Database.ExecuteSqlRaw("DROP TABLE \"StalwartMailAccounts\"");
+        db.Database.ExecuteSqlRaw("DROP TABLE \"StalwartMailDomains\"");
+
+        Reconcile();
+
+        IsRecorded(columnMigrationId).Should().BeTrue("its column is present and cannot be given back");
+        TableExists("StalwartComponentConfigs").Should().BeFalse("the empty leftover is dropped so EF can re-apply");
+
+        db.Database.Migrate();
+
+        IsRecorded(lastMigrationId).Should().BeTrue();
+        TableExists("StalwartMailAccounts").Should().BeTrue();
+        ColumnExists("ClusterCostRates", "ChargeIdleCapacity").Should().BeTrue();
     }
 }

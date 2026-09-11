@@ -20,24 +20,27 @@ public sealed class SchemaReconciliationException(string message) : Exception(me
 /// exist while its <c>__EFMigrationsHistory</c> row does not.
 ///
 /// <para><b>Why this exists.</b> EF decides what to apply purely from the history table. If a
-/// migration's tables are present but unrecorded — a container killed mid-migration, a restored
+/// migration's objects are present but unrecorded — a container killed mid-migration, a restored
 /// snapshot, a schema touched by hand — every subsequent start re-runs it, fails on
-/// <c>relation already exists</c>, and the application never comes up. The remedy is a few lines
-/// of SQL, which is exactly what nobody has to hand on a production box at the moment they need
-/// it. So the application does it on startup instead.</para>
+/// <c>relation already exists</c> or <c>column already exists</c>, and the application never comes
+/// up. The remedy is a few lines of SQL, which is exactly what nobody has to hand on a production
+/// box at the moment they need it. So the application does it on startup instead.</para>
 ///
-/// <para><b>What it will and will not do.</b> It only ever touches tables that the failing
-/// migration itself creates, so a pre-existing table is never a candidate. From there:</para>
+/// <para><b>What it looks at.</b> Only the objects the failing migration itself creates: the tables
+/// it creates, and the columns it adds to tables it does not. A pre-existing object is never a
+/// candidate. From there:</para>
 /// <list type="bullet">
-/// <item>tables all present and holding rows — the migration really did run, so its history row is
-/// written and nothing is altered;</item>
-/// <item>tables present but empty — leftovers from a run that did not finish, so they are dropped
-/// and EF re-applies the migration properly, indexes and constraints included;</item>
-/// <item>some present, some missing, and one of them holds rows — refused. That is a schema this
+/// <item>everything present, and something in it worth keeping — the migration really did run, so
+/// its history row is written and nothing is altered;</item>
+/// <item>only empty leftovers present — the remains of a run that did not finish, so they are
+/// dropped and EF re-applies the migration properly, indexes and constraints included;</item>
+/// <item>partly present, with something that cannot be given back — refused. That is a schema this
 /// cannot complete without guessing, and guessing here destroys data.</item>
 /// </list>
 ///
-/// <para>Emptiness is the safety property throughout: nothing with a row in it is ever dropped.</para>
+/// <para>Removability is the safety property throughout: an empty table can be dropped because
+/// nothing is lost with it, and a column never can — the rows around it are real, and its values
+/// would go with it. Nothing holding data is ever dropped.</para>
 /// </summary>
 public static class MigrationReconciler
 {
@@ -75,30 +78,42 @@ public static class MigrationReconciler
 
             Migration migration = assembly.CreateMigration(migrationType, provider);
 
-            List<CreateTableOperation> created = migration.UpOperations
+            List<CreateTableOperation> createdTables = migration.UpOperations
                 .OfType<CreateTableOperation>()
                 .ToList();
 
-            if (created.Count == 0)
-            {
-                // Nothing to compare against. A migration that only alters existing objects cannot be
-                // judged this way, so it is left to EF — which is the right answer, not a gap.
-                return;
-            }
-
-            List<TableState> states = created
-                .Select(op => Inspect(db, sqlHelper, op.Schema, op.Name, logger))
+            // Columns added to tables this migration also creates are already accounted for by the
+            // table itself, so judging them separately would only double-count.
+            List<AddColumnOperation> addedColumns = migration.UpOperations
+                .OfType<AddColumnOperation>()
+                .Where(op => !createdTables.Any(t => t.Name == op.Table && t.Schema == op.Schema))
                 .ToList();
 
-            if (states.All(s => !s.Exists))
+            if (createdTables.Count == 0 && addedColumns.Count == 0)
+            {
+                // Nothing to compare against — an index-only or data-only migration cannot be judged
+                // this way, so it is left to EF. The next pending migration still can be, so the scan
+                // carries on rather than giving up here.
+                continue;
+            }
+
+            List<SchemaObject> objects =
+            [
+                .. createdTables.Select(op => InspectTable(db, sqlHelper, op.Schema, op.Name, logger)),
+                .. addedColumns.Select(op => InspectColumn(db, sqlHelper, op.Schema, op.Table, op.Name, logger)),
+            ];
+
+            List<SchemaObject> present = objects.Where(o => o.Exists).ToList();
+
+            if (present.Count == 0)
             {
                 // The ordinary case: this migration has not run. Neither has anything after it.
                 return;
             }
 
-            List<TableState> present = states.Where(s => s.Exists).ToList();
-
-            if (present.All(s => s.RowCount == 0))
+            // An empty table can be handed back; a column cannot, because dropping it takes its
+            // values with it and the rows around it are real.
+            if (present.All(o => o.Removable))
             {
                 DropLeftovers(db, sqlHelper, present, migrationId, logger);
 
@@ -107,7 +122,7 @@ public static class MigrationReconciler
                 return;
             }
 
-            if (states.All(s => s.Exists))
+            if (present.Count == objects.Count)
             {
                 StampAsApplied(db, history, migrationId, present, logger);
                 continue;
@@ -115,73 +130,148 @@ public static class MigrationReconciler
 
             throw new SchemaReconciliationException(
                 $"Migration '{migrationId}' is half-applied and cannot be repaired automatically. "
-                + $"Present and holding data: {Describe(present.Where(s => s.RowCount > 0))}. "
-                + $"Missing: {Describe(states.Where(s => !s.Exists))}. "
-                + "Dropping a table with rows in it would lose them, so this needs a decision no "
-                + "process should make on its own: either restore the missing objects, or move the "
-                + "data aside and drop the tables this migration creates so it can re-apply.");
+                + $"Present and not safe to give back: {Describe(present.Where(o => !o.Removable))}. "
+                + $"Missing: {Describe(objects.Where(o => !o.Exists))}. "
+                + "Dropping these would lose data, so this needs a decision no process should make "
+                + "on its own: either restore the missing objects, or move the data aside and drop "
+                + "what this migration creates so it can re-apply.");
         }
     }
 
-    private sealed record TableState(string? Schema, string Name, bool Exists, long RowCount);
+    /// <summary>
+    /// One thing a migration brings into existence. <paramref name="Removable"/> says whether it can
+    /// be dropped to put the database back where the migration found it — true only for a table this
+    /// migration creates that holds no rows.
+    /// </summary>
+    private sealed record SchemaObject(
+        string Description, bool Exists, bool Removable, string? DropSql);
 
     /// <summary>
     /// Asks the database whether a table is there and, if so, whether anything is in it. Existence is
     /// inferred from the query succeeding rather than from a catalog lookup, because the catalogs
     /// differ per provider and this has to hold for all three.
     /// </summary>
-    private static TableState Inspect(
+    private static SchemaObject InspectTable(
         DbContext db, ISqlGenerationHelper sqlHelper, string? schema, string name, ILogger logger)
     {
         string delimited = sqlHelper.DelimitIdentifier(name, schema);
+        string label = schema is null ? name : $"{schema}.{name}";
 
         try
         {
             long rows = ExecuteScalarLong(db, $"SELECT COUNT(*) FROM {delimited}");
-            return new TableState(schema, name, Exists: true, RowCount: rows);
+            return new SchemaObject(
+                $"table {label} ({rows} rows)",
+                Exists: true,
+                Removable: rows == 0,
+                DropSql: $"DROP TABLE {delimited}");
         }
         catch (DbException ex)
         {
             // Almost always "no such table", which is the answer we are after. It can also be a
             // permission problem, which would be misread as absence — so say what was seen.
-            logger.LogDebug("Reconciler: {Table} reads as absent ({Message})", delimited, ex.Message);
-            return new TableState(schema, name, Exists: false, RowCount: 0);
+            logger.LogDebug("Reconciler: table {Table} reads as absent ({Message})", delimited, ex.Message);
+            return new SchemaObject($"table {label}", Exists: false, Removable: false, DropSql: null);
         }
     }
 
+    /// <summary>
+    /// Asks the database whether a column is there, by reading the shape of an empty result off the
+    /// table. Naming the column in the query instead would be the obvious move and is wrong: SQLite
+    /// falls back to reading a double-quoted identifier it cannot resolve as a string literal, so
+    /// <c>SELECT COUNT("Missing") FROM "T"</c> succeeds and every absent column reads as present.
+    /// The column list is the same answer on every provider and cannot be faked that way.
+    /// A missing table reads as a missing column, which is right — it is not there either way.
+    /// </summary>
+    private static SchemaObject InspectColumn(
+        DbContext db, ISqlGenerationHelper sqlHelper, string? schema, string table, string name, ILogger logger)
+    {
+        string delimitedTable = sqlHelper.DelimitIdentifier(table, schema);
+        string label = schema is null ? $"{table}.{name}" : $"{schema}.{table}.{name}";
+
+        List<string>? columns = ReadColumnNames(db, delimitedTable, logger);
+
+        // Case-insensitively, because SQL Server and SQLite both fold it and only PostgreSQL would
+        // ever disagree — and there a near-miss is a different bug, not a column to be judged here.
+        bool exists = columns?.Any(c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase)) == true;
+
+        if (!exists)
+        {
+            logger.LogDebug("Reconciler: column {Column} on {Table} reads as absent", name, delimitedTable);
+        }
+
+        // Never removable: the table around it holds whatever it holds, and dropping the column
+        // discards its values for every one of those rows.
+        return new SchemaObject($"column {label}", exists, Removable: false, DropSql: null);
+    }
+
     private static void DropLeftovers(
-        DbContext db, ISqlGenerationHelper sqlHelper, List<TableState> present, string migrationId, ILogger logger)
+        DbContext db, ISqlGenerationHelper sqlHelper, List<SchemaObject> present, string migrationId, ILogger logger)
     {
         logger.LogWarning(
-            "Migration '{MigrationId}' left {Count} empty table(s) behind without recording itself: {Tables}. "
+            "Migration '{MigrationId}' left {Count} empty object(s) behind without recording itself: {Objects}. "
             + "Dropping them so the migration can apply in full — they hold no rows, so nothing is lost.",
             migrationId, present.Count, Describe(present));
 
         // Reverse creation order, so a table is gone before the one it depends on. No CASCADE: if
         // something outside this migration references these, that is a surprise worth failing on.
-        foreach (TableState table in Enumerable.Reverse(present))
+        foreach (SchemaObject leftover in Enumerable.Reverse(present))
         {
-            string delimited = sqlHelper.DelimitIdentifier(table.Name, table.Schema);
-            db.Database.ExecuteSqlRaw($"DROP TABLE {delimited}");
-            logger.LogInformation("Reconciler: dropped leftover table {Table}", delimited);
+            db.Database.ExecuteSqlRaw(leftover.DropSql!);
+            logger.LogInformation("Reconciler: dropped leftover {Object}", leftover.Description);
         }
     }
 
     private static void StampAsApplied(
-        DbContext db, IHistoryRepository history, string migrationId, List<TableState> present, ILogger logger)
+        DbContext db, IHistoryRepository history, string migrationId, List<SchemaObject> present, ILogger logger)
     {
         logger.LogWarning(
             "Migration '{MigrationId}' is not recorded in the history table, but everything it creates is "
-            + "present and holds data ({Tables}). Recording it as applied rather than re-running it.",
+            + "already present ({Objects}). Recording it as applied rather than re-running it.",
             migrationId, Describe(present));
 
         db.Database.ExecuteSqlRaw(
             history.GetInsertScript(new HistoryRow(migrationId, ProductInfo.GetVersion())));
     }
 
-    private static string Describe(IEnumerable<TableState> tables) =>
-        string.Join(", ", tables.Select(t =>
-            t.Schema is null ? $"{t.Name} ({t.RowCount} rows)" : $"{t.Schema}.{t.Name} ({t.RowCount} rows)"));
+    private static string Describe(IEnumerable<SchemaObject> objects) =>
+        string.Join(", ", objects.Select(o => o.Description));
+
+    /// <summary>
+    /// The columns of a table, or null if the table cannot be read at all — which for our purposes
+    /// means it is not there.
+    /// </summary>
+    private static List<string>? ReadColumnNames(DbContext db, string delimitedTable, ILogger logger)
+    {
+        DbConnection connection = db.Database.GetDbConnection();
+        bool wasClosed = connection.State != System.Data.ConnectionState.Open;
+
+        if (wasClosed)
+        {
+            connection.Open();
+        }
+
+        try
+        {
+            using DbCommand command = connection.CreateCommand();
+            command.CommandText = $"SELECT * FROM {delimitedTable} WHERE 1 = 0";
+            using DbDataReader reader = command.ExecuteReader();
+
+            return Enumerable.Range(0, reader.FieldCount).Select(reader.GetName).ToList();
+        }
+        catch (DbException ex)
+        {
+            logger.LogDebug("Reconciler: table {Table} reads as absent ({Message})", delimitedTable, ex.Message);
+            return null;
+        }
+        finally
+        {
+            if (wasClosed)
+            {
+                connection.Close();
+            }
+        }
+    }
 
     private static long ExecuteScalarLong(DbContext db, string sql)
     {
