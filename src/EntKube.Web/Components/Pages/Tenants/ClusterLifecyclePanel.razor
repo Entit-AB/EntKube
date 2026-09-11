@@ -1,0 +1,512 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject ProvisionedClusterService Specs
+@inject ClusterReconciler Reconciler
+@inject ClusterOperationsService Operations
+@inject ClusterTeardownService Teardown
+@inject ClusterCredentialRotationService Credentials
+@inject FoundationVerifier Verifier
+@inject ToastService Toasts
+
+@* Day-2 for a cluster EntKube built: what it is supposed to be, what it actually is, and the
+   operations that close the gap. Only rendered for provisioned clusters — a cluster registered by
+   kubeconfig has no spec to edit and none of this applies to it. *@
+
+@if (spec is null)
+{
+    <div class="border rounded">
+        <EmptyState Icon="bi-hdd-network"
+                    Title="Not provisioned by EntKube"
+                    Message="This cluster was registered by kubeconfig, so there is no specification to operate against. Lifecycle operations are available on clusters EntKube created." />
+    </div>
+}
+else
+{
+    <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+        <div>
+            <h5 class="mb-1"><i class="bi bi-sliders me-2"></i>Cluster lifecycle</h5>
+            <div class="text-muted small">
+                @spec.Name — Kubernetes @spec.KubernetesVersion on
+                @(spec.ControlPlaneCount) control-plane node(s)
+            </div>
+        </div>
+        <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-secondary" disabled="@busy" @onclick="Refresh">
+                <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" disabled="@busy" @onclick="RunVerification">
+                <i class="bi bi-clipboard-check me-1"></i>Verify foundation
+            </button>
+        </div>
+    </div>
+
+    @* ── State ── *@
+    <div class="card mb-3">
+        <div class="card-body py-2">
+            @if (observation is null)
+            {
+                <span class="text-muted small">Nothing observed yet.</span>
+            }
+            else
+            {
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <span class="badge @HealthClass">@observation.Health</span>
+                    @if (!string.IsNullOrEmpty(observation.Summary))
+                    {
+                        <span class="small">@observation.Summary</span>
+                    }
+                    @if (spec.Generation != spec.ObservedGeneration)
+                    {
+                        @* The spec has moved on. Worth saying plainly: the cluster is not yet what
+                           the form above it claims. *@
+                        <span class="badge bg-warning text-dark">
+                            Edit not applied yet (spec @spec.Generation, cluster @spec.ObservedGeneration)
+                        </span>
+                    }
+                    @if (spec.LastReconciledAt is DateTime seen)
+                    {
+                        <span class="text-muted small ms-auto">checked @seen.ToLocalTime().ToString("HH:mm")</span>
+                    }
+                </div>
+
+                @if (observation.ControlPlaneDesired > 0)
+                {
+                    <div class="small text-muted mt-2">
+                        Control plane: @observation.ControlPlaneReady / @observation.ControlPlaneDesired ready
+                        @if (observation.ControlPlaneVersion is not null)
+                        {
+                            <span>· @observation.ControlPlaneVersion</span>
+                        }
+                    </div>
+                }
+            }
+
+            @if (certificates is { Urgency: not CertificateUrgency.Fine })
+            {
+                <div class="alert @(certificates.Urgency == CertificateUrgency.Soon ? "alert-info" : "alert-warning") py-2 px-3 small mt-2 mb-0">
+                    <i class="bi bi-clock-history me-1"></i>@certificates.Message
+                </div>
+            }
+        </div>
+    </div>
+
+    @* ── Worker pools ── *@
+    <div class="card mb-3">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span class="fw-semibold">Worker pools</span>
+            <button class="btn btn-sm btn-outline-primary" disabled="@busy" @onclick="() => showAddPool = !showAddPool">
+                <i class="bi bi-plus-lg me-1"></i>Add pool
+            </button>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-sm mb-0 align-middle">
+                <thead>
+                    <tr>
+                        <th>Pool</th><th>Flavor</th><th>Nodes</th><th>Version</th><th class="text-end">Scale</th><th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (ProvisionedWorkerPool pool in spec.WorkerPools.OrderBy(p => p.Name))
+                    {
+                        PoolObservation? seen = observation?.Pools.FirstOrDefault(p => p.Name == pool.Name);
+                        <tr>
+                            <td class="fw-semibold">@pool.Name</td>
+                            <td class="small">
+                                @pool.Flavor
+                                @if (pool.DiskGb > 0)
+                                {
+                                    <span class="text-muted"> · @(pool.DiskGb) GiB</span>
+                                }
+                            </td>
+                            <td class="small">
+                                @if (seen is null)
+                                {
+                                    <span class="text-warning">not on the cluster</span>
+                                }
+                                else
+                                {
+                                    <span>@seen.Ready / @seen.Desired ready</span>
+                                    @if (!seen.IsSettled)
+                                    {
+                                        <span class="spinner-border spinner-border-sm ms-2"></span>
+                                    }
+                                }
+                                @if (pool.Autoscale)
+                                {
+                                    <span class="badge bg-secondary ms-1">auto @pool.MinCount–@pool.MaxCount</span>
+                                }
+                            </td>
+                            <td class="small">@(pool.KubernetesVersion ?? spec.KubernetesVersion)</td>
+                            <td class="text-end">
+                                <div class="d-inline-flex align-items-center gap-1">
+                                    <input type="number" min="0" class="form-control form-control-sm" style="width:5rem"
+                                           value="@pool.Count" @onchange="e => OnScaleEntered(pool.Name, e)" />
+                                    <button class="btn btn-sm btn-outline-secondary" disabled="@busy"
+                                            @onclick="() => Scale(pool.Name)">Apply</button>
+                                </div>
+                            </td>
+                            <td class="text-end">
+                                <button class="btn btn-sm btn-outline-danger" disabled="@(busy || spec.WorkerPools.Count == 1)"
+                                        title="@(spec.WorkerPools.Count == 1 ? "A cluster needs at least one pool" : $"Drain and remove {pool.Name}")"
+                                        @onclick="() => ConfirmRemovePool(pool.Name)">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        @if (showAddPool)
+        {
+            <div class="card-body border-top bg-body-tertiary">
+                <div class="row g-2">
+                    <div class="col-md-3">
+                        <label class="form-label small mb-0">Name</label>
+                        <input class="form-control form-control-sm" @bind="newPoolName" placeholder="memory" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small mb-0">Flavor</label>
+                        <input class="form-control form-control-sm" @bind="newPoolFlavor" placeholder="b.8c32gb" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small mb-0">Nodes</label>
+                        <input type="number" min="0" class="form-control form-control-sm" @bind="newPoolCount" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small mb-0">Disk (GiB)</label>
+                        <input type="number" min="0" class="form-control form-control-sm" @bind="newPoolDiskGb" />
+                    </div>
+                    <div class="col-md-2 d-flex align-items-end">
+                        <button class="btn btn-sm btn-primary w-100" disabled="@busy" @onclick="AddPool">Add</button>
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+
+    @* ── Version ── *@
+    <div class="card mb-3">
+        <div class="card-header py-2 fw-semibold">Kubernetes version</div>
+        <div class="card-body">
+            <p class="small text-muted">
+                The control plane moves first, then each pool. One minor version at a time, and
+                workers never ahead of the control plane — both are refused rather than attempted.
+            </p>
+            <div class="d-flex gap-2 align-items-end flex-wrap">
+                <div>
+                    <label class="form-label small mb-0">Target version</label>
+                    <input class="form-control form-control-sm" style="width:10rem" @bind="targetVersion" placeholder="v1.32.0" />
+                </div>
+                <button class="btn btn-sm btn-outline-primary" disabled="@busy" @onclick="UpgradeControlPlane">
+                    Upgrade control plane
+                </button>
+                @foreach (ProvisionedWorkerPool pool in spec.WorkerPools.OrderBy(p => p.Name))
+                {
+                    <button class="btn btn-sm btn-outline-secondary" disabled="@busy" @onclick="() => UpgradePool(pool.Name)">
+                        Upgrade @pool.Name
+                    </button>
+                }
+            </div>
+        </div>
+    </div>
+
+    @* ── Credentials ── *@
+    <div class="card mb-3">
+        <div class="card-header py-2 fw-semibold">Credentials</div>
+        <div class="card-body d-flex gap-2 flex-wrap">
+            <button class="btn btn-sm btn-outline-secondary" disabled="@busy" @onclick="RefreshKubeconfig">
+                <i class="bi bi-key me-1"></i>Refresh kubeconfig
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" disabled="@busy"
+                    @onclick='() => pendingConfirm = new PendingConfirm("Issue a new OpenStack application credential and move the cluster onto it? The previous credential keeps working and should be revoked in OpenStack once the cluster has been seen running on the new one.", "Rotate", RotateCloudCredential)'>
+                <i class="bi bi-arrow-repeat me-1"></i>Rotate cloud credential
+            </button>
+        </div>
+    </div>
+
+    @* ── Verification results ── *@
+    @if (checks is not null)
+    {
+        <div class="card mb-3">
+            <div class="card-header py-2 fw-semibold">Foundation</div>
+            <ul class="list-group list-group-flush">
+                @foreach (FoundationCheck check in checks)
+                {
+                    <li class="list-group-item py-2 d-flex gap-2">
+                        <i class="bi @(check.Passed ? "bi-check-circle text-success" : "bi-x-circle text-danger") mt-1"></i>
+                        <span>
+                            <span class="fw-semibold">@check.Title</span>
+                            <span class="d-block small text-muted">@check.Detail</span>
+                        </span>
+                    </li>
+                }
+            </ul>
+        </div>
+    }
+
+    @* ── Destruction ── *@
+    <div class="card border-danger-subtle">
+        <div class="card-header py-2 fw-semibold text-danger">Delete this cluster</div>
+        <div class="card-body">
+            <p class="small text-muted mb-2">
+                Deleting removes the machines, load balancer, floating IPs, volumes and security
+                groups this cluster created. EntKube boots a temporary management plane to do it,
+                because a cluster cannot tear down the machines its own controllers are running on.
+                Anything still present afterwards is reported rather than removed.
+            </p>
+            <div class="d-flex gap-2 align-items-end flex-wrap">
+                <div>
+                    <label class="form-label small mb-0">Type the cluster name to confirm</label>
+                    <input class="form-control form-control-sm" style="width:14rem" @bind="deleteConfirmation" placeholder="@spec.Name" />
+                </div>
+                <button class="btn btn-sm btn-danger" disabled="@(busy || deleteConfirmation != spec.Name)" @onclick="() => Delete(force: false)">
+                    <i class="bi bi-trash me-1"></i>Delete cluster
+                </button>
+                <button class="btn btn-sm btn-outline-danger" disabled="@(busy || deleteConfirmation != spec.Name)"
+                        title="Only when the cloud cannot be reached. Forgets the cluster here; its resources keep running and keep billing."
+                        @onclick="() => Delete(force: true)">
+                    Forget without deleting
+                </button>
+            </div>
+        </div>
+    </div>
+
+    @if (log is not null)
+    {
+        <pre class="bg-body-tertiary border rounded p-2 mt-3 small" style="max-height:16rem;overflow:auto">@log</pre>
+    }
+}
+
+<ConfirmDialog Visible="@(pendingConfirm is not null)"
+               Message="@(pendingConfirm?.Message ?? "")"
+               ConfirmText="@(pendingConfirm?.ConfirmText ?? "Confirm")"
+               IsBusy="busy"
+               OnConfirm="ConfirmPending"
+               OnCancel="() => pendingConfirm = null" />
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public Guid ClusterId { get; set; }
+
+    private ProvisionedCluster? spec;
+    private ClusterObservation? observation;
+    private CertificateStatus? certificates;
+    private IReadOnlyList<FoundationCheck>? checks;
+
+    private bool busy;
+    private string? log;
+    private string targetVersion = "";
+    private string deleteConfirmation = "";
+
+    private bool showAddPool;
+    private string newPoolName = "";
+    private string newPoolFlavor = "";
+    private int newPoolCount = 3;
+    private int newPoolDiskGb;
+
+    private readonly Dictionary<string, int> scaleTo = [];
+    private PendingConfirm? pendingConfirm;
+
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+
+    private string HealthClass => observation?.Health switch
+    {
+        ClusterHealth.Healthy => "bg-success",
+        ClusterHealth.Progressing => "bg-info text-dark",
+        ClusterHealth.Degraded => "bg-danger",
+        _ => "bg-secondary"
+    };
+
+    protected override async Task OnInitializedAsync() => await Load();
+
+    private async Task Load()
+    {
+        spec = await Specs.GetByClusterAsync(TenantId, ClusterId);
+        if (spec is null)
+        {
+            return;
+        }
+
+        targetVersion = spec.KubernetesVersion;
+        observation = ClusterObservation.FromJson(spec.ObservedStateJson);
+        certificates = await Credentials.CheckKubeconfigExpiryAsync(ClusterId);
+    }
+
+    /// <summary>Observes now rather than showing what the five-minute sweep last saw.</summary>
+    private async Task Refresh()
+    {
+        if (spec is null) return;
+        await Run(async () =>
+        {
+            observation = await Reconciler.ReconcileAsync(spec.Id);
+            await Load();
+            return ClusterOperationResult.Ok("");
+        }, silentOnSuccess: true);
+    }
+
+    private async Task RunVerification()
+    {
+        if (spec is null) return;
+        await Run(async () =>
+        {
+            checks = null;
+            ProvisionedCluster current = spec;
+            IReadOnlyList<FoundationCheck>? result = await VerifyAsync(current);
+            if (result is null)
+            {
+                return ClusterOperationResult.Failed("No kubeconfig is stored for this cluster.");
+            }
+
+            checks = result;
+            int failed = result.Count(c => !c.Passed);
+            return failed == 0
+                ? ClusterOperationResult.Ok("Foundation looks healthy.")
+                : ClusterOperationResult.Failed($"{failed} foundation check(s) failed — see below.");
+        });
+    }
+
+    private async Task<IReadOnlyList<FoundationCheck>?> VerifyAsync(ProvisionedCluster current)
+    {
+        certificates = await Credentials.CheckKubeconfigExpiryAsync(ClusterId);
+
+        string? kubeconfig = await Credentials.GetKubeconfigAsync(ClusterId);
+        if (string.IsNullOrWhiteSpace(kubeconfig))
+        {
+            return null;
+        }
+
+        // Backups are only checked where Velero is actually installed; asking a cluster without it
+        // produces a failure that says nothing except that it was not installed.
+        return await Verifier.VerifyAsync(kubeconfig, checkBackups: false);
+    }
+
+    private void OnScaleEntered(string pool, ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out int value))
+        {
+            scaleTo[pool] = value;
+        }
+    }
+
+    private async Task Scale(string pool)
+    {
+        if (spec is null || !scaleTo.TryGetValue(pool, out int replicas)) return;
+        await Run(() => Operations.ScalePoolAsync(TenantId, spec.Id, pool, replicas));
+    }
+
+    private async Task AddPool()
+    {
+        if (spec is null) return;
+        await Run(() => Operations.AddPoolAsync(TenantId, spec.Id, new ProvisionedWorkerPool
+        {
+            Name = newPoolName.Trim(),
+            Flavor = newPoolFlavor.Trim(),
+            Count = newPoolCount,
+            DiskGb = newPoolDiskGb
+        }));
+        showAddPool = false;
+    }
+
+    /// <summary>
+    /// Built in code rather than inline: the message needs the pool's name in quotes, and escaping
+    /// that through a Razor attribute is a way to produce something that neither reads nor compiles.
+    /// </summary>
+    private void ConfirmRemovePool(string pool)
+    {
+        pendingConfirm = new PendingConfirm(
+            $"Drain and remove pool '{pool}'? Its machines are cordoned, drained and deleted once "
+            + "their workloads have moved elsewhere.",
+            "Remove pool",
+            () => RemovePool(pool));
+    }
+
+    private async Task RemovePool(string pool)
+    {
+        if (spec is null) return;
+        await Run(() => Operations.RemovePoolAsync(TenantId, spec.Id, pool));
+    }
+
+    private async Task UpgradeControlPlane()
+    {
+        if (spec is null) return;
+        await Run(() => Operations.UpgradeControlPlaneAsync(TenantId, spec.Id, targetVersion));
+    }
+
+    private async Task UpgradePool(string pool)
+    {
+        if (spec is null) return;
+        await Run(() => Operations.UpgradePoolAsync(TenantId, spec.Id, pool, targetVersion));
+    }
+
+    private async Task RefreshKubeconfig()
+    {
+        if (spec is null) return;
+        await Run(() => Credentials.RefreshKubeconfigAsync(TenantId, spec));
+    }
+
+    private async Task RotateCloudCredential()
+    {
+        if (spec is null) return;
+        await Run(() => Credentials.RotateCloudCredentialAsync(TenantId, spec));
+    }
+
+    private async Task Delete(bool force)
+    {
+        if (spec is null) return;
+
+        List<string> lines = [];
+        await Run(async () =>
+        {
+            ClusterOperationResult result = await Teardown.DeleteAsync(
+                TenantId, spec.Id, force, line => lines.Add(line));
+            log = string.Join("\n", lines);
+            return result;
+        });
+
+        // The spec is gone once a delete succeeds, so there is nothing left to show.
+        spec = await Specs.GetByClusterAsync(TenantId, ClusterId);
+    }
+
+    private async Task ConfirmPending()
+    {
+        PendingConfirm? pending = pendingConfirm;
+        pendingConfirm = null;
+        if (pending is not null)
+        {
+            await pending.Action();
+        }
+    }
+
+    /// <summary>
+    /// One place where every operation is run: busy state, the result surfaced as a toast, and a
+    /// reload afterwards so the panel shows what the cluster now says rather than what was asked.
+    /// </summary>
+    private async Task Run(Func<Task<ClusterOperationResult>> operation, bool silentOnSuccess = false)
+    {
+        busy = true;
+        try
+        {
+            ClusterOperationResult result = await operation();
+
+            if (!result.Success)
+            {
+                Toasts.Error(result.Message);
+            }
+            else if (!silentOnSuccess && !string.IsNullOrEmpty(result.Message))
+            {
+                Toasts.Success(result.Message);
+            }
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+        finally
+        {
+            busy = false;
+            await Load();
+        }
+    }
+}

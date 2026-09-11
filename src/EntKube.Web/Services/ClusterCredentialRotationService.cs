@@ -197,6 +197,14 @@ public class ClusterCredentialRotationService(
     }
 
     /// <summary>
+    /// The cluster's kubeconfig, materialized from the vault. Public because callers keep needing
+    /// it and there is exactly one correct way to get it — projecting the property does not work,
+    /// and every place that tried learned that the hard way.
+    /// </summary>
+    public async Task<string?> GetKubeconfigAsync(Guid clusterId, CancellationToken ct = default)
+        => await LoadStoredKubeconfigAsync(clusterId, ct);
+
+    /// <summary>
     /// What the certificates in the stored kubeconfig say. Cheap enough to ask on a page load, and
     /// the answer is the one thing that predicts a cluster locking EntKube out.
     /// </summary>
