@@ -295,27 +295,30 @@ All nine phases are built and unit-tested. None of it has run against an OpenSta
 | 2 Images + kubeadm bootstrap | ✅ | `MachineImageBuilder`, `NodeImageRecipe`. k3s is gone. |
 | 3 Authored manifests | ✅ | `CapiManifestBuilder`. Multi-pool is real. |
 | 4 Spec as data | ✅ | `ProvisionedCluster` + pools, migrations on all three providers. |
-| 5 Reconciler | ✅ read-only | Observes and records; does not apply. Deliberate — see below. |
-| 6 Day-2 | ✅ service | `ClusterOperationsService`. **No UI**: nothing in the Components or cluster pages calls it yet. |
-| 7 Delete | ✅ | Summoned plane + leftover sweep. **No UI.** |
-| 8 Foundation verification | ✅ | `FoundationVerifier`. Not yet run automatically after a bootstrap. |
-| 9 etcd backup, cert expiry | ✅ partial | Manifest and detection exist. Not scheduled by the baseline, and cert findings are not wired into the Operations Advisor. |
+| 5 Reconciler | ✅ | Observes, and corrects replica drift and missing pools. Will not reshape, upgrade or delete — see below. |
+| 6 Day-2 | ✅ | `ClusterOperationsService`, with a Lifecycle tab on provisioned clusters. |
+| 7 Delete | ✅ | Summoned plane + leftover sweep, behind a type-the-name confirmation. |
+| 8 Foundation verification | ✅ | Runs after every bootstrap, recorded as a step of its own. Also on demand. |
+| 9 etcd backup, cert expiry, rotation | ✅ mostly | Kubeconfig and cloud-credential rotation shipped. The etcd CronJob is built but not yet scheduled by the production baseline, and certificate findings are surfaced on the Lifecycle tab rather than in the Operations Advisor. |
 
 **Known gaps, in the order they matter:**
 
 1. **Nothing has touched a real cloud.** The tests cover judgement and document structure. They
    cannot tell you whether CAPO accepts these manifests, whether the bake script produces a
-   bootable image, or whether `clusterctl move` behaves as assumed during teardown.
-2. **Day-2 and delete have no user interface.** The services are callable and tested; there is no
-   button. A cluster can be created from the wizard and then only operated through code.
-3. **The reconciler does not act.** By design until it has been watched against real clusters, but
-   it means drift is reported and not corrected.
-4. **Credential and kubeconfig rotation are not built.** CAPI issues a short-lived admin
-   kubeconfig; the vaulted copy is written once at provisioning and never refreshed. That is a
-   clock nobody is watching yet, and it is the same shape of failure as the certificate expiry
-   phase 9 does watch.
-5. **Foundation verification is not automatic.** It has to be asked for; a bootstrap that leaves a
-   cluster with no working storage still reports success.
+   bootable image, or whether `clusterctl move` behaves as assumed during teardown. This is the
+   only item on this list that cannot be closed by writing more code.
+2. **Cloud discovery is not wired into the wizard's form.** `OpenStackDiscoveryService` reads
+   flavors, images, networks and zones, and the New Cluster wizard still asks an operator to type
+   them. Purely a UI job.
+3. **The etcd CronJob is not scheduled by the production baseline.** The manifest exists and is
+   tested; nothing installs it yet, so a cluster built today has Velero and no etcd snapshot.
+4. **Certificate expiry is shown on the Lifecycle tab, not in the Operations Advisor.** Someone
+   has to open the cluster to see it, which is the wrong way round for something whose whole
+   problem is that nobody is looking.
+5. **The reconciler's apply half is narrow on purpose.** Replica drift and missing pools only.
+   Reshape, upgrade and removal stay operator-driven, and drift of that kind is reported rather
+   than corrected. Worth revisiting only after the read half has been watched against real
+   clusters for a while.
 
 ## Decisions still open
 
