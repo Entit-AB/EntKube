@@ -3472,6 +3472,103 @@ public class KeycloakService(
         };
     }
 
+    /// <summary>
+    /// The three values a component needs to speak OIDC to a realm, once EntKube has made sure the client
+    /// behind them exists.
+    /// </summary>
+    /// <param name="IssuerUrl">Realm issuer — what a discovery document is fetched from.</param>
+    /// <param name="ClientId">The client's own id, as registered.</param>
+    /// <param name="ClientSecret">Its secret. Confidential clients only, which is all this provisions.</param>
+    public sealed record ProvisionedOidcClient(string IssuerUrl, string ClientId, string ClientSecret);
+
+    /// <summary>
+    /// Makes sure a confidential OIDC client exists in <paramref name="realmId"/> with these redirect URIs,
+    /// and hands back what a component needs to use it.
+    ///
+    /// <para>This is the step that otherwise happens in a browser tab, by hand, at the wrong moment: create
+    /// a client, remember to make it confidential, paste the redirect URI without a typo, find the secret
+    /// on another tab, copy it into EntKube. Every one of those is a silent failure if it goes wrong — the
+    /// component installs fine and the first sign-in is what tells you.</para>
+    ///
+    /// <para>Idempotent, and it has to be: this runs on every apply. An existing client is reused and its
+    /// redirect URIs are UNIONED rather than replaced, because a client may legitimately serve more than
+    /// one address (a renamed hostname, a second webmail) and a reconcile that quietly drops one would
+    /// break a login nobody touched. The secret is read, never regenerated on a client that already has
+    /// one — rotating it here would invalidate whatever else is already using it.</para>
+    /// </summary>
+    public async Task<ProvisionedOidcClient> EnsureOidcClientAsync(
+        Guid tenantId, Guid realmId, string clientId, IReadOnlyList<string> redirectUris,
+        string? displayName = null, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        KeycloakRealm realm = await db.KeycloakRealms
+            .Include(r => r.ComponentConfig)
+            .FirstOrDefaultAsync(r => r.Id == realmId && r.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Realm not found.");
+
+        string issuer = $"{realm.ComponentConfig.AdminUrl!.TrimEnd('/')}/realms/{realm.RealmName}";
+
+        List<KeycloakClientInfo> existing = await GetClientsAsync(tenantId, realmId, ct);
+        KeycloakClientInfo? match = existing.FirstOrDefault(c =>
+            string.Equals(c.ClientId, clientId, StringComparison.Ordinal));
+
+        string clientUuid = match?.Id
+            ?? await CreateClientAsync(tenantId, realmId, clientId, publicClient: false, displayName, ct);
+
+        // CreateClientAsync does not carry redirect URIs, and a client without them rejects every login
+        // with "Invalid parameter: redirect_uri" — which reads as a misconfigured component rather than a
+        // half-created client. So the details are always written, on create and on reuse alike.
+        KeycloakClientDetail detail = await GetClientAsync(tenantId, realmId, clientUuid, ct);
+
+        List<string> mergedRedirects = [.. detail.RedirectUris];
+        List<string> mergedOrigins = [.. detail.WebOrigins];
+        foreach (string uri in redirectUris)
+        {
+            if (!mergedRedirects.Contains(uri, StringComparer.Ordinal)) mergedRedirects.Add(uri);
+
+            // Web origins matter for anything the browser fetches cross-origin against the realm; scheme
+            // and host of the redirect is the right value, never "*".
+            if (Uri.TryCreate(uri, UriKind.Absolute, out Uri? parsed))
+            {
+                string origin = $"{parsed.Scheme}://{parsed.Authority}";
+                if (!mergedOrigins.Contains(origin, StringComparer.Ordinal)) mergedOrigins.Add(origin);
+            }
+        }
+
+        detail.RedirectUris = mergedRedirects;
+        detail.WebOrigins = mergedOrigins;
+        detail.Enabled = true;
+        detail.PublicClient = false;      // it holds a secret; a public client would not have one to hold
+        detail.StandardFlowEnabled = true;
+        await UpdateClientAsync(tenantId, realmId, detail, ct);
+
+        string secret = await GetClientSecretAsync(tenantId, realmId, clientUuid, ct)
+            // A client that has never had one — the only case where minting is not destructive.
+            ?? await RegenerateClientSecretAsync(tenantId, realmId, clientUuid, ct)
+            ?? throw new InvalidOperationException(
+                $"Keycloak client '{clientId}' has no secret and one could not be generated.");
+
+        return new ProvisionedOidcClient(issuer, clientId, secret);
+    }
+
+    /// <summary>
+    /// The realms reachable from a given Kubernetes cluster — every realm on a Keycloak installed there.
+    /// This is what a component's realm picker offers.
+    /// </summary>
+    public async Task<List<KeycloakRealm>> GetRealmsForClusterAsync(
+        Guid tenantId, Guid kubernetesClusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.KeycloakRealms
+            .Include(r => r.ComponentConfig)
+            .Where(r => r.TenantId == tenantId
+                && db.ClusterComponents.Any(comp =>
+                    comp.Id == r.ComponentConfig.ClusterComponentId && comp.ClusterId == kubernetesClusterId))
+            .OrderBy(r => r.DisplayName)
+            .ToListAsync(ct);
+    }
+
     public async Task<string> CreateClientAsync(
         Guid tenantId, Guid realmId, string clientId, bool publicClient, string? name,
         CancellationToken ct = default)

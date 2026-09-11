@@ -3,6 +3,7 @@ using System;
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace EntKube.Web.Data.Migrations.Postgres
 {
     [DbContext(typeof(PostgresApplicationDbContext))]
-    partial class PostgresApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260910092336_AddStalwartMail")]
+    partial class AddStalwartMail
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1748,9 +1751,6 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
-
-                    b.Property<bool>("ChargeIdleCapacity")
-                        .HasColumnType("boolean");
 
                     b.Property<bool>("ChargeOnRequests")
                         .HasColumnType("boolean");

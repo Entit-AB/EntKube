@@ -13,6 +13,21 @@ public class RedisOperatorStatus
     public string? OperatorClusterName { get; set; }
 }
 
+/// <summary>
+/// One Redis a component can be pointed at, as offered in a picker.
+/// </summary>
+/// <param name="Host">In-cluster DNS name of the Service.</param>
+/// <param name="Port">Port it answers on.</param>
+/// <param name="Label">What the operator sees in the list.</param>
+/// <param name="Managed">True for a Redis EntKube created — the only kind whose password it knows.</param>
+/// <param name="RedisClusterId">The managed cluster's id, used to fetch that password from the vault.</param>
+public sealed record RedisEndpointOption(
+    string Host, int Port, string Label, bool Managed, Guid? RedisClusterId)
+{
+    /// <summary>The <c>host:port</c> form a component's configuration wants.</summary>
+    public string Endpoint => $"{Host}:{Port}";
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 /// <summary>
@@ -45,6 +60,123 @@ public class RedisService(
             .Where(c => c.TenantId == tenantId)
             .OrderBy(c => c.Name)
             .ToListAsync(ct);
+    }
+
+    // ── Endpoint discovery ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Every Redis a component on this cluster could be pointed at: the ones EntKube manages, plus any
+    /// other Service in the cluster that answers on the Redis port.
+    ///
+    /// <para>The point is to stop asking an operator to type a service DNS name from memory. A wrong one
+    /// does not fail the install — the component starts, connects to nothing, and the symptom arrives much
+    /// later as a filter that never learns or a cache that never hits.</para>
+    ///
+    /// <para>Unmanaged Services are included because a cluster may perfectly well run a Redis from a Helm
+    /// chart or a bare StatefulSet, and refusing to see those would send the operator back to typing. They
+    /// are marked as unmanaged so the difference stays visible: EntKube knows the password for one kind
+    /// and not the other.</para>
+    /// </summary>
+    public async Task<List<RedisEndpointOption>> DiscoverEndpointsAsync(
+        Guid kubernetesClusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        KubernetesCluster? cluster = await db.KubernetesClusters
+            .FirstOrDefaultAsync(c => c.Id == kubernetesClusterId, ct);
+        if (cluster is null) return [];
+
+        List<RedisEndpointOption> options = [];
+
+        // Managed first: these carry a vaulted password, so choosing one can fill in the credential too.
+        List<RedisCluster> managed = await db.RedisClusters
+            .Where(c => c.KubernetesClusterId == kubernetesClusterId)
+            .OrderBy(c => c.Name)
+            .ToListAsync(ct);
+
+        foreach (RedisCluster m in managed)
+        {
+            options.Add(new RedisEndpointOption(
+                Host: $"{m.Name}-leader.{m.Namespace}.svc.cluster.local",
+                Port: RedisPort,
+                Label: $"{m.Name} ({m.Namespace}) — managed by EntKube",
+                Managed: true,
+                RedisClusterId: m.Id));
+        }
+
+        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig)) return options;
+
+        // Then whatever else is listening. Best-effort by design: a cluster we cannot read right now
+        // should still offer the managed list and a free-text box, not an empty form.
+        try
+        {
+            string json = await k8s.GetJsonAllNamespacesAsync("services", cluster.Kubeconfig!, ct: ct);
+            foreach (RedisEndpointOption found in ParseRedisServices(json))
+            {
+                if (!options.Any(o => string.Equals(o.Host, found.Host, StringComparison.OrdinalIgnoreCase)))
+                {
+                    options.Add(found);
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Discovery is a convenience on top of a field the operator can always type.
+        }
+
+        return options;
+    }
+
+    /// <summary>
+    /// Picks the Redis-looking Services out of a <c>kubectl get services -A -o json</c> payload: anything
+    /// exposing the Redis port, or a port named for it. Headless Services are skipped — they resolve to
+    /// pod IPs, which is not an address a client should be handed as a stable endpoint.
+    /// </summary>
+    public static List<RedisEndpointOption> ParseRedisServices(string json)
+    {
+        List<RedisEndpointOption> found = [];
+        if (string.IsNullOrWhiteSpace(json)) return found;
+
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("items", out System.Text.Json.JsonElement items)) return found;
+
+        foreach (System.Text.Json.JsonElement item in items.EnumerateArray())
+        {
+            if (!item.TryGetProperty("metadata", out System.Text.Json.JsonElement meta)) continue;
+            string? name = meta.TryGetProperty("name", out System.Text.Json.JsonElement n) ? n.GetString() : null;
+            string? ns = meta.TryGetProperty("namespace", out System.Text.Json.JsonElement nsEl) ? nsEl.GetString() : null;
+            if (name is null || ns is null) continue;
+
+            if (!item.TryGetProperty("spec", out System.Text.Json.JsonElement spec)) continue;
+            if (spec.TryGetProperty("clusterIP", out System.Text.Json.JsonElement ip)
+                && string.Equals(ip.GetString(), "None", StringComparison.Ordinal))
+            {
+                continue;   // headless
+            }
+            if (!spec.TryGetProperty("ports", out System.Text.Json.JsonElement ports)) continue;
+
+            foreach (System.Text.Json.JsonElement port in ports.EnumerateArray())
+            {
+                int number = port.TryGetProperty("port", out System.Text.Json.JsonElement p) && p.TryGetInt32(out int v)
+                    ? v : 0;
+                string portName = port.TryGetProperty("name", out System.Text.Json.JsonElement pn)
+                    ? pn.GetString() ?? "" : "";
+
+                bool looksLikeRedis = number == RedisPort
+                    || portName.Contains("redis", StringComparison.OrdinalIgnoreCase);
+                if (!looksLikeRedis || number == 0) continue;
+
+                found.Add(new RedisEndpointOption(
+                    Host: $"{name}.{ns}.svc.cluster.local",
+                    Port: number,
+                    Label: $"{name} ({ns})",
+                    Managed: false,
+                    RedisClusterId: null));
+                break;   // one entry per Service, not one per port
+            }
+        }
+
+        return [.. found.OrderBy(f => f.Label, StringComparer.OrdinalIgnoreCase)];
     }
 
     // ── Operator detection ────────────────────────────────────────────────────

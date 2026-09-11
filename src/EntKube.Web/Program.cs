@@ -462,6 +462,12 @@ public class Program
         builder.Services.AddScoped<KafkaService>();
         builder.Services.AddScoped<HarborService>();
         builder.Services.AddScoped<OpenLdapService>();
+        builder.Services.AddScoped<StalwartService>();
+
+        // Resolved from the already-registered scoped instances rather than constructed again, so a
+        // provider and the service that owns the configuration are always the same object.
+        builder.Services.AddScoped<IComponentFormValueProvider>(sp => sp.GetRequiredService<OpenLdapService>());
+        builder.Services.AddScoped<IComponentFormValueProvider>(sp => sp.GetRequiredService<StalwartService>());
         builder.Services.AddScoped<TailscaleService>();
         builder.Services.AddScoped<HeadscaleService>();
         builder.Services.AddScoped<AuditService>();

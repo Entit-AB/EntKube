@@ -35,6 +35,7 @@ public class ComponentInstallOrchestrator(
     KeycloakService keycloakService,
     HarborService harborService,
     OpenLdapService openLdapService,
+    StalwartService stalwartService,
     HeadscaleService headscaleService)
 {
     /// <summary>
@@ -78,6 +79,15 @@ public class ComponentInstallOrchestrator(
         // For ClusterIssuer TLS, provision the cert-manager Certificate → tls Secret BEFORE the
         // install so the StatefulSet's init container can mount it (chart does not self-sign).
         await openLdapService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId);
+        // Regenerate the mail components' manifests from what the operator authored, so an install
+        // deploys the current configuration rather than whatever was rendered when it was added.
+        await stalwartService.RefreshManifestIfConfiguredAsync(tenantId, componentId);
+        await stalwartService.RefreshRspamdManifestAsync(tenantId, componentId, ct);
+        await stalwartService.RefreshRoundcubeManifestAsync(tenantId, componentId, ct);
+        await stalwartService.RefreshSnappyMailManifestAsync(tenantId, componentId, ct);
+        // Same reason as OpenLDAP: the StatefulSet mounts the TLS Secret, so a pod started before
+        // cert-manager has issued it sits in ContainerCreating until somebody looks.
+        await stalwartService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId, ct);
 
         HelmCommand command = await lifecycleService.GetInstallCommandAsync(componentId, ct);
         command.NoWait = options.NoWait;

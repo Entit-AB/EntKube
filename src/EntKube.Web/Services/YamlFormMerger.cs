@@ -31,6 +31,18 @@ public class ComponentFormField
     /// <summary>What kind of form control to render.</summary>
     public required FormFieldType Type { get; init; }
 
+    /// <summary>
+    /// True when <see cref="YamlPath"/> is a pseudo-path — a "prefix:name" marker such as
+    /// "cnpg:", "harbor:", "ldap:", "velero:" or "subchart:" — rather than a dot-notation path
+    /// into the Helm values. These fields are owned by component-specific side configuration
+    /// (a KeycloakComponentConfig, an OpenLdapComponentConfig, a storage link, …), so they must
+    /// never be merged into, or read back out of, the values YAML: merging one writes a literal
+    /// "ldap:base-dn" key the chart ignores (and, for a password field, leaks the plaintext into
+    /// the stored values), while reading one back always misses and silently re-fills the form
+    /// with catalog defaults. No real Helm value key contains a colon, so the colon is the test.
+    /// </summary>
+    public bool IsPseudoPath => YamlPath.Contains(':');
+
     /// <summary>Default value for the field (shown when the form first renders).</summary>
     public string? DefaultValue { get; init; }
 
@@ -132,7 +144,37 @@ public enum FormFieldType
     /// Helm release name (e.g. "istio-ingress-external"), which is used for
     /// ManifestPlaceholder substitution at apply-time.
     /// </summary>
-    GatewaySelector
+    GatewaySelector,
+
+    /// <summary>
+    /// Renders as a dropdown of the Redis endpoints on the cluster: the ones EntKube manages (Cache tab)
+    /// and any other Service answering on the Redis port. The stored value is the <c>host:port</c> the
+    /// component's configuration wants, so nothing downstream has to know this was a picker rather than a
+    /// text box — and when the chosen Redis is one EntKube manages, its vaulted password is filled into a
+    /// sibling field whose Key is "redis-password", because an endpoint without its credential is only
+    /// half an answer. Falls back to free text when the cluster has none.
+    /// </summary>
+    RedisSelector,
+
+    /// <summary>
+    /// Renders as a dropdown of the Keycloak realms on this cluster. The stored value is the realm's
+    /// EntKube id, and choosing one is a standing instruction rather than a lookup: on every apply, the
+    /// component's OIDC client is created in that realm if it is missing, its redirect URI is kept
+    /// correct, and the issuer/client id/secret are filled in from it. Left empty, the manual OIDC fields
+    /// beside it are used instead — which is what an external identity provider needs.
+    /// </summary>
+    KeycloakRealmSelector,
+
+    /// <summary>
+    /// Renders as a dropdown of the tenant's stored OIDC app registrations (Microsoft Entra, Google, …
+    /// held in the vault as <see cref="VaultSecretType.OAuthClient"/>). The stored value is the
+    /// registration secret's id, and choosing one is a standing instruction like <see cref="KeycloakRealmSelector"/>:
+    /// on every apply the issuer, client id and client secret are resolved from it — with the
+    /// provider-correct issuer, audience, username claim and scopes filled in — and written into the same
+    /// OIDC secrets a Keycloak realm would populate, so nothing downstream knows which provider it was.
+    /// Left empty, the Keycloak realm or the manual OIDC fields beside it are used instead.
+    /// </summary>
+    OidcAppRegistrationSelector
 }
 
 /// <summary>

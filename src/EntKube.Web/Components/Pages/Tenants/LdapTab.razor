@@ -102,6 +102,20 @@
                     <div class="col-lg-6">
                         <div class="card shadow-sm h-100"><div class="card-body">
                             <h6 class="card-title"><i class="bi bi-diagram-2 me-2"></i>Directory identity</h6>
+                            @if (IsInitialized)
+                            {
+                                <div class="alert alert-warning py-2 px-3 small d-flex align-items-start gap-2">
+                                    <i class="bi bi-exclamation-triangle-fill mt-1"></i>
+                                    <div>
+                                        This directory has already been initialized on its volume. The base DN, the admin and
+                                        config passwords and the TLS setup are written by the container <strong>only at first
+                                        initialization</strong> — re-applying changes the Helm values but not the running
+                                        directory, and a changed password then fails to bind (<code>Invalid credentials (49)</code>).
+                                        To move them, uninstall the component, delete its <code>data-@(ReleaseName)-*</code> PVCs,
+                                        and install again. OUs, users and groups are seed LDIFs and <em>do</em> apply on re-apply.
+                                    </div>
+                                </div>
+                            }
                             <div class="mb-2">
                                 <label class="form-label small">Base DN</label>
                                 <input class="form-control form-control-sm" @bind="cfg.BaseDn" />
@@ -144,6 +158,14 @@
                                     <div class="form-text text-warning">
                                         Requires cert-manager and a ready CA/self-signed ClusterIssuer. Install hangs if the
                                         cert can't be issued — use Self-signed if unsure.
+                                    </div>
+                                }
+                                @if (cfg.TlsMode == OpenLdapTlsMode.Off && cfg.PhpLdapAdminEnabled)
+                                {
+                                    <div class="form-text text-danger">
+                                        phpLDAPadmin always connects with StartTLS (the chart hard-codes it), so with TLS off it
+                                        cannot log in — it reports <em>Could not start TLS</em>. Use Self-signed to keep the
+                                        bundled admin UI working.
                                     </div>
                                 }
                             </div>
@@ -487,6 +509,13 @@
     // True once the selected instance has a saved config row (directory CRUD needs its Id).
     private bool IsPersisted => selected?.Config is not null;
 
+    // True once the release has run at least once: its data volume then already carries slapd.d, and the
+    // container skips the whole first-boot setup (TLS config, admin/config password, base DN) on every
+    // later start — so those settings can no longer be changed by re-applying values.
+    private bool IsInitialized => selected?.Component.Status == ComponentStatus.Installed;
+
+    private string ReleaseName => selected?.Component.ReleaseName ?? selected?.Component.Name ?? "openldap";
+
     private async Task LoadSelectedConfigAsync()
     {
         if (selected?.Config is not null)
@@ -521,6 +550,14 @@
         if (!ValidateWebUi("the self-service password portal", cfg.LtbPasswdEnabled, cfg.LtbPasswdExposeMode, cfg.LtbPasswdHostname)) return false;
 
         // LTB has no working default image — warn (non-blocking) that it won't deploy without one.
+        if (cfg.ReplicaCount > 1 && OpenLdapService.PasswordBreaksReplicationCredentials(adminPassword))
+        {
+            Toasts.Warning(
+                "The admin password contains & / or \\ — the chart substitutes it into the replication "
+                + "credentials with sed, which rewrites those characters. Logins will work, but the replicas "
+                + "will not be able to authenticate to each other. Pick a password without them.");
+        }
+
         if (cfg.LtbPasswdEnabled && string.IsNullOrWhiteSpace(cfg.LtbPasswdImage))
         {
             Toasts.Warning("Self-service password portal has no image set — it will not be deployed. Provide a compatible image to enable it.");

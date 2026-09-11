@@ -24,6 +24,7 @@ public class CatalogComponentRegistrar(
     KeycloakService keycloakService,
     HarborService harborService,
     OpenLdapService openLdapService,
+    StalwartService stalwartService,
     LokiService lokiService,
     MimirService mimirService,
     TempoService tempoService,
@@ -113,6 +114,7 @@ public class CatalogComponentRegistrar(
         await SaveKeycloakConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveHarborConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveOpenLdapConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
+        await SaveMailConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveLokiConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveMimirConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveTempoConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
@@ -153,10 +155,9 @@ public class CatalogComponentRegistrar(
                 continue;
             }
 
-            if (field.YamlPath.StartsWith("cnpg:", StringComparison.Ordinal)
-                || field.YamlPath.StartsWith("harbor:", StringComparison.Ordinal)
-                || field.YamlPath.StartsWith("loki:", StringComparison.Ordinal)
-                || field.YamlPath.StartsWith("ldap:", StringComparison.Ordinal))
+            // cnpg:/harbor:/ldap:/loki:/mimir:/tempo:/velero:/headscale:/entkube-telemetry: pseudo-paths
+            // are handled by the side config above, never by the values YAML.
+            if (field.IsPseudoPath)
             {
                 continue;
             }
@@ -328,6 +329,31 @@ public class CatalogComponentRegistrar(
         }
 
         await openLdapService.ConfigureFromFormAsync(tenantId, componentId, fieldValues);
+    }
+
+    /// <summary>
+    /// Configures the mail components. Stalwart gets a full config record; rspamd and the two
+    /// webmail clients keep their settings as component vault secrets, so all that is needed here
+    /// is to render their manifest from what the form just stored.
+    /// </summary>
+    private async Task SaveMailConfigIfNeededAsync(
+        Guid tenantId, Guid componentId, IReadOnlyDictionary<string, string> fieldValues, CatalogEntry catalogEntry)
+    {
+        switch (catalogEntry.Key)
+        {
+            case StalwartService.CatalogKey:
+                await stalwartService.ConfigureFromFormAsync(tenantId, componentId, fieldValues);
+                break;
+            case StalwartService.RspamdCatalogKey:
+                await stalwartService.RefreshRspamdManifestAsync(tenantId, componentId);
+                break;
+            case StalwartService.RoundcubeCatalogKey:
+                await stalwartService.RefreshRoundcubeManifestAsync(tenantId, componentId);
+                break;
+            case StalwartService.SnappyMailCatalogKey:
+                await stalwartService.RefreshSnappyMailManifestAsync(tenantId, componentId);
+                break;
+        }
     }
 
     private async Task SaveLokiConfigIfNeededAsync(

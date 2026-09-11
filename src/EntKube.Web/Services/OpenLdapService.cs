@@ -28,8 +28,19 @@ public class OpenLdapService(
     VaultService vaultService,
     IKubernetesClientFactory k8sFactory,
     ExternalRouteService routeService,
-    ILogger<OpenLdapService> logger)
+    ILogger<OpenLdapService> logger) : IComponentFormValueProvider
 {
+    // Explicit implementation: the class already exposes CatalogKey as a const, and the interface
+    // wants it as a property.
+    string IComponentFormValueProvider.CatalogKey => CatalogKey;
+
+    async Task<Dictionary<string, string>> IComponentFormValueProvider.ReadFormValuesAsync(
+        Guid tenantId, Guid clusterComponentId, CancellationToken ct)
+    {
+        OpenLdapComponentConfig? config = await GetConfigForComponentAsync(tenantId, clusterComponentId, ct);
+        return config is null ? [] : BuildFormValues(config);
+    }
+
     /// <summary>Subchart Service name suffixes (openldap-stack-ha convention: {release}-{suffix}).</summary>
     private const string PhpLdapAdminServiceSuffix = "phpldapadmin";
     private const string LtbPasswdServiceSuffix = "ltb-passwd";
@@ -70,6 +81,19 @@ public class OpenLdapService(
         return components
             .Select(c => new OpenLdapInstance(c, configs.GetValueOrDefault(c.Id)))
             .ToList();
+    }
+
+    /// <summary>
+    /// The directory config attached to an installed component, or null when it has never been
+    /// configured. Used to re-populate the component's catalog form, whose fields are ldap:
+    /// pseudo-paths and so cannot be read back from the Helm values.
+    /// </summary>
+    public async Task<OpenLdapComponentConfig?> GetConfigForComponentAsync(
+        Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.OpenLdapComponentConfigs
+            .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId && c.TenantId == tenantId, ct);
     }
 
     public async Task<OpenLdapComponentConfig?> GetConfigAsync(Guid configId, CancellationToken ct = default)
@@ -131,6 +155,15 @@ public class OpenLdapService(
 
         if (!string.IsNullOrWhiteSpace(adminPassword))
         {
+            if (config.ReplicaCount > 1 && PasswordBreaksReplicationCredentials(adminPassword))
+            {
+                logger.LogWarning(
+                    "OpenLDAP component {ComponentId}: the admin password contains a character (& / \\) that the "
+                    + "chart's sed-based replication-credential substitution rewrites — the admin bind will work "
+                    + "but the {Replicas} replicas will fail to authenticate to each other.",
+                    clusterComponentId, config.ReplicaCount);
+            }
+
             await vaultService.SetComponentSecretAsync(
                 tenantId, clusterComponentId, AdminPasswordSecretName, adminPassword, ct,
                 k8sSecretName: credSecretName, k8sNamespace: ns);
@@ -223,51 +256,122 @@ public class OpenLdapService(
     public async Task ConfigureFromFormAsync(
         Guid tenantId, Guid clusterComponentId, IReadOnlyDictionary<string, string> form, CancellationToken ct = default)
     {
-        string baseDn = Get(form, "base-dn", "dc=example,dc=com");
-        string org = Get(form, "organization", "EntKube");
-        string tlsMode = Get(form, "tls-mode", "SelfSigned");
-        string? issuer = form.TryGetValue("cluster-issuer", out string? i) && !string.IsNullOrWhiteSpace(i) ? i : null;
-        int replicas = form.TryGetValue("replica-count", out string? r) && int.TryParse(r, out int rp) && rp > 0 ? rp : 1;
-        string storage = Get(form, "storage-size", "8Gi");
         form.TryGetValue("admin-password", out string? adminPassword);
         form.TryGetValue("config-password", out string? configPassword);
-        bool phpEnabled = IsOn(form, "phpldapadmin-enabled");
-        string? phpHost = form.TryGetValue("phpldapadmin-hostname", out string? ph) && !string.IsNullOrWhiteSpace(ph) ? ph.Trim() : null;
-        bool ltbEnabled = IsOn(form, "ltb-passwd-enabled");
-        string? ltbHost = form.TryGetValue("ltb-passwd-hostname", out string? lh) && !string.IsNullOrWhiteSpace(lh) ? lh.Trim() : null;
-
-        OpenLdapTlsMode mode = tlsMode switch
-        {
-            "Off" => OpenLdapTlsMode.Off,
-            "Manual" => OpenLdapTlsMode.Manual,
-            "ClusterIssuer" => OpenLdapTlsMode.ClusterIssuer,
-            _ => OpenLdapTlsMode.SelfSigned,
-        };
 
         await ConfigureAsync(
             tenantId, clusterComponentId,
-            cfg =>
-            {
-                cfg.BaseDn = baseDn;
-                cfg.Organization = org;
-                cfg.TlsMode = mode;
-                cfg.ClusterIssuer = mode == OpenLdapTlsMode.ClusterIssuer ? issuer : null;
-                cfg.ReplicaCount = replicas;
-                cfg.ReplicationEnabled = replicas > 1;
-                cfg.StorageSize = storage;
-                cfg.PhpLdapAdminEnabled = phpEnabled;
-                cfg.PhpLdapAdminHostname = phpEnabled ? phpHost : null;
-                cfg.LtbPasswdEnabled = ltbEnabled;
-                cfg.LtbPasswdHostname = ltbEnabled ? ltbHost : null;
-            },
+            cfg => ApplyFormValues(cfg, form),
             string.IsNullOrWhiteSpace(adminPassword) ? null : adminPassword,
             string.IsNullOrWhiteSpace(configPassword) ? null : configPassword,
             ct);
+    }
 
-        static string Get(IReadOnlyDictionary<string, string> f, string k, string dflt) =>
-            f.TryGetValue(k, out string? v) && !string.IsNullOrWhiteSpace(v) ? v.Trim() : dflt;
-        static bool IsOn(IReadOnlyDictionary<string, string> f, string k) =>
-            f.TryGetValue(k, out string? v) && (v == "true" || v == "on" || v == "1");
+    /// <summary>
+    /// Applies catalog form-field values onto a directory config. Only the keys the form actually
+    /// carries are applied: a form that has no say over a setting (the component form does not offer
+    /// the LTB portal, and never re-sends the overlay/ppolicy settings authored in the LDAP tab) must
+    /// leave that setting exactly as the operator left it, rather than resetting it to a catalog default.
+    /// A brand-new config keeps the entity's own defaults for anything the form omits.
+    /// </summary>
+    /// <summary>
+    /// The inverse of <see cref="ApplyFormValues"/>: the component form's values, read back out of
+    /// the stored config so reopening the Components tab shows the directory as it stands.
+    ///
+    /// <para>Needed because every field here is an <c>ldap:</c> pseudo-path, so the component's
+    /// stored Helm values carry none of them and the form would otherwise re-open on catalog
+    /// defaults — a fresh base DN over a live directory.</para>
+    ///
+    /// <para>The set this returns was correct when it was written by hand; what it did not have was
+    /// anything stopping the next field added to the catalog entry from quietly missing out. Pairing
+    /// it with <see cref="SecretFormKeys"/> lets a test assert the two stay in step.</para>
+    /// </summary>
+    public static Dictionary<string, string> BuildFormValues(OpenLdapComponentConfig config) => new()
+    {
+        ["base-dn"] = config.BaseDn,
+        ["organization"] = config.Organization,
+        ["tls-mode"] = config.TlsMode.ToString(),
+        ["cluster-issuer"] = config.ClusterIssuer ?? "",
+        ["replica-count"] = config.ReplicaCount.ToString(),
+        ["storage-size"] = config.StorageSize,
+        ["phpldapadmin-enabled"] = config.PhpLdapAdminEnabled ? "true" : "false",
+        ["phpldapadmin-hostname"] = config.PhpLdapAdminHostname ?? "",
+    };
+
+    /// <summary>
+    /// Form keys holding a secret, which are never echoed back into the UI. Leaving them out of
+    /// <see cref="BuildFormValues"/> also means a blank field on re-save keeps the stored password
+    /// rather than overwriting it with nothing.
+    /// </summary>
+    public static readonly string[] SecretFormKeys = ["admin-password", "config-password"];
+
+    public static void ApplyFormValues(OpenLdapComponentConfig cfg, IReadOnlyDictionary<string, string> form)
+    {
+        if (TryText(form, "base-dn", out string? baseDn)) cfg.BaseDn = baseDn;
+        if (TryText(form, "organization", out string? org)) cfg.Organization = org;
+
+        if (TryText(form, "tls-mode", out string? tlsMode))
+        {
+            cfg.TlsMode = tlsMode switch
+            {
+                "Off" => OpenLdapTlsMode.Off,
+                "Manual" => OpenLdapTlsMode.Manual,
+                "ClusterIssuer" => OpenLdapTlsMode.ClusterIssuer,
+                _ => OpenLdapTlsMode.SelfSigned,
+            };
+        }
+
+        if (cfg.TlsMode == OpenLdapTlsMode.ClusterIssuer)
+        {
+            if (TryText(form, "cluster-issuer", out string? issuer)) cfg.ClusterIssuer = issuer;
+        }
+        else
+        {
+            cfg.ClusterIssuer = null;
+        }
+
+        if (TryText(form, "replica-count", out string? replicaText)
+            && int.TryParse(replicaText, out int replicas) && replicas > 0)
+        {
+            cfg.ReplicaCount = replicas;
+            cfg.ReplicationEnabled = replicas > 1;
+        }
+
+        if (TryText(form, "storage-size", out string? storage)) cfg.StorageSize = storage;
+
+        if (TryBool(form, "phpldapadmin-enabled", out bool phpEnabled))
+        {
+            cfg.PhpLdapAdminEnabled = phpEnabled;
+            if (!phpEnabled) cfg.PhpLdapAdminHostname = null;
+        }
+        if (cfg.PhpLdapAdminEnabled && TryText(form, "phpldapadmin-hostname", out string? phpHost))
+        {
+            cfg.PhpLdapAdminHostname = phpHost;
+        }
+
+        if (TryBool(form, "ltb-passwd-enabled", out bool ltbEnabled))
+        {
+            cfg.LtbPasswdEnabled = ltbEnabled;
+            if (!ltbEnabled) cfg.LtbPasswdHostname = null;
+        }
+        if (cfg.LtbPasswdEnabled && TryText(form, "ltb-passwd-hostname", out string? ltbHost))
+        {
+            cfg.LtbPasswdHostname = ltbHost;
+        }
+
+        static bool TryText(IReadOnlyDictionary<string, string> f, string k, out string value)
+        {
+            value = f.TryGetValue(k, out string? v) && !string.IsNullOrWhiteSpace(v) ? v.Trim() : "";
+            return value.Length > 0;
+        }
+
+        static bool TryBool(IReadOnlyDictionary<string, string> f, string k, out bool value)
+        {
+            value = false;
+            if (!f.TryGetValue(k, out string? v) || string.IsNullOrWhiteSpace(v)) return false;
+            value = v is "true" or "on" or "1" or "True";
+            return true;
+        }
     }
 
     /// <summary>
@@ -617,10 +721,13 @@ public class OpenLdapService(
         sb.Append("# Generated by EntKube from the OpenLDAP directory config — edits here are\n");
         sb.Append("# overwritten on the next Save & Apply. Manage the directory in the LDAP tab.\n\n");
         sb.Append($"replicaCount: {Math.Max(1, config.ReplicaCount)}\n\n");
+        // A blank admin username would render `cn=,<base dn>` — a DN the server rejects outright.
+        string adminUser = string.IsNullOrWhiteSpace(config.AdminUsername) ? "admin" : config.AdminUsername.Trim();
+
         sb.Append("global:\n");
         // ldapDomain accepts an explicit DN (dc=example,dc=com) — pass the base DN verbatim.
         sb.Append($"  ldapDomain: \"{config.BaseDn.Trim()}\"\n");
-        sb.Append($"  adminUser: \"{config.AdminUsername}\"\n");
+        sb.Append($"  adminUser: \"{adminUser}\"\n");
         sb.Append("  configUser: \"admin\"\n");
         // Admin/config passwords come from the EntKube-managed Secret (vault-synced):
         // keys LDAP_ADMIN_PASSWORD + LDAP_CONFIG_ADMIN_PASSWORD.
@@ -666,22 +773,34 @@ public class OpenLdapService(
         {
             sb.Append("initTLSSecret:\n  tls_enabled: true\n");
             sb.Append($"  secret: \"{TlsSecretName}\"\n\n");
-            sb.Append("env:\n");
-            sb.Append("  LDAP_ENABLE_TLS: \"yes\"\n");
-            sb.Append($"  LDAP_REQUIRE_TLS: \"{Bool(!config.StartTlsEnabled)}\"\n\n");
         }
         else
         {
             // SelfSigned or Off — chart self-signs into an emptyDir (no external Secret to wait for).
             sb.Append("initTLSSecret:\n  tls_enabled: false\n\n");
-            sb.Append("env:\n");
+        }
+
+        sb.Append("env:\n");
+        // The admin DN is cn=$LDAP_ADMIN_USERNAME,<base dn>, and the container reads that name ONLY from
+        // its environment. global.adminUser above does not reach it — with global.existingSecret set the
+        // chart writes no Secret of its own, and LDAP_ADMIN_USERNAME appears nowhere else — so without
+        // this line the directory always gets cn=admin while phpLDAPadmin (built from global.adminUser)
+        // binds cn=<configured name>: "Invalid credentials (49)" for every password.
+        sb.Append($"  LDAP_ADMIN_USERNAME: \"{adminUser}\"\n");
+        if (externalCert)
+        {
+            sb.Append("  LDAP_ENABLE_TLS: \"yes\"\n");
+            sb.Append($"  LDAP_REQUIRE_TLS: \"{Bool(!config.StartTlsEnabled)}\"\n");
+        }
+        else
+        {
             sb.Append($"  LDAP_ENABLE_TLS: \"{(config.TlsMode == OpenLdapTlsMode.Off ? "no" : "yes")}\"\n");
             if (config.TlsMode != OpenLdapTlsMode.Off)
             {
                 sb.Append($"  LDAP_REQUIRE_TLS: \"{Bool(!config.StartTlsEnabled)}\"\n");
             }
-            sb.Append('\n');
         }
+        sb.Append('\n');
 
         // Custom overlay notes + seed entries. The root org entry MUST be present because the
         // chart skips default-tree creation when customLdifFiles is set.
@@ -695,6 +814,22 @@ public class OpenLdapService(
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// True when a password cannot survive the chart's replication-credential substitution.
+    ///
+    /// With <c>global.existingSecret</c> set, the chart writes <c>credentials=%%ADMIN_PASSWORD%%</c> into the
+    /// syncrepl directives and the init container substitutes it with
+    /// <c>sed "s/%%ADMIN_PASSWORD%%/${LDAP_ADMIN_PASSWORD}/g"</c>. In a sed replacement <c>&amp;</c> means "the
+    /// whole match", <c>/</c> ends the replacement and <c>\</c> escapes — so a password containing any of them
+    /// is silently rewritten and the replicas can no longer authenticate to each other. The admin bind still
+    /// works (that password never passes through sed), which is what makes it easy to miss: replication just
+    /// stops, with a credentials error buried in the slapd log.
+    ///
+    /// Only relevant with more than one replica; a single-node directory runs no syncrepl.
+    /// </summary>
+    public static bool PasswordBreaksReplicationCredentials(string? password) =>
+        !string.IsNullOrEmpty(password) && password.AsSpan().IndexOfAny('&', '/', '\\') >= 0;
 
     /// <summary>The base DN's root organization entry (dcObject + organization).</summary>
     public static string BuildRootLdif(OpenLdapComponentConfig config)

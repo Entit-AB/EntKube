@@ -1,0 +1,1260 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject StalwartService Mail
+@inject ComponentInstallOrchestrator InstallOrchestrator
+@inject ToastService Toasts
+
+@* ===========================================================================
+   Mail Tab — manages EntKube-authored Stalwart mail servers.
+
+   The configuration here is split the way Stalwart v0.16 splits it. The pod's
+   shape (ports, storage, TLS, exposure) is a manifest EntKube re-applies; the
+   server's own state (domains, mailboxes, directory, spam filter) lives inside
+   its datastore and is converged by "Apply configuration", which restarts the
+   server into recovery mode to do it. Saving is therefore cheap and applying
+   is not, and the two buttons say so.
+   =========================================================================== *@
+
+<LoadingPanel Loading="@loading" LoadingText="Loading mail servers…">
+@if (!loading)
+{
+    <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                   Message="@(pendingConfirm?.Message ?? "")"
+                   ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+                   IsBusy="confirmBusy"
+                   OnConfirm="RunPendingConfirmAsync"
+                   OnCancel="() => pendingConfirm = null" />
+
+    @if (instances.Count == 0)
+    {
+        <div class="alert alert-info d-flex align-items-start gap-2">
+            <i class="bi bi-info-circle-fill mt-1"></i>
+            <div>
+                <strong>No Stalwart mail servers found for this environment.</strong>
+                <div class="small mt-1">
+                    Install <em>Stalwart Mail Server</em> from a cluster's <strong>Components</strong> tab (Mail category),
+                    then return here to add domains and mailboxes. <em>Rspamd</em> and a webmail client
+                    (<em>Roundcube</em> or <em>SnappyMail</em>) live in the same category.
+                </div>
+            </div>
+        </div>
+    }
+    else
+    {
+        <div class="mb-4">
+            <label class="form-label small text-muted mb-1">Mail server</label>
+            <div class="d-flex gap-2 flex-wrap">
+                @foreach (var inst in instances)
+                {
+                    bool active = selected?.Component.Id == inst.Component.Id;
+                    <button class="btn btn-sm @(active ? "btn-primary" : "btn-outline-secondary")"
+                            @onclick="() => SelectInstanceAsync(inst)">
+                        <i class="bi bi-envelope-at me-1"></i>@inst.Component.Cluster.Name
+                        @if (inst.Config is null)
+                        {
+                            <span class="badge bg-warning text-dark ms-1">unconfigured</span>
+                        }
+                    </button>
+                }
+            </div>
+        </div>
+
+        @if (selected is not null && cfg is not null)
+        {
+            <div class="d-flex align-items-center justify-content-between mb-3">
+                <div>
+                    <h5 class="mb-0"><i class="bi bi-envelope-at text-primary me-2"></i>@cfg.Hostname</h5>
+                    <div class="small text-muted">
+                        @if (cfg.LastAppliedAt is DateTime applied)
+                        {
+                            <span>Configuration last applied @applied.ToString("yyyy-MM-dd HH:mm") UTC</span>
+                        }
+                        else
+                        {
+                            <span class="text-warning">Never applied — the running server has none of this yet.</span>
+                        }
+                    </div>
+                </div>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-sm btn-outline-primary" @onclick="SaveConfigAsync" disabled="@busy">
+                        <i class="bi bi-save me-1"></i>Save
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="ApplyManifestAsync" disabled="@busy">
+                        <i class="bi bi-cloud-upload me-1"></i>Re-deploy pod
+                    </button>
+                    <button class="btn btn-sm btn-success" @onclick="ConfirmApplyConfiguration"
+                            disabled="@(busy || !IsPersisted || preflight.Any(i => i.IsBlocking))"
+                            title="@(preflight.Any(i => i.IsBlocking)
+                                ? "Resolve the problems listed above first"
+                                : "Converge the running server onto this configuration")">
+                        <i class="bi bi-arrow-repeat me-1"></i>Apply configuration
+                    </button>
+                </div>
+            </div>
+            <div class="form-check form-switch small mb-3">
+                <input class="form-check-input" type="checkbox" id="clearbans" @bind="clearBlockedIps" />
+                <label class="form-check-label" for="clearbans">
+                    Also clear every blocked IP address on this apply
+                </label>
+                <div class="form-text">
+                    Stalwart bans an address after repeated failed logins. Use this if the server answers
+                    every request with <em>403 Forbidden</em> — that is what it looks like when the address
+                    it banned was the ingress gateway, which is every user at once. It lifts bans on real
+                    attackers too, so it is off by default and not remembered.
+                </div>
+            </div>
+            <div class="form-check form-switch small mb-3">
+                <input class="form-check-input" type="checkbox" id="verboselog" @bind="verboseLogging" />
+                <label class="form-check-label" for="verboselog">
+                    Verbose server logging on this apply
+                </label>
+                <div class="form-text">
+                    Sets Stalwart's log level to <em>debug</em> so a rejected login explains which step
+                    refused it — at the normal level it says nothing. Noisy; the next apply restores it.
+                </div>
+            </div>
+
+            @if (!IsPersisted)
+            {
+                <div class="alert alert-warning d-flex align-items-start gap-2 py-2">
+                    <i class="bi bi-exclamation-triangle-fill mt-1"></i>
+                    <div class="small">
+                        This mail server isn't configured yet. Set the hostname and an administrator password,
+                        then <strong>Save</strong> — after that you can add domains and mailboxes and apply
+                        everything to the running server.
+                    </div>
+                </div>
+            }
+
+            @if (preflight.Count > 0)
+            {
+                <div class="alert @(preflight.Any(i => i.IsBlocking) ? "alert-danger" : "alert-warning") py-2">
+                    <div class="fw-semibold mb-2">
+                        <i class="bi bi-exclamation-octagon-fill me-1"></i>
+                        @(preflight.Any(i => i.IsBlocking)
+                            ? "This configuration would produce a mail server nobody can log in to."
+                            : "Worth checking before you apply.")
+                    </div>
+                    <ul class="mb-0 small">
+                        @foreach (var issue in preflight)
+                        {
+                            <li class="mb-1">
+                                @issue.Problem
+                                <div class="text-body-secondary">@issue.Remedy</div>
+                            </li>
+                        }
+                    </ul>
+                </div>
+            }
+
+            <ul class="nav nav-tabs mb-3">
+                <li class="nav-item"><a class="nav-link @(view == "config" ? "active" : "")" role="button" @onclick="@(() => view = "config")">Configuration</a></li>
+                @if (IsPersisted)
+                {
+                    <li class="nav-item"><a class="nav-link @(view == "domains" ? "active" : "")" role="button" @onclick="@(() => view = "domains")">Domains <span class="badge bg-secondary rounded-pill">@cfg.Domains.Count</span></a></li>
+                    <li class="nav-item"><a class="nav-link @(view == "mailboxes" ? "active" : "")" role="button" @onclick="@(() => view = "mailboxes")">Mailboxes <span class="badge bg-secondary rounded-pill">@cfg.Accounts.Count</span></a></li>
+                    <li class="nav-item"><a class="nav-link @(view == "dns" ? "active" : "")" role="button" @onclick="@(() => view = "dns")">DNS</a></li>
+                }
+                else
+                {
+                    <li class="nav-item"><span class="nav-link disabled" title="Save the configuration first">Domains</span></li>
+                    <li class="nav-item"><span class="nav-link disabled" title="Save the configuration first">Mailboxes</span></li>
+                    <li class="nav-item"><span class="nav-link disabled" title="Save the configuration first">DNS</span></li>
+                }
+            </ul>
+
+            @if (view == "config")
+            {
+                <div class="row g-4">
+                    <div class="col-lg-6">
+                        <div class="card shadow-sm h-100"><div class="card-body">
+                            <h6 class="card-title"><i class="bi bi-hdd-network me-2"></i>Identity &amp; exposure</h6>
+                            <div class="mb-2">
+                                <label class="form-label small">Mail hostname</label>
+                                <input class="form-control form-control-sm" @bind="cfg.Hostname" placeholder="mail.example.com" />
+                                <div class="form-text">
+                                    The SMTP greeting, the name on the certificate, and what every MX record points at.
+                                    It needs an A record on the LoadBalancer address below and a matching PTR, or a lot of
+                                    receivers will refuse the mail.
+                                </div>
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label small">Web hostname (admin UI, JMAP, autoconfig)</label>
+                                <input class="form-control form-control-sm" @bind="cfg.AdminHostname" placeholder="mailadmin.example.com" />
+                                <div class="form-text">
+                                    Published through the cluster's gateway — Istio or Traefik, whichever is installed.
+                                    Leave blank to keep these reachable only inside the cluster.
+                                </div>
+                            </div>
+                            <div class="row g-2 mb-2">
+                                <div class="col">
+                                    <label class="form-label small">Administrator</label>
+                                    <input class="form-control form-control-sm" @bind="cfg.AdminUsername" />
+                                    <div class="form-text">
+                                        A local part (placed in the primary domain) or a full address in any served
+                                        domain. Gets the Admin role on
+                                        <code>@(StalwartService.ResolveAdminIdentity(cfg, cfg.Domains.ToList())?.Address
+                                            ?? $"{cfg.AdminUsername}@{cfg.Domains.FirstOrDefault(d => d.IsPrimary)?.Name ?? cfg.Domains.FirstOrDefault()?.Name ?? "your-domain"}")</code>.
+                                        @if (cfg.AuthMode == StalwartAuthMode.Ldap)
+                                        {
+                                            <span>
+                                                A directory user with that email address has to exist — the
+                                                password stays in LDAP, and this only grants the role.
+                                            </span>
+                                        }
+                                        else if (cfg.AuthMode == StalwartAuthMode.Oidc)
+                                        {
+                                            <span>Signs in through Keycloak; the password below is not used.</span>
+                                        }
+                                    </div>
+                                </div>
+                                <div class="col">
+                                    <label class="form-label small">Administrator password</label>
+                                    <input type="password" class="form-control form-control-sm" placeholder="unchanged" @bind="adminPassword" />
+                                </div>
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label small">Mail ports</label>
+                                <select class="form-select form-select-sm" @bind="cfg.ExposeMode">
+                                    <option value="@StalwartMailExposeMode.LoadBalancer">LoadBalancer — own address for SMTP/IMAP</option>
+                                    <option value="@StalwartMailExposeMode.ClusterIp">ClusterIP — internal only</option>
+                                </select>
+                            </div>
+                            @if (cfg.ExposeMode == StalwartMailExposeMode.LoadBalancer)
+                            {
+                                <div class="mb-2">
+                                    <label class="form-label small">Requested address</label>
+                                    <input class="form-control form-control-sm" @bind="cfg.LoadBalancerIp" placeholder="leave blank to take what is allocated" />
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">LoadBalancer annotations</label>
+                                    <textarea class="form-control form-control-sm font-monospace" rows="3"
+                                              @bind="cfg.LoadBalancerAnnotations"
+                                              placeholder="one key: value per line"></textarea>
+                                    <div class="form-text">Provider-specific settings — a floating IP, an address pool, an internal-LB flag.</div>
+                                </div>
+                            }
+                            <div class="d-flex gap-3 flex-wrap mt-3">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="p-smtp" @bind="cfg.SmtpEnabled" />
+                                    <label class="form-check-label small" for="p-smtp">SMTP (25)</label>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="p-sub" @bind="cfg.SubmissionEnabled" />
+                                    <label class="form-check-label small" for="p-sub">Submission (587/465)</label>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="p-imap" @bind="cfg.ImapEnabled" />
+                                    <label class="form-check-label small" for="p-imap">IMAP (143/993)</label>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="p-pop3" @bind="cfg.Pop3Enabled" />
+                                    <label class="form-check-label small" for="p-pop3">POP3 (110/995)</label>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="p-sieve" @bind="cfg.ManageSieveEnabled" />
+                                    <label class="form-check-label small" for="p-sieve">ManageSieve (4190)</label>
+                                </div>
+                            </div>
+                            @if (!cfg.SmtpEnabled)
+                            {
+                                <div class="form-text text-warning mt-2">
+                                    With SMTP off this server cannot receive mail from anywhere else — it can only submit.
+                                </div>
+                            }
+                            <div class="row g-2 mt-3">
+                                <div class="col">
+                                    <label class="form-label small">Storage size</label>
+                                    <input class="form-control form-control-sm" @bind="cfg.StorageSize" />
+                                    <div class="form-text">Messages, indexes and the whole server configuration.</div>
+                                </div>
+                                <div class="col">
+                                    <label class="form-label small">Storage class</label>
+                                    <input class="form-control form-control-sm" @bind="cfg.StorageClass" placeholder="cluster default" />
+                                </div>
+                            </div>
+                        </div></div>
+                    </div>
+
+                    <div class="col-lg-6">
+                        <div class="card shadow-sm h-100"><div class="card-body">
+                            <h6 class="card-title"><i class="bi bi-person-badge me-2"></i>Authentication</h6>
+                            <div class="mb-2">
+                                <select class="form-select form-select-sm" @bind="cfg.AuthMode">
+                                    <option value="@StalwartAuthMode.Ldap">LDAP — OpenLDAP directory</option>
+                                    <option value="@StalwartAuthMode.Oidc">OIDC — Keycloak tokens</option>
+                                    <option value="@StalwartAuthMode.Internal">Internal — Stalwart's own accounts</option>
+                                </select>
+                                <div class="form-text">
+                                    Stalwart accepts one directory at a time, so this is a choice rather than a set of
+                                    options. LDAP: every mail client works with a password, and mailboxes follow the
+                                    directory. OIDC: webmail gets single sign-on, but mailboxes must exist before their
+                                    first login and clients without OAUTHBEARER — Outlook, Thunderbird, Apple Mail —
+                                    need app passwords.
+                                </div>
+                            </div>
+
+                            @if (cfg.AuthMode == StalwartAuthMode.Ldap)
+                            {
+                                <div class="mb-2">
+                                    <label class="form-label small">EntKube-managed directory</label>
+                                    <select class="form-select form-select-sm" value="@(cfg.OpenLdapConfigId?.ToString() ?? "")"
+                                            @onchange="OnDirectoryLinkChanged">
+                                        <option value="">Not linked — enter the connection by hand</option>
+                                        @foreach (var dir in directories)
+                                        {
+                                            <option value="@dir.Id">@dir.BaseDn</option>
+                                        }
+                                    </select>
+                                    <div class="form-text">
+                                        Linking derives the URL, base DN and bind DN from that directory on save, so the
+                                        two components cannot drift apart.
+                                    </div>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">LDAP URL</label>
+                                    <input class="form-control form-control-sm" @bind="cfg.LdapUrl"
+                                           disabled="@(cfg.OpenLdapConfigId is not null)"
+                                           placeholder="ldap://openldap.openldap.svc.cluster.local:389" />
+                                </div>
+                                <div class="row g-2 mb-2">
+                                    <div class="col">
+                                        <label class="form-label small">Base DN</label>
+                                        <input class="form-control form-control-sm" @bind="cfg.LdapBaseDn"
+                                               disabled="@(cfg.OpenLdapConfigId is not null)" />
+                                    </div>
+                                    <div class="col">
+                                        <label class="form-label small">Bind DN</label>
+                                        <input class="form-control form-control-sm" @bind="cfg.LdapBindDn"
+                                               disabled="@(cfg.OpenLdapConfigId is not null)" />
+                                    </div>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">Bind password</label>
+                                    <input type="password" class="form-control form-control-sm" placeholder="unchanged" @bind="ldapBindPassword" />
+                                    <div class="form-text">Reaches the server as an environment variable, so it never appears in the applied configuration.</div>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">Login filter</label>
+                                    <input class="form-control form-control-sm font-monospace" @bind="cfg.LdapLoginFilter" />
+                                    <div class="form-text">
+                                        <code>?</code> is the login name, which since v0.16 is a full email address —
+                                        a filter matching a bare <code>uid</code> will never match.
+                                    </div>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">Mailbox filter</label>
+                                    <input class="form-control form-control-sm font-monospace" @bind="cfg.LdapMailboxFilter" />
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="ldaptls" @bind="cfg.LdapUseTls" />
+                                    <label class="form-check-label small" for="ldaptls">Connect over LDAPS</label>
+                                </div>
+                            }
+                            else if (cfg.AuthMode == StalwartAuthMode.Oidc)
+                            {
+                                <div class="mb-2">
+                                    <label class="form-label small">Identity provider</label>
+                                    <select class="form-select form-select-sm" value="@(cfg.OidcAppRegistrationSecretId?.ToString() ?? "")"
+                                            @onchange="e => cfg.OidcAppRegistrationSecretId = Guid.TryParse(e.Value?.ToString(), out var g) ? g : null">
+                                        <option value="">Enter the issuer by hand</option>
+                                        @foreach (var reg in oidcRegistrations)
+                                        {
+                                            <option value="@reg.SecretId">@reg.Name (@OAuthClientHelper.DisplayName(reg.Provider))</option>
+                                        }
+                                    </select>
+                                    <div class="form-text">
+                                        Pick a stored app registration (e.g. Microsoft Entra) and the issuer, username claim,
+                                        audience and scopes are derived from it on save — including the provider-specific rules
+                                        (Entra requires the audience to be the client id, and the profile scope for the username).
+                                    </div>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">Issuer URL</label>
+                                    <input class="form-control form-control-sm" @bind="cfg.OidcIssuerUrl"
+                                           disabled="@(cfg.OidcAppRegistrationSecretId is not null)"
+                                           placeholder="https://login.example.com/auth/realms/mail" />
+                                </div>
+                                <div class="row g-2 mb-2">
+                                    <div class="col">
+                                        <label class="form-label small">Username claim</label>
+                                        <input class="form-control form-control-sm" @bind="cfg.OidcClaimUsername" />
+                                    </div>
+                                    <div class="col">
+                                        <label class="form-label small">Username domain</label>
+                                        <input class="form-control form-control-sm" @bind="cfg.OidcUsernameDomain" placeholder="example.com" />
+                                    </div>
+                                </div>
+                                <div class="row g-2 mb-2">
+                                    <div class="col">
+                                        <label class="form-label small">Groups claim</label>
+                                        <input class="form-control form-control-sm" @bind="cfg.OidcClaimGroups" />
+                                    </div>
+                                    <div class="col">
+                                        <label class="form-label small">Required audience</label>
+                                        <input class="form-control form-control-sm" @bind="cfg.OidcRequireAudience" placeholder="any" />
+                                    </div>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">Required scopes</label>
+                                    <input class="form-control form-control-sm" @bind="cfg.OidcRequireScopes" />
+                                </div>
+                                @if (cfg.Accounts.Count == 0)
+                                {
+                                    <div class="alert alert-warning py-2 px-3 small mb-0">
+                                        <i class="bi bi-exclamation-triangle me-1"></i>
+                                        No mailboxes are defined. In OIDC mode a valid token is not enough — an account
+                                        that does not already exist is refused at first login. Add mailboxes on the
+                                        Mailboxes tab, or import them from the linked directory.
+                                    </div>
+                                }
+                            }
+                            else
+                            {
+                                <div class="alert alert-secondary py-2 px-3 small mb-0">
+                                    Accounts and passwords live in Stalwart itself. Manage them from its admin UI —
+                                    the mailboxes listed here are still created, but they have no password until one
+                                    is set there.
+                                </div>
+                            }
+                        </div></div>
+                    </div>
+
+                    <div class="col-lg-6">
+                        <div class="card shadow-sm h-100"><div class="card-body">
+                            <h6 class="card-title"><i class="bi bi-shield-lock me-2"></i>Mail TLS</h6>
+                            <div class="mb-2">
+                                <select class="form-select form-select-sm" @bind="cfg.TlsMode">
+                                    <option value="@StalwartTlsMode.ClusterIssuer">cert-manager ClusterIssuer</option>
+                                    <option value="@StalwartTlsMode.Acme">Stalwart's own ACME client</option>
+                                    <option value="@StalwartTlsMode.Manual">Manual certificate</option>
+                                </select>
+                            </div>
+                            @if (cfg.TlsMode == StalwartTlsMode.ClusterIssuer)
+                            {
+                                <div class="mb-2">
+                                    <label class="form-label small">Cluster issuer</label>
+                                    <input class="form-control form-control-sm" @bind="cfg.ClusterIssuer" placeholder="letsencrypt-prod" />
+                                    <div class="form-text">
+                                        Issued before the pod starts, because the pod mounts it. The issuer has to be
+                                        able to prove ownership of <code>@cfg.Hostname</code>, and that name resolves to
+                                        the mail LoadBalancer rather than the gateway — so it needs a <strong>DNS-01
+                                        solver</strong>. An HTTP-01-only issuer cannot solve for this name and the
+                                        install will stop waiting for a certificate that is never issued.
+                                    </div>
+                                </div>
+                            }
+                            else if (cfg.TlsMode == StalwartTlsMode.Acme)
+                            {
+                                <div class="mb-2">
+                                    <label class="form-label small">ACME contact</label>
+                                    <input class="form-control form-control-sm" @bind="cfg.AcmeContact" placeholder="hostmaster@@example.com" />
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">Challenge</label>
+                                    <select class="form-select form-select-sm" @bind="cfg.AcmeChallenge">
+                                        <option value="@StalwartAcmeChallenge.TlsAlpn01">TLS-ALPN-01 (port 443)</option>
+                                        <option value="@StalwartAcmeChallenge.Http01">HTTP-01 (port 80)</option>
+                                        <option value="@StalwartAcmeChallenge.Dns01">DNS-01</option>
+                                    </select>
+                                    <div class="form-text">
+                                        @if (cfg.AcmeChallenge == StalwartAcmeChallenge.Dns01)
+                                        {
+                                            <span>
+                                                No extra ports are opened, but Stalwart solves this challenge itself and
+                                                EntKube does not configure its DNS credentials — set the DNS provider up
+                                                in Stalwart's own admin UI, or use the cluster issuer, which already has
+                                                a solver.
+                                            </span>
+                                        }
+                                        else
+                                        {
+                                            <span>
+                                                Port @(cfg.AcmeChallenge == StalwartAcmeChallenge.Http01 ? "80" : "443")
+                                                is published on the mail LoadBalancer so the CA can reach the server the
+                                                certificate is for, and it must be reachable from the internet. That port
+                                                serves nothing but the challenge — the admin UI and JMAP stay on the
+                                                gateway hostname.
+                                            </span>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="mb-2">
+                                    <label class="form-label small">Certificate (PEM)</label>
+                                    <textarea class="form-control form-control-sm font-monospace" rows="4" @bind="tlsCertificate"
+                                              placeholder="unchanged"></textarea>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small">Private key (PEM)</label>
+                                    <textarea class="form-control form-control-sm font-monospace" rows="4" @bind="tlsPrivateKey"
+                                              placeholder="unchanged"></textarea>
+                                </div>
+                            }
+                            <hr />
+                            <div class="mb-2">
+                                <label class="form-label small">Web hostname issuer</label>
+                                <input class="form-control form-control-sm" @bind="cfg.WebClusterIssuer" placeholder="letsencrypt-prod" />
+                                <div class="form-text">
+                                    Separate from the mail certificate: the web hostname is public and the gateway
+                                    terminates its TLS, so a public ACME issuer fits here.
+                                </div>
+                            </div>
+                        </div></div>
+                    </div>
+
+                    <div class="col-lg-6">
+                        <div class="card shadow-sm h-100"><div class="card-body">
+                            <h6 class="card-title"><i class="bi bi-shield-check me-2"></i>Spam filtering</h6>
+                            <div class="form-check form-switch mb-2">
+                                <input class="form-check-input" type="checkbox" id="rspamd" @bind="cfg.RspamdEnabled" />
+                                <label class="form-check-label small" for="rspamd">Scan incoming mail with rspamd</label>
+                            </div>
+                            @if (cfg.RspamdEnabled)
+                            {
+                                <div class="row g-2 mb-2">
+                                    <div class="col-8">
+                                        <label class="form-label small">rspamd host</label>
+                                        <input class="form-control form-control-sm" @bind="cfg.RspamdHost"
+                                               placeholder="rspamd.rspamd.svc.cluster.local" />
+                                    </div>
+                                    <div class="col-4">
+                                        <label class="form-label small">Milter port</label>
+                                        <input type="number" class="form-control form-control-sm" @bind="cfg.RspamdPort" />
+                                    </div>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="rspamdfail" @bind="cfg.RspamdTempFailOnError" />
+                                    <label class="form-check-label small" for="rspamdfail">Defer mail when rspamd is unreachable</label>
+                                </div>
+                                <div class="form-text">
+                                    On by default, and deliberately: the alternative is that an rspamd outage quietly
+                                    turns the spam filter off while mail keeps flowing.
+                                </div>
+                                @if (string.IsNullOrWhiteSpace(cfg.RspamdHost))
+                                {
+                                    <div class="form-text text-warning">
+                                        No host set, so no milter is configured — install the Rspamd component and point
+                                        this at its Service.
+                                    </div>
+                                }
+                            }
+                            else
+                            {
+                                <div class="form-text">
+                                    Install the <em>Rspamd</em> component from the Mail category first; it keeps its
+                                    learned state in the cluster's Redis.
+                                </div>
+                            }
+                        </div></div>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="card shadow-sm h-100"><div class="card-body">
+                            <h6 class="card-title"><i class="bi bi-diagram-3 me-2"></i>High availability</h6>
+                            <div class="form-check form-switch mb-2">
+                                <input class="form-check-input" type="checkbox" id="ha" @bind="cfg.HighAvailability" />
+                                <label class="form-check-label small" for="ha">Run more than one replica</label>
+                            </div>
+                            <div class="form-text mb-3">
+                                Single-node Stalwart keeps everything in an embedded database on one volume. HA moves the
+                                datastore to a shared PostgreSQL, message bodies to S3, and coordinates the nodes through
+                                Redis — every node then runs the full role. <strong>Applying an incomplete HA config is
+                                blocked</strong>, because a misconfigured cluster can corrupt the shared datastore.
+                            </div>
+                            @if (cfg.HighAvailability)
+                            {
+                                <div class="row g-3">
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Replicas</label>
+                                        <input type="number" min="2" class="form-control form-control-sm" @bind="cfg.Replicas" />
+                                    </div>
+                                    <div class="col-md-8">
+                                        <label class="form-label small">Shared datastore (CNPG PostgreSQL)</label>
+                                        <select class="form-select form-select-sm" value="@(cfg.CnpgDatabaseId?.ToString() ?? "")"
+                                                @onchange="e => cfg.CnpgDatabaseId = Guid.TryParse(e.Value?.ToString(), out var g) ? g : null">
+                                            <option value="">Choose a database…</option>
+                                            @foreach (var d in haDatabases)
+                                            {
+                                                <option value="@d.Id">@d.Name</option>
+                                            }
+                                        </select>
+                                    </div>
+                                    <div class="col-md-8">
+                                        <label class="form-label small">Shared blob store (S3)</label>
+                                        <select class="form-select form-select-sm" value="@(cfg.BlobStorageLinkId?.ToString() ?? "")"
+                                                @onchange="e => cfg.BlobStorageLinkId = Guid.TryParse(e.Value?.ToString(), out var g) ? g : null">
+                                            <option value="">Choose a storage link…</option>
+                                            @foreach (var l in haStorageLinks)
+                                            {
+                                                <option value="@l.Id">@l.Name</option>
+                                            }
+                                        </select>
+                                        <div class="form-text">Message bodies and attachments live here so every node can reach them.</div>
+                                    </div>
+                                    @if (haRedisEndpoints.Count > 0)
+                                    {
+                                        <div class="col-12">
+                                            <label class="form-label small">Coordinator (Redis)</label>
+                                            <select class="form-select form-select-sm"
+                                                    value="@($"{cfg.CoordinatorRedisHost}:{cfg.CoordinatorRedisPort}")"
+                                                    @onchange="OnCoordinatorRedisSelectedAsync">
+                                                <option value="">Choose a Redis on this cluster…</option>
+                                                @foreach (var r in haRedisEndpoints)
+                                                {
+                                                    <option value="@r.Endpoint">@r.Label — @r.Endpoint</option>
+                                                }
+                                                <option value="__manual__">Other — enter host and port manually</option>
+                                            </select>
+                                            <div class="form-text">
+                                                Pick the Redis component the nodes coordinate through and EntKube fills the host, port
+                                                and (for a Redis it manages) the password. This is the existing Redis component — the
+                                                same one rspamd already uses.
+                                            </div>
+                                        </div>
+                                    }
+                                    <div class="col-md-8">
+                                        <label class="form-label small">Coordinator Redis host</label>
+                                        <input class="form-control form-control-sm" @bind="cfg.CoordinatorRedisHost"
+                                               placeholder="redis.redis.svc.cluster.local" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Coordinator Redis port</label>
+                                        <input type="number" class="form-control form-control-sm" @bind="cfg.CoordinatorRedisPort" />
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">Redis password</label>
+                                        <input type="password" class="form-control form-control-sm" placeholder="unchanged / none"
+                                               @bind="coordinatorRedisPassword" />
+                                    </div>
+                                </div>
+                            }
+                        </div></div>
+                    </div>
+                </div>
+            }
+            else if (view == "domains")
+            {
+                <div class="card shadow-sm mb-3"><div class="card-body">
+                    <h6 class="card-title"><i class="bi bi-plus-circle me-2"></i>Add a domain</h6>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-5">
+                            <label class="form-label small">Domain</label>
+                            <input class="form-control form-control-sm" @bind="newDomainName" placeholder="example.com" />
+                        </div>
+                        <div class="col-md-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="newprimary" @bind="newDomainPrimary" />
+                                <label class="form-check-label small" for="newprimary">Primary</label>
+                            </div>
+                        </div>
+                        <div class="col-md-2">
+                            <button class="btn btn-sm btn-primary" @onclick="AddDomainAsync" disabled="@busy">Add</button>
+                        </div>
+                    </div>
+                </div></div>
+
+                @if (cfg.Domains.Count == 0)
+                {
+                    <div class="alert alert-warning small">
+                        No domains yet. Applying the configuration without one is refused — the primary domain is what
+                        Stalwart appends to a login that arrives without one, so a server without it turns away every
+                        client that sends a bare username.
+                    </div>
+                }
+                else
+                {
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th>Domain</th><th>Primary</th><th>Catch-all</th>
+                                    <th>Relaying</th><th>DKIM</th><th>Plus addressing</th><th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var domain in cfg.Domains.OrderByDescending(d => d.IsPrimary).ThenBy(d => d.Name))
+                                {
+                                    <tr @key="domain.Id">
+                                        <td class="font-monospace">@domain.Name</td>
+                                        <td>
+                                            <input type="radio" name="primarydomain" checked="@domain.IsPrimary"
+                                                   @onchange="() => SetPrimaryDomainAsync(domain)" />
+                                        </td>
+                                        <td style="min-width: 10rem">
+                                            <input class="form-control form-control-sm" @bind="domain.CatchAllLocalPart"
+                                                   @bind:after="() => SaveDomainAsync(domain)" placeholder="none" />
+                                        </td>
+                                        <td>
+                                            <input type="checkbox" class="form-check-input" @bind="domain.AllowRelaying"
+                                                   @bind:after="() => SaveDomainAsync(domain)" />
+                                        </td>
+                                        <td>
+                                            <input type="checkbox" class="form-check-input" @bind="domain.AutomaticDkim"
+                                                   @bind:after="() => SaveDomainAsync(domain)" />
+                                        </td>
+                                        <td>
+                                            <input type="checkbox" class="form-check-input" @bind="domain.SubAddressing"
+                                                   @bind:after="() => SaveDomainAsync(domain)" />
+                                        </td>
+                                        <td class="text-end">
+                                            <button class="btn btn-sm btn-outline-danger" @onclick="() => ConfirmDeleteDomain(domain)">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="form-text">
+                        Removing a domain here removes it from what EntKube applies. It is not deleted from the running
+                        server — mail already delivered to it stays where it is until an administrator removes it there.
+                    </div>
+                }
+            }
+            else if (view == "mailboxes")
+            {
+                <div class="card shadow-sm mb-3"><div class="card-body">
+                    <h6 class="card-title"><i class="bi bi-plus-circle me-2"></i>Add a mailbox</h6>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-3">
+                            <label class="form-label small">Local part</label>
+                            <input class="form-control form-control-sm" @bind="newAccountLocalPart" placeholder="alice" />
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">Domain</label>
+                            <select class="form-select form-select-sm" @bind="newAccountDomainId">
+                                <option value="">Choose…</option>
+                                @foreach (var domain in cfg.Domains.OrderBy(d => d.Name))
+                                {
+                                    <option value="@domain.Id">@domain.Name</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Display name</label>
+                            <input class="form-control form-control-sm" @bind="newAccountDisplayName" />
+                        </div>
+                        <div class="col-md-2">
+                            <button class="btn btn-sm btn-primary" @onclick="AddAccountAsync" disabled="@busy">Add</button>
+                        </div>
+                    </div>
+                    @if (cfg.OpenLdapConfigId is not null)
+                    {
+                        <hr />
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="ImportFromLdapAsync" disabled="@busy">
+                            <i class="bi bi-download me-1"></i>Import from the linked directory
+                        </button>
+                        <div class="form-text">
+                            Creates a mailbox for every directory user whose email address is in one of these domains
+                            and does not have one yet. Existing mailboxes are left alone.
+                        </div>
+                    }
+                </div></div>
+
+                @if (cfg.Accounts.Count == 0)
+                {
+                    <div class="alert alert-info small">
+                        No mailboxes defined.
+                        @if (cfg.AuthMode == StalwartAuthMode.Ldap)
+                        {
+                            <span>
+                                In LDAP mode that is fine — Stalwart resolves mailboxes from the directory as mail
+                                arrives. Add them here only for addresses that are not directory users.
+                            </span>
+                        }
+                        else
+                        {
+                            <span>
+                                In this mode mailboxes must exist before their first login, so nobody can sign in yet.
+                            </span>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead><tr><th>Address</th><th>Display name</th><th>Aliases</th><th></th></tr></thead>
+                            <tbody>
+                                @foreach (var account in cfg.Accounts.OrderBy(a => a.LocalPart))
+                                {
+                                    <tr @key="account.Id">
+                                        <td class="font-monospace">@account.LocalPart@("@")@DomainName(account.DomainId)</td>
+                                        <td style="min-width: 12rem">
+                                            <input class="form-control form-control-sm" @bind="account.DisplayName"
+                                                   @bind:after="() => SaveAccountAsync(account)" />
+                                        </td>
+                                        <td style="min-width: 14rem">
+                                            <input class="form-control form-control-sm" @bind="account.Aliases"
+                                                   @bind:after="() => SaveAccountAsync(account)"
+                                                   placeholder="comma or newline separated local parts" />
+                                        </td>
+                                        <td class="text-end">
+                                            <button class="btn btn-sm btn-outline-danger" @onclick="() => ConfirmDeleteAccount(account)">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="form-text">
+                        Removing a mailbox here removes it from what EntKube applies; it is never deleted from the
+                        running server, because a configuration change should not be able to destroy somebody's mail.
+                    </div>
+                }
+            }
+            else if (view == "dns")
+            {
+                @if (cfg.Domains.Count == 0)
+                {
+                    <div class="alert alert-info small">Add a domain to see the records it needs.</div>
+                }
+                else
+                {
+                    <div class="alert alert-secondary small">
+                        <i class="bi bi-info-circle me-1"></i>
+                        Publish these in each domain's zone. DKIM is not listed: Stalwart generates those keys itself,
+                        so the selector and public key only exist once the domain has been applied — read them from the
+                        server's admin UI afterwards.
+                    </div>
+                    @foreach (var domain in cfg.Domains.OrderByDescending(d => d.IsPrimary).ThenBy(d => d.Name))
+                    {
+                        <div class="card shadow-sm mb-3" @key="domain.Id"><div class="card-body">
+                            <h6 class="card-title font-monospace">@domain.Name</h6>
+                            <div class="table-responsive">
+                                <table class="table table-sm">
+                                    <thead><tr><th>Name</th><th>Type</th><th>Value</th><th>Why</th></tr></thead>
+                                    <tbody>
+                                        @foreach (var record in StalwartPlanBuilder.DnsRecordsFor(cfg, domain))
+                                        {
+                                            <tr>
+                                                <td class="font-monospace small">@record.Name</td>
+                                                <td class="small">@record.Type</td>
+                                                <td class="font-monospace small">@record.Value</td>
+                                                <td class="small text-muted">@record.Note</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div></div>
+                    }
+                }
+            }
+
+            @if (!string.IsNullOrWhiteSpace(applyOutput))
+            {
+                <div class="card shadow-sm mt-3"><div class="card-body">
+                    <h6 class="card-title"><i class="bi bi-terminal me-2"></i>Last apply</h6>
+                    <pre class="small mb-0" style="max-height: 20rem; overflow: auto">@applyOutput</pre>
+                </div></div>
+            }
+        }
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
+    private bool loading = true;
+    private bool busy;
+    private string view = "config";
+    private string? applyOutput;
+
+    private List<StalwartService.StalwartInstance> instances = [];
+    private StalwartService.StalwartInstance? selected;
+    private StalwartComponentConfig? cfg;
+    private List<OpenLdapComponentConfig> directories = [];
+    private List<CnpgDatabase> haDatabases = [];
+    private List<StorageLink> haStorageLinks = [];
+    private List<RedisEndpointOption> haRedisEndpoints = [];
+    private string? coordinatorRedisPassword;
+    private List<StalwartService.MailPreflightIssue> preflight = [];
+    private bool clearBlockedIps;
+    private bool verboseLogging;
+    private List<StalwartService.OidcRegistration> oidcRegistrations = [];
+
+    private string? adminPassword;
+    private string? ldapBindPassword;
+    private string? tlsCertificate;
+    private string? tlsPrivateKey;
+
+    private string newDomainName = "";
+    private bool newDomainPrimary;
+    private string newAccountLocalPart = "";
+    private string newAccountDomainId = "";
+    private string? newAccountDisplayName;
+
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Run);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    /// <summary>True once the config exists in the database, which is what domains hang off.</summary>
+    private bool IsPersisted => selected?.Config is not null;
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        try
+        {
+            instances = await Mail.GetInstancesAsync(TenantId, EnvironmentId);
+            StalwartService.StalwartInstance? keep = selected is null
+                ? instances.FirstOrDefault()
+                : instances.FirstOrDefault(i => i.Component.Id == selected.Component.Id) ?? instances.FirstOrDefault();
+
+            if (keep is not null)
+            {
+                await SelectInstanceAsync(keep);
+            }
+            else
+            {
+                selected = null;
+                cfg = null;
+            }
+        }
+        finally { loading = false; }
+    }
+
+    private async Task SelectInstanceAsync(StalwartService.StalwartInstance instance)
+    {
+        selected = instance;
+        applyOutput = null;
+        directories = await Mail.GetLinkableDirectoriesAsync(TenantId, instance.Component.Id);
+        haDatabases = await Mail.GetCnpgDatabasesAsync(TenantId, instance.Component.Id);
+        haStorageLinks = await Mail.GetStorageLinksAsync(TenantId);
+        haRedisEndpoints = await Mail.GetCoordinatorRedisEndpointsAsync(instance.Component.Id);
+        oidcRegistrations = await Mail.GetOidcRegistrationsAsync(TenantId);
+
+        preflight = instance.Config is null
+            ? []
+            : await Mail.PreflightAsync(TenantId, instance.Component.Id);
+
+        cfg = instance.Config is null
+            ? new StalwartComponentConfig
+            {
+                Id = Guid.Empty,
+                TenantId = TenantId,
+                ClusterComponentId = instance.Component.Id,
+                Hostname = "",
+                // A linked directory is the common case and the one that needs no retyping, so
+                // preselect it when the cluster has exactly one.
+                OpenLdapConfigId = directories.Count == 1 ? directories[0].Id : null,
+            }
+            : await Mail.GetConfigAsync(instance.Config.Id) ?? instance.Config;
+    }
+
+    private async Task ReloadConfigAsync()
+    {
+        if (selected?.Config is null && cfg?.Id == Guid.Empty)
+        {
+            await LoadAsync();
+            return;
+        }
+        if (cfg is not null && cfg.Id != Guid.Empty)
+        {
+            cfg = await Mail.GetConfigAsync(cfg.Id) ?? cfg;
+        }
+    }
+
+    private void OnDirectoryLinkChanged(ChangeEventArgs e)
+    {
+        if (cfg is null) return;
+        cfg.OpenLdapConfigId = Guid.TryParse(e.Value?.ToString(), out Guid id) ? id : null;
+    }
+
+    // Picking a Redis from the dropdown fills the host/port the nodes coordinate through, and for a
+    // Redis EntKube manages it resolves the vaulted password so the operator never handles it. "Other"
+    // clears the host and hands the manual fields back. The manual boxes stay editable throughout, so an
+    // external Redis is still reachable by typing it in.
+    private async Task OnCoordinatorRedisSelectedAsync(ChangeEventArgs e)
+    {
+        if (cfg is null) return;
+        string value = e.Value?.ToString() ?? "";
+
+        if (value is "" or "__manual__")
+        {
+            if (value == "__manual__")
+            {
+                cfg.CoordinatorRedisHost = null;
+            }
+            return;
+        }
+
+        RedisEndpointOption? chosen = haRedisEndpoints.FirstOrDefault(r => r.Endpoint == value);
+        if (chosen is null) return;
+
+        cfg.CoordinatorRedisHost = chosen.Host;
+        cfg.CoordinatorRedisPort = chosen.Port;
+
+        // Only overwrite the password box when we actually resolved one — a managed Redis. For an
+        // unmanaged endpoint the operator's typed password (if any) is left untouched.
+        if (await Mail.ResolveCoordinatorRedisPasswordAsync(TenantId, chosen) is string password)
+        {
+            coordinatorRedisPassword = password;
+        }
+    }
+
+    private string DomainName(Guid domainId) =>
+        cfg?.Domains.FirstOrDefault(d => d.Id == domainId)?.Name ?? "";
+
+    private async Task<bool> PersistConfigAsync()
+    {
+        if (selected is null || cfg is null) return false;
+
+        if (string.IsNullOrWhiteSpace(cfg.Hostname))
+        {
+            Toasts.Warning("Set the mail hostname first — it is the name on the certificate and in every MX record.");
+            return false;
+        }
+
+        if (cfg.AuthMode == StalwartAuthMode.Oidc
+            && cfg.OidcAppRegistrationSecretId is null
+            && string.IsNullOrWhiteSpace(cfg.OidcIssuerUrl))
+        {
+            Toasts.Warning("OIDC authentication needs an issuer — pick a stored app registration or enter the URL.");
+            return false;
+        }
+
+        StalwartComponentConfig edited = cfg;
+        await Mail.ConfigureAsync(TenantId, selected.Component.Id, target =>
+        {
+            target.Hostname = edited.Hostname.Trim();
+            target.AdminHostname = string.IsNullOrWhiteSpace(edited.AdminHostname) ? null : edited.AdminHostname.Trim();
+            target.AdminUsername = edited.AdminUsername;
+            target.StorageSize = edited.StorageSize;
+            target.StorageClass = string.IsNullOrWhiteSpace(edited.StorageClass) ? null : edited.StorageClass.Trim();
+            target.AuthMode = edited.AuthMode;
+            target.OpenLdapConfigId = edited.AuthMode == StalwartAuthMode.Ldap ? edited.OpenLdapConfigId : null;
+            target.LdapUrl = edited.LdapUrl;
+            target.LdapBaseDn = edited.LdapBaseDn;
+            target.LdapBindDn = edited.LdapBindDn;
+            target.LdapLoginFilter = edited.LdapLoginFilter;
+            target.LdapMailboxFilter = edited.LdapMailboxFilter;
+            target.LdapMemberOfFilter = edited.LdapMemberOfFilter;
+            target.LdapUseTls = edited.LdapUseTls;
+            target.OidcAppRegistrationSecretId = edited.AuthMode == StalwartAuthMode.Oidc ? edited.OidcAppRegistrationSecretId : null;
+            target.OidcIssuerUrl = edited.OidcIssuerUrl;
+            target.OidcClaimUsername = edited.OidcClaimUsername;
+            target.OidcUsernameDomain = edited.OidcUsernameDomain;
+            target.OidcClaimGroups = edited.OidcClaimGroups;
+            target.OidcRequireAudience = edited.OidcRequireAudience;
+            target.OidcRequireScopes = edited.OidcRequireScopes;
+            target.TlsMode = edited.TlsMode;
+            target.ClusterIssuer = edited.ClusterIssuer;
+            target.AcmeContact = edited.AcmeContact;
+            target.AcmeChallenge = edited.AcmeChallenge;
+            target.WebClusterIssuer = edited.WebClusterIssuer;
+            target.ExposeMode = edited.ExposeMode;
+            target.LoadBalancerIp = string.IsNullOrWhiteSpace(edited.LoadBalancerIp) ? null : edited.LoadBalancerIp.Trim();
+            target.LoadBalancerAnnotations = edited.LoadBalancerAnnotations;
+            target.SmtpEnabled = edited.SmtpEnabled;
+            target.SubmissionEnabled = edited.SubmissionEnabled;
+            target.ImapEnabled = edited.ImapEnabled;
+            target.Pop3Enabled = edited.Pop3Enabled;
+            target.ManageSieveEnabled = edited.ManageSieveEnabled;
+            target.RspamdEnabled = edited.RspamdEnabled;
+            target.RspamdHost = edited.RspamdHost;
+            target.RspamdPort = edited.RspamdPort;
+            target.RspamdTempFailOnError = edited.RspamdTempFailOnError;
+            target.HighAvailability = edited.HighAvailability;
+            target.Replicas = Math.Max(1, edited.Replicas);
+            target.CnpgDatabaseId = edited.HighAvailability ? edited.CnpgDatabaseId : null;
+            target.BlobStorageLinkId = edited.HighAvailability ? edited.BlobStorageLinkId : null;
+            target.CoordinatorRedisHost = edited.HighAvailability
+                ? (string.IsNullOrWhiteSpace(edited.CoordinatorRedisHost) ? null : edited.CoordinatorRedisHost.Trim())
+                : null;
+            target.CoordinatorRedisPort = edited.CoordinatorRedisPort;
+        }, adminPassword, ldapBindPassword, tlsCertificate, tlsPrivateKey, coordinatorRedisPassword);
+        coordinatorRedisPassword = null;
+
+        adminPassword = ldapBindPassword = tlsCertificate = tlsPrivateKey = null;
+        return true;
+    }
+
+    private async Task SaveConfigAsync()
+    {
+        busy = true;
+        try
+        {
+            if (await PersistConfigAsync())
+            {
+                Toasts.Success("Saved. Use “Apply configuration” to converge the running server onto it.");
+                await LoadAsync();
+            }
+        }
+        catch (Exception ex) { Toasts.Error($"Save failed: {ex.Message}"); }
+        finally { busy = false; }
+    }
+
+    private async Task ApplyManifestAsync()
+    {
+        if (selected?.Component is null) return;
+        busy = true;
+        try
+        {
+            if (!await PersistConfigAsync()) return;
+            HelmExecutionResult result = await InstallOrchestrator.InstallAsync(TenantId, selected.Component.Id);
+            applyOutput = result.Output;
+            if (result.Success) Toasts.Success("Pod re-deployed with the current ports, storage and TLS.");
+            else Toasts.Error("Re-deploy failed — see the output below.");
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error($"Re-deploy failed: {ex.Message}"); }
+        finally { busy = false; }
+    }
+
+    private void ConfirmApplyConfiguration() =>
+        pendingConfirm = new PendingConfirm(
+            "Applying restarts the mail server into recovery mode, replays the configuration, and restarts it "
+            + "back. Mail is not accepted for the duration — usually under a minute, but senders will queue and "
+            + "retry."
+            + (clearBlockedIps
+                ? " Every blocked IP address will also be cleared, including any that are blocking a real attacker."
+                : "")
+            + " Continue?",
+            "Apply configuration",
+            ApplyConfigurationAsync);
+
+    private async Task ApplyConfigurationAsync()
+    {
+        if (selected?.Component is null) return;
+        if (!await PersistConfigAsync()) return;
+
+        HelmExecutionResult result = await Mail.ApplyConfigurationAsync(
+            TenantId, selected.Component.Id, clearBlockedIps, verboseLogging);
+        applyOutput = result.Output;
+        // Deliberate one-shots: neither clearing bans nor debug logging is something to leave on.
+        clearBlockedIps = false;
+        verboseLogging = false;
+
+        if (result.Success) Toasts.Success("The running server now matches this configuration.");
+        else Toasts.Error("Apply failed — see the output below.");
+
+        await LoadAsync();
+    }
+
+    // ── Domains ──
+    private async Task AddDomainAsync()
+    {
+        if (cfg is null || string.IsNullOrWhiteSpace(newDomainName)) return;
+        busy = true;
+        try
+        {
+            await Mail.AddDomainAsync(cfg.Id, newDomainName, newDomainPrimary);
+            newDomainName = "";
+            newDomainPrimary = false;
+            await ReloadConfigAsync();
+        }
+        catch (Exception ex) { Toasts.Error($"Add domain failed: {ex.Message}"); }
+        finally { busy = false; }
+    }
+
+    private async Task SaveDomainAsync(StalwartMailDomain domain)
+    {
+        try { await Mail.UpdateDomainAsync(domain); }
+        catch (Exception ex) { Toasts.Error($"Save failed: {ex.Message}"); }
+    }
+
+    private async Task SetPrimaryDomainAsync(StalwartMailDomain domain)
+    {
+        domain.IsPrimary = true;
+        await SaveDomainAsync(domain);
+        await ReloadConfigAsync();
+    }
+
+    private void ConfirmDeleteDomain(StalwartMailDomain domain) =>
+        pendingConfirm = new PendingConfirm(
+            $"Remove {domain.Name} from this server's configuration? Mail already delivered to it stays on the "
+            + "running server — this only stops EntKube applying the domain.",
+            "Remove",
+            async () =>
+            {
+                await Mail.DeleteDomainAsync(domain.Id);
+                await ReloadConfigAsync();
+            });
+
+    // ── Mailboxes ──
+    private async Task AddAccountAsync()
+    {
+        if (cfg is null
+            || string.IsNullOrWhiteSpace(newAccountLocalPart)
+            || !Guid.TryParse(newAccountDomainId, out Guid domainId))
+        {
+            Toasts.Warning("A mailbox needs a local part and a domain.");
+            return;
+        }
+
+        busy = true;
+        try
+        {
+            await Mail.AddAccountAsync(new StalwartMailAccount
+            {
+                ConfigId = cfg.Id,
+                DomainId = domainId,
+                LocalPart = newAccountLocalPart,
+                DisplayName = newAccountDisplayName,
+            });
+            newAccountLocalPart = "";
+            newAccountDisplayName = null;
+            await ReloadConfigAsync();
+        }
+        catch (Exception ex) { Toasts.Error($"Add mailbox failed: {ex.Message}"); }
+        finally { busy = false; }
+    }
+
+    private async Task SaveAccountAsync(StalwartMailAccount account)
+    {
+        try { await Mail.UpdateAccountAsync(account); }
+        catch (Exception ex) { Toasts.Error($"Save failed: {ex.Message}"); }
+    }
+
+    private void ConfirmDeleteAccount(StalwartMailAccount account) =>
+        pendingConfirm = new PendingConfirm(
+            $"Remove {account.LocalPart}@{DomainName(account.DomainId)} from this server's configuration? "
+            + "The mailbox and its mail stay on the running server — delete it there if that is what you mean.",
+            "Remove",
+            async () =>
+            {
+                await Mail.DeleteAccountAsync(account.Id);
+                await ReloadConfigAsync();
+            });
+
+    private async Task ImportFromLdapAsync()
+    {
+        if (cfg is null) return;
+        busy = true;
+        try
+        {
+            int added = await Mail.ImportMailboxesFromLdapAsync(cfg.Id);
+            Toasts.Success(added == 0
+                ? "Every directory user with an address in these domains already has a mailbox."
+                : $"Added {added} mailbox(es) from the directory.");
+            await ReloadConfigAsync();
+        }
+        catch (Exception ex) { Toasts.Error($"Import failed: {ex.Message}"); }
+        finally { busy = false; }
+    }
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try
+        {
+            await pendingConfirm.Run();
+            pendingConfirm = null;
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { confirmBusy = false; }
+    }
+}

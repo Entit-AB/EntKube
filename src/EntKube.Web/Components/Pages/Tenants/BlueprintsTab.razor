@@ -863,7 +863,10 @@
 
     private static bool IsClusterScopedField(ComponentFormField field) =>
         field.Type is FormFieldType.CnpgDatabase or FormFieldType.ClusterIssuer
-            or FormFieldType.StorageLink or FormFieldType.GatewaySelector;
+            or FormFieldType.StorageLink or FormFieldType.GatewaySelector
+            // A blueprint has no target cluster yet, so there is nothing to discover Redis on, and no
+            // Keycloak to enumerate realms from.
+            or FormFieldType.RedisSelector or FormFieldType.KeycloakRealmSelector;
 
     private RenderFragment RenderField(ComponentFormField field) => builder =>
     {
