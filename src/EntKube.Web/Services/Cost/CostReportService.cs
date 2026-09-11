@@ -40,11 +40,59 @@ public sealed record AppCost
     public double ShareOfBillable { get; init; }
 }
 
+/// <summary>
+/// One cluster's nodes against what is scheduled on them.
+///
+/// The provider's invoice is for the nodes, so <see cref="NodeMonthlyCost"/> — what they
+/// cost at the price sheet's compute rates whatever runs on them — is the figure an
+/// operator holds up against the bill. The distance between it and what the namespaces
+/// hold is the idle capacity, and the reason a report priced on requests alone lands at
+/// a fraction of the invoice.
+/// </summary>
+public sealed record ClusterCapacityCost
+{
+    public required Guid ClusterId { get; init; }
+    public required string ClusterName { get; init; }
+
+    /// <summary>False when the cluster's node capacity could not be read; the capacity figures are then meaningless.</summary>
+    public bool HasCapacity { get; init; }
+
+    public double Nodes { get; init; }
+    public double CpuCapacity { get; init; }
+    public double MemoryCapacityGiB { get; init; }
+
+    /// <summary>CPU the namespaces hold — requested or used, per the cluster's charging basis.</summary>
+    public double CpuAllocated { get; init; }
+    public double MemoryAllocatedGiB { get; init; }
+
+    public double CpuUtilisation => CpuCapacity > 0d ? CpuAllocated / CpuCapacity : 0d;
+    public double MemoryUtilisation => MemoryCapacityGiB > 0d ? MemoryAllocatedGiB / MemoryCapacityGiB : 0d;
+
+    /// <summary>What the nodes cost at the compute rates, regardless of what runs on them.</summary>
+    public decimal NodeMonthlyCost { get; init; }
+
+    /// <summary>The unallocated capacity, priced. Zero when the price sheet does not charge for it.</summary>
+    public decimal IdleMonthlyCost { get; init; }
+
+    /// <summary>Whether the price sheet charges for idle capacity at all.</summary>
+    public bool IdleCharged { get; init; }
+
+    /// <summary>
+    /// Everything the report attributes to this cluster — compute, idle, storage,
+    /// network and the fixed fee. With idle charged, this is the figure that should
+    /// approach the invoice.
+    /// </summary>
+    public decimal TotalMonthlyCost { get; init; }
+}
+
 /// <summary>A tenant-wide cost picture at current run rate.</summary>
 public sealed record CostReport
 {
     public required IReadOnlyList<NamespaceCost> Namespaces { get; init; }
     public required DateTime GeneratedAt { get; init; }
+
+    /// <summary>Each priced cluster's nodes against what runs on them, in cluster-name order.</summary>
+    public IReadOnlyList<ClusterCapacityCost> Capacity { get; init; } = [];
 
     /// <summary>Currency of the figures. Mixed-currency tenants are reported as "—" (see below).</summary>
     public string Currency { get; init; } = "USD";
@@ -71,6 +119,13 @@ public sealed record CostReport
     /// so it is exactly what was billed.
     /// </summary>
     public decimal SharedPoolMonthlyCost => Namespaces.Sum(n => n.SharedMonthlyCost);
+
+    /// <summary>
+    /// Node capacity nothing holds, priced, across the fleet. Part of the shared pool —
+    /// already inside the total, shown apart because it is the line that turns "what
+    /// was requested" into "what is paid for".
+    /// </summary>
+    public decimal IdleMonthlyCost => Namespaces.Where(n => n.IsIdle).Sum(n => n.DirectMonthlyCost);
 
     public decimal TotalMonthlyCost => Billed.Sum(n => n.TotalMonthlyCost);
     public decimal TotalHourlyCost => TotalMonthlyCost / CostAllocation.HoursPerMonth;
@@ -190,6 +245,14 @@ public class CostReportService(
     private const string StorageQuery =
         "sum by (namespace) (kubelet_volume_stats_capacity_bytes)";
 
+    // Node capacity rather than allocatable: the cloud bills the whole machine, and the
+    // slice the kubelet reserves for itself is part of what is paid for.
+    private const string NodeCpuCapacityQuery =
+        "sum(kube_node_status_capacity{resource=\"cpu\"})";
+    private const string NodeMemoryCapacityQuery =
+        "sum(kube_node_status_capacity{resource=\"memory\"})";
+    private const string NodeCountQuery = "count(kube_node_info)";
+
     public async Task<CostReport> GetTenantReportAsync(
         Guid tenantId, DateTime now, CancellationToken ct = default)
     {
@@ -256,6 +319,7 @@ public class CostReportService(
         }
 
         List<NamespaceCost> allCosts = [];
+        List<ClusterCapacityCost> capacities = [];
         HashSet<string> currencies = [];
 
         foreach (var cluster in clusters)
@@ -287,9 +351,23 @@ public class CostReportService(
                 continue;
             }
 
-            allCosts.AddRange(CostAllocation.Allocate(
+            // Measured whether or not the cluster charges for idle capacity: the nodes
+            // against what runs on them is the comparison an operator makes with the
+            // invoice, and it is worth having even where the idle line is switched off.
+            ClusterCapacity? capacity = await MeasureCapacityAsync(cluster.Id, ct);
+            if (capacity is null && rate.ChargeIdleCapacity)
+            {
+                warnings.Add(
+                    $"“{cluster.Name}” reported no node capacity, so its idle capacity is not in the total.");
+            }
+
+            IReadOnlyList<NamespaceCost> allocated = CostAllocation.Allocate(
                 consumption, rate, cluster.Id, cluster.Name,
-                ns => owners.GetValueOrDefault((cluster.Id, ns), NamespaceOwner.None)));
+                ns => owners.GetValueOrDefault((cluster.Id, ns), NamespaceOwner.None),
+                capacity);
+
+            allCosts.AddRange(allocated);
+            capacities.Add(Summarise(cluster.Id, cluster.Name, rate, consumption, capacity, allocated));
         }
 
         List<NamespaceCost> ordered = [.. allCosts.OrderByDescending(c => c.TotalMonthlyCost)];
@@ -297,6 +375,7 @@ public class CostReportService(
         return new CostReport
         {
             Namespaces = ordered,
+            Capacity = capacities,
             GeneratedAt = now,
             // Mixing currencies would make the totals meaningless, so say so rather than
             // silently adding euros to dollars.
@@ -338,6 +417,72 @@ public class CostReportService(
             LoadBalancers = network.GetValueOrDefault(ns).LoadBalancers,
             PublicIps = network.GetValueOrDefault(ns).PublicIps,
         })];
+    }
+
+    /// <summary>
+    /// Reads what the cluster's nodes provide in total. Null when nothing came back —
+    /// no kube-state-metrics, or a cluster that could not be reached — so the caller can
+    /// say so rather than price an idle line of zero as though the cluster were full.
+    /// </summary>
+    private async Task<ClusterCapacity?> MeasureCapacityAsync(Guid clusterId, CancellationToken ct)
+    {
+        try
+        {
+            double cpu = await ScalarMeanAsync(clusterId, NodeCpuCapacityQuery, ct);
+            double memory = await ScalarMeanAsync(clusterId, NodeMemoryCapacityQuery, ct);
+
+            if (cpu <= 0d && memory <= 0d)
+            {
+                return null;
+            }
+
+            return new ClusterCapacity
+            {
+                Nodes = await ScalarMeanAsync(clusterId, NodeCountQuery, ct),
+                CpuCores = cpu,
+                MemoryGiB = CostAllocation.BytesToGiB(memory),
+            };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Node capacity measurement failed for cluster {ClusterId}", clusterId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The nodes-against-workloads summary for one cluster. Node cost is the capacity at
+    /// the compute rates and nothing else — no storage, network or fixed fee — because it
+    /// is meant to be compared with the compute lines of an invoice.
+    /// </summary>
+    private static ClusterCapacityCost Summarise(
+        Guid clusterId, string clusterName, ClusterCostRate rate,
+        IReadOnlyList<NamespaceConsumption> consumption,
+        ClusterCapacity? capacity,
+        IReadOnlyList<NamespaceCost> allocated)
+    {
+        decimal nodeCost = capacity is null
+            ? 0m
+            : Math.Round(
+                (decimal)capacity.CpuCores * rate.CpuCoreHourCost * CostAllocation.HoursPerMonth
+                + (decimal)capacity.MemoryGiB * rate.MemoryGiBHourCost * CostAllocation.HoursPerMonth,
+                2, MidpointRounding.AwayFromZero);
+
+        return new ClusterCapacityCost
+        {
+            ClusterId = clusterId,
+            ClusterName = clusterName,
+            HasCapacity = capacity is not null,
+            Nodes = capacity?.Nodes ?? 0d,
+            CpuCapacity = capacity?.CpuCores ?? 0d,
+            MemoryCapacityGiB = capacity?.MemoryGiB ?? 0d,
+            CpuAllocated = consumption.Sum(n => n.CpuCores),
+            MemoryAllocatedGiB = consumption.Sum(n => n.MemoryGiB),
+            NodeMonthlyCost = nodeCost,
+            IdleMonthlyCost = allocated.Where(n => n.IsIdle).Sum(n => n.DirectMonthlyCost),
+            IdleCharged = rate.ChargeIdleCapacity,
+            TotalMonthlyCost = allocated.Where(n => !n.IsRedistributed).Sum(n => n.TotalMonthlyCost),
+        };
     }
 
     /// <summary>
@@ -448,6 +593,27 @@ public class CostReportService(
         }
 
         return counts;
+    }
+
+    /// <summary>
+    /// The mean of a single-valued query over the sample window. An aggregate with no
+    /// grouping yields one unlabelled series; anything else, or nothing, reads as zero.
+    /// </summary>
+    private async Task<double> ScalarMeanAsync(Guid clusterId, string query, CancellationToken ct)
+    {
+        KubernetesOperationResult<List<PrometheusTimeSeries>> result =
+            await prometheus.GetMetricRangeAsync(clusterId, query, SampleWindow, ct);
+
+        if (!result.IsSuccess || result.Data is null || result.Data.Count == 0)
+        {
+            return 0d;
+        }
+
+        return result.Data[0].DataPoints
+            .Select(p => p.Value)
+            .Where(v => !double.IsNaN(v) && !double.IsInfinity(v) && v >= 0)
+            .DefaultIfEmpty(0)
+            .Average();
     }
 
     private async Task<Dictionary<string, double>> SumByNamespaceAsync(

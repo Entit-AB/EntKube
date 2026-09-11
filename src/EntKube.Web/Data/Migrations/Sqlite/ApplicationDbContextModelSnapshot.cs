@@ -1744,6 +1744,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("ChargeIdleCapacity")
+                        .HasColumnType("INTEGER");
+
                     b.Property<bool>("ChargeOnRequests")
                         .HasColumnType("INTEGER");
 

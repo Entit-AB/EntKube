@@ -1749,6 +1749,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<bool>("ChargeIdleCapacity")
+                        .HasColumnType("boolean");
+
                     b.Property<bool>("ChargeOnRequests")
                         .HasColumnType("boolean");
 

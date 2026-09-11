@@ -50,6 +50,12 @@
             everything billable on the same cluster, so an app occupying a third of a cluster
             carries a third of what running that cluster costs.
         </p>
+        <p class="text-muted small mb-3">
+            A cloud bills the <strong>nodes</strong>, not the pods on them. Capacity nothing has
+            requested is therefore a real charge with nobody to cause it — it is carried as an
+            <em>idle capacity</em> line per cluster and charged out like the platform, so the total
+            approaches the invoice rather than the sum of what was asked for.
+        </p>
 
         @if (error is not null)
         {
@@ -109,9 +115,77 @@
                             <i class="bi bi-hdd-stack me-1"></i>Shared, charged out
                         </div>
                         <div class="fs-4 fw-semibold text-muted">@Money(report.SharedPoolMonthlyCost)</div>
+                        @if (report.IdleMonthlyCost > 0m)
+                        {
+                            <div class="small text-muted">of which idle capacity @Money(report.IdleMonthlyCost)</div>
+                        }
                     </div>
                 </div>
             </div>
+
+            @if (report.Capacity.Count > 0)
+            {
+                <h6 class="small text-muted fw-semibold">Nodes against what runs on them</h6>
+                <p class="text-muted small mb-2">
+                    The provider's invoice is for the nodes. <em>Nodes at these rates</em> is what they
+                    cost at the price sheet's CPU and memory rates whatever is scheduled on them — the
+                    figure to hold up against the compute lines of the bill. What the namespaces hold
+                    is the rest of the way to it is idle capacity.
+                </p>
+                <div class="table-responsive mb-3">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead>
+                            <tr class="text-muted small">
+                                <th>Cluster</th>
+                                <th class="text-end">Nodes</th>
+                                <th class="text-end" title="CPU the namespaces hold, over the CPU the nodes provide.">CPU held / total</th>
+                                <th class="text-end" title="Memory the namespaces hold, over the memory the nodes provide.">Memory held / total</th>
+                                <th class="text-end" title="What the nodes cost at the CPU and memory rates, regardless of what runs on them. Compare with the invoice.">Nodes at these rates</th>
+                                <th class="text-end" title="Capacity nothing holds, priced. Charged out to the apps like a platform namespace.">Idle</th>
+                                <th class="text-end" title="Everything this report attributes to the cluster: compute, idle, storage, network and the fixed fee.">Attributed</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (ClusterCapacityCost c in report.Capacity)
+                            {
+                                <tr>
+                                    <td class="small fw-medium">@c.ClusterName</td>
+                                    @if (!c.HasCapacity)
+                                    {
+                                        <td colspan="5" class="small text-muted fst-italic">
+                                            Node capacity could not be read — is kube-state-metrics running?
+                                        </td>
+                                    }
+                                    else
+                                    {
+                                        <td class="text-end small text-muted">@c.Nodes.ToString("N0")</td>
+                                        <td class="text-end small text-muted">
+                                            @c.CpuAllocated.ToString("N1") / @c.CpuCapacity.ToString("N1")
+                                            <span class="ms-1">(@((c.CpuUtilisation * 100).ToString("N0"))%)</span>
+                                        </td>
+                                        <td class="text-end small text-muted">
+                                            @c.MemoryAllocatedGiB.ToString("N0") / @c.MemoryCapacityGiB.ToString("N0") Gi
+                                            <span class="ms-1">(@((c.MemoryUtilisation * 100).ToString("N0"))%)</span>
+                                        </td>
+                                        <td class="text-end small">@Money(c.NodeMonthlyCost)</td>
+                                        <td class="text-end small text-muted">
+                                            @if (c.IdleCharged)
+                                            {
+                                                @Money(c.IdleMonthlyCost)
+                                            }
+                                            else
+                                            {
+                                                <span class="fst-italic" title="This cluster's price sheet does not charge for idle capacity, so its total stops at what the namespaces hold.">not charged</span>
+                                            }
+                                        </td>
+                                    }
+                                    <td class="text-end fw-semibold">@Money(c.TotalMonthlyCost)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
 
             <div class="row g-3">
                 <div class="col-md-6">
@@ -318,10 +392,11 @@
                     Shared pool — charged out to the apps above
                 </h6>
                 <p class="text-muted small mb-2">
-                    Namespaces EntKube holds no deployment record for. Their cost is <strong>already
-                    included</strong> in the figures above, spread across the apps by capacity share —
-                    it is listed here so the pool can be checked. A workload that does not belong here
-                    is being paid for by every customer, so an unfamiliar entry is worth chasing.
+                    Namespaces EntKube holds no deployment record for, and each cluster's idle node
+                    capacity. Their cost is <strong>already included</strong> in the figures above,
+                    spread across the apps by capacity share — it is listed here so the pool can be
+                    checked. A workload that does not belong here is being paid for by every customer,
+                    so an unfamiliar entry is worth chasing.
                 </p>
                 <div class="table-responsive">
                     <table class="table table-sm align-middle mb-0">
@@ -340,7 +415,19 @@
                             @foreach (NamespaceCost row in report.SharedPool.Take(50))
                             {
                                 <tr>
-                                    <td><code class="small">@row.Namespace</code></td>
+                                    <td>
+                                        @if (row.IsIdle)
+                                        {
+                                            <span class="small fst-italic"
+                                                  title="Node capacity nothing has requested. Not a namespace — the nodes are billed whether or not anything runs on them.">
+                                                <i class="bi bi-hdd me-1"></i>Idle capacity
+                                            </span>
+                                        }
+                                        else
+                                        {
+                                            <code class="small">@row.Namespace</code>
+                                        }
+                                    </td>
                                     <td class="small text-muted">@row.ClusterName</td>
                                     <td class="text-end small text-muted">@row.CpuCores.ToString("N2")</td>
                                     <td class="text-end small text-muted">@row.MemoryGiB.ToString("N1") Gi</td>
@@ -641,6 +728,7 @@
                             <th>Fixed monthly</th>
                             <th>Currency</th>
                             <th>Basis</th>
+                            <th title="Whether node capacity nothing has requested is priced and charged out. On, the total approaches the invoice; off, it stops at what was requested.">Idle capacity</th>
                             <th class="text-end">Actions</th>
                         </tr>
                     </thead>
@@ -661,6 +749,12 @@
                                     <select class="form-select form-select-sm" style="width:9rem" @bind="form.Basis">
                                         <option value="requests">Requests</option>
                                         <option value="usage">Actual usage</option>
+                                    </select>
+                                </td>
+                                <td>
+                                    <select class="form-select form-select-sm" style="width:9rem" @bind="form.Idle">
+                                        <option value="charged">Charged out</option>
+                                        <option value="ignored">Not charged</option>
                                     </select>
                                 </td>
                                 <td class="text-end">
@@ -691,12 +785,23 @@
                 rather than guessed at — put it in the fixed monthly cost if you want it in the total.
             </div>
 
-            <div class="alert alert-light border small mb-0">
+            <div class="alert alert-light border small">
                 <strong>Requests vs actual usage.</strong> Charging on <em>requests</em> bills what the
                 scheduler reserves — which is what a customer genuinely denies to everyone else, and
                 the defensible basis for a chargeback. Charging on <em>actual usage</em> lets a team
                 that over-requests push the cost of their own waste onto their neighbours. Storage is
                 always billed on provisioned capacity either way.
+            </div>
+
+            <div class="alert alert-light border small mb-0">
+                <strong>Idle capacity.</strong> The provider bills every node in full whether or not
+                anything is scheduled on it, so on either basis the namespaces add up to less than the
+                invoice — on a half-allocated cluster, to about half of it. <em>Charged out</em> prices
+                the difference at the CPU and memory rates and spreads it across the apps like a
+                platform namespace, which is what makes the total approach the bill. <em>Not charged</em>
+                is for hardware that is a sunk cost nobody should be invoiced for. Node root disks are
+                not counted either way; if your provider bills them separately, put them in the fixed
+                monthly cost.
             </div>
         }
     </div>
@@ -739,6 +844,7 @@
         public decimal Overhead { get; set; }
         public string Currency { get; set; } = "USD";
         public string Basis { get; set; } = "requests";
+        public string Idle { get; set; } = "charged";
     }
 
     protected override async Task OnInitializedAsync()
@@ -842,6 +948,7 @@
                 Overhead = rate.ClusterMonthlyOverhead,
                 Currency = rate.Currency,
                 Basis = rate.ChargeOnRequests ? "requests" : "usage",
+                Idle = rate.ChargeIdleCapacity ? "charged" : "ignored",
             };
         }
     }
@@ -872,6 +979,7 @@
                 ClusterMonthlyOverhead = form.Overhead,
                 Currency = form.Currency,
                 ChargeOnRequests = form.Basis == "requests",
+                ChargeIdleCapacity = form.Idle == "charged",
             },
             updatedBy: (await AuthState.GetAuthenticationStateAsync()).User.Identity?.Name);
         }
