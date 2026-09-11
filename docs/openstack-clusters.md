@@ -285,6 +285,38 @@ be tested honestly until it has, 3 because until we author the manifests the wor
 spec are fiction. Together with 1 they are what make "connect a cloud and get whatever machines are
 required" true.
 
+## Where this stands
+
+All nine phases are built and unit-tested. None of it has run against an OpenStack.
+
+| Phase | Built | Notes |
+|---|---|---|
+| 1 Cloud discovery | ✅ | `OpenStackDiscoveryService`. Not yet wired into the wizard's form fields — the pickers still render as free text. |
+| 2 Images + kubeadm bootstrap | ✅ | `MachineImageBuilder`, `NodeImageRecipe`. k3s is gone. |
+| 3 Authored manifests | ✅ | `CapiManifestBuilder`. Multi-pool is real. |
+| 4 Spec as data | ✅ | `ProvisionedCluster` + pools, migrations on all three providers. |
+| 5 Reconciler | ✅ read-only | Observes and records; does not apply. Deliberate — see below. |
+| 6 Day-2 | ✅ service | `ClusterOperationsService`. **No UI**: nothing in the Components or cluster pages calls it yet. |
+| 7 Delete | ✅ | Summoned plane + leftover sweep. **No UI.** |
+| 8 Foundation verification | ✅ | `FoundationVerifier`. Not yet run automatically after a bootstrap. |
+| 9 etcd backup, cert expiry | ✅ partial | Manifest and detection exist. Not scheduled by the baseline, and cert findings are not wired into the Operations Advisor. |
+
+**Known gaps, in the order they matter:**
+
+1. **Nothing has touched a real cloud.** The tests cover judgement and document structure. They
+   cannot tell you whether CAPO accepts these manifests, whether the bake script produces a
+   bootable image, or whether `clusterctl move` behaves as assumed during teardown.
+2. **Day-2 and delete have no user interface.** The services are callable and tested; there is no
+   button. A cluster can be created from the wizard and then only operated through code.
+3. **The reconciler does not act.** By design until it has been watched against real clusters, but
+   it means drift is reported and not corrected.
+4. **Credential and kubeconfig rotation are not built.** CAPI issues a short-lived admin
+   kubeconfig; the vaulted copy is written once at provisioning and never refreshed. That is a
+   clock nobody is watching yet, and it is the same shape of failure as the certificate expiry
+   phase 9 does watch.
+5. **Foundation verification is not automatic.** It has to be asked for; a bootstrap that leaves a
+   cluster with no working storage still reports success.
+
 ## Decisions still open
 
 1. **Machine images: build them?** Recommended yes (a) — and with k3s ruled out this is close to
