@@ -4900,6 +4900,52 @@ public static class ComponentCatalog
                   csi: true
                 """,
             FormFields = []
+        },
+
+        // ── Autoscaling ──
+
+        new CatalogEntry
+        {
+            Key = "cluster-autoscaler",
+            DisplayName = "Cluster Autoscaler (Nodes)",
+            Description = "Scales the number of worker nodes up and down based on pending/underused pods, driving the cluster's Cluster API MachineDeployments. Because EntKube-provisioned clusters pivot to self-managed (their CAPI resources live in-cluster), the autoscaler runs in-cluster in clusterapi mode. Per-pool bounds come from the min/max you set on each worker pool, applied as MachineDeployment annotations during provisioning.",
+            Icon = "bi-arrows-expand",
+            Category = "Autoscaling",
+            HelmRepoUrl = "https://kubernetes.github.io/autoscaler",
+            HelmChartName = "cluster-autoscaler",
+            HelmChartVersion = "9.43.2",
+            DefaultNamespace = "kube-system",
+            DefaultReleaseName = "cluster-autoscaler",
+            InstallTimeout = "15m0s",
+            DetectionResource = new DetectionResource("apps", "v1", "deployments", "cluster-autoscaler"),
+            DefaultValues = """
+                # Drive Cluster API MachineDeployments. The cluster is self-managed after the
+                # provisioning pivot, so both the CAPI resources and the workloads are in this
+                # same cluster (incluster-incluster). Node-group bounds are read from the
+                # MachineDeployment autoscaler annotations EntKube writes during provisioning.
+                cloudProvider: clusterapi
+                clusterAPIMode: incluster-incluster
+                extraArgs:
+                  balance-similar-node-groups: "true"
+                  skip-nodes-with-system-pods: "false"
+                  scale-down-unneeded-time: 10m
+                # The chart's default ClusterRole doesn't grant access to Cluster API resources,
+                # which the clusterapi provider must read and scale. Append those rules so the
+                # autoscaler can drive MachineDeployments (and their scale subresource).
+                rbac:
+                  create: true
+                  additionalRules:
+                    - apiGroups: ["cluster.x-k8s.io"]
+                      resources:
+                        - machinedeployments
+                        - machinedeployments/scale
+                        - machines
+                        - machinesets
+                        - machinepools
+                        - machinepools/scale
+                      verbs: ["get", "list", "update", "watch", "patch"]
+                """,
+            FormFields = []
         }
     ];
 

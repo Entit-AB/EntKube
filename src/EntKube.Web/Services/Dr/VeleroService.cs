@@ -96,6 +96,106 @@ public class VeleroService(
     }
 
     /// <summary>
+    /// Decides Velero's backup target at registration time. An explicitly chosen storage link is
+    /// wired straight through — and any problem with it is raised, because an operator who picked
+    /// a bucket wants to hear that it cannot be used.
+    ///
+    /// With no link chosen there is nothing to raise: a cluster provisioned from zero has no S3
+    /// anywhere yet. So a CubeFS component installed earlier in the same run is used to mint a
+    /// bucket and its own object user, and Velero is pointed at that. This path is best-effort by
+    /// design — the operator asked for backups, not for the bootstrap to stop when the storage
+    /// they never mentioned is missing, so a failure leaves Velero installed and unconfigured.
+    /// </summary>
+    public async Task ConfigureFromRegistrationAsync(
+        Guid tenantId, Guid clusterComponentId, Guid? explicitStorageLinkId, CancellationToken ct = default)
+    {
+        if (explicitStorageLinkId is Guid chosen && chosen != Guid.Empty)
+        {
+            await WriteStorageHelmValuesAsync(tenantId, clusterComponentId, chosen, ct);
+            return;
+        }
+
+        try
+        {
+            Guid clusterId;
+            Guid environmentId;
+            using (ApplicationDbContext db = dbFactory.CreateDbContext())
+            {
+                ClusterComponent velero = await db.ClusterComponents
+                    .Include(c => c.Cluster)
+                    .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+                    ?? throw new InvalidOperationException("Velero component not found.");
+                clusterId = velero.ClusterId;
+                environmentId = velero.Cluster.EnvironmentId;
+            }
+
+            Guid? cubefsComponentId = await FindCubeFsComponentOnClusterAsync(clusterId, ct);
+            if (cubefsComponentId is null)
+            {
+                logger.LogInformation(
+                    "Velero component {ComponentId}: no CubeFS component on the cluster, so the backup target is left unconfigured.",
+                    clusterComponentId);
+                return;
+            }
+
+            StorageLink link = await storageService.ProvisionCubeFSBackupTargetAsync(
+                tenantId, environmentId, cubefsComponentId.Value, AutoBucketName,
+                displayName: "Velero backups (CubeFS)",
+                notes: "Auto-provisioned for cluster backups.", ct: ct);
+
+            await WriteStorageHelmValuesAsync(tenantId, clusterComponentId, link.Id, ct);
+
+            logger.LogInformation(
+                "Velero component {ComponentId} auto-wired to CubeFS bucket {Bucket} (storage link {StorageLinkId})",
+                clusterComponentId, AutoBucketName, link.Id);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Velero component {ComponentId}: could not auto-provision a backup target; installing without one.",
+                clusterComponentId);
+        }
+    }
+
+    /// <summary>
+    /// Re-applies the configured target's values and credentials before an install or upgrade, so a
+    /// rotated key reaches the cluster without anyone re-picking the link. Mirrors Harbor's refresh.
+    /// </summary>
+    public async Task RefreshHelmValuesIfConfiguredAsync(
+        Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
+    {
+        Guid? linkId = await GetStorageLinkIdForComponentAsync(tenantId, clusterComponentId, ct);
+        if (linkId is Guid id && id != Guid.Empty)
+        {
+            await WriteStorageHelmValuesAsync(tenantId, clusterComponentId, id, ct);
+        }
+    }
+
+    /// <summary>The storage link this component was last pointed at, or null if it has none.</summary>
+    public async Task<Guid?> GetStorageLinkIdForComponentAsync(
+        Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        ClusterComponent? component = await db.ClusterComponents
+            .Include(c => c.Cluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+        return component is null ? null : TryReadConfig(component.Configuration)?.StorageLinkId;
+    }
+
+    /// <summary>Bucket minted for a cluster that has no S3 of its own yet.</summary>
+    private const string AutoBucketName = "velero-backups";
+
+    private async Task<Guid?> FindCubeFsComponentOnClusterAsync(Guid clusterId, CancellationToken ct)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        ClusterComponent? cubefs = await db.ClusterComponents
+            .Where(c => c.ClusterId == clusterId && c.Name == "cubefs" && c.Status == ComponentStatus.Installed)
+            .OrderByDescending(c => c.CreatedAt)
+            .FirstOrDefaultAsync(ct);
+        return cubefs?.Id;
+    }
+
+    /// <summary>
     /// Maps a storage link onto Velero's backup storage location. Pure and public so the
     /// mapping can be checked without a database — an endpoint written into the wrong key
     /// produces a component that installs cleanly and cannot back anything up.

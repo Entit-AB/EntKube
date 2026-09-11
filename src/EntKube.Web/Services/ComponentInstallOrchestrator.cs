@@ -35,6 +35,7 @@ public class ComponentInstallOrchestrator(
     KeycloakService keycloakService,
     HarborService harborService,
     OpenLdapService openLdapService,
+    Dr.VeleroService veleroService,
     StalwartService stalwartService,
     HeadscaleService headscaleService)
 {
@@ -79,6 +80,8 @@ public class ComponentInstallOrchestrator(
         // For ClusterIssuer TLS, provision the cert-manager Certificate → tls Secret BEFORE the
         // install so the StatefulSet's init container can mount it (chart does not self-sign).
         await openLdapService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId);
+        // Refresh Velero's S3 backup-target values + credentials before install/upgrade.
+        await veleroService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId, ct);
         // Regenerate the mail components' manifests from what the operator authored, so an install
         // deploys the current configuration rather than whatever was rendered when it was added.
         await stalwartService.RefreshManifestIfConfiguredAsync(tenantId, componentId);

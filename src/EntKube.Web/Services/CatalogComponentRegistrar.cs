@@ -387,18 +387,19 @@ public class CatalogComponentRegistrar(
     }
 
     /// <summary>
-    /// Points Velero at the selected storage link. Bucket, endpoint, region and credentials
-    /// all come from there, so a blueprint that installs Velero needs only the link id —
-    /// the same single source the UI install path uses.
+    /// Points Velero at a storage link. An explicitly selected link wires directly — bucket,
+    /// endpoint, region and credentials all come from there, so a blueprint that installs Velero
+    /// needs only the link id. With no link, a CubeFS component installed earlier in the same run
+    /// is used to mint a backup target, so backups need no operator input at all.
     /// </summary>
     private async Task SaveVeleroConfigIfNeededAsync(
         Guid tenantId, Guid componentId, IReadOnlyDictionary<string, string> fieldValues, CatalogEntry catalogEntry)
     {
         if (catalogEntry.Key != "velero") return;
-        if (TryGetStorageLink(fieldValues, out Guid storageLinkId))
-        {
-            await veleroService.WriteStorageHelmValuesAsync(tenantId, componentId, storageLinkId);
-        }
+        // An explicit storage link wires directly; otherwise Velero auto-provisions a CubeFS
+        // backup target from a CubeFS component installed earlier in the same run.
+        Guid? explicitLink = TryGetStorageLink(fieldValues, out Guid storageLinkId) ? storageLinkId : null;
+        await veleroService.ConfigureFromRegistrationAsync(tenantId, componentId, explicitLink);
     }
 
     /// <summary>
