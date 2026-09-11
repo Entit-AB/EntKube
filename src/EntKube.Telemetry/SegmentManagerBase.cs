@@ -54,6 +54,29 @@ public sealed class SegmentEngineOptions
     public int RetentionDays { get; init; } = 90;
 
     /// <summary>
+    /// Ceiling on the total bytes of SEALED ARCHIVES held in object storage, across every signal. 0 (the
+    /// default) means no size bound — retention by age only.
+    ///
+    /// <para>This is the bound the engine did not have. <see cref="RetentionDays"/> bounds telemetry in
+    /// TIME, which bounds the bucket only if you already know the cluster's log rate — and the whole point
+    /// of a bucket is that nothing tells you when it grows. Every other ceiling here measures the local
+    /// volume, which object storage is not. So a busy month simply became a larger bill, discovered
+    /// afterwards.</para>
+    ///
+    /// <para>Enforced oldest-first, exactly like the volume guard's last resort and for the same reason:
+    /// past the ceiling the choice is not "keep or drop" but "drop the far end of the window, or keep
+    /// paying". Set it to what the bucket is worth per cluster.</para>
+    /// </summary>
+    public long ObjectStorageMaxBytes { get; init; }
+
+    /// <summary>
+    /// Where reclaiming stops, as a percentage of <see cref="ObjectStorageMaxBytes"/>. Below the ceiling
+    /// on purpose — reclaiming back to exactly the trigger fires again on the next pass, taking a little
+    /// more each time. Default 90.
+    /// </summary>
+    public int ObjectStorageTargetPercent { get; init; } = 90;
+
+    /// <summary>
     /// Retention for the <c>spans</c> signal — the raw per-span waterfall data, which is by far the largest
     /// telemetry volume (eBPF instruments everything). Raw spans are dropped after this window while the
     /// per-trace SUMMARY index (which powers the trace list) follows the full <see cref="RetentionDays"/>,
@@ -113,8 +136,14 @@ public sealed class SegmentEngineOptions
     /// <summary>Max number of sealed-segment readers kept open in memory per (tenant, signal). Least-
     /// recently-used readers beyond this are closed (they reopen on demand). Bounds file handles /
     /// heap so a long-running app with 90-day retention doesn't accumulate a reader per segment.
-    /// Default 256.</summary>
-    public int MaxCachedReaders { get; init; } = 256;
+    ///
+    /// <para>Default 64, down from 256. An open Lucene reader is not a handle — it holds that segment's
+    /// term dictionary and field caches resident, tens of megabytes for a busy hour, so the cache alone
+    /// could account for more of this process's heap than everything else it does. 64 covers the recent
+    /// window that queries actually revisit; older segments reopen from the local warm copy on demand,
+    /// which costs a page-in rather than a download. Raise it where memory is plentiful and queries
+    /// range far back.</para></summary>
+    public int MaxCachedReaders { get; init; } = 64;
 
     /// <summary>
     /// zstd level used to compress a sealed segment's archive before it is uploaded to object storage
@@ -337,6 +366,53 @@ public abstract class SegmentManagerBase : IDisposable
         }
     }
 
+    /// <summary>
+    /// Answers "does this index hold anything matching?" without opening the whole window at once.
+    ///
+    /// <see cref="QueryAsync{T}(SegmentScope,DateTime?,DateTime?,Func{IndexSearcher,T},CancellationToken)"/>
+    /// builds one searcher over EVERY overlapping segment before it reads a single document, and a sealed
+    /// segment that is not already cached locally must first be downloaded from object storage and
+    /// unpacked. A real query needs that. A yes/no does not — and this yes/no sits in front of every log
+    /// and trace view as the read-routing probe, so paying a query's price for it is the difference
+    /// between a page that opens and one that looks like it has hung.
+    ///
+    /// So: newest segment first, one at a time, stopping at the first match. A cluster with recent data is
+    /// answered by the active index alone and touches object storage not at all.
+    /// </summary>
+    public async Task<bool> AnyAsync(
+        SegmentScope scope, DateTime? from, DateTime? to, Func<IndexSearcher, bool> match,
+        CancellationToken ct = default)
+    {
+        if (scope != SegmentScope.Sealed)
+        {
+            ActiveSegmentIndex active = _active;
+            active.Refresh();
+            IndexSearcher activeSearcher = active.Acquire();
+            try
+            {
+                if (await Task.Run(() => match(activeSearcher), ct)) return true;
+            }
+            finally { active.Release(activeSearcher); }
+        }
+
+        if (scope == SegmentScope.Hot) return false;
+
+        foreach (TelemetrySegment seg in (await SegmentsOverlappingAsync(from, to, ct))
+                     .OrderByDescending(s => s.MaxTs))
+        {
+            ct.ThrowIfCancellationRequested();
+            DirectoryReader reader = await AcquireSegmentReaderAsync(seg, ct);
+            try
+            {
+                IndexSearcher searcher = new(reader);
+                if (await Task.Run(() => match(searcher), ct)) return true;
+            }
+            finally { reader.DecRef(); }
+        }
+
+        return false;
+    }
+
     // Get-or-open the cached reader for a sealed segment, then IncRef it for the caller's query.
     private async Task<DirectoryReader> AcquireSegmentReaderAsync(TelemetrySegment seg, CancellationToken ct)
     {
@@ -474,6 +550,18 @@ public abstract class SegmentManagerBase : IDisposable
         _logger.LogInformation(
             "Sealed {Signal} segment {SegId}: {Docs} docs, {Size} bytes, {Min:o}..{Max:o}", Signal, segId, docs, size, min, max);
         return segment;
+    }
+
+    /// <summary>
+    /// Total bytes this (tenant, signal) holds in sealed archives, from the catalog — the sizes are
+    /// recorded when a segment is sealed, so this costs one catalog read and never lists the bucket.
+    /// </summary>
+    public async Task<long> SealedBytesAsync(CancellationToken ct = default)
+    {
+        IReadOnlyList<TelemetrySegment> all = await _catalog.ListOverlappingAsync(TenantId, Signal, null, null, ct);
+        long total = 0;
+        foreach (TelemetrySegment seg in all) total += seg.SizeBytes;
+        return total;
     }
 
     /// <summary>Drops sealed segments whose newest event is older than the retention window (S3 + catalog + cache).</summary>

@@ -56,6 +56,19 @@ telemetry:
   # How long sealed segments are kept at all.
   retentionDays: 90
 
+  # The bound on the BUCKET: total bytes of sealed archives in object storage, across every signal.
+  # 0 (default) means no size bound — age alone decides, which bounds the bucket only if you already know
+  # this cluster's log rate. Nothing tells you when that changes, and object storage does not push back:
+  # it accepts what it is given and sends an invoice. Past this ceiling the OLDEST segments are dropped
+  # (archive + catalog row), oldest-first and proportionally across signals, down to
+  # objectStorageTargetPercent of the ceiling.
+  #
+  # Set it to what a cluster's telemetry is worth to keep. 53687091200 is 50 GiB.
+  objectStorageMaxBytes: 0
+  # Where reclaiming stops, as a percentage of the ceiling — below it on purpose, so a pass does not
+  # immediately re-trigger and take a little more each time.
+  objectStorageTargetPercent: 90
+
   # WARM tier: how long a sealed segment also stays on local disk, where a query reads it without touching
   # object storage. Past this it is evicted and served cold. Nothing is lost — the archive is durable in
   # the bucket for the full retentionDays.

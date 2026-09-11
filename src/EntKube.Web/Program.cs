@@ -330,6 +330,9 @@ public class Program
             // back from object storage. See docs/telemetry-in-cluster.md §3.1.
             WarmRetentionDays = builder.Configuration.GetValue<int?>("Telemetry:WarmRetentionDays") ?? 3,
             WarmMaxBytes = builder.Configuration.GetValue<long?>("Telemetry:WarmMaxBytes") ?? 8L * 1024 * 1024 * 1024,
+    MaxCachedReaders = builder.Configuration.GetValue<int?>("Telemetry:MaxCachedReaders") ?? 64,
+    ObjectStorageMaxBytes = builder.Configuration.GetValue<long?>("Telemetry:ObjectStorageMaxBytes") ?? 0,
+    ObjectStorageTargetPercent = builder.Configuration.GetValue<int?>("Telemetry:ObjectStorageTargetPercent") ?? 90,
         };
         builder.Services.AddSingleton(segmentOptions);
         // Per-tenant setting for which StorageLink backs a tenant's telemetry (edited in the tenant's
@@ -771,10 +774,34 @@ public class Program
         // which are stamped onto every row. OtlpIngest.ReadAsync handles token/gzip/size-cap/parse and
         // returns 503 (telemetry off), 401 (bad token), 413 (too large), or 400 (unparseable). The
         // collector retries on 5xx and drops on 4xx.
+        //
+        // LEGACY, and kept only so a cluster that has not been cut over yet keeps recording. Nothing is
+        // configured to push here any more: a collector ships to the indexer in its own cluster, whose
+        // data EntKube queries in place rather than being sent a copy. Set Telemetry:AcceptDirectIngest
+        // to false to close the door for good — reads of what is already stored here keep working, and
+        // anything still pushing gets a 410 that says where its data belongs instead of a silent accept.
+        bool acceptDirectIngest =
+            app.Configuration.GetValue<bool?>("Telemetry:AcceptDirectIngest") ?? true;
+
+        IResult? IngestClosed(ILoggerFactory loggerFactory, HttpContext ctx)
+        {
+            if (acceptDirectIngest) return null;
+            loggerFactory.CreateLogger("OtlpIngest").LogWarning(
+                "Refused a direct telemetry push from {Peer}: this management plane does not accept "
+                + "cluster telemetry (Telemetry:AcceptDirectIngest is false). Install the EntKube "
+                + "Telemetry Indexer on that cluster and re-apply its collector.",
+                ctx.Connection.RemoteIpAddress);
+            // 410, not 503: Gone is permanent, so the collector DROPS the batch instead of retrying and
+            // buffering it until the kubelet kills the pod.
+            return Results.StatusCode(StatusCodes.Status410Gone);
+        }
+
         app.MapPost("/ingest/otlp/v1/logs", async (
             HttpContext httpContext, ITelemetryIngest telemetry, IngestTokenService tokens,
             IngestRateLimiter rateLimiter, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
+            if (IngestClosed(loggerFactory, httpContext) is { } closed) return closed;
+
             ILogger log = loggerFactory.CreateLogger("OtlpIngest");
             OtlpIngest.Result r = await OtlpIngest.ReadAsync(httpContext, telemetry, tokens, rateLimiter, log, ct);
             if (r.Error is not null) return r.Error;
@@ -810,6 +837,8 @@ public class Program
             HttpContext httpContext, ITelemetryIngest telemetry, IngestTokenService tokens,
             IngestRateLimiter rateLimiter, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
+            if (IngestClosed(loggerFactory, httpContext) is { } closed) return closed;
+
             ILogger log = loggerFactory.CreateLogger("OtlpIngest");
             OtlpIngest.Result r = await OtlpIngest.ReadAsync(httpContext, telemetry, tokens, rateLimiter, log, ct);
             if (r.Error is not null) return r.Error;

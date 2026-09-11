@@ -14,8 +14,24 @@ namespace EntKube.Web.Services;
 /// all with no per-cluster flag or configuration. The method surface mirrors LokiService and
 /// PgLogService exactly, so switching a viewer's injection to this type is a drop-in.
 /// </summary>
-public class LogQueryService(ILogBackend native, LokiService loki, IDbContextFactory<ApplicationDbContext> dbFactory)
+public class LogQueryService(
+    ILogBackend native,
+    LokiService loki,
+    IDbContextFactory<ApplicationDbContext> dbFactory,
+    ILogger<LogQueryService> logger)
 {
+    /// <summary>
+    /// How long a backend probe may take before the viewer stops waiting on it and treats it as a no.
+    ///
+    /// Probing is not the work — it only decides which store to ask — but it runs before the first thing
+    /// the operator sees, so a slow probe is indistinguishable from a broken page: the namespace picker
+    /// sits on "Loading namespaces…" with nothing to say. Both probes reach out of the process (a cluster's
+    /// API server for Loki, the segment store for the native side), so both can be slow for reasons that
+    /// have nothing to do with the cluster being looked at. A probe that overruns is left running — its
+    /// result still lands in the cache for the next load — and this one answers "no".
+    /// </summary>
+    private static readonly TimeSpan ProbeBudget = TimeSpan.FromSeconds(8);
+
     // The routing probes (component check + HasDataAsync) would otherwise run before EVERY facade
     // call — ~5 extra round-trips per log-panel load. Memoize per cluster for a few seconds: long
     // enough for one page render to share a single probe, short enough to pick up newly-arriving
@@ -57,7 +73,7 @@ public class LogQueryService(ILogBackend native, LokiService loki, IDbContextFac
         // Auto: EntKube takes over when its collector is installed (even before data arrives);
         // otherwise use native only if it already holds data, else fall back to Loki.
         bool useNative = await NativeCollectorInstalledAsync(clusterId, ct)
-            || await native.HasDataAsync(clusterId, ct);
+            || await WithinBudgetAsync(native.HasDataAsync(clusterId, ct), clusterId, "EntKube telemetry");
         _routeCache[clusterId] = (useNative, DateTime.UtcNow);
         return useNative;
     }
@@ -77,8 +93,25 @@ public class LogQueryService(ILogBackend native, LokiService loki, IDbContextFac
     {
         Task<bool> nativeProbe = native.IsEnabled ? NativeUsableAsync(clusterId, ct) : Task.FromResult(false);
         Task<bool> lokiProbe = loki.IsAvailableAsync(clusterId, ct);
-        await Task.WhenAll(nativeProbe, lokiProbe);
-        return (await nativeProbe, await lokiProbe);
+        return (await WithinBudgetAsync(nativeProbe, clusterId, "EntKube telemetry"),
+                await WithinBudgetAsync(lokiProbe, clusterId, "Loki"));
+    }
+
+    /// <summary>Waits <see cref="ProbeBudget"/> for a probe and answers "no" if it overruns, so a slow or
+    /// wedged backend costs the viewer a source rather than the whole page.</summary>
+    private async Task<bool> WithinBudgetAsync(Task<bool> probe, Guid clusterId, string what)
+    {
+        if (probe == await Task.WhenAny(probe, Task.Delay(ProbeBudget))) return await probe;
+
+        // Nobody awaits the overrunning probe, so its exceptions would be unobserved; and its result is
+        // still worth having — it populates the route/endpoint caches for the next load.
+        _ = probe.ContinueWith(t => logger.LogDebug(t.Exception, "{Backend} probe for cluster {ClusterId} "
+            + "finished after the viewer stopped waiting.", what, clusterId), TaskScheduler.Default);
+
+        logger.LogWarning(
+            "{Backend} availability probe for cluster {ClusterId} exceeded {Budget}s; treating it as "
+            + "unavailable for this page load so the log viewer can open.", what, clusterId, ProbeBudget.TotalSeconds);
+        return false;
     }
 
     private async Task<bool> NativeUsableAsync(Guid clusterId, CancellationToken ct)
