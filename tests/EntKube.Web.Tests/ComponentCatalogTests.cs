@@ -3,6 +3,7 @@ using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using YamlDotNet.RepresentationModel;
 
 namespace EntKube.Web.Tests;
 
@@ -148,6 +149,91 @@ public class ComponentCatalogTests : IDisposable
         YamlFormMerger.ExtractValue(merged, "resources.requests.cpu").Should().Be("100m");
         YamlFormMerger.ExtractValue(merged, "k8sCache.resources.limits.memory").Should().Be("512Mi");
         YamlFormMerger.ExtractValue(merged, "k8sCache.resources.requests.cpu").Should().Be("50m");
+    }
+
+    [Fact]
+    public void OtelEbpf_CapsRouteCardinality()
+    {
+        // Without a routes section OBI falls back to its `heuristic` decorator, which replaces
+        // only the path segments that LOOK like ids — a path shaped like a directory tree stays
+        // unique forever, so every variant becomes another permanent metric series. Turning the
+        // metric exporters off hides that; it does not fix it, and it returns the moment the RED
+        // metrics field is set back to 9090. The cap is what makes that switch safe to flip.
+        CatalogEntry entry = ComponentCatalog.GetByKey("otel-ebpf")!;
+        Dictionary<string, string> values = entry.FormFields
+            .Where(f => f.DefaultValue is { Length: > 0 })
+            .ToDictionary(f => f.Key, f => f.DefaultValue!);
+
+        string merged = CatalogComponentRegistrar.MergeFormValues(entry, values, []);
+
+        YamlFormMerger.ExtractValue(merged, "config.data.routes.unmatched")
+            .Should().Be("low-cardinality");
+        YamlFormMerger.ExtractValue(merged, "config.data.routes.max_path_segment_cardinality")
+            .Should().Be("10");
+    }
+
+    [Fact]
+    public void OtelEbpf_ShipsWithBothMetricExportersOff()
+    {
+        // Both have to be said out loud, because config.data is a MAP-MERGE: the chart's own
+        // defaults put an OTLP metrics endpoint at ${HOST_IP}:4318 and a Prometheus endpoint on
+        // :9090, and simply not mentioning them here leaves both in place. That combination had
+        // OBI aggregating RED metrics for every service and route on the node and sending them to
+        // a collector with no metrics pipeline and to a scrape endpoint with no scraper — and
+        // OBI's Prometheus registry only evicts expired label sets inside Collect(), which runs
+        // on a scrape and nowhere else, so with no scraper nothing was ever evicted.
+        CatalogEntry entry = ComponentCatalog.GetByKey("otel-ebpf")!;
+
+        YamlFormMerger.ExtractValue(entry.DefaultValues!, "config.data.prometheus_export.port")
+            .Should().Be("0", "an unscraped Prometheus endpoint never runs its own reaper");
+        YamlFormMerger.ExtractValue(entry.DefaultValues!, "config.data.otel_metrics_export.endpoint")
+            .Should().BeNullOrEmpty("the EntKube collector runs no metrics pipeline to receive them");
+
+        // Traces are this component's remaining job and must still reach the collector.
+        YamlFormMerger.ExtractValue(entry.DefaultValues!, "config.data.otel_traces_export.endpoint")
+            .Should().Be("http://otel-collector.monitoring:4317");
+    }
+
+    [Fact]
+    public void OtelEbpf_DeclaresInstrumentationsUnderTheExporterNotAtTheTopLevel()
+    {
+        // OBI has no top-level `instrumentations` key — the setting belongs to each exporter. It
+        // parses its config non-strictly, so a top-level one is accepted, silently ignored, and
+        // leaves the full default protocol list loaded: a dozen protocols, each another eBPF
+        // program plus its maps on every instrumented executable, while the config on disk looks
+        // like it selected three.
+        CatalogEntry entry = ComponentCatalog.GetByKey("otel-ebpf")!;
+
+        YamlMappingNode data = (YamlMappingNode)Navigate(entry.DefaultValues!, "config", "data");
+        data.Children.Keys.OfType<YamlScalarNode>().Select(k => k.Value)
+            .Should().NotContain("instrumentations",
+                "a top-level instrumentations key is accepted, ignored, and changes nothing");
+
+        YamlSequenceNode declared = (YamlSequenceNode)Navigate(
+            entry.DefaultValues!, "config", "data", "otel_traces_export", "instrumentations");
+        declared.Children.OfType<YamlScalarNode>().Should().NotBeEmpty();
+    }
+
+    /// <summary>
+    /// Walks a YAML document by key. YamlFormMerger.ExtractValue only descends through mappings
+    /// to a scalar leaf, so it cannot see a sequence or assert on a mapping's key set.
+    /// </summary>
+    private static YamlNode Navigate(string yaml, params string[] path)
+    {
+        YamlStream stream = new();
+        stream.Load(new StringReader(yaml));
+        YamlNode current = stream.Documents[0].RootNode;
+
+        foreach (string segment in path)
+        {
+            YamlMappingNode mapping = (YamlMappingNode)current;
+            YamlScalarNode key = mapping.Children.Keys.OfType<YamlScalarNode>()
+                .FirstOrDefault(k => k.Value == segment)
+                ?? throw new InvalidOperationException($"no key '{segment}' in {string.Join('.', path)}");
+            current = mapping.Children[key];
+        }
+
+        return current;
     }
 
     // ──────── Lookup ────────

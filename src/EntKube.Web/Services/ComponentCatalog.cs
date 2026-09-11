@@ -1891,6 +1891,13 @@ public static class ComponentCatalog
                     DefaultValue = "false",
                     HelpText = "Registers the RED metrics endpoint above with a Prometheus Operator install. Pointless without a port; and a port without this is memory spent on metrics no one reads."
                 },
+                new ComponentFormField
+                {
+                    Key = "route-cardinality", Label = "Max Route Cardinality",
+                    YamlPath = "config.data.routes.max_path_segment_cardinality", Type = FormFieldType.Number,
+                    DefaultValue = "10",
+                    HelpText = "Distinct values kept per URL path segment per service before the rest collapse into the wildcard. This is what bounds the RED metrics above: OBI's own route decorator is a heuristic that collapses only the segments that LOOK like ids, so a path built like a directory tree (/org/repo/tree/branch) stays unique forever and every variant becomes another live series. 0 removes the cap."
+                },
                 // The Kubernetes metadata cache Deployment (k8sCache.replicas is 1 below), which
                 // holds cluster object metadata and so scales with cluster size, not node size.
                 new ComponentFormField
@@ -2027,6 +2034,18 @@ public static class ComponentCatalog
                       endpoint: ""
                     prometheus_export:
                       port: 0
+
+                    # The cap that makes turning those back on safe. Without a routes section OBI
+                    # falls back to its `heuristic` decorator, which replaces only the path segments
+                    # that look like ids — anything shaped like a directory tree survives intact, so
+                    # every distinct path on the node becomes its own permanent series. That is the
+                    # other half of what made the Prometheus endpoint above unbounded, and it is not
+                    # fixed by switching the endpoint off: it comes straight back with it.
+                    # `low-cardinality` applies the same heuristic first, then caps the distinct
+                    # values per path segment per service and wildcards the rest.
+                    routes:
+                      unmatched: low-cardinality
+                      max_path_segment_cardinality: 10
 
                     # Override the chart's ${HOST_IP} default → the EntKube collector's OTLP gRPC
                     # receiver. The collector enriches (k8sattributes) and forwards to the native
