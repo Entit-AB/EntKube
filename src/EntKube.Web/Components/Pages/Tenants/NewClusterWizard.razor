@@ -2,6 +2,7 @@
 @using EntKube.Web.Services
 @using Microsoft.AspNetCore.Components.Authorization
 @inject ClusterBlueprintService BlueprintService
+@inject ProvisionedClusterService ProvisionedClusters
 @inject StorageService StorageService
 @inject TenantService TenantService
 @inject ToastService Toasts
@@ -397,11 +398,21 @@
         busy = true;
         try
         {
+            // The spec is recorded before anything is built, and it outlives the run: this is what
+            // day-2 edits and what the reconciler compares against. The blueprint stays the thing
+            // that installs components, which is all it was ever good at.
+            (ProvisionedCluster spec, List<ProvisionedWorkerPool> pools) =
+                ProvisionedClusterService.FromConfig(TenantId, environmentId, config);
+            await ProvisionedClusters.CreateAsync(spec, pools);
+
             IReadOnlyList<BaselineStep> steps = ProductionBaseline.BuildSteps(selectedBaseline);
             ClusterBlueprint bp = await BlueprintService.CreateProvisioningBlueprintAsync(
                 TenantId, BlueprintName, config, steps);
             BootstrapRun run = await BlueprintService.StartProvisioningBootstrapAsync(
                 TenantId, environmentId, bp.Id, overrides: null, triggeredBy: "new-cluster-wizard");
+
+            // Now that the cluster row exists, the spec knows which cluster it describes.
+            await ProvisionedClusters.UpdateAsync(TenantId, spec.Id, c => c.KubernetesClusterId = run.ClusterId);
 
             Toasts.Success("Cluster provisioning queued.");
             GoToCluster(run.ClusterId, $"Provisioning {config.ClusterName} — opening live progress…", tab: "bootstrap");

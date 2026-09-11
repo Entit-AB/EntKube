@@ -118,6 +118,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<SecretExpiryNotification> SecretExpiryNotifications => Set<SecretExpiryNotification>();
     public DbSet<ClusterServer> ClusterServers => Set<ClusterServer>();
     public DbSet<IdentityBinding> IdentityBindings => Set<IdentityBinding>();
+    public DbSet<ProvisionedCluster> ProvisionedClusters => Set<ProvisionedCluster>();
+    public DbSet<ProvisionedWorkerPool> ProvisionedWorkerPools => Set<ProvisionedWorkerPool>();
     public DbSet<ClusterBlueprint> ClusterBlueprints => Set<ClusterBlueprint>();
     public DbSet<BlueprintStep> BlueprintSteps => Set<BlueprintStep>();
     public DbSet<BootstrapRun> BootstrapRuns => Set<BootstrapRun>();
@@ -2471,6 +2473,63 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(s => s.Cluster)
                 .WithMany(c => c.Servers)
                 .HasForeignKey(s => s.ClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ProvisionedCluster — a cluster EntKube creates and operates on OpenStack. The spec, as
+        // asked for; the cluster's own CAPI objects remain the authority on what exists.
+        //
+        // The link to KubernetesCluster is deliberately SetNull rather than Cascade: unregistering
+        // a cluster is not the same as deleting the machines it runs on, and a spec that vanishes
+        // with its registration leaves nothing that knows how to tear the cloud resources down.
+
+        builder.Entity<ProvisionedCluster>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.HasIndex(c => new { c.TenantId, c.Name }).IsUnique();
+            entity.HasIndex(c => c.KubernetesClusterId);
+            entity.Property(c => c.Name).HasMaxLength(63).IsRequired();
+            entity.Property(c => c.KubernetesVersion).HasMaxLength(20).IsRequired();
+            entity.Property(c => c.NodeImageName).HasMaxLength(200);
+            entity.Property(c => c.BaseImageName).HasMaxLength(200);
+            entity.Property(c => c.ControlPlaneFlavor).HasMaxLength(100);
+            entity.Property(c => c.NodeNetworkId).HasMaxLength(100);
+            entity.Property(c => c.ExternalNetworkId).HasMaxLength(100);
+            entity.Property(c => c.PodCidr).HasMaxLength(50);
+            entity.Property(c => c.ServiceCidr).HasMaxLength(50);
+            entity.Property(c => c.DnsNameservers).HasMaxLength(200);
+            entity.Property(c => c.FailureDomain).HasMaxLength(100);
+            entity.Property(c => c.BootstrapFlavor).HasMaxLength(100);
+            entity.Property(c => c.BootstrapNetworkId).HasMaxLength(100);
+            entity.Property(c => c.BootstrapSshUser).HasMaxLength(50);
+            entity.Property(c => c.LastError).HasMaxLength(4000);
+            entity.Property(c => c.DesiredState).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.ApiEndpoint).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.NetworkMode).HasConversion<string>().HasMaxLength(20);
+
+            entity.HasOne(c => c.Tenant)
+                .WithMany()
+                .HasForeignKey(c => c.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ProvisionedWorkerPool — pools are addressed by name from day-2 operations and from the
+        // CAPI resources that carry them, so the name is unique within its cluster.
+
+        builder.Entity<ProvisionedWorkerPool>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => new { p.ProvisionedClusterId, p.Name }).IsUnique();
+            entity.Property(p => p.Name).HasMaxLength(63).IsRequired();
+            entity.Property(p => p.Flavor).HasMaxLength(100);
+            entity.Property(p => p.FailureDomain).HasMaxLength(100);
+            entity.Property(p => p.KubernetesVersion).HasMaxLength(20);
+            entity.Property(p => p.LabelsJson).HasMaxLength(4000);
+            entity.Property(p => p.TaintsJson).HasMaxLength(4000);
+
+            entity.HasOne(p => p.Cluster)
+                .WithMany(c => c.WorkerPools)
+                .HasForeignKey(p => p.ProvisionedClusterId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

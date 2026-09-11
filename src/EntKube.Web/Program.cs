@@ -450,6 +450,7 @@ public class Program
         builder.Services.AddSingleton<CommandRunner>();
         builder.Services.AddScoped<OpenStackDiscoveryService>();
         builder.Services.AddScoped<MachineImageBuilder>();
+        builder.Services.AddScoped<ProvisionedClusterService>();
         builder.Services.AddScoped<ClusterProvisioningService>();
         builder.Services.AddScoped<StorageService>();
         builder.Services.AddScoped<StorageLinkClientFactory>();
