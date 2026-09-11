@@ -605,10 +605,10 @@ public class ClusterProvisioningService(
         }
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        return await db.KubernetesClusters
-            .Where(c => c.Id == clusterId)
-            .Select(c => c.Kubeconfig)
-            .FirstOrDefaultAsync(ct);
+
+        // Materialized rather than projected — Kubeconfig is [NotMapped] and comes from the vault.
+        KubernetesCluster? cluster = await db.KubernetesClusters.FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+        return cluster?.Kubeconfig;
     }
 
     // ──────── Cluster-row state helpers ────────

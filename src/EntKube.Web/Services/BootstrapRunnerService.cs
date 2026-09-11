@@ -150,11 +150,104 @@ public class BootstrapRunnerService(
             await db.SaveChangesAsync(ct);
         }
 
+        // A successful run means every step reported success, which is not the same as the cluster
+        // working — a CSI driver installs cleanly and provisions nothing, and nobody finds out
+        // until the first PersistentVolumeClaim. Verified here, while somebody is still watching.
+        if (!failed)
+        {
+            await VerifyFoundationAsync(scope, dbFactory, runId, clusterId, ct);
+        }
+
         // If this run belongs to a staged rollout, update its target and advance.
         await blueprintService.OnRunFinishedAsync(runId, ct);
 
         logger.LogInformation("BootstrapRunnerService: run {RunId} finished ({Status})",
             runId, failed ? "Failed" : "Succeeded");
+    }
+
+    /// <summary>
+    /// Checks that what was installed actually works, and records the result on the run's log.
+    ///
+    /// <para>Deliberately not allowed to fail the run: the components are installed, and marking an
+    /// otherwise-successful bootstrap as failed because storage is not ready yet would hide the
+    /// components that did land. It is reported instead, where the person who just ran it is
+    /// looking.</para>
+    /// </summary>
+    private async Task VerifyFoundationAsync(
+        IServiceScope scope,
+        IDbContextFactory<ApplicationDbContext> dbFactory,
+        Guid runId,
+        Guid clusterId,
+        CancellationToken ct)
+    {
+        try
+        {
+            string? kubeconfig;
+            using (ApplicationDbContext db = dbFactory.CreateDbContext())
+            {
+                // Materialized rather than projected: Kubeconfig is [NotMapped] and is filled
+                // from the vault when the entity loads.
+                kubeconfig = (await db.KubernetesClusters
+                    .FirstOrDefaultAsync(c => c.Id == clusterId, ct))?.Kubeconfig;
+            }
+
+            if (string.IsNullOrWhiteSpace(kubeconfig))
+            {
+                return;
+            }
+
+            FoundationVerifier verifier = scope.ServiceProvider.GetRequiredService<FoundationVerifier>();
+            IReadOnlyList<FoundationCheck> checks = await verifier.VerifyAsync(kubeconfig, checkBackups: false, ct);
+
+            List<FoundationCheck> failures = checks.Where(c => !c.Passed).ToList();
+
+            string summary = failures.Count == 0
+                ? $"Foundation verified: {string.Join("; ", checks.Select(c => c.Title))} — all good."
+                : "Foundation problems found after install:\n"
+                  + string.Join("\n", failures.Select(c => $"  • {c.Title}: {c.Detail}"));
+
+            // Recorded as a step of its own rather than tacked onto the run, so it appears in the
+            // Bootstrap panel beside the installs it is a verdict on — and shows as failed there
+            // without failing the run.
+            using (ApplicationDbContext db = dbFactory.CreateDbContext())
+            {
+                int lastOrder = await db.BootstrapStepRuns
+                    .Where(sr => sr.BootstrapRunId == runId)
+                    .Select(sr => sr.Order)
+                    .DefaultIfEmpty(0)
+                    .MaxAsync(ct);
+
+                db.BootstrapStepRuns.Add(new BootstrapStepRun
+                {
+                    Id = Guid.NewGuid(),
+                    BootstrapRunId = runId,
+                    Order = lastOrder + 1,
+                    StepType = BlueprintStepType.Component,
+                    Key = "foundation-check",
+                    Name = "Verify the foundation",
+                    Status = failures.Count == 0 ? BootstrapStepStatus.Succeeded : BootstrapStepStatus.Failed,
+                    Output = summary,
+                    Error = failures.Count == 0 ? null : $"{failures.Count} check(s) failed",
+                    StartedAt = DateTime.UtcNow,
+                    FinishedAt = DateTime.UtcNow
+                });
+
+                await db.SaveChangesAsync(ct);
+            }
+
+            if (failures.Count > 0)
+            {
+                logger.LogWarning(
+                    "BootstrapRunnerService: run {RunId} installed everything but {Count} foundation check(s) failed",
+                    runId, failures.Count);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Verification is a report, not a gate. Failing to produce it must not turn a
+            // successful bootstrap into a failed one.
+            logger.LogWarning(ex, "BootstrapRunnerService: foundation verification could not run for {RunId}", runId);
+        }
     }
 
     private async Task<(bool ok, string? error)> ExecuteStepAsync(

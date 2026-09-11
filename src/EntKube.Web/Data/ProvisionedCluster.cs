@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations.Schema;
+
 namespace EntKube.Web.Data;
 
 /// <summary>What the operator wants this cluster to be doing.</summary>
@@ -186,6 +188,17 @@ public class ProvisionedWorkerPool
     public int? MinCount { get; set; }
 
     public int? MaxCount { get; set; }
+
+    /// <summary>
+    /// True when both bounds are set and sane. An autoscaled pool's replica count belongs to the
+    /// autoscaler rather than to the spec, which is what stops the reconciler correcting it back
+    /// every five minutes and fighting the thing that is supposed to own it.
+    ///
+    /// <para>Not a column: it is derived from two that are, and the migration for this table is
+    /// already written — a mapped property here would exist in the model and not in the database.</para>
+    /// </summary>
+    [NotMapped]
+    public bool Autoscale => MinCount is int min && MaxCount is int max && min >= 0 && max >= min && max > 0;
 
     /// <summary>
     /// Null follows the control plane. It differs only during an upgrade, where the control plane

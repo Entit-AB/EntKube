@@ -316,10 +316,11 @@ public class ClusterOperationsService(
         }
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        return await db.KubernetesClusters
-            .Where(c => c.Id == clusterId)
-            .Select(c => c.Kubeconfig)
-            .FirstOrDefaultAsync(ct);
+
+        // Materialized rather than projected: Kubeconfig is [NotMapped] and arrives via the
+        // interceptor that runs when the entity is loaded.
+        KubernetesCluster? cluster = await db.KubernetesClusters.FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+        return cluster?.Kubeconfig;
     }
 
     /// <summary>
