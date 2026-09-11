@@ -236,6 +236,44 @@ public class OpenStackDiscoveryService(
     }
 
     /// <summary>
+    /// Names of resources in a collection that start with a prefix. Used to sweep a project for
+    /// anything a deleted cluster left behind, which is why it matches on the name rather than on
+    /// a tag: CAPO names what it creates after the cluster, and a resource that lost its tags still
+    /// carries the name.
+    /// </summary>
+    public async Task<List<string>> ListNamedAsync(
+        KeystoneSession session,
+        string serviceType,
+        string path,
+        string collection,
+        string nameProperty,
+        string prefix,
+        CancellationToken ct = default)
+    {
+        IReadOnlyList<string> names = await ReadAsync(session, serviceType, path, ct, doc =>
+        {
+            List<string> found = [];
+            if (!doc.RootElement.TryGetProperty(collection, out JsonElement items)
+                || items.ValueKind != JsonValueKind.Array)
+            {
+                return (IReadOnlyList<string>)found;
+            }
+
+            foreach (JsonElement item in items.EnumerateArray())
+            {
+                string? name = item.TryGetProperty(nameProperty, out JsonElement n) ? n.GetString() : null;
+                if (!string.IsNullOrEmpty(name) && name.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    found.Add(name);
+                }
+            }
+            return (IReadOnlyList<string>)found;
+        });
+
+        return names.OrderBy(n => n, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>
     /// One read against one service. A service the catalog does not advertise, or that refuses the
     /// call, yields an empty list and a warning: discovery is here to fill in a form, and half a
     /// form beats an error page.

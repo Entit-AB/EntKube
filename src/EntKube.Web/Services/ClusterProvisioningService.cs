@@ -500,6 +500,117 @@ public class ClusterProvisioningService(
         }
     }
 
+    /// <summary>
+    /// Deletes a provisioned cluster by summoning a management plane to do it.
+    ///
+    /// <para>A self-managed cluster cannot delete itself — the controllers that would tear down its
+    /// OpenStack resources run on the machines being torn down, so the moment the first
+    /// control-plane node goes there is nothing left to remove the load balancer, the floating IPs
+    /// or the volumes. So the same ephemeral kubeadm VM the initial bootstrap uses is booted, CAPO
+    /// installed on it, the cluster's CAPI state moved <em>out</em> to it, and the Cluster deleted
+    /// there. CAPO then unwinds the cloud properly, and the VM is destroyed after.</para>
+    ///
+    /// <para>This is what having no permanent seed costs, and it is paid here — once, at deletion —
+    /// rather than by every cluster keeping a management plane alive for the day it might be
+    /// deleted.</para>
+    /// </summary>
+    public async Task DeleteProvisionedClusterAsync(
+        Guid tenantId,
+        ProvisionedCluster spec,
+        KeystoneSession session,
+        Action<string> log,
+        CancellationToken ct = default)
+    {
+        string workDir = Path.Combine(Path.GetTempPath(), $"entkube-teardown-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        BootstrapVm? plane = null;
+
+        try
+        {
+            string targetKubeconfig = await LoadClusterKubeconfigAsync(spec, ct)
+                ?? throw new InvalidOperationException(
+                    "This cluster has no stored kubeconfig, so its CAPI state cannot be moved out to be "
+                    + "deleted. Delete with force to forget it here and clean the cloud up by hand.");
+
+            string targetPath = Path.Combine(workDir, "target.kubeconfig");
+            await File.WriteAllTextAsync(targetPath, targetKubeconfig, ct);
+
+            string? cloudsYaml = await vaultService.GetClusterSecretValueAsync(
+                tenantId, spec.KubernetesClusterId!.Value, CloudsYamlSecret, ct)
+                ?? throw new InvalidOperationException(
+                    "The cloud credentials this cluster was built with are no longer in the vault, so CAPO "
+                    + "cannot be given what it needs to tear it down.");
+
+            SshKeyPair key = SshKeyFactory.Create("entkube-teardown");
+            string keyPath = Path.Combine(workDir, "id_rsa");
+            await SshKeyFactory.WritePrivateKeyFileAsync(keyPath, key.PrivateKeyPem, ct);
+
+            OpenStackProvisioningConfig config = ProvisionedClusterService.ToConfig(spec);
+
+            log("Booting the ephemeral management plane…");
+            (string fipId, string fipAddress) =
+                await compute.AllocateFloatingIpAsync(session, config.ExternalNetworkId, ct);
+
+            plane = await compute.CreateEphemeralVmAsync(
+                session,
+                name: $"{spec.Name}-teardown",
+                imageName: config.EffectiveBootstrapImageName,
+                flavor: config.BootstrapFlavor,
+                networkId: config.BootstrapNetworkId,
+                sshPublicKey: key.PublicKeyOpenSsh,
+                cloudInitUserData: NodeImageRecipe.BootstrapCloudInit(
+                    config.KubernetesVersion, fipAddress, config.PodCidr, CalicoManifestUrl),
+                ingressPorts: [22, 6443],
+                floatingIpId: fipId,
+                floatingIpAddress: fipAddress,
+                ct: ct);
+
+            string planePath = Path.Combine(workDir, "plane.kubeconfig");
+            await FetchBootstrapKubeconfigAsync(config.BootstrapSshUser, plane.FloatingIp, keyPath, planePath, log, ct);
+
+            log("Installing CAPO on it…");
+            await RunAsync("clusterctl", "init --infrastructure openstack", workDir, EnvFor(planePath), log, ct,
+                timeout: TimeSpan.FromMinutes(10));
+
+            await ApplyCloudIdentitySecretAsync(cloudsYaml, planePath, workDir, log, ct);
+
+            // Out of the cluster being deleted, into the plane that will outlive it.
+            log("Moving the cluster's Cluster API state out to the management plane…");
+            await RunAsync("clusterctl", $"move --to-kubeconfig {planePath}", workDir, EnvFor(targetPath), log, ct,
+                timeout: TimeSpan.FromMinutes(10));
+
+            log("Deleting the cluster. CAPO now unwinds the machines, load balancer, ports and volumes…");
+            await RunAsync("kubectl",
+                $"delete cluster {spec.Name} --namespace {CapiManifestBuilder.Namespace} --wait=true --timeout=30m",
+                workDir, EnvFor(planePath), log, ct, timeout: TimeSpan.FromMinutes(35));
+
+            log("Cluster deleted.");
+        }
+        finally
+        {
+            if (plane is not null)
+            {
+                log("Destroying the ephemeral management plane.");
+                await compute.DeleteBootstrapVmAsync(session, plane, CancellationToken.None);
+            }
+            TryDeleteDirectory(workDir);
+        }
+    }
+
+    private async Task<string?> LoadClusterKubeconfigAsync(ProvisionedCluster spec, CancellationToken ct)
+    {
+        if (spec.KubernetesClusterId is not Guid clusterId)
+        {
+            return null;
+        }
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.KubernetesClusters
+            .Where(c => c.Id == clusterId)
+            .Select(c => c.Kubeconfig)
+            .FirstOrDefaultAsync(ct);
+    }
+
     // ──────── Cluster-row state helpers ────────
 
     private async Task<OpenStackConnection> LoadConnectionAsync(Guid tenantId, Guid connectionId, CancellationToken ct)
