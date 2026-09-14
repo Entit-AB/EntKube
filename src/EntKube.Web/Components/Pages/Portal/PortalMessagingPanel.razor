@@ -1,0 +1,815 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Components.Pages.Shared
+@inject PortalServiceScopeService Scope
+@inject RabbitMQService RabbitMQService
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   Portal → App → Messaging.
+
+   The customer manages RabbitMQ topology inside the vhost(s) their app is
+   bound to, and nowhere else. The vhost is the boundary — it is never a field
+   the customer fills in, it comes from the MessagingBindings an operator set
+   up, and every create/delete re-checks the target against that scope before
+   it touches the broker. Creating or deleting a vhost is deliberately absent.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex align-items-center mb-3">
+    <i class="bi bi-send fs-4 me-2 text-primary"></i>
+    <div>
+        <h4 class="mb-0">Messaging — @App.Name</h4>
+        <small class="text-muted">@Environment.Name</small>
+    </div>
+    <button class="btn btn-sm btn-outline-secondary ms-auto" @onclick="ReloadAll" disabled="@loading">
+        <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+    </button>
+</div>
+
+@if (loading)
+{
+    <div class="text-center py-4"><div class="spinner-border text-primary" role="status"></div></div>
+}
+else if (loadError is not null)
+{
+    <div class="alert alert-danger py-2 small">
+        <i class="bi bi-exclamation-triangle me-1"></i>Could not load your messaging resources: @loadError
+    </div>
+}
+else if (scope is null || scope.IsEmpty)
+{
+    <EmptyState Icon="bi-send"
+                Title="No message broker assigned"
+                Message="This app is not connected to a RabbitMQ virtual host in this environment. Ask your service provider to connect one — you can then manage your own queues, exchanges and routing inside it." />
+}
+else
+{
+    @foreach (PortalVhostScope vh in scope.Vhosts)
+    {
+        VhostState state = StateFor(vh);
+        <div class="card shadow-sm mb-4">
+            <div class="card-header bg-white py-2">
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <i class="bi bi-hdd-rack text-primary"></i>
+                    <strong>@vh.Cluster.Name</strong>
+                    <span class="text-muted small">virtual host</span>
+                    <code>@vh.Vhost</code>
+                    @if (state.Error is not null)
+                    {
+                        <span class="badge bg-danger-subtle text-danger border border-danger-subtle">Unreachable</span>
+                    }
+                    <span class="ms-auto text-muted small">
+                        @state.Queues.Count queues · @state.Exchanges.Count exchanges · @state.Routes.Count bindings
+                    </span>
+                </div>
+            </div>
+
+            <div class="card-body">
+                @if (state.Loading)
+                {
+                    <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary" role="status"></div></div>
+                }
+                else if (state.Error is not null)
+                {
+                    <div class="alert alert-danger py-2 small mb-0">
+                        <i class="bi bi-exclamation-triangle me-1"></i>@state.Error
+                    </div>
+                }
+                else
+                {
+                    @* ── Queues ── *@
+                    <div class="d-flex align-items-center justify-content-between mb-2">
+                        <span class="fw-medium"><i class="bi bi-collection me-1 text-info"></i>Queues</span>
+                        @if (CanWrite)
+                        {
+                            <button class="btn btn-sm btn-outline-primary" @onclick='() => ToggleForm(vh.Key, "queue")'>
+                                <i class="bi bi-plus me-1"></i>New queue
+                            </button>
+                        }
+                    </div>
+
+                    @if (openForm == (vh.Key, "queue"))
+                    {
+                        <div class="card border-primary mb-3">
+                            <div class="card-body py-2">
+                                @if (formError is not null) { <div class="alert alert-danger py-1 small mb-2">@formError</div> }
+                                <div class="row g-2 align-items-end">
+                                    <div class="col-md-4">
+                                        <label class="form-label small mb-0" for="q-name-@vh.Key">Name</label>
+                                        <input id="q-name-@vh.Key" class="form-control form-control-sm" placeholder="orders"
+                                               @bind="formName" @bind:event="oninput" />
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small mb-0" for="q-type-@vh.Key">Type</label>
+                                        <select id="q-type-@vh.Key" class="form-select form-select-sm" @bind="formQueueType">
+                                            <option value="quorum">Quorum (replicated)</option>
+                                            <option value="classic">Classic</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="q-dur-@vh.Key" @bind="formDurable" />
+                                            <label class="form-check-label small" for="q-dur-@vh.Key">Durable</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="q-auto-@vh.Key" @bind="formAutoDelete" />
+                                            <label class="form-check-label small" for="q-auto-@vh.Key">Auto-delete</label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <button class="btn btn-sm btn-primary" @onclick="() => CreateQueue(vh)"
+                                                disabled="@(submitting || !IsValidName(formName))">
+                                            @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            Create
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary" @onclick="CloseForm" disabled="@submitting">Cancel</button>
+                                    </div>
+                                </div>
+                                <div class="form-text small">Created in <code>@vh.Vhost</code> on @vh.Cluster.Name.</div>
+                            </div>
+                        </div>
+                    }
+
+                    @if (state.Queues.Count == 0)
+                    {
+                        <p class="text-muted small">No queues in this virtual host yet.</p>
+                    }
+                    else
+                    {
+                        <div class="table-responsive mb-4">
+                            <table class="table table-sm table-hover align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Queue</th>
+                                        <th>Type</th>
+                                        <th class="text-end">Ready</th>
+                                        <th class="text-end">Unacked</th>
+                                        <th class="text-end">Consumers</th>
+                                        <th></th>
+                                        @if (CanWrite) { <th class="text-end">Actions</th> }
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (RabbitMQQueueInfo q in state.Queues)
+                                    {
+                                        RabbitMQQueueStats? st = state.Stats.FirstOrDefault(s => s.QueueName == q.QueueName);
+                                        <tr>
+                                            <td class="fw-medium">@q.QueueName</td>
+                                            <td><span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle small">@q.QueueType</span></td>
+                                            <td class="text-end">@(st?.MessagesReady.ToString("N0") ?? "—")</td>
+                                            <td class="text-end">@(st?.MessagesUnacknowledged.ToString("N0") ?? "—")</td>
+                                            <td class="text-end">@(st?.Consumers.ToString() ?? "—")</td>
+                                            <td>
+                                                @if (st?.Stalled == true)
+                                                {
+                                                    <span class="badge bg-warning text-dark small" title="Messages are waiting with no consumer attached">Stalled</span>
+                                                }
+                                                @if (st?.InFlowControl == true)
+                                                {
+                                                    <span class="badge bg-warning text-dark small" title="The broker is throttling publishers">Flow control</span>
+                                                }
+                                            </td>
+                                            @if (CanWrite)
+                                            {
+                                                <td class="text-end text-nowrap">
+                                                    @if (confirmDelete == q.K8sName)
+                                                    {
+                                                        <span class="small text-danger me-1">@DeleteWarning</span>
+                                                        <button class="btn btn-sm btn-danger" @onclick='() => DeleteTopology(vh, "queue", q.K8sName, q.QueueName)'>Delete</button>
+                                                        <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="CancelDelete">Cancel</button>
+                                                    }
+                                                    else
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-danger"
+                                                                title="Delete queue" aria-label="Delete queue"
+                                                                @onclick='() => ConfirmDelete(vh, "queue", q.K8sName, q.QueueName)'>
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    }
+                                                </td>
+                                            }
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+
+                    @* ── Exchanges ── *@
+                    <div class="d-flex align-items-center justify-content-between mb-2">
+                        <span class="fw-medium"><i class="bi bi-arrow-left-right me-1 text-warning"></i>Exchanges</span>
+                        @if (CanWrite)
+                        {
+                            <button class="btn btn-sm btn-outline-primary" @onclick='() => ToggleForm(vh.Key, "exchange")'>
+                                <i class="bi bi-plus me-1"></i>New exchange
+                            </button>
+                        }
+                    </div>
+
+                    @if (openForm == (vh.Key, "exchange"))
+                    {
+                        <div class="card border-primary mb-3">
+                            <div class="card-body py-2">
+                                @if (formError is not null) { <div class="alert alert-danger py-1 small mb-2">@formError</div> }
+                                <div class="row g-2 align-items-end">
+                                    <div class="col-md-4">
+                                        <label class="form-label small mb-0" for="x-name-@vh.Key">Name</label>
+                                        <input id="x-name-@vh.Key" class="form-control form-control-sm" placeholder="events"
+                                               @bind="formName" @bind:event="oninput" />
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small mb-0" for="x-type-@vh.Key">Type</label>
+                                        <select id="x-type-@vh.Key" class="form-select form-select-sm" @bind="formExchangeType">
+                                            <option value="direct">direct</option>
+                                            <option value="topic">topic</option>
+                                            <option value="fanout">fanout</option>
+                                            <option value="headers">headers</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="x-dur-@vh.Key" @bind="formDurable" />
+                                            <label class="form-check-label small" for="x-dur-@vh.Key">Durable</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="x-auto-@vh.Key" @bind="formAutoDelete" />
+                                            <label class="form-check-label small" for="x-auto-@vh.Key">Auto-delete</label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <button class="btn btn-sm btn-primary" @onclick="() => CreateExchange(vh)"
+                                                disabled="@(submitting || !IsValidName(formName))">
+                                            @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            Create
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary" @onclick="CloseForm" disabled="@submitting">Cancel</button>
+                                    </div>
+                                </div>
+                                <div class="form-text small">Created in <code>@vh.Vhost</code> on @vh.Cluster.Name.</div>
+                            </div>
+                        </div>
+                    }
+
+                    @if (state.Exchanges.Count == 0)
+                    {
+                        <p class="text-muted small">No exchanges in this virtual host yet.</p>
+                    }
+                    else
+                    {
+                        <div class="table-responsive mb-4">
+                            <table class="table table-sm table-hover align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Exchange</th>
+                                        <th>Type</th>
+                                        <th>Durable</th>
+                                        @if (CanWrite) { <th class="text-end">Actions</th> }
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (RabbitMQExchangeInfo x in state.Exchanges)
+                                    {
+                                        <tr>
+                                            <td class="fw-medium">@x.ExchangeName</td>
+                                            <td><span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle small">@x.ExchangeType</span></td>
+                                            <td>@(x.Durable ? "Yes" : "No")</td>
+                                            @if (CanWrite)
+                                            {
+                                                <td class="text-end text-nowrap">
+                                                    @if (confirmDelete == x.K8sName)
+                                                    {
+                                                        <span class="small text-danger me-1">@DeleteWarning</span>
+                                                        <button class="btn btn-sm btn-danger" @onclick='() => DeleteTopology(vh, "exchange", x.K8sName, x.ExchangeName)'>Delete</button>
+                                                        <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="CancelDelete">Cancel</button>
+                                                    }
+                                                    else
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-danger"
+                                                                title="Delete exchange" aria-label="Delete exchange"
+                                                                @onclick='() => ConfirmDelete(vh, "exchange", x.K8sName, x.ExchangeName)'>
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    }
+                                                </td>
+                                            }
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+
+                    @* ── Routing bindings ── *@
+                    <div class="d-flex align-items-center justify-content-between mb-2">
+                        <span class="fw-medium"><i class="bi bi-diagram-3 me-1 text-success"></i>Routing</span>
+                        @if (CanWrite && state.Exchanges.Count > 0)
+                        {
+                            <button class="btn btn-sm btn-outline-primary" @onclick='() => ToggleForm(vh.Key, "binding")'>
+                                <i class="bi bi-plus me-1"></i>New binding
+                            </button>
+                        }
+                    </div>
+
+                    @if (openForm == (vh.Key, "binding"))
+                    {
+                        <div class="card border-primary mb-3">
+                            <div class="card-body py-2">
+                                @if (formError is not null) { <div class="alert alert-danger py-1 small mb-2">@formError</div> }
+                                <div class="row g-2 align-items-end">
+                                    <div class="col-md-3">
+                                        <label class="form-label small mb-0" for="b-src-@vh.Key">From exchange</label>
+                                        <select id="b-src-@vh.Key" class="form-select form-select-sm" @bind="formSource">
+                                            <option value="">Select…</option>
+                                            @foreach (RabbitMQExchangeInfo x in state.Exchanges)
+                                            {
+                                                <option value="@x.ExchangeName">@x.ExchangeName</option>
+                                            }
+                                        </select>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label small mb-0" for="b-kind-@vh.Key">To</label>
+                                        <select id="b-kind-@vh.Key" class="form-select form-select-sm" @bind="formDestType">
+                                            <option value="queue">Queue</option>
+                                            <option value="exchange">Exchange</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small mb-0" for="b-dest-@vh.Key">Destination</label>
+                                        <select id="b-dest-@vh.Key" class="form-select form-select-sm" @bind="formDestination">
+                                            <option value="">Select…</option>
+                                            @if (formDestType == "queue")
+                                            {
+                                                @foreach (RabbitMQQueueInfo q in state.Queues)
+                                                {
+                                                    <option value="@q.QueueName">@q.QueueName</option>
+                                                }
+                                            }
+                                            else
+                                            {
+                                                @foreach (RabbitMQExchangeInfo x in state.Exchanges)
+                                                {
+                                                    <option value="@x.ExchangeName">@x.ExchangeName</option>
+                                                }
+                                            }
+                                        </select>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label small mb-0" for="b-key-@vh.Key">Routing key</label>
+                                        <input id="b-key-@vh.Key" class="form-control form-control-sm" placeholder="order.*"
+                                               @bind="formRoutingKey" @bind:event="oninput" />
+                                    </div>
+                                    <div class="col-md-2">
+                                        <button class="btn btn-sm btn-primary" @onclick="() => CreateRouting(vh)"
+                                                disabled="@(submitting || formSource.Length == 0 || formDestination.Length == 0)">
+                                            @if (submitting) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            Bind
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary" @onclick="CloseForm" disabled="@submitting">Cancel</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    }
+
+                    @if (state.Routes.Count == 0)
+                    {
+                        <p class="text-muted small mb-0">No routing bindings in this virtual host yet.</p>
+                    }
+                    else
+                    {
+                        <div class="table-responsive">
+                            <table class="table table-sm table-hover align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>From exchange</th>
+                                        <th>To</th>
+                                        <th>Routing key</th>
+                                        @if (CanWrite) { <th class="text-end">Actions</th> }
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (RabbitMQRoutingBindingInfo r in state.Routes)
+                                    {
+                                        <tr>
+                                            <td class="fw-medium">@r.Source</td>
+                                            <td>
+                                                <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle small me-1">@r.DestinationType</span>
+                                                @r.Destination
+                                            </td>
+                                            <td>@(string.IsNullOrEmpty(r.RoutingKey) ? "—" : r.RoutingKey)</td>
+                                            @if (CanWrite)
+                                            {
+                                                <td class="text-end text-nowrap">
+                                                    @if (confirmDelete == r.K8sName)
+                                                    {
+                                                        <button class="btn btn-sm btn-danger" @onclick='() => DeleteTopology(vh, "binding", r.K8sName, RouteLabel(r))'>Delete</button>
+                                                        <button class="btn btn-sm btn-outline-secondary ms-1" @onclick="CancelDelete">Cancel</button>
+                                                    }
+                                                    else
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-danger"
+                                                                title="Delete binding" aria-label="Delete binding"
+                                                                @onclick='() => ConfirmDelete(vh, "binding", r.K8sName, RouteLabel(r))'>
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    }
+                                                </td>
+                                            }
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                }
+            </div>
+
+            @* ── Credentials the app's deployments receive ── *@
+            <div class="card-footer bg-white py-2">
+                <div class="small fw-medium mb-1"><i class="bi bi-key me-1 text-muted"></i>Connection secrets</div>
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Deployment</th>
+                                <th>Queue / Exchange</th>
+                                <th>Kubernetes secret</th>
+                                <th>Last synced</th>
+                                @if (CanWrite) { <th class="text-end">Actions</th> }
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (MessagingBinding b in vh.Bindings)
+                            {
+                                <tr>
+                                    <td>@DeploymentName(b.AppDeploymentId)</td>
+                                    <td>
+                                        @if (b.QueueName is not null) { <code class="small me-1">@b.QueueName</code> }
+                                        @if (b.ExchangeName is not null) { <code class="small">@b.ExchangeName</code> }
+                                        @if (b.QueueName is null && b.ExchangeName is null) { <span class="text-muted small">vhost only</span> }
+                                    </td>
+                                    <td><code class="small">@b.KubernetesSecretName</code></td>
+                                    <td>
+                                        @if (b.LastSyncedAt is null)
+                                        {
+                                            <span class="badge bg-warning text-dark small">Never synced</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="text-muted small">@b.LastSyncedAt.Value.ToString("MMM d, HH:mm")</span>
+                                        }
+                                    </td>
+                                    @if (CanWrite)
+                                    {
+                                        <td class="text-end">
+                                            <button class="btn btn-sm btn-outline-success" @onclick="() => SyncBinding(b)"
+                                                    disabled="@syncingBindings.Contains(b.Id)">
+                                                @if (syncingBindings.Contains(b.Id)) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                else { <i class="bi bi-cloud-arrow-up me-1"></i> }
+                                                Sync
+                                            </button>
+                                        </td>
+                                    }
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    }
+
+    <p class="text-muted small">
+        <i class="bi bi-shield-lock me-1"></i>
+        @if (CanWrite)
+        {
+            <text>You manage topology inside the virtual host@(scope.Vhosts.Count == 1 ? "" : "s") above. Virtual hosts
+            themselves are managed by your service provider.</text>
+        }
+        else
+        {
+            <text>You have read-only access to this customer. Ask for the Operator role to manage queues and exchanges.</text>
+        }
+    </p>
+}
+
+@code {
+    [Parameter, EditorRequired] public Data.App App { get; set; } = null!;
+    [Parameter, EditorRequired] public Data.Environment Environment { get; set; } = null!;
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter] public CustomerAccessRole AccessRole { get; set; } = CustomerAccessRole.Viewer;
+
+    private bool CanWrite => AccessRole >= CustomerAccessRole.Operator;
+
+    private PortalMessagingScope? scope;
+    private bool loading = true;
+    private string? loadError;
+
+    /// <summary>Live broker topology for one vhost, filtered to that vhost only.</summary>
+    private sealed class VhostState
+    {
+        public bool Loading { get; set; } = true;
+        public string? Error { get; set; }
+        public List<RabbitMQQueueInfo> Queues { get; set; } = [];
+        public List<RabbitMQExchangeInfo> Exchanges { get; set; } = [];
+        public List<RabbitMQRoutingBindingInfo> Routes { get; set; } = [];
+        public List<RabbitMQQueueStats> Stats { get; set; } = [];
+    }
+
+    private readonly Dictionary<string, VhostState> states = [];
+
+    // Create forms — one open at a time, keyed by (vhost, kind).
+    private (string Vhost, string Kind)? openForm;
+    private string formName = "";
+    private string formQueueType = "quorum";
+    private string formExchangeType = "direct";
+    private bool formDurable = true;
+    private bool formAutoDelete;
+    private string formSource = "";
+    private string formDestination = "";
+    private string formDestType = "queue";
+    private string formRoutingKey = "";
+    private bool submitting;
+    private string? formError;
+
+    // Delete confirmation
+    private string? confirmDelete;
+    private string? deleteWarning;
+    private List<RabbitMQCascadeItem> cascadeDependents = [];
+    private string DeleteWarning => deleteWarning ?? "";
+
+    private readonly HashSet<Guid> syncingBindings = [];
+
+    // The parent re-renders on every tree interaction, so only reload when the panel is
+    // actually pointed at a different app or environment.
+    private (Guid App, Guid Env)? loadedFor;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor == (App.Id, Environment.Id)) return;
+        loadedFor = (App.Id, Environment.Id);
+        await ReloadAll();
+    }
+
+    private VhostState StateFor(PortalVhostScope vh) =>
+        states.TryGetValue(vh.Key, out VhostState? s) ? s : new VhostState { Loading = true };
+
+    private static string RouteLabel(RabbitMQRoutingBindingInfo r) => $"{r.Source} → {r.Destination}";
+
+    private string DeploymentName(Guid id) =>
+        scope?.Deployments.FirstOrDefault(d => d.Id == id)?.Name ?? "deployment";
+
+    private async Task ReloadAll()
+    {
+        loading = true;
+        states.Clear();
+        StateHasChanged();
+
+        loadError = null;
+        try
+        {
+            scope = await Scope.GetMessagingScopeAsync(TenantId, App.Id, Environment.Id);
+        }
+        catch (Exception ex)
+        {
+            // Surfaced in the panel rather than thrown: an unhandled exception in a
+            // component lifecycle method tears down the whole portal circuit.
+            scope = null;
+            loadError = ex.Message;
+        }
+        loading = false;
+        StateHasChanged();
+
+        foreach (PortalVhostScope vh in scope?.Vhosts ?? [])
+            await LoadVhost(vh);
+    }
+
+    /// <summary>
+    /// Reads the broker's topology and keeps only the rows in this vhost. The service
+    /// APIs are cluster-wide, so this filter is what stops one customer seeing another
+    /// customer's queues on a shared broker.
+    /// </summary>
+    private async Task LoadVhost(PortalVhostScope vh)
+    {
+        VhostState state = new();
+        states[vh.Key] = state;
+        StateHasChanged();
+
+        try
+        {
+            List<RabbitMQQueueInfo> queues = await RabbitMQService.GetQueuesAsync(TenantId, vh.Cluster.Id);
+            List<RabbitMQExchangeInfo> exchanges = await RabbitMQService.GetExchangesAsync(TenantId, vh.Cluster.Id);
+            List<RabbitMQRoutingBindingInfo> routes = await RabbitMQService.GetRoutingBindingsAsync(TenantId, vh.Cluster.Id);
+
+            state.Queues = queues.Where(q => q.Vhost == vh.Vhost).OrderBy(q => q.QueueName).ToList();
+            state.Exchanges = exchanges.Where(x => x.Vhost == vh.Vhost).OrderBy(x => x.ExchangeName).ToList();
+            state.Routes = routes.Where(r => r.Vhost == vh.Vhost).OrderBy(r => r.Source).ThenBy(r => r.Destination).ToList();
+
+            try
+            {
+                List<RabbitMQQueueStats> stats = await RabbitMQService.GetQueueStatsAsync(TenantId, vh.Cluster.Id);
+                state.Stats = stats.Where(s => s.Vhost == vh.Vhost).ToList();
+            }
+            catch
+            {
+                // Counters are a nicety; an unreachable stats path must not blank the topology.
+            }
+        }
+        catch (Exception ex)
+        {
+            state.Error = ex.Message;
+        }
+        finally
+        {
+            state.Loading = false;
+            StateHasChanged();
+        }
+    }
+
+    // ── Forms ─────────────────────────────────────────────────────────────────
+
+    private void ToggleForm(string vhostKey, string kind)
+    {
+        openForm = openForm == (vhostKey, kind) ? null : (vhostKey, kind);
+        formName = "";
+        formQueueType = "quorum";
+        formExchangeType = "direct";
+        formDurable = true;
+        formAutoDelete = false;
+        formSource = "";
+        formDestination = "";
+        formDestType = "queue";
+        formRoutingKey = "";
+        formError = null;
+    }
+
+    private void CloseForm()
+    {
+        openForm = null;
+        formError = null;
+    }
+
+    /// <summary>AMQP allows most characters, but keep portal-created names boring and shell-safe.</summary>
+    private static bool IsValidName(string name) =>
+        name.Length is > 0 and <= 255
+        && name.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '.' or '-' or '_');
+
+    /// <summary>
+    /// Fails the operation unless the target vhost is still one this app is bound to.
+    /// Re-resolved from the database, not from the rendered page.
+    /// </summary>
+    private async Task<bool> EnsureInScope(PortalVhostScope vh)
+    {
+        if (!CanWrite) return false;
+        scope = await Scope.GetMessagingScopeAsync(TenantId, App.Id, Environment.Id);
+        if (scope.AllowsVhost(vh.Cluster.Id, vh.Vhost)) return true;
+
+        formError = "This virtual host is no longer connected to your app.";
+        return false;
+    }
+
+    private async Task CreateQueue(PortalVhostScope vh)
+    {
+        formError = null;
+        if (!IsValidName(formName)) { formError = "Use letters, digits, dot, dash or underscore."; return; }
+        if (!await EnsureInScope(vh)) return;
+
+        submitting = true;
+        try
+        {
+            await RabbitMQService.CreateQueueAsync(
+                TenantId, vh.Cluster.Id, vh.Vhost, formName.Trim(), formQueueType, formDurable, formAutoDelete);
+            Toasts.Success($"Queue '{formName}' created in {vh.Vhost}.");
+            CloseForm();
+            await LoadVhost(vh);
+        }
+        catch (Exception ex) { formError = ex.Message; }
+        finally { submitting = false; }
+    }
+
+    private async Task CreateExchange(PortalVhostScope vh)
+    {
+        formError = null;
+        if (!IsValidName(formName)) { formError = "Use letters, digits, dot, dash or underscore."; return; }
+        if (!await EnsureInScope(vh)) return;
+
+        submitting = true;
+        try
+        {
+            await RabbitMQService.CreateExchangeAsync(
+                TenantId, vh.Cluster.Id, vh.Vhost, formName.Trim(), formExchangeType, formDurable, formAutoDelete);
+            Toasts.Success($"Exchange '{formName}' created in {vh.Vhost}.");
+            CloseForm();
+            await LoadVhost(vh);
+        }
+        catch (Exception ex) { formError = ex.Message; }
+        finally { submitting = false; }
+    }
+
+    private async Task CreateRouting(PortalVhostScope vh)
+    {
+        formError = null;
+        if (!await EnsureInScope(vh)) return;
+
+        // The source and destination must already exist inside this vhost, so a crafted
+        // request can't bind across into another tenant's topology.
+        VhostState state = StateFor(vh);
+        bool sourceOk = state.Exchanges.Any(x => x.ExchangeName == formSource);
+        bool destOk = formDestType == "queue"
+            ? state.Queues.Any(q => q.QueueName == formDestination)
+            : state.Exchanges.Any(x => x.ExchangeName == formDestination);
+        if (!sourceOk || !destOk)
+        {
+            formError = "Pick a source and destination that exist in this virtual host.";
+            return;
+        }
+
+        submitting = true;
+        try
+        {
+            await RabbitMQService.CreateRoutingBindingAsync(
+                TenantId, vh.Cluster.Id, vh.Vhost, formSource, formDestination, formDestType, formRoutingKey.Trim());
+            Toasts.Success($"Bound {formSource} → {formDestination}.");
+            CloseForm();
+            await LoadVhost(vh);
+        }
+        catch (Exception ex) { formError = ex.Message; }
+        finally { submitting = false; }
+    }
+
+    // ── Delete ────────────────────────────────────────────────────────────────
+
+    private async Task ConfirmDelete(PortalVhostScope vh, string kind, string k8sName, string display)
+    {
+        confirmDelete = k8sName;
+        deleteWarning = null;
+        cascadeDependents = [];
+
+        if (kind == "binding") return;
+
+        try
+        {
+            cascadeDependents = await RabbitMQService.GetCascadeDependentsAsync(
+                TenantId, vh.Cluster.Id, kind, vh.Vhost, display);
+            if (cascadeDependents.Count > 0)
+                deleteWarning = $"Also removes {cascadeDependents.Count} dependent binding(s).";
+        }
+        catch
+        {
+            // A broker that can't enumerate dependents still allows the delete itself.
+        }
+    }
+
+    private void CancelDelete()
+    {
+        confirmDelete = null;
+        deleteWarning = null;
+        cascadeDependents = [];
+    }
+
+    private async Task DeleteTopology(PortalVhostScope vh, string kind, string k8sName, string display)
+    {
+        List<RabbitMQCascadeItem> dependents = cascadeDependents;
+        CancelDelete();
+
+        formError = null;
+        if (!await EnsureInScope(vh))
+        {
+            Toasts.Error("This virtual host is no longer connected to your app.", "Delete blocked");
+            return;
+        }
+
+        try
+        {
+            await RabbitMQService.DeleteTopologyCascadeAsync(TenantId, vh.Cluster.Id, kind, k8sName, dependents);
+            Toasts.Success($"Deleted {kind} '{display}'.");
+            await LoadVhost(vh);
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message, $"Could not delete {kind}");
+        }
+    }
+
+    // ── Credential sync ───────────────────────────────────────────────────────
+
+    private async Task SyncBinding(MessagingBinding binding)
+    {
+        if (!CanWrite || scope?.Bindings.Any(b => b.Id == binding.Id) != true) return;
+        syncingBindings.Add(binding.Id);
+        try
+        {
+            await RabbitMQService.SyncMessagingBindingAsync(TenantId, binding.Id);
+            Toasts.Success($"Connection secret '{binding.KubernetesSecretName}' synced.");
+            scope = await Scope.GetMessagingScopeAsync(TenantId, App.Id, Environment.Id);
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message, "Sync failed");
+        }
+        finally
+        {
+            syncingBindings.Remove(binding.Id);
+        }
+    }
+}

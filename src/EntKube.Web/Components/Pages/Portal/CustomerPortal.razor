@@ -166,6 +166,38 @@ else
                     <p class="text-muted small mt-2 mb-0">Loading apps...</p>
                 </div>
             }
+            else if (portalInitialSection is "databases" or "messaging" or "cache"
+                     && selectedPortalApp is not null && selectedPortalEnvironment is not null)
+            {
+                @* Databases/Messaging/Cache get their own customer-facing panels rather than the
+                   internal environment view: each resolves what this app is entitled to and shows
+                   nothing else, so a customer can manage its own resources without ever seeing —
+                   or reaching — another customer's on the same shared service. *@
+                @if (portalInitialSection == "databases")
+                {
+                    <PortalDatabasesPanel App="selectedPortalApp"
+                                          Environment="selectedPortalEnvironment"
+                                          TenantId="selectedCustomer.TenantId"
+                                          AccessRole="currentAccessRole"
+                                          @key="(selectedPortalApp.Id, selectedPortalEnvironment.Id)" />
+                }
+                else if (portalInitialSection == "messaging")
+                {
+                    <PortalMessagingPanel App="selectedPortalApp"
+                                          Environment="selectedPortalEnvironment"
+                                          TenantId="selectedCustomer.TenantId"
+                                          AccessRole="currentAccessRole"
+                                          @key="(selectedPortalApp.Id, selectedPortalEnvironment.Id)" />
+                }
+                else
+                {
+                    <PortalCachePanel App="selectedPortalApp"
+                                      Environment="selectedPortalEnvironment"
+                                      TenantId="selectedCustomer.TenantId"
+                                      AccessRole="currentAccessRole"
+                                      @key="(selectedPortalApp.Id, selectedPortalEnvironment.Id)" />
+                }
+            }
             else if (selectedPortalEnvironment is not null && selectedPortalApp is not null)
             {
                 @* App-level actions stay reachable above the environment's deployments so you

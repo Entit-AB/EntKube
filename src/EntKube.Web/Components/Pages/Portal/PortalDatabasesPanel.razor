@@ -1,0 +1,735 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Components.Pages.Shared
+@inject PortalServiceScopeService Scope
+@inject CnpgService CnpgService
+@inject MongoService MongoService
+@inject RegisteredPostgresService RegisteredPostgresService
+@inject VaultService VaultService
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   Portal → App → Databases.
+
+   A customer sees only the database servers their app is entitled to: the
+   ones an operator attached or allow-listed (see PortalServiceScopeService).
+   Inside those they may create their own databases and wire them to their own
+   deployments — they can never reach another customer's server or database,
+   and the server list is not something they can add to.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex align-items-center mb-3">
+    <i class="bi bi-database fs-4 me-2 text-primary"></i>
+    <div>
+        <h4 class="mb-0">Databases — @App.Name</h4>
+        <small class="text-muted">@Environment.Name</small>
+    </div>
+    <button class="btn btn-sm btn-outline-secondary ms-auto" @onclick="Reload" disabled="@loading">
+        <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+    </button>
+</div>
+
+@if (loading)
+{
+    <div class="text-center py-4"><div class="spinner-border text-primary" role="status"></div></div>
+}
+else if (loadError is not null)
+{
+    <div class="alert alert-danger py-2 small">
+        <i class="bi bi-exclamation-triangle me-1"></i>Could not load your databases: @loadError
+    </div>
+}
+else if (scope is null || scope.IsEmpty)
+{
+    <EmptyState Icon="bi-database"
+                Title="No database service assigned"
+                Message="This app has no database server in this environment yet. Ask your service provider to assign one — you can then create and manage your own databases inside it." />
+}
+else
+{
+    @if (scope.Deployments.Count == 0)
+    {
+        <div class="alert alert-warning py-2 small">
+            <i class="bi bi-info-circle me-1"></i>This app has no deployments in @Environment.Name yet, so databases
+            can be created but not yet connected to a running workload.
+        </div>
+    }
+
+    @foreach (DbServer server in Servers)
+    {
+        <div class="card shadow-sm mb-3">
+            <div class="card-header bg-white py-2">
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <i class="bi @server.Icon text-primary"></i>
+                    <strong>@server.Name</strong>
+                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle">@server.Engine</span>
+                    <span class="text-muted small">
+                        <i class="bi bi-hdd-network me-1"></i>@server.Location
+                    </span>
+                    @if (CanWrite && server.SupportsCreate)
+                    {
+                        <button class="btn btn-sm btn-outline-primary ms-auto"
+                                @onclick="() => ToggleCreate(server.Key)">
+                            <i class="bi bi-plus me-1"></i>New database
+                        </button>
+                    }
+                </div>
+            </div>
+
+            @if (createOpenFor == server.Key)
+            {
+                <div class="card-body border-bottom py-2">
+                    @if (createError is not null)
+                    {
+                        <div class="alert alert-danger py-1 small mb-2"><i class="bi bi-exclamation-triangle me-1"></i>@createError</div>
+                    }
+                    <div class="d-flex gap-2 align-items-start flex-wrap">
+                        <div>
+                            <label class="form-label small mb-0" for="newdb-@server.Key">Database name</label>
+                            <input id="newdb-@server.Key" class="form-control form-control-sm" style="min-width:16rem"
+                                   placeholder="e.g. billing" @bind="newDbName" @bind:event="oninput" />
+                            <div class="form-text small">Lowercase letters, digits and underscores.</div>
+                        </div>
+                        <button class="btn btn-sm btn-primary mt-4" @onclick="() => CreateDatabase(server)"
+                                disabled="@(creating || !IsValidDbName(newDbName))">
+                            @if (creating) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            Create
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary mt-4" @onclick="CancelCreate" disabled="@creating">Cancel</button>
+                    </div>
+                </div>
+            }
+
+            <div class="card-body p-0">
+                @if (server.Databases.Count == 0)
+                {
+                    <div class="text-muted small px-3 py-3">No databases yet on this server.</div>
+                }
+                else
+                {
+                    <div class="table-responsive">
+                        <table class="table table-hover align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Database</th>
+                                    <th>Owner</th>
+                                    <th>Status</th>
+                                    <th>Connected to</th>
+                                    <th class="text-end">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (DbEntry entry in server.Databases)
+                                {
+                                    <tr>
+                                        <td class="fw-medium">@entry.Name</td>
+                                        <td><code class="small">@entry.Owner</code></td>
+                                        <td>
+                                            <span class="badge @StatusClass(entry.Status) small">@entry.Status</span>
+                                        </td>
+                                        <td>
+                                            @{
+                                                List<DatabaseBinding> attached = BindingsFor(entry);
+                                            }
+                                            @if (attached.Count == 0)
+                                            {
+                                                <span class="text-muted small">Not connected</span>
+                                            }
+                                            else
+                                            {
+                                                @foreach (DatabaseBinding b in attached)
+                                                {
+                                                    <div class="small">
+                                                        <i class="bi bi-rocket-takeoff text-primary me-1"></i>@DeploymentName(b.AppDeploymentId)
+                                                        <code class="ms-1">@b.KubernetesSecretName</code>
+                                                        @if (b.LastSyncedAt is null)
+                                                        {
+                                                            <span class="badge bg-warning text-dark ms-1">Never synced</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="text-muted ms-1">@b.LastSyncedAt.Value.ToString("MMM d, HH:mm")</span>
+                                                        }
+                                                        @if (CanWrite)
+                                                        {
+                                                            @if (confirmDetachId == b.Id)
+                                                            {
+                                                                <button class="btn btn-sm btn-danger py-0 px-1 ms-1" @onclick="() => Detach(b)">Disconnect</button>
+                                                                <button class="btn btn-sm btn-outline-secondary py-0 px-1 ms-1" @onclick="() => confirmDetachId = null">No</button>
+                                                            }
+                                                            else
+                                                            {
+                                                                <button class="btn btn-sm btn-link py-0 px-1 text-danger"
+                                                                        title="Disconnect from this deployment"
+                                                                        aria-label="Disconnect from this deployment"
+                                                                        @onclick="() => confirmDetachId = b.Id"><i class="bi bi-x-circle"></i></button>
+                                                            }
+                                                        }
+                                                    </div>
+                                                }
+                                            }
+                                        </td>
+                                        <td class="text-end text-nowrap">
+                                            <button class="btn btn-sm btn-outline-secondary me-1"
+                                                    title="@(revealedKey == entry.Key ? "Hide credentials" : "View credentials")"
+                                                    aria-label="Toggle credentials visibility"
+                                                    @onclick="() => ToggleCredentials(entry)">
+                                                <i class="bi @(revealedKey == entry.Key ? "bi-eye-slash" : "bi-eye")"></i>
+                                            </button>
+                                            @if (CanWrite)
+                                            {
+                                                @if (ConnectableDeployments(entry).Count > 0)
+                                                {
+                                                    <button class="btn btn-sm btn-outline-primary me-1" @onclick="() => ToggleConnect(entry)">
+                                                        <i class="bi bi-plug me-1"></i>Connect
+                                                    </button>
+                                                }
+                                                <button class="btn btn-sm btn-outline-success me-1"
+                                                        @onclick="() => SyncDatabase(entry)" disabled="@busyKeys.Contains(entry.Key)">
+                                                    @if (busyKeys.Contains(entry.Key)) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    else { <i class="bi bi-cloud-arrow-up me-1"></i> }
+                                                    Sync
+                                                </button>
+                                                @if (confirmRotateKey == entry.Key)
+                                                {
+                                                    <button class="btn btn-sm btn-warning me-1" @onclick="() => RotatePassword(entry)">Rotate now</button>
+                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmRotateKey = null">Cancel</button>
+                                                }
+                                                else
+                                                {
+                                                    <button class="btn btn-sm btn-outline-warning"
+                                                            title="Rotate the database password" aria-label="Rotate the database password"
+                                                            @onclick="() => confirmRotateKey = entry.Key"><i class="bi bi-arrow-repeat"></i></button>
+                                                }
+                                            }
+                                        </td>
+                                    </tr>
+
+                                    @if (connectOpenFor == entry.Key)
+                                    {
+                                        <tr class="table-light">
+                                            <td colspan="5" class="px-3 py-2">
+                                                @if (connectError is not null)
+                                                {
+                                                    <div class="alert alert-danger py-1 small mb-2">@connectError</div>
+                                                }
+                                                <div class="d-flex gap-2 align-items-end flex-wrap">
+                                                    <div>
+                                                        <label class="form-label small mb-0" for="conn-dep-@entry.Key">Deployment</label>
+                                                        <select id="conn-dep-@entry.Key" class="form-select form-select-sm" @bind="connectDeploymentId">
+                                                            <option value="@Guid.Empty">Select deployment…</option>
+                                                            @foreach (AppDeployment d in ConnectableDeployments(entry))
+                                                            {
+                                                                <option value="@d.Id">@d.Name (@d.Namespace)</option>
+                                                            }
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <label class="form-label small mb-0" for="conn-secret-@entry.Key">Kubernetes secret name</label>
+                                                        <input id="conn-secret-@entry.Key" class="form-control form-control-sm" style="min-width:16rem"
+                                                               @bind="connectSecretName" @bind:event="oninput" />
+                                                    </div>
+                                                    <button class="btn btn-sm btn-primary" @onclick="() => Connect(entry)"
+                                                            disabled="@(connecting || connectDeploymentId == Guid.Empty || string.IsNullOrWhiteSpace(connectSecretName))">
+                                                        @if (connecting) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                        Connect &amp; sync
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => connectOpenFor = null" disabled="@connecting">Cancel</button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    }
+
+                                    @if (revealedKey == entry.Key)
+                                    {
+                                        <tr class="table-light">
+                                            <td colspan="5" class="px-3 py-2">
+                                                @if (credLoading)
+                                                {
+                                                    <div class="text-center py-2"><div class="spinner-border spinner-border-sm text-primary" role="status"></div></div>
+                                                }
+                                                else if (credSecrets is { Count: > 0 })
+                                                {
+                                                    <div class="d-flex flex-wrap gap-3 align-items-center">
+                                                        @foreach (VaultSecret sec in credSecrets)
+                                                        {
+                                                            <div class="d-flex align-items-center gap-1">
+                                                                <span class="text-muted small">@sec.Name:</span>
+                                                                @if (sec.Name == "PASSWORD")
+                                                                {
+                                                                    @if (revealedPasswordId == sec.Id)
+                                                                    {
+                                                                        <code class="user-select-all small">@credValues.GetValueOrDefault(sec.Id, "•••")</code>
+                                                                        <button class="btn btn-sm btn-link py-0 px-1" aria-label="Hide password"
+                                                                                @onclick="() => revealedPasswordId = null"><i class="bi bi-eye-slash"></i></button>
+                                                                    }
+                                                                    else
+                                                                    {
+                                                                        <code class="small text-muted">••••••••</code>
+                                                                        <button class="btn btn-sm btn-link py-0 px-1" aria-label="Reveal password"
+                                                                                @onclick="() => RevealPassword(sec)" disabled="@passwordRevealing">
+                                                                            @if (passwordRevealing) { <span class="spinner-border spinner-border-sm"></span> }
+                                                                            else { <i class="bi bi-eye"></i> }
+                                                                        </button>
+                                                                    }
+                                                                }
+                                                                else
+                                                                {
+                                                                    <code class="user-select-all small">@credValues.GetValueOrDefault(sec.Id, "…")</code>
+                                                                }
+                                                            </div>
+                                                        }
+                                                    </div>
+                                                }
+                                                else
+                                                {
+                                                    <div class="text-muted small">No credentials stored in the vault for this database.</div>
+                                                }
+                                            </td>
+                                        </tr>
+                                    }
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </div>
+        </div>
+    }
+
+    @if (!CanWrite)
+    {
+        <p class="text-muted small">
+            <i class="bi bi-eye me-1"></i>You have read-only access to this customer. Ask for the Operator role to
+            create databases or connect them to deployments.
+        </p>
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public Data.App App { get; set; } = null!;
+    [Parameter, EditorRequired] public Data.Environment Environment { get; set; } = null!;
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter] public CustomerAccessRole AccessRole { get; set; } = CustomerAccessRole.Viewer;
+
+    private bool CanWrite => AccessRole >= CustomerAccessRole.Operator;
+
+    private PortalDatabaseScope? scope;
+    private bool loading = true;
+    private string? loadError;
+
+    // Create
+    private string? createOpenFor;
+    private string newDbName = "";
+    private bool creating;
+    private string? createError;
+
+    // Connect / disconnect
+    private string? connectOpenFor;
+    private Guid connectDeploymentId;
+    private string connectSecretName = "";
+    private bool connecting;
+    private string? connectError;
+    private Guid? confirmDetachId;
+
+    // Per-database busy + rotate confirm
+    private readonly HashSet<string> busyKeys = [];
+    private string? confirmRotateKey;
+
+    // Credential reveal
+    private string? revealedKey;
+    private bool credLoading;
+    private List<VaultSecret>? credSecrets;
+    private readonly Dictionary<Guid, string> credValues = [];
+    private Guid? revealedPasswordId;
+    private bool passwordRevealing;
+
+    // The parent re-renders on every tree interaction, so only reload when the panel is
+    // actually pointed at a different app or environment.
+    private (Guid App, Guid Env)? loadedFor;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor == (App.Id, Environment.Id)) return;
+        loadedFor = (App.Id, Environment.Id);
+        await Reload();
+    }
+
+    private async Task Reload()
+    {
+        loading = true;
+        loadError = null;
+        StateHasChanged();
+        try
+        {
+            scope = await Scope.GetDatabaseScopeAsync(TenantId, App.Id, Environment.Id);
+        }
+        catch (Exception ex)
+        {
+            // Surfaced in the panel rather than thrown: an unhandled exception in a
+            // component lifecycle method tears down the whole portal circuit.
+            scope = null;
+            loadError = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    // ── Server / database projection ──────────────────────────────────────────
+
+    /// <summary>
+    /// One row per database server in scope, each carrying only the databases this
+    /// app is entitled to — never the server's full contents.
+    /// </summary>
+    private sealed record DbServer(
+        string Key, string Name, string Engine, string Icon, string Location,
+        bool SupportsCreate, Guid Id, DbKind Kind, List<DbEntry> Databases);
+
+    private sealed record DbEntry(
+        string Key, DbKind Kind, Guid Id, Guid ServerId, string Name, string Owner, string Status);
+
+    private enum DbKind { Cnpg, Mongo, RegisteredPostgres }
+
+    private List<DbServer> Servers
+    {
+        get
+        {
+            if (scope is null) return [];
+            List<DbServer> servers = [];
+
+            foreach (CnpgCluster c in scope.CnpgClusters)
+            {
+                servers.Add(new DbServer(
+                    $"cnpg-{c.Id}", c.Name, $"PostgreSQL {c.PostgresVersion}", "bi-database", $"{c.KubernetesCluster?.Name} / {c.Namespace}",
+                    SupportsCreate: !c.IsExternal, c.Id, DbKind.Cnpg,
+                    scope.CnpgDatabases.Where(d => d.CnpgClusterId == c.Id)
+                        .OrderBy(d => d.Name)
+                        .Select(d => new DbEntry($"cnpg-{d.Id}", DbKind.Cnpg, d.Id, c.Id, d.Name, d.Owner, d.Status.ToString()))
+                        .ToList()));
+            }
+
+            foreach (MongoCluster c in scope.MongoClusters)
+            {
+                servers.Add(new DbServer(
+                    $"mongo-{c.Id}", c.Name, $"MongoDB {c.MongoVersion}", "bi-database", $"{c.KubernetesCluster?.Name} / {c.Namespace}",
+                    SupportsCreate: !c.IsExternal, c.Id, DbKind.Mongo,
+                    scope.MongoDatabases.Where(d => d.MongoClusterId == c.Id)
+                        .OrderBy(d => d.Name)
+                        .Select(d => new DbEntry($"mongo-{d.Id}", DbKind.Mongo, d.Id, c.Id, d.Name, d.Owner, d.Status.ToString()))
+                        .ToList()));
+            }
+
+            foreach (RegisteredPostgresInstance i in scope.RegisteredInstances)
+            {
+                servers.Add(new DbServer(
+                    $"rpg-{i.Id}", i.Name, "PostgreSQL (external)", "bi-hdd", $"{i.Namespace} / {i.ServiceName}:{i.Port}",
+                    // Externally-owned servers stay read-only from the portal: EntKube does not
+                    // own their capacity, so a customer must not be able to grow them.
+                    SupportsCreate: false, i.Id, DbKind.RegisteredPostgres,
+                    scope.RegisteredDatabases.Where(d => d.RegisteredPostgresInstanceId == i.Id)
+                        .OrderBy(d => d.Name)
+                        .Select(d => new DbEntry($"rpg-{d.Id}", DbKind.RegisteredPostgres, d.Id, i.Id, d.Name, d.Owner, d.Status.ToString()))
+                        .ToList()));
+            }
+
+            return servers.OrderBy(s => s.Name).ToList();
+        }
+    }
+
+    private List<DatabaseBinding> BindingsFor(DbEntry entry) =>
+        (scope?.Bindings ?? []).Where(b => MatchesEntry(b, entry)).ToList();
+
+    private static bool MatchesEntry(DatabaseBinding b, DbEntry entry) => entry.Kind switch
+    {
+        DbKind.Cnpg => b.CnpgDatabaseId == entry.Id,
+        DbKind.Mongo => b.MongoDatabaseId == entry.Id,
+        DbKind.RegisteredPostgres => b.RegisteredPostgresDatabaseId == entry.Id,
+        _ => false,
+    };
+
+    private List<AppDeployment> ConnectableDeployments(DbEntry entry) =>
+        (scope?.Deployments ?? [])
+            .Where(d => !BindingsFor(entry).Any(b => b.AppDeploymentId == d.Id))
+            .ToList();
+
+    private string DeploymentName(Guid id) =>
+        scope?.Deployments.FirstOrDefault(d => d.Id == id)?.Name ?? "deployment";
+
+    private static string StatusClass(string status) => status switch
+    {
+        "Ready" => "bg-success-subtle text-success border border-success-subtle",
+        "Failed" => "bg-danger-subtle text-danger border border-danger-subtle",
+        _ => "bg-secondary-subtle text-secondary border border-secondary-subtle",
+    };
+
+    // ── Create ────────────────────────────────────────────────────────────────
+
+    private void ToggleCreate(string serverKey)
+    {
+        createOpenFor = createOpenFor == serverKey ? null : serverKey;
+        newDbName = "";
+        createError = null;
+    }
+
+    private void CancelCreate()
+    {
+        createOpenFor = null;
+        newDbName = "";
+        createError = null;
+    }
+
+    /// <summary>A PostgreSQL/Mongo-safe identifier; keeps the name out of quoting trouble.</summary>
+    private static bool IsValidDbName(string name) =>
+        name.Length is > 0 and <= 63
+        && char.IsLetter(name[0])
+        && name.All(ch => char.IsAsciiLetterLower(ch) || char.IsAsciiDigit(ch) || ch == '_');
+
+    private async Task CreateDatabase(DbServer server)
+    {
+        createError = null;
+
+        // Re-check the target against the freshly resolved scope: the page may have been
+        // open since before the operator revoked this server.
+        if (!CanWrite || !ServerStillInScope(server))
+        {
+            createError = "That database server is no longer available to this app.";
+            await Reload();
+            return;
+        }
+        if (!IsValidDbName(newDbName))
+        {
+            createError = "Use lowercase letters, digits and underscores, starting with a letter.";
+            return;
+        }
+        if (server.Databases.Any(d => d.Name == newDbName))
+        {
+            createError = $"A database named '{newDbName}' already exists on this server.";
+            return;
+        }
+
+        creating = true;
+        try
+        {
+            switch (server.Kind)
+            {
+                case DbKind.Cnpg:
+                    CnpgDatabase created = await CnpgService.CreateDatabaseAsync(TenantId, server.Id, newDbName);
+                    await Scope.GrantDatabaseAsync(App.Id, Environment.Id, cnpgDatabaseId: created.Id);
+                    break;
+                case DbKind.Mongo:
+                    MongoDatabase createdMongo = await MongoService.CreateDatabaseAsync(TenantId, server.Id, newDbName);
+                    await Scope.GrantDatabaseAsync(App.Id, Environment.Id, mongoDatabaseId: createdMongo.Id);
+                    break;
+                default:
+                    createError = "This server does not support creating databases from the portal.";
+                    return;
+            }
+
+            Toasts.Success($"Database '{newDbName}' created on {server.Name}.");
+            CancelCreate();
+            await Reload();
+        }
+        catch (Exception ex)
+        {
+            createError = ex.Message;
+        }
+        finally
+        {
+            creating = false;
+        }
+    }
+
+    private bool ServerStillInScope(DbServer server) => server.Kind switch
+    {
+        DbKind.Cnpg => scope?.AllowsCnpgCluster(server.Id) == true,
+        DbKind.Mongo => scope?.AllowsMongoCluster(server.Id) == true,
+        _ => false,
+    };
+
+    private bool EntryStillInScope(DbEntry entry) => entry.Kind switch
+    {
+        DbKind.Cnpg => scope?.AllowsCnpgDatabase(entry.Id) == true,
+        DbKind.Mongo => scope?.AllowsMongoDatabase(entry.Id) == true,
+        DbKind.RegisteredPostgres => scope?.AllowsRegisteredDatabase(entry.Id) == true,
+        _ => false,
+    };
+
+    // ── Connect / disconnect ──────────────────────────────────────────────────
+
+    private void ToggleConnect(DbEntry entry)
+    {
+        connectOpenFor = connectOpenFor == entry.Key ? null : entry.Key;
+        connectDeploymentId = Guid.Empty;
+        connectSecretName = $"{entry.Name}-db";
+        connectError = null;
+    }
+
+    private async Task Connect(DbEntry entry)
+    {
+        connectError = null;
+
+        // Both halves are re-validated: the database must still be in scope and the
+        // deployment must belong to this app and environment.
+        if (!CanWrite || !EntryStillInScope(entry) || scope?.AllowsDeployment(connectDeploymentId) != true)
+        {
+            connectError = "That database or deployment is no longer available to this app.";
+            await Reload();
+            return;
+        }
+
+        connecting = true;
+        try
+        {
+            switch (entry.Kind)
+            {
+                case DbKind.Cnpg:
+                    await CnpgService.AddCnpgDatabaseBindingAsync(connectDeploymentId, entry.Id, connectSecretName.Trim());
+                    await CnpgService.SyncDatabaseCredentialsToK8sAsync(TenantId, entry.ServerId, entry.Id);
+                    break;
+                case DbKind.Mongo:
+                    await MongoService.AddMongoDatabaseBindingAsync(connectDeploymentId, entry.Id, connectSecretName.Trim());
+                    await MongoService.SyncDatabaseCredentialsToK8sAsync(TenantId, entry.ServerId, entry.Id);
+                    break;
+                case DbKind.RegisteredPostgres:
+                    await RegisteredPostgresService.AddDatabaseBindingAsync(connectDeploymentId, entry.Id, connectSecretName.Trim());
+                    await RegisteredPostgresService.SyncCredentialsToK8sAsync(TenantId, entry.ServerId, entry.Id);
+                    break;
+            }
+
+            Toasts.Success($"'{entry.Name}' connected to {DeploymentName(connectDeploymentId)}.");
+            connectOpenFor = null;
+            await Reload();
+        }
+        catch (Exception ex)
+        {
+            connectError = ex.Message;
+        }
+        finally
+        {
+            connecting = false;
+        }
+    }
+
+    private async Task Detach(DatabaseBinding binding)
+    {
+        confirmDetachId = null;
+        if (!CanWrite || scope?.Bindings.Any(b => b.Id == binding.Id) != true) return;
+        try
+        {
+            await CnpgService.RemoveDatabaseBindingAsync(binding.Id);
+            Toasts.Success("Database disconnected from the deployment.");
+            await Reload();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message, "Disconnect failed");
+        }
+    }
+
+    // ── Sync / rotate ─────────────────────────────────────────────────────────
+
+    private async Task SyncDatabase(DbEntry entry)
+    {
+        if (!CanWrite || !EntryStillInScope(entry)) return;
+        busyKeys.Add(entry.Key);
+        try
+        {
+            await SyncCredentials(entry);
+            Toasts.Success($"Credentials for '{entry.Name}' synced.");
+            await Reload();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message, "Sync failed");
+        }
+        finally
+        {
+            busyKeys.Remove(entry.Key);
+        }
+    }
+
+    private Task SyncCredentials(DbEntry entry) => entry.Kind switch
+    {
+        DbKind.Cnpg => CnpgService.SyncDatabaseCredentialsToK8sAsync(TenantId, entry.ServerId, entry.Id),
+        DbKind.Mongo => MongoService.SyncDatabaseCredentialsToK8sAsync(TenantId, entry.ServerId, entry.Id),
+        _ => RegisteredPostgresService.SyncCredentialsToK8sAsync(TenantId, entry.ServerId, entry.Id),
+    };
+
+    private async Task RotatePassword(DbEntry entry)
+    {
+        confirmRotateKey = null;
+        if (!CanWrite || !EntryStillInScope(entry)) return;
+        busyKeys.Add(entry.Key);
+        try
+        {
+            switch (entry.Kind)
+            {
+                case DbKind.Cnpg: await CnpgService.RotateDatabasePasswordAsync(TenantId, entry.ServerId, entry.Id); break;
+                case DbKind.Mongo: await MongoService.RotateDatabasePasswordAsync(TenantId, entry.ServerId, entry.Id); break;
+                default: await RegisteredPostgresService.RotatePasswordAsync(TenantId, entry.ServerId, entry.Id); break;
+            }
+            // Rotation writes a new password to the vault; push it to every namespace
+            // that already holds the secret so running pods aren't left on the old one.
+            await SyncCredentials(entry);
+            Toasts.Success($"Password for '{entry.Name}' rotated and re-synced.");
+            await Reload();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message, "Rotation failed");
+        }
+        finally
+        {
+            busyKeys.Remove(entry.Key);
+        }
+    }
+
+    // ── Credentials ───────────────────────────────────────────────────────────
+
+    private async Task ToggleCredentials(DbEntry entry)
+    {
+        if (revealedKey == entry.Key)
+        {
+            revealedKey = null; credSecrets = null; credValues.Clear(); revealedPasswordId = null;
+            return;
+        }
+
+        revealedKey = entry.Key;
+        credLoading = true;
+        credSecrets = null;
+        credValues.Clear();
+        revealedPasswordId = null;
+        try
+        {
+            credSecrets = entry.Kind switch
+            {
+                DbKind.Cnpg => await VaultService.GetCnpgDatabaseSecretsAsync(TenantId, entry.Id),
+                DbKind.Mongo => await VaultService.GetMongoDatabaseSecretsAsync(TenantId, entry.Id),
+                _ => await VaultService.GetRegisteredPostgresDatabaseSecretsAsync(TenantId, entry.Id),
+            };
+            foreach (VaultSecret sec in credSecrets ?? [])
+                if (sec.Name != "PASSWORD")
+                    credValues[sec.Id] = await VaultService.GetSecretValueByIdAsync(sec.Id);
+        }
+        finally
+        {
+            credLoading = false;
+        }
+    }
+
+    private async Task RevealPassword(VaultSecret secret)
+    {
+        passwordRevealing = true;
+        try
+        {
+            credValues[secret.Id] = await VaultService.GetSecretValueByIdAsync(secret.Id);
+            revealedPasswordId = secret.Id;
+        }
+        finally
+        {
+            passwordRevealing = false;
+        }
+    }
+}
