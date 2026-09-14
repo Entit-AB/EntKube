@@ -534,6 +534,7 @@ public class Program
         builder.Services.AddScoped<ClusterBlueprintService>();
         builder.Services.AddScoped<BlueprintFromClusterService>();
         builder.Services.AddScoped<AppGovernanceService>();
+        builder.Services.AddScoped<PortalServiceScopeService>();
         builder.Services.AddScoped<GitOperationsService>();
         builder.Services.AddScoped<GitRepositoryService>();
         builder.Services.AddScoped<CustomerGitService>();

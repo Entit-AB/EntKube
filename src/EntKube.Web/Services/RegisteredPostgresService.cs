@@ -390,6 +390,30 @@ public class RegisteredPostgresService(
     /// Syncs the database credentials to Kubernetes as an Opaque Secret in the
     /// instance namespace, and to every bound app deployment namespace.
     /// </summary>
+    /// <summary>
+    /// Binds a registered-Postgres database to an app deployment so credential syncs
+    /// reach its namespace. Mirrors <see cref="CnpgService.AddCnpgDatabaseBindingAsync"/>;
+    /// does not sync — call <see cref="SyncCredentialsToK8sAsync"/> after.
+    /// </summary>
+    public async Task<DatabaseBinding> AddDatabaseBindingAsync(
+        Guid appDeploymentId, Guid registeredPostgresDatabaseId, string kubernetesSecretName,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        DatabaseBinding binding = new()
+        {
+            Id = Guid.NewGuid(),
+            AppDeploymentId = appDeploymentId,
+            RegisteredPostgresDatabaseId = registeredPostgresDatabaseId,
+            KubernetesSecretName = kubernetesSecretName
+        };
+
+        db.DatabaseBindings.Add(binding);
+        await db.SaveChangesAsync(ct);
+        return binding;
+    }
+
     public async Task SyncCredentialsToK8sAsync(
         Guid tenantId, Guid instanceId, Guid databaseId, CancellationToken ct = default)
     {
