@@ -189,68 +189,6 @@ public class JitAccessServiceTests : IDisposable
         grant.Namespace.Should().Be("locked-ns");
     }
 
-    // ── What was asked for ────────────────────────────────────────────────────
-
-    [Fact]
-    public async Task A_request_records_the_level_and_length_it_asked_for()
-    {
-        JitGrant grant = await sut.RequestAsync(
-            appId, envId, SubjectId, "restarting a stuck worker", SubjectEmail,
-            requestedLevel: JitAccessLevel.Operate,
-            requestedDuration: TimeSpan.FromHours(2));
-
-        grant.RequestedLevel.Should().Be(JitAccessLevel.Operate);
-        grant.RequestedMinutes.Should().Be(120);
-
-        // Asking is not being granted. Level and ExpiresAt stay unset until somebody decides.
-        grant.ApprovedAt.Should().BeNull();
-        grant.ExpiresAt.Should().BeNull();
-        grant.StatusAt(DateTime.UtcNow).Should().Be(JitGrantStatus.Pending);
-    }
-
-    [Fact]
-    public async Task A_request_that_says_nothing_asks_for_the_least_and_the_default_length()
-    {
-        JitGrant grant = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
-
-        grant.RequestedLevel.Should().Be(JitAccessLevel.Observe);
-        grant.RequestedMinutes.Should().Be((int)JitAccessService.DefaultDuration.TotalMinutes);
-    }
-
-    [Fact]
-    public async Task A_request_longer_than_the_ceiling_is_clamped_where_it_is_made()
-    {
-        // Clamped on the way in rather than at approval, so the queue never shows an approver a
-        // request it would have to silently shorten.
-        JitGrant grant = await sut.RequestAsync(
-            appId, envId, SubjectId, "debugging", SubjectEmail,
-            requestedDuration: TimeSpan.FromDays(7));
-
-        grant.RequestedMinutes.Should().Be((int)JitAccessService.MaximumDuration.TotalMinutes);
-        JitAccessService.DurationOptionsMinutes.Should().Contain(grant.RequestedMinutes);
-    }
-
-    [Fact]
-    public async Task The_approver_is_not_bound_by_what_was_asked_for()
-    {
-        JitGrant requested = await sut.RequestAsync(
-            appId, envId, SubjectId, "restarting a stuck worker", SubjectEmail,
-            requestedLevel: JitAccessLevel.Operate,
-            requestedDuration: TimeSpan.FromHours(4));
-
-        JitApproval approval = await sut.ApproveAsync(
-            requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe, TimeSpan.FromMinutes(15));
-
-        approval.Grant.Level.Should().Be(JitAccessLevel.Observe);
-        approval.Grant.ExpiresAt.Should().BeCloseTo(
-            DateTime.UtcNow.AddMinutes(15), TimeSpan.FromMinutes(1));
-
-        // The ask survives the decision — "asked for Operate, granted Observe" is a record worth
-        // keeping, and it is the whole reason these are separate columns.
-        approval.Grant.RequestedLevel.Should().Be(JitAccessLevel.Operate);
-        approval.Grant.RequestedMinutes.Should().Be(240);
-    }
-
     // ── Identity ──────────────────────────────────────────────────────────────
     //
     // A grant names a person twice: once as an account id, which is a key, and once as a display

@@ -3421,12 +3421,6 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
 
-                    b.Property<int>("RequestedLevel")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("RequestedMinutes")
-                        .HasColumnType("integer");
-
                     b.Property<string>("RevokeReason")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");

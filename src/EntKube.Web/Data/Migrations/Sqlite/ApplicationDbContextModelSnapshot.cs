@@ -3416,12 +3416,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(256)
                         .HasColumnType("TEXT");
 
-                    b.Property<int>("RequestedLevel")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("RequestedMinutes")
-                        .HasColumnType("INTEGER");
-
                     b.Property<string>("RevokeReason")
                         .HasMaxLength(1000)
                         .HasColumnType("TEXT");

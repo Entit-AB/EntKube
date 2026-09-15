@@ -31,31 +31,6 @@ public class JitAccessService(
     public static readonly TimeSpan DefaultDuration = TimeSpan.FromHours(1);
 
     /// <summary>
-    /// The lifetimes either side may pick, in minutes, all inside <see cref="MaximumDuration"/>.
-    ///
-    /// A shared list rather than one per screen: the requester asks for one of these and the
-    /// approver grants one of these, and a request for a length the queue cannot offer would have
-    /// to be silently rounded. A free-text box would invite "24" and then quietly clamp it, which
-    /// teaches people the ceiling is advisory.
-    /// </summary>
-    public static readonly int[] DurationOptionsMinutes = [15, 30, 60, 120, 240, 480];
-
-    /// <summary>A duration written the way it is spoken. Shared so both screens say it the same.</summary>
-    public static string HumaniseMinutes(int totalMinutes) =>
-        totalMinutes < 60 ? $"{totalMinutes} min"
-        : totalMinutes % 60 == 0 ? $"{totalMinutes / 60} h"
-        : $"{totalMinutes / 60} h {totalMinutes % 60} min";
-
-    /// <summary>What each level lets somebody do, in one line, for a picker.</summary>
-    public static string DescribeLevel(JitAccessLevel level) => level switch
-    {
-        JitAccessLevel.Observe => "Observe — read the workload, its events and its logs",
-        JitAccessLevel.Troubleshoot => "Troubleshoot — also ConfigMaps and a shell inside a pod",
-        JitAccessLevel.Operate => "Operate — also restart pods and scale deployments",
-        _ => level.ToString(),
-    };
-
-    /// <summary>
     /// Hard ceiling on a grant's lifetime. Anything longer stops being just-in-time and becomes a
     /// standing credential with extra steps, which is the thing this feature exists to avoid.
     /// </summary>
@@ -179,8 +154,6 @@ public class JitAccessService(
         string requestedBy,
         Guid? clusterId = null,
         string? ticketRef = null,
-        JitAccessLevel requestedLevel = JitAccessLevel.Observe,
-        TimeSpan? requestedDuration = null,
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(reason))
@@ -243,10 +216,6 @@ public class JitAccessService(
             UserId = subjectUserId,
             Reason = reason.Trim(),
             TicketRef = string.IsNullOrWhiteSpace(ticketRef) ? null : ticketRef.Trim(),
-            RequestedLevel = requestedLevel,
-            // Clamped on the way in, so the queue never offers an approver a request it would
-            // have to silently shorten.
-            RequestedMinutes = (int)ClampDuration(requestedDuration).TotalMinutes,
             RequestedBy = requestedBy,
             RequestedAt = DateTime.UtcNow,
         };
@@ -255,8 +224,7 @@ public class JitAccessService(
         await db.SaveChangesAsync(ct);
 
         await auditService.RecordAsync(null, "JitAccessRequested", "JitGrant", grant.Id.ToString(),
-            $"{grant.RequestedLevel} on {target.Namespace} ({target.ClusterName}) for "
-            + $"{subjectName}, {grant.RequestedMinutes} min: {grant.Reason}",
+            $"{target.Namespace} on {target.ClusterName} for {subjectName}: {grant.Reason}",
             requestedBy, ct);
 
         logger.LogInformation(
