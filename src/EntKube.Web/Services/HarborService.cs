@@ -173,21 +173,43 @@ public class HarborWebhookInfo
 ///   as a component vault secret so InjectSecretsIntoValuesAsync delivers it at install time.
 /// - S3: reads StorageLink credentials from the vault and stores them as component
 ///   vault secrets (harbor-s3-access-key, harbor-s3-secret-key) for injection at install time.
+/// - Redis: points the chart at a Redis already on the cluster instead of the one it would
+///   otherwise run for itself; the password is resolved from the vault when that Redis is one
+///   EntKube manages, and stored as harbor-redis-password for injection at install time.
 /// - Vault: admin password stored as component vault secret HARBOR_ADMIN_PASSWORD.
 /// </summary>
 public class HarborService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
     StorageService storageService,
+    RedisService redisService,
+    CnpgService cnpgService,
     IHttpClientFactory httpClientFactory)
 {
     private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
+
+    /// <summary>
+    /// The highest golang-migrate schema version the catalog's pinned Harbor ships — 0180, the last
+    /// migration in Harbor 2.15.x (chart 1.19.x).
+    ///
+    /// <para>Bump this with the chart, never separately. Harbor migrates its schema forward only, so this
+    /// number is the whole of what decides which databases this Harbor can be pointed at, and a pin that
+    /// moves without it would either refuse databases it can handle or accept ones it cannot.</para>
+    /// </summary>
+    public const int HarborSchemaVersion = 180;
+
+    /// <summary>The Harbor release behind <see cref="HarborSchemaVersion"/>, for saying so in a message.</summary>
+    public const string HarborAppVersion = "2.15.2";
     // ── Configuration ─────────────────────────────────────────────────────────
 
     /// <summary>
     /// Creates or updates the Harbor configuration for a component. Stores the admin
-    /// password in vault and injects CNPG + S3 connection details into Helm values.
+    /// password in vault and injects CNPG, S3 and Redis connection details into Helm values.
     /// Pass null for adminPassword to leave the existing password unchanged.
+    ///
+    /// <para><paramref name="redisEndpoint"/> empty means Harbor keeps the Redis the chart runs for
+    /// itself, and an endpoint that was previously set is taken back off — so clearing the field in the
+    /// form is a real instruction, not a no-op.</para>
     /// </summary>
     public async Task<HarborComponentConfig> ConfigureAsync(
         Guid tenantId,
@@ -197,6 +219,8 @@ public class HarborService(
         string adminUsername,
         string? adminPassword,
         string? registryUrl,
+        string? redisEndpoint = null,
+        string? redisPassword = null,
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
@@ -205,6 +229,10 @@ public class HarborService(
             .Include(c => c.Cluster)
             .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
+
+        // Before anything is written. A Redis Harbor cannot use must not reach the config record, or the
+        // refusal would move from "your form was rejected" to "every install of this component now throws".
+        await EnsureRedisEndpointUsableAsync(component.ClusterId, redisEndpoint, ct);
 
         // Upsert the config record.
         HarborComponentConfig? config = await db.HarborComponentConfigs
@@ -223,6 +251,7 @@ public class HarborService(
 
         config.CnpgDatabaseId = cnpgDatabaseId;
         config.StorageLinkId = storageLinkId;
+        config.RedisEndpoint = string.IsNullOrWhiteSpace(redisEndpoint) ? null : redisEndpoint.Trim();
         config.AdminUsername = adminUsername;
 
         if (!string.IsNullOrWhiteSpace(registryUrl))
@@ -255,6 +284,8 @@ public class HarborService(
         {
             await WriteStorageHelmValuesAsync(tenantId, clusterComponentId, storageLinkId.Value, ct);
         }
+
+        await WriteRedisHelmValuesAsync(tenantId, clusterComponentId, config.RedisEndpoint, redisPassword, ct);
 
         return config;
     }
@@ -373,7 +404,179 @@ public class HarborService(
     }
 
     /// <summary>
-    /// Refreshes database and S3 credentials in Helm values from the stored config.
+    /// Why this Harbor cannot be installed against the database it is pointed at, or null when it can.
+    ///
+    /// <para>The case this exists for: a database that already holds a <em>newer</em> Harbor's schema.
+    /// Harbor's migrator only goes forward, so it connects, reads a version it has no migration for, and
+    /// dies with <c>no migration found for version N</c> — several minutes into a Helm wait, in a pod log
+    /// nobody is watching, while helm reports only that its deadline lapsed. Every pod downstream then
+    /// fails on top of it, so the namespace is full of errors and none of them is the reason.</para>
+    ///
+    /// <para>Best-effort and silent about everything else. A database it cannot read, a component with no
+    /// managed database, an empty schema — all of those are "no objection", because refusing an install on
+    /// a question we could not answer is worse than the failure this prevents.</para>
+    /// </summary>
+    public async Task<string?> DescribeDatabaseSchemaConflictAsync(
+        Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        HarborComponentConfig? config = await db.HarborComponentConfigs
+            .Include(c => c.CnpgDatabase)
+            .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId && c.TenantId == tenantId, ct);
+
+        if (config?.CnpgDatabase is null) return null;
+
+        (int Version, bool Dirty)? schema = await cnpgService.ReadMigrateSchemaVersionAsync(
+            tenantId, config.CnpgDatabase.CnpgClusterId, config.CnpgDatabase.Id, ct);
+
+        return schema is null
+            ? null
+            : DescribeSchemaConflict(schema.Value.Version, schema.Value.Dirty, config.CnpgDatabase.Name);
+    }
+
+    /// <summary>
+    /// The message for a schema this Harbor cannot work with, or null when it can. Separated from the
+    /// lookup so the wording is testable — it is the only thing an operator will have to go on.
+    /// </summary>
+    public static string? DescribeSchemaConflict(int schemaVersion, bool dirty, string databaseName)
+    {
+        if (schemaVersion > HarborSchemaVersion)
+        {
+            return $"The database '{databaseName}' already holds a Harbor schema at version {schemaVersion}, "
+                + $"written by a newer Harbor than this one. EntKube installs Harbor {HarborAppVersion}, "
+                + $"whose last migration is {HarborSchemaVersion}, and Harbor migrates a schema forward "
+                + "only — it would start, fail with \"no migration found for version "
+                + $"{schemaVersion}\", and take the rest of the release down with it.\n\n"
+                + "Point this component at an empty database, or install a Harbor at least as new as the "
+                + "one that wrote this schema.";
+        }
+
+        if (dirty)
+        {
+            return $"The database '{databaseName}' is at Harbor schema version {schemaVersion} with the "
+                + "migration marked dirty — an earlier upgrade stopped half-applied. Harbor refuses to "
+                + "migrate from a dirty state, so the install would fail on startup.\n\n"
+                + "Restore that database from a backup, or point this component at an empty one.";
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Refuses a Redis endpoint Harbor cannot actually speak to, so the form says no now rather than the
+    /// registry misbehaving a week later.
+    ///
+    /// <para>The one case that matters today is a sharded Redis Cluster — which is every Redis EntKube
+    /// manages, because the operator behind the Cache tab only builds clusters. Harbor addresses Redis as
+    /// a single server and puts its core, job service, registry and scanner state in databases 0, 1, 2 and
+    /// 5; a cluster has only database 0, so <c>SELECT</c> fails outright, and a client that is not
+    /// cluster-aware is redirected away from keys another shard owns. The install would still succeed.</para>
+    /// </summary>
+    private async Task EnsureRedisEndpointUsableAsync(
+        Guid kubernetesClusterId, string? redisEndpoint, CancellationToken ct)
+    {
+        string endpoint = (redisEndpoint ?? "").Trim();
+        if (endpoint.Length == 0) return;
+
+        RedisEndpointOption? managed = await redisService.ResolveManagedEndpointAsync(
+            kubernetesClusterId, endpoint, ct);
+
+        if (managed?.ClusterMode == true)
+        {
+            throw ShardedRedisRefused(endpoint);
+        }
+    }
+
+    private static InvalidOperationException ShardedRedisRefused(string endpoint) =>
+        new($"'{endpoint}' is a sharded Redis Cluster, which Harbor cannot use: it addresses Redis as a "
+            + "single server and needs databases 0, 1, 2 and 5, while a cluster has only database 0. Point "
+            + "Harbor at a standalone Redis or a sentinel set, or leave the field empty to let it run its own.");
+
+    /// <summary>
+    /// Points Harbor at a Redis already running on the cluster, instead of the one the chart would start
+    /// for itself. An empty endpoint puts it back on its own Redis, so clearing the field is an
+    /// instruction rather than a no-op.
+    ///
+    /// <para>The password is resolved here rather than taken on trust from the form. When the address is a
+    /// Redis EntKube manages, its vaulted password is authoritative — which also means a rotation is
+    /// picked up on the next apply, because this runs before every install. For anything else the
+    /// operator's typed password is kept, and a blank one is a Redis with no authentication rather than an
+    /// error.</para>
+    ///
+    /// <para>A sharded Redis Cluster is refused. Harbor addresses Redis as a single server or a sentinel
+    /// set and uses four separate databases (0, 1, 2 and 5) — a cluster has only database 0, so
+    /// <c>SELECT</c> fails outright, and a non-cluster client is redirected away from keys another shard
+    /// owns. Installing anyway produces a Harbor that comes up and then misbehaves in the job service and
+    /// the scanner, which is a far worse outcome than being told now.</para>
+    /// </summary>
+    public async Task WriteRedisHelmValuesAsync(
+        Guid tenantId,
+        Guid clusterComponentId,
+        string? redisEndpoint,
+        string? redisPassword,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ClusterComponent component = await db.ClusterComponents
+            .Include(c => c.Cluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Component not found.");
+
+        string endpoint = (redisEndpoint ?? "").Trim();
+
+        if (endpoint.Length == 0)
+        {
+            component.HelmValues = YamlFormMerger.MergeFormValues(
+                component.HelmValues ?? "",
+                new Dictionary<string, string> { ["redis.type"] = "internal" });
+
+            await db.SaveChangesAsync(ct);
+            return;
+        }
+
+        RedisEndpointOption? managed = await redisService.ResolveManagedEndpointAsync(
+            component.ClusterId, endpoint, ct);
+
+        if (managed?.ClusterMode == true)
+        {
+            throw ShardedRedisRefused(endpoint);
+        }
+
+        component.HelmValues = YamlFormMerger.MergeFormValues(
+            component.HelmValues ?? "",
+            new Dictionary<string, string>
+            {
+                ["redis.type"] = "external",
+                ["redis.external.addr"] = endpoint
+            });
+
+        await db.SaveChangesAsync(ct);
+
+        // The credential follows the same route as the database and S3 ones: the component vault secret
+        // behind redis.external.password, which InjectSecretsIntoValuesAsync merges in at install time so
+        // it is never written into the stored Helm YAML in the clear.
+        //
+        // Only written when there is something to write. For a Redis EntKube manages the vault is
+        // authoritative and overwrites whatever the form held — that is what makes a rotated password
+        // arrive on the next apply. For any other Redis, an empty box means "leave the stored password
+        // alone", because the form never echoes a password back and blanking on every save would
+        // otherwise erase it the first time the operator changed anything else.
+        string? password = managed is { RedisClusterId: Guid managedId }
+            ? (await redisService.GetCredentialsAsync(tenantId, managedId, ct)).password
+            : redisPassword;
+
+        if (!string.IsNullOrEmpty(password))
+        {
+            await vaultService.InitializeVaultAsync(tenantId, ct);
+            await vaultService.SetComponentSecretAsync(
+                tenantId, clusterComponentId, "harbor-redis-password", password, ct);
+        }
+    }
+
+    /// <summary>
+    /// Refreshes database, S3 and Redis credentials in Helm values from the stored config.
     /// Call this before every install/upgrade to ensure the latest credentials are used.
     /// </summary>
     public async Task RefreshHelmValuesIfConfiguredAsync(
@@ -395,6 +598,11 @@ public class HarborService(
         {
             await WriteStorageHelmValuesAsync(tenantId, clusterComponentId, config.StorageLinkId.Value, ct);
         }
+
+        // Re-resolved rather than left as stored: for a Redis EntKube manages this is what picks up a
+        // rotated password. No password is passed because there is none to pass here — the operator's
+        // own is already in the vault, and an unmanaged endpoint leaves it exactly where it is.
+        await WriteRedisHelmValuesAsync(tenantId, clusterComponentId, config.RedisEndpoint, null, ct);
     }
 
     // ── Queries ───────────────────────────────────────────────────────────────

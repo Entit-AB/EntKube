@@ -8,6 +8,7 @@ namespace EntKube.Web.Data;
 /// S3 credentials are stored as component vault secrets (keys: harbor-s3-access-key,
 /// harbor-s3-secret-key) and injected into Helm values at install time.
 /// CNPG database password is stored as a component vault secret (key: harbor-db-password).
+/// A shared Redis password is stored as a component vault secret (key: harbor-redis-password).
 /// </summary>
 public class HarborComponentConfig
 {
@@ -23,6 +24,18 @@ public class HarborComponentConfig
 
     /// <summary>S3-compatible storage link for Harbor artifact storage. Null uses local filesystem PVC.</summary>
     public Guid? StorageLinkId { get; set; }
+
+    /// <summary>
+    /// A Redis already running on the cluster that this Harbor shares, as <c>host:port</c>. Null runs the
+    /// chart's own Redis.
+    ///
+    /// <para>Stored as the address rather than a foreign key on purpose: the endpoint is the whole of the
+    /// configuration, and it is equally valid for a Redis EntKube never created — a Helm chart's, a bare
+    /// StatefulSet's. Whether it happens to be one EntKube manages is re-derived from the address at
+    /// install time, which is also how its vaulted password is found, so a rotated password is picked up
+    /// without anything here changing.</para>
+    /// </summary>
+    public string? RedisEndpoint { get; set; }
 
     /// <summary>Harbor admin username (default "admin").</summary>
     public string AdminUsername { get; set; } = "admin";

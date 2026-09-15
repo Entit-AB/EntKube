@@ -21,8 +21,16 @@ public class RedisOperatorStatus
 /// <param name="Label">What the operator sees in the list.</param>
 /// <param name="Managed">True for a Redis EntKube created — the only kind whose password it knows.</param>
 /// <param name="RedisClusterId">The managed cluster's id, used to fetch that password from the vault.</param>
+/// <param name="ClusterMode">
+/// True when this is a sharded Redis Cluster rather than a single server. It matters because that is not
+/// merely a bigger Redis: a cluster has only database 0, so <c>SELECT 1</c> is an error, and a client that
+/// is not cluster-aware is redirected away from keys it does not own. Plenty of components — Harbor among
+/// them — speak only to a single server or a sentinel set, and pointing one at a cluster fails in ways that
+/// look like anything but the address. Always true for a Redis EntKube manages, because the operator it
+/// uses only builds clusters; unknown, and so false, for a Service merely found on the cluster.
+/// </param>
 public sealed record RedisEndpointOption(
-    string Host, int Port, string Label, bool Managed, Guid? RedisClusterId)
+    string Host, int Port, string Label, bool Managed, Guid? RedisClusterId, bool ClusterMode = false)
 {
     /// <summary>The <c>host:port</c> form a component's configuration wants.</summary>
     public string Endpoint => $"{Host}:{Port}";
@@ -99,9 +107,10 @@ public class RedisService(
             options.Add(new RedisEndpointOption(
                 Host: $"{m.Name}-leader.{m.Namespace}.svc.cluster.local",
                 Port: RedisPort,
-                Label: $"{m.Name} ({m.Namespace}) — managed by EntKube",
+                Label: $"{m.Name} ({m.Namespace}) — managed by EntKube, Redis Cluster mode",
                 Managed: true,
-                RedisClusterId: m.Id));
+                RedisClusterId: m.Id,
+                ClusterMode: true));
         }
 
         if (string.IsNullOrWhiteSpace(cluster.Kubeconfig)) return options;
@@ -125,6 +134,41 @@ public class RedisService(
         }
 
         return options;
+    }
+
+    /// <summary>
+    /// The managed Redis behind an endpoint string, or null when the address is not one of ours.
+    ///
+    /// <para>Deliberately database-only: this runs on the install path, where the question is "whose
+    /// password is this?" and a cluster that happens to be unreachable at that moment must not turn the
+    /// answer into "nobody's" — that would silently install a component with no credential.</para>
+    /// </summary>
+    public async Task<RedisEndpointOption?> ResolveManagedEndpointAsync(
+        Guid kubernetesClusterId, string endpoint, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(endpoint)) return null;
+
+        string host = endpoint.Split(':')[0].Trim();
+        if (host.Length == 0) return null;
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<RedisCluster> managed = await db.RedisClusters
+            .Where(c => c.KubernetesClusterId == kubernetesClusterId)
+            .ToListAsync(ct);
+
+        RedisCluster? match = managed.FirstOrDefault(m => string.Equals(
+            $"{m.Name}-leader.{m.Namespace}.svc.cluster.local", host, StringComparison.OrdinalIgnoreCase));
+
+        return match is null
+            ? null
+            : new RedisEndpointOption(
+                Host: host,
+                Port: RedisPort,
+                Label: $"{match.Name} ({match.Namespace})",
+                Managed: true,
+                RedisClusterId: match.Id,
+                ClusterMode: true);
     }
 
     /// <summary>

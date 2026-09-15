@@ -3537,7 +3537,10 @@ public static class ComponentCatalog
             Category = "Registry",
             HelmRepoUrl = "https://helm.goharbor.io",
             HelmChartName = "harbor",
-            HelmChartVersion = "1.16.1",
+            // Chart 1.19.2 is Harbor 2.15.2. The pair matters: Harbor migrates its schema forward only,
+            // so the appVersion behind this pin decides which databases it can be pointed at. When this
+            // moves, move HarborService.HarborSchemaVersion with it — there is a test that says so.
+            HelmChartVersion = "1.19.2",
             DefaultNamespace = "harbor",
             DefaultReleaseName = "harbor",
             // Very heavy: core, registry, jobservice, portal, trivy, database, redis.
@@ -3556,6 +3559,26 @@ public static class ComponentCatalog
                     Key = "storage-link", Label = "S3 Storage",
                     YamlPath = "harbor:storage-link-id", Type = FormFieldType.StorageLink,
                     HelpText = "S3-compatible bucket for registry artifact storage (optional — uses PVC when not set)"
+                },
+                new ComponentFormField
+                {
+                    Key = "redis-endpoint", Label = "Redis",
+                    YamlPath = "harbor:redis-endpoint", Type = FormFieldType.RedisSelector,
+                    Placeholder = "redis.redis.svc.cluster.local:6379",
+                    HelpText = "Point Harbor at a Redis already running on this cluster instead of the one the "
+                        + "chart would start for itself. Picking one EntKube manages fills in its password too. "
+                        + "Harbor claims databases 0, 1, 2 and 5 on whichever Redis it is given — the core index "
+                        + "is fixed at 0 by Harbor and cannot be moved — and it speaks to a single address or a "
+                        + "sentinel set, never to a sharded Redis Cluster. Leave empty to keep Harbor's own Redis."
+                },
+                new ComponentFormField
+                {
+                    Key = "redis-password", Label = "Redis Password",
+                    YamlPath = "redis.external.password", Type = FormFieldType.Password,
+                    StoreAsSecret = true, SecretName = "harbor-redis-password",
+                    HelpText = "Stored in the vault and injected at install time. Only needed for a Redis EntKube "
+                        + "does not manage — for a managed one the vaulted password is resolved automatically. "
+                        + "Leave blank for a Redis with no authentication, or to keep the password already stored."
                 },
                 new ComponentFormField
                 {
@@ -3650,6 +3673,11 @@ public static class ComponentCatalog
                 # Use internal Postgres by default; overridden to 'external' by HarborService
                 # when a CNPG database is configured.
                 database:
+                  type: internal
+
+                # Harbor runs its own Redis by default; overridden to 'external' by HarborService
+                # when the component is pointed at a Redis already on the cluster.
+                redis:
                   type: internal
 
                 persistence:

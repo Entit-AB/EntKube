@@ -56,6 +56,14 @@ public class ComponentInstallOrchestrator(
     public async Task<HelmExecutionResult> ApplyAsync(
         Guid tenantId, Guid componentId, ComponentApplyOptions options, CancellationToken ct = default)
     {
+        // Before the component is marked as installing, and before helm is given anything to wait on: a
+        // Harbor pointed at a database written by a newer Harbor cannot start, and every way of finding
+        // that out later costs half an hour and points at the wrong thing.
+        if (await harborService.DescribeDatabaseSchemaConflictAsync(tenantId, componentId, ct) is string conflict)
+        {
+            return new HelmExecutionResult { Success = false, Output = conflict };
+        }
+
         if (options.IsUpgrade)
         {
             await lifecycleService.PrepareUpgradeAsync(componentId, ct);

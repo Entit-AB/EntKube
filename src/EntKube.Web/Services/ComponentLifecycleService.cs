@@ -2137,7 +2137,27 @@ public class ComponentLifecycleService(
             }
 
             string arguments = string.Join(" ", args);
-            return await RunProcessAsync("helm", arguments, ct);
+            HelmExecutionResult result = await RunProcessAsync("helm", arguments, ct);
+
+            // "Error: context deadline exceeded" is the whole of what helm says when --wait runs out,
+            // and on its own it names nothing: not the resource, not the reason, not even that waiting
+            // was the problem. For a chart like Harbor — seven workloads, several PVCs, an external
+            // database — that leaves an operator with a failed release and nowhere to start. The
+            // cluster still holds the answer at this moment, so take it while it is there.
+            if (!result.Success
+                && command.Operation != "uninstall"
+                && !string.IsNullOrWhiteSpace(command.Namespace)
+                && LooksLikeWaitTimeout(result.Output))
+            {
+                string stalled = await DescribeStalledWorkloadsAsync(command.Namespace!, kubeconfigPath, ct);
+
+                if (!string.IsNullOrWhiteSpace(stalled))
+                {
+                    result.Output = $"{result.Output.TrimEnd()}\n\n{stalled}";
+                }
+            }
+
+            return result;
         }
         finally
         {
@@ -2659,6 +2679,282 @@ public class ComponentLifecycleService(
     /// <param name="stdin">Written to the process's standard input and then closed. Used for secrets —
     /// a password in <paramref name="arguments"/> is readable by any process on the host and lands in
     /// logs, so anything sensitive comes through here instead.</param>
+    /// <summary>
+    /// True when a helm failure is the <c>--wait</c> deadline running out rather than a real error.
+    /// Helm has worded this two ways across versions — the older "timed out waiting for the condition"
+    /// and the current, far less helpful "context deadline exceeded" — so both are recognised.
+    /// </summary>
+    public static bool LooksLikeWaitTimeout(string? helmOutput) =>
+        helmOutput is not null
+        && (helmOutput.Contains("context deadline exceeded", StringComparison.OrdinalIgnoreCase)
+            || helmOutput.Contains("timed out waiting for the condition", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Asks the cluster what was still not ready when helm gave up, and renders it as a few lines an
+    /// operator can act on. Best-effort throughout: a diagnosis that fails must not replace or obscure
+    /// helm's own error, so anything unexpected here simply yields nothing.
+    /// </summary>
+    private async Task<string> DescribeStalledWorkloadsAsync(
+        string ns, string kubeconfigPath, CancellationToken ct)
+    {
+        try
+        {
+            HelmExecutionResult pods = await RunProcessAsync(
+                "kubectl", $"get pods -n {ns} -o json --kubeconfig {kubeconfigPath}", ct);
+            HelmExecutionResult claims = await RunProcessAsync(
+                "kubectl", $"get pvc -n {ns} -o json --kubeconfig {kubeconfigPath}", ct);
+
+            string summary = SummarizeStalledWorkloads(
+                ns,
+                pods.Success ? pods.Output : null,
+                claims.Success ? claims.Output : null);
+
+            if (summary.Length == 0) return "";
+
+            // A container that is running and simply never reports ready has no status text to explain
+            // itself — "not ready" is the whole of what the API says. What it is waiting for is in its
+            // log, and only at the END of it: these images print a screenful of registration banners at
+            // startup, so the head of the log looks identical whether the thing came up or hung. Fetching
+            // the tail here is what turns the report into the answer instead of a place to start looking.
+            List<string> tails = [];
+
+            foreach ((string pod, string container) in FindSilentlyUnreadyContainers(
+                         pods.Success ? pods.Output : null))
+            {
+                HelmExecutionResult log = await RunProcessAsync(
+                    "kubectl",
+                    $"logs {pod} -c {container} --tail={LogTailLines} -n {ns} --kubeconfig {kubeconfigPath}",
+                    ct);
+
+                if (log.Success && !string.IsNullOrWhiteSpace(log.Output))
+                {
+                    tails.Add($"Last {LogTailLines} log lines from {pod} ({container}):\n{log.Output.TrimEnd()}");
+                }
+            }
+
+            return tails.Count == 0 ? summary : $"{summary}\n\n{string.Join("\n\n", tails)}";
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not collect stalled-workload diagnostics for namespace {Namespace}.", ns);
+            return "";
+        }
+    }
+
+    /// <summary>How much of a stalled container's log to quote. Enough to show a retry loop, not a novel.</summary>
+    private const int LogTailLines = 12;
+
+    /// <summary>At most this many containers are quoted, so one broken chart cannot flood the output.</summary>
+    private const int MaxQuotedContainers = 3;
+
+    /// <summary>
+    /// The containers worth quoting a log from: running, not ready, and saying nothing about why through
+    /// the API. A container that is waiting or terminated already carries its reason — ImagePullBackOff,
+    /// CrashLoopBackOff and the crash message are all in the pod status — and quoting those adds noise.
+    /// This is the other case, the silent one, where the process is up and blocked on something it is
+    /// only telling its own log about.
+    /// </summary>
+    public static List<(string Pod, string Container)> FindSilentlyUnreadyContainers(string? podsJson)
+    {
+        List<(string, string)> found = [];
+
+        foreach (JsonElement pod in EnumerateItems(podsJson))
+        {
+            if (found.Count >= MaxQuotedContainers) break;
+
+            string? name = Text(pod, "metadata", "name");
+            if (name is null || Text(pod, "status", "phase") != "Running") continue;
+
+            if (!pod.TryGetProperty("status", out JsonElement status)
+                || !status.TryGetProperty("containerStatuses", out JsonElement containers)
+                || containers.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (JsonElement c in containers.EnumerateArray())
+            {
+                bool ready = c.TryGetProperty("ready", out JsonElement r) && r.ValueKind == JsonValueKind.True;
+                bool running = c.TryGetProperty("state", out JsonElement st)
+                    && st.ValueKind == JsonValueKind.Object
+                    && st.TryGetProperty("running", out _);
+
+                if (ready || !running) continue;
+
+                string? container = c.TryGetProperty("name", out JsonElement n) ? n.GetString() : null;
+                if (container is not null)
+                {
+                    found.Add((name, container));
+                    break;   // one container per pod is enough to explain it
+                }
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// Turns <c>kubectl get pods/pvc -o json</c> into the short list of things that were not ready.
+    ///
+    /// <para>Only the unready are listed. A timed-out install of a large chart usually has one or two
+    /// real problems among a dozen healthy pods, and printing the healthy ones buries the answer.</para>
+    /// </summary>
+    public static string SummarizeStalledWorkloads(string ns, string? podsJson, string? pvcJson)
+    {
+        List<string> lines = [];
+
+        foreach (JsonElement pod in EnumerateItems(podsJson))
+        {
+            string name = Text(pod, "metadata", "name") ?? "(unnamed)";
+            string phase = Text(pod, "status", "phase") ?? "Unknown";
+
+            if (phase is "Succeeded") continue;
+
+            string? detail = DescribeUnreadyPod(pod, phase);
+            if (detail is not null)
+            {
+                lines.Add($"  pod/{name} — {detail}");
+            }
+        }
+
+        foreach (JsonElement pvc in EnumerateItems(pvcJson))
+        {
+            string name = Text(pvc, "metadata", "name") ?? "(unnamed)";
+            string phase = Text(pvc, "status", "phase") ?? "Unknown";
+
+            if (phase != "Bound")
+            {
+                lines.Add($"  persistentvolumeclaim/{name} — {phase} (no volume was provisioned; "
+                    + "check the StorageClass)");
+            }
+        }
+
+        if (lines.Count == 0) return "";
+
+        return $"Helm stopped waiting. Still not ready in namespace '{ns}':\n"
+            + string.Join("\n", lines)
+            + "\n\nThe release is left installed but failed; fix the cause and apply again.";
+    }
+
+    /// <summary>
+    /// Why one pod is not ready, or null when it is. Reads the container statuses first because they
+    /// carry the actionable text (ImagePullBackOff, CrashLoopBackOff and the crash message), and falls
+    /// back to the scheduling condition, which is what explains a pod that never got a node at all.
+    /// </summary>
+    private static string? DescribeUnreadyPod(JsonElement pod, string phase)
+    {
+        if (pod.TryGetProperty("status", out JsonElement status)
+            && status.TryGetProperty("containerStatuses", out JsonElement containers)
+            && containers.ValueKind == JsonValueKind.Array)
+        {
+            List<string> unready = [];
+
+            foreach (JsonElement c in containers.EnumerateArray())
+            {
+                bool ready = c.TryGetProperty("ready", out JsonElement r) && r.ValueKind == JsonValueKind.True;
+                if (ready) continue;
+
+                string cname = c.TryGetProperty("name", out JsonElement n) ? n.GetString() ?? "?" : "?";
+                string? reason =
+                    Text(c, "state", "waiting", "reason")
+                    ?? Text(c, "state", "terminated", "reason")
+                    ?? "not ready";
+                string? message = Text(c, "state", "waiting", "message") ?? Text(c, "state", "terminated", "message");
+
+                int restarts = c.TryGetProperty("restartCount", out JsonElement rc) && rc.TryGetInt32(out int rcv) ? rcv : 0;
+                string restartNote = restarts > 0 ? $", {restarts} restarts" : "";
+
+                unready.Add(message is null
+                    ? $"container '{cname}': {reason}{restartNote}"
+                    : $"container '{cname}': {reason}{restartNote} — {Collapse(message)}");
+            }
+
+            if (unready.Count > 0)
+            {
+                return $"{phase}, {string.Join("; ", unready)}";
+            }
+
+            // Every container is ready and the pod is Running: not what helm was waiting on.
+            if (phase == "Running") return null;
+        }
+
+        // No container statuses at all means it was never scheduled — the condition says why.
+        if (pod.TryGetProperty("status", out JsonElement st)
+            && st.TryGetProperty("conditions", out JsonElement conds)
+            && conds.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement cond in conds.EnumerateArray())
+            {
+                string? type = cond.TryGetProperty("type", out JsonElement t) ? t.GetString() : null;
+                string? state = cond.TryGetProperty("status", out JsonElement sv) ? sv.GetString() : null;
+
+                if (type == "PodScheduled" && state == "False")
+                {
+                    string? msg = cond.TryGetProperty("message", out JsonElement m) ? m.GetString() : null;
+                    string? reason = cond.TryGetProperty("reason", out JsonElement rs) ? rs.GetString() : null;
+                    return $"{phase} — {reason ?? "not scheduled"}{(msg is null ? "" : $": {Collapse(msg)}")}";
+                }
+            }
+        }
+
+        return phase == "Running" ? null : phase;
+    }
+
+    private static IEnumerable<JsonElement> EnumerateItems(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) yield break;
+
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(json);
+        }
+        catch (JsonException)
+        {
+            yield break;
+        }
+
+        using (doc)
+        {
+            if (!doc.RootElement.TryGetProperty("items", out JsonElement items)
+                || items.ValueKind != JsonValueKind.Array)
+            {
+                yield break;
+            }
+
+            foreach (JsonElement item in items.EnumerateArray())
+            {
+                yield return item.Clone();
+            }
+        }
+    }
+
+    /// <summary>Reads a nested string property, or null when any step of the path is absent.</summary>
+    private static string? Text(JsonElement element, params string[] path)
+    {
+        JsonElement current = element;
+
+        foreach (string segment in path)
+        {
+            if (current.ValueKind != JsonValueKind.Object
+                || !current.TryGetProperty(segment, out JsonElement next))
+            {
+                return null;
+            }
+            current = next;
+        }
+
+        return current.ValueKind == JsonValueKind.String ? current.GetString() : null;
+    }
+
+    /// <summary>Folds a multi-line kubelet message onto one line and caps it, so the list stays readable.</summary>
+    private static string Collapse(string message)
+    {
+        string flat = string.Join(" ", message.Split('\n', StringSplitOptions.RemoveEmptyEntries |
+                                                          StringSplitOptions.TrimEntries));
+        return flat.Length <= 300 ? flat : flat[..300] + "…";
+    }
+
     private static async Task<HelmExecutionResult> RunProcessAsync(
         string program, string arguments, CancellationToken ct, string? stdin = null)
     {
