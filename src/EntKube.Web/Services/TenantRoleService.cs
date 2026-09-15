@@ -27,6 +27,7 @@ public class TenantRoleService(IDbContextFactory<ApplicationDbContext> dbFactory
         (TenantFeature.VPN,                "VPN",                "bi-shield-shaded"),
         (TenantFeature.Monitoring,         "Monitoring",         "bi-activity"),
         (TenantFeature.Audit,              "Audit Log",          "bi-journal-text"),
+        (TenantFeature.JitAccess,          "JIT cluster access", "bi-terminal"),
     ];
 
     // ── Role CRUD ──────────────────────────────────────────────────────────────

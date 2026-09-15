@@ -347,10 +347,16 @@ public class AppGovernanceService(
         return existing;
     }
 
+    /// <summary>
+    /// Adds one rule to an app's Role. Throws <see cref="InvalidOperationException"/> when the rule
+    /// is on the RBAC deny-list — see <see cref="AppRbacRuleValidator"/> for what that covers and why.
+    /// </summary>
     public async Task<AppRbacRule> AddRbacRuleAsync(
         Guid rbacPolicyId, string apiGroups, string resources, string verbs,
         CancellationToken ct = default)
     {
+        AppRbacRuleValidator.ThrowIfBlocked(apiGroups, resources, verbs);
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         AppRbacRule rule = new()
         {

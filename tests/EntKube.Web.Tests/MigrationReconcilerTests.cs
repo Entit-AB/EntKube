@@ -17,12 +17,19 @@ public class MigrationReconcilerTests : IDisposable
     private readonly SqliteConnection connection;
     private readonly ApplicationDbContext db;
 
-    /// <summary>The migration under test: the most recent one, so re-applying it is what EF would do.</summary>
-    private readonly string lastMigrationId;
+    /// <summary>
+    /// The migration under test — the one that creates several tables, so the partially-applied
+    /// cases have something real to be partial about.
+    ///
+    /// Pinned by name rather than taken as the newest. It used to be <c>GetMigrations().Last()</c>,
+    /// which quietly meant "whichever migration was added most recently" and broke every
+    /// assertion here the next time anyone added one.
+    /// </summary>
+    private readonly string tableMigrationId;
 
     /// <summary>
     /// A migration that only adds a column, so the column-shaped cases can be exercised against a
-    /// real one rather than a fixture. It sits immediately before <see cref="lastMigrationId"/>,
+    /// real one rather than a fixture. It sits immediately before <see cref="tableMigrationId"/>,
     /// which is the order the two of them wedged a production database in.
     /// </summary>
     private readonly string columnMigrationId;
@@ -36,7 +43,7 @@ public class MigrationReconcilerTests : IDisposable
             .UseSqlite(connection)
             .Options);
 
-        lastMigrationId = db.Database.GetMigrations().Last();
+        tableMigrationId = db.Database.GetMigrations().Single(m => m.EndsWith("AddStalwartMail"));
         columnMigrationId = db.Database.GetMigrations().Single(m => m.EndsWith("AddIdleCapacityCharge"));
     }
 
@@ -90,7 +97,7 @@ public class MigrationReconcilerTests : IDisposable
 
         Reconcile();
 
-        IsRecorded(lastMigrationId).Should().BeTrue();
+        IsRecorded(tableMigrationId).Should().BeTrue();
         TableExists("StalwartComponentConfigs").Should().BeTrue();
     }
 
@@ -104,7 +111,7 @@ public class MigrationReconcilerTests : IDisposable
         db.Database.Migrate();
 
         TableExists("StalwartComponentConfigs").Should().BeTrue();
-        IsRecorded(lastMigrationId).Should().BeTrue();
+        IsRecorded(tableMigrationId).Should().BeTrue();
     }
 
     [Fact]
@@ -113,7 +120,7 @@ public class MigrationReconcilerTests : IDisposable
         // The reported failure: the migration created its first table, never recorded itself, and
         // every start since died on "relation already exists".
         db.Database.Migrate();
-        Forget(lastMigrationId);
+        Forget(tableMigrationId);
         db.Database.ExecuteSqlRaw("DROP TABLE \"StalwartMailAccounts\"");
         db.Database.ExecuteSqlRaw("DROP TABLE \"StalwartMailDomains\"");
 
@@ -128,7 +135,7 @@ public class MigrationReconcilerTests : IDisposable
         TableExists("StalwartComponentConfigs").Should().BeTrue();
         TableExists("StalwartMailDomains").Should().BeTrue();
         TableExists("StalwartMailAccounts").Should().BeTrue();
-        IsRecorded(lastMigrationId).Should().BeTrue();
+        IsRecorded(tableMigrationId).Should().BeTrue();
     }
 
     [Fact]
@@ -138,15 +145,15 @@ public class MigrationReconcilerTests : IDisposable
         // migration. Re-running it would fail; dropping the tables would destroy the data.
         db.Database.Migrate();
         SeedMailConfig();
-        Forget(lastMigrationId);
+        Forget(tableMigrationId);
 
         Reconcile();
 
-        IsRecorded(lastMigrationId).Should().BeTrue();
+        IsRecorded(tableMigrationId).Should().BeTrue();
         db.Set<StalwartComponentConfig>().Count().Should().Be(1, "nothing should have been dropped");
 
         db.Database.Migrate();
-        IsRecorded(lastMigrationId).Should().BeTrue();
+        IsRecorded(tableMigrationId).Should().BeTrue();
     }
 
     [Fact]
@@ -156,7 +163,7 @@ public class MigrationReconcilerTests : IDisposable
         // loses data, stamping leaves the schema incomplete: there is no safe move to make here.
         db.Database.Migrate();
         SeedMailConfig();
-        Forget(lastMigrationId);
+        Forget(tableMigrationId);
         db.Database.ExecuteSqlRaw("DROP TABLE \"StalwartMailAccounts\"");
 
         Action reconcile = Reconcile;
@@ -213,7 +220,7 @@ public class MigrationReconcilerTests : IDisposable
         // reachable, or the table leftovers are never cleaned up and the boot loop continues.
         db.Database.Migrate();
         Forget(columnMigrationId);
-        Forget(lastMigrationId);
+        Forget(tableMigrationId);
         db.Database.ExecuteSqlRaw("DROP TABLE \"StalwartMailAccounts\"");
         db.Database.ExecuteSqlRaw("DROP TABLE \"StalwartMailDomains\"");
 
@@ -224,7 +231,7 @@ public class MigrationReconcilerTests : IDisposable
 
         db.Database.Migrate();
 
-        IsRecorded(lastMigrationId).Should().BeTrue();
+        IsRecorded(tableMigrationId).Should().BeTrue();
         TableExists("StalwartMailAccounts").Should().BeTrue();
         ColumnExists("ClusterCostRates", "ChargeIdleCapacity").Should().BeTrue();
     }

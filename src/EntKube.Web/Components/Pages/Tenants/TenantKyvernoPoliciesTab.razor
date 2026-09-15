@@ -130,6 +130,24 @@
                     "Pods must set seccompProfile to RuntimeDefault or Localhost at the pod or container level.")
             </div>
 
+            @* ── RBAC ── *@
+            <h6 class="text-muted fw-semibold mb-2 d-flex align-items-center gap-1">
+                <i class="bi bi-shield-lock text-danger"></i> RBAC
+            </h6>
+            <div class="list-group list-group-flush mb-3">
+                @RenderPolicyRow(KyvernoPolicyType.RestrictRbac,
+                    "Restrict RBAC in app namespaces",
+                    "Refuses Roles that use wildcards, manage RBAC, or grant exec/attach/port-forward, "
+                    + "and RoleBindings that bind to cluster-admin, admin or edit. Catches RBAC that arrives "
+                    + "by Helm chart or hand-applied manifest rather than through Governance → RBAC.")
+                @RenderPolicyRow(KyvernoPolicyType.RestrictClusterRbac,
+                    "Block cluster-wide RBAC for app namespaces",
+                    "Refuses any ClusterRoleBinding that grants cluster-wide permissions to a ServiceAccount "
+                    + "in a customer app namespace. One ClusterPolicy per cluster, covering every tenant's app "
+                    + "namespaces — enabling it here protects all of them, and the strongest mode set by any "
+                    + "tenant on the cluster wins.")
+            </div>
+
             @* ── Workload Isolation ── *@
             <h6 class="text-muted fw-semibold mb-2 d-flex align-items-center gap-1">
                 <i class="bi bi-server text-info"></i> Workload Isolation

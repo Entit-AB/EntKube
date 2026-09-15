@@ -295,22 +295,214 @@ public class KyvernoPolicyService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         List<KyvernoPolicy> policies = await GetPoliciesAsync(tenantId, environmentId, ct);
-        if (policies.Count == 0)
-            return [("(no policies)", false, "No policies configured — nothing to apply.")];
 
         List<(KubernetesCluster Cluster, string Namespace)> targets =
             await ResolveTargetsAsync(db, tenantId, environmentId, ct);
 
-        if (targets.Count == 0)
-            return [("(no deployments)", false, "No deployments found for this tenant in this environment.")];
-
         var results = new List<(string Target, bool Success, string Output)>();
+
+        // The cluster-scoped policy is reconciled even when nothing is enabled, because "nothing
+        // enabled" is exactly when a previously applied ClusterPolicy has to be removed.
+        foreach (KubernetesCluster cluster in targets.Select(t => t.Cluster).DistinctBy(c => c.Id))
+        {
+            (bool cpOk, string cpOutput) = await ReconcileClusterRbacPolicyAsync(cluster, ct);
+            if (!string.IsNullOrWhiteSpace(cpOutput))
+                results.Add(($"{cluster.Name} (cluster RBAC)", cpOk, cpOutput));
+        }
+
+        if (policies.Count == 0)
+        {
+            results.Add(("(no policies)", false, "No namespaced policies configured — nothing to apply."));
+            return results;
+        }
+
+        if (targets.Count == 0)
+        {
+            results.Add(("(no deployments)", false, "No deployments found for this tenant in this environment."));
+            return results;
+        }
+
         foreach (var (cluster, ns) in targets)
         {
             (bool ok, string output) = await ApplyToNamespaceAsync(policies, cluster, ns, ct);
             results.Add(($"{cluster.Name}/{ns}", ok, output));
         }
         return results;
+    }
+
+    /// <summary>
+    /// Every customer app namespace on a cluster, across every tenant and environment.
+    ///
+    /// Deliberately not scoped to the tenant that triggered the apply. A ClusterPolicy is a single
+    /// cluster-wide object, so building it from one tenant's namespaces would silently drop every
+    /// other tenant's from the deny-list the moment that tenant applied — the protection would
+    /// disappear for whoever did not apply most recently. Cluster-wide state has to be computed
+    /// from cluster-wide data.
+    /// </summary>
+    public static async Task<List<string>> ResolveClusterAppNamespacesAsync(
+        ApplicationDbContext db, Guid clusterId, CancellationToken ct)
+    {
+        var deployments = await db.AppDeployments
+            .Where(d => d.ClusterId == clusterId)
+            .Select(d => new { d.AppId, d.EnvironmentId, d.Namespace })
+            .ToListAsync(ct);
+
+        if (deployments.Count == 0) return [];
+
+        List<Guid> appIds = deployments.Select(d => d.AppId).Distinct().ToList();
+
+        Dictionary<(Guid, Guid), string?> locked = (await db.AppEnvironments
+            .Where(ae => appIds.Contains(ae.AppId))
+            .Select(ae => new { ae.AppId, ae.EnvironmentId, ae.Namespace })
+            .ToListAsync(ct))
+            .ToDictionary(x => (x.AppId, x.EnvironmentId), x => x.Namespace);
+
+        return deployments
+            .Select(d => locked.TryGetValue((d.AppId, d.EnvironmentId), out string? ns)
+                         && !string.IsNullOrWhiteSpace(ns)
+                ? ns!
+                : d.Namespace)
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
+    /// The mode the cluster-scoped RBAC policy should run in, or null when no tenant or environment
+    /// with a footprint on this cluster has it enabled.
+    ///
+    /// Strongest setting wins. With one object shared by every tenant on the cluster, last-writer
+    /// -wins would let one tenant's apply quietly drop another's policy from Enforce to Audit, and
+    /// the two would flip it back and forth on every deploy.
+    /// </summary>
+    public static async Task<KyvernoValidationFailureAction?> ResolveClusterRbacModeAsync(
+        ApplicationDbContext db, Guid clusterId, CancellationToken ct)
+    {
+        var scopes = await db.AppDeployments
+            .Where(d => d.ClusterId == clusterId)
+            .Select(d => new { d.App.Customer.TenantId, d.EnvironmentId })
+            .Distinct()
+            .ToListAsync(ct);
+
+        if (scopes.Count == 0) return null;
+
+        List<Guid> tenantIds = scopes.Select(x => x.TenantId).Distinct().ToList();
+        List<Guid> envIds = scopes.Select(x => x.EnvironmentId).Distinct().ToList();
+
+        List<KyvernoPolicy> candidates = await db.KyvernoPolicies
+            .Where(p => p.PolicyType == KyvernoPolicyType.RestrictClusterRbac
+                        && tenantIds.Contains(p.TenantId)
+                        && envIds.Contains(p.EnvironmentId))
+            .ToListAsync(ct);
+
+        // The query above is a cross-product of the two id lists, so narrow it back to the
+        // (tenant, environment) pairs that actually have a footprint here.
+        HashSet<(Guid, Guid)> live = scopes.Select(x => (x.TenantId, x.EnvironmentId)).ToHashSet();
+
+        List<KyvernoPolicy> enabled = candidates
+            .Where(p => live.Contains((p.TenantId, p.EnvironmentId)))
+            .ToList();
+
+        if (enabled.Count == 0) return null;
+
+        return enabled.Any(p => p.ValidationFailureAction == KyvernoValidationFailureAction.Enforce)
+            ? KyvernoValidationFailureAction.Enforce
+            : KyvernoValidationFailureAction.Audit;
+    }
+
+    /// <summary>
+    /// Brings the cluster's <c>restrict-cluster-rbac</c> ClusterPolicy in line with the database —
+    /// applying it with the current app-namespace list, or removing it when nobody has it enabled.
+    ///
+    /// Must run after every deploy, not only when the policy is toggled. The namespace list is data,
+    /// not configuration: a newly created app namespace is not in the policy that was written before
+    /// it existed, and until the policy is rewritten that namespace is the one place the deny-list
+    /// does not cover.
+    /// </summary>
+    public async Task<(bool Success, string Output)> ReconcileClusterRbacPolicyAsync(
+        KubernetesCluster cluster, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            return (false, "Cluster has no kubeconfig configured.");
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        KyvernoValidationFailureAction? mode = await ResolveClusterRbacModeAsync(db, cluster.Id, ct);
+        List<string> appNamespaces = mode is null
+            ? []
+            : await ResolveClusterAppNamespacesAsync(db, cluster.Id, ct);
+
+        string? yaml = mode is null
+            ? null
+            : BuildClusterRbacPolicy(appNamespaces,
+                mode == KyvernoValidationFailureAction.Enforce ? "Enforce" : "Audit");
+
+        if (yaml is null)
+        {
+            // Disabled, or nothing left to protect. Either way the object must go — leaving it
+            // would keep enforcing a namespace list that no longer reflects the cluster.
+            return await RunKubectlAsync(cluster,
+                $"delete clusterpolicy {ClusterRbacPolicyName} --ignore-not-found", ct);
+        }
+
+        await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+        {
+            Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+            Kubeconfig = cluster.Kubeconfig,
+            ClusterLabel = cluster.Name,
+            Summary = $"Apply cluster RBAC policy covering {appNamespaces.Count} app namespace(s)",
+            Manifest = yaml,
+        }, ct);
+
+        string manifestPath = Path.Combine(Path.GetTempPath(), $"entkube-kyverno-cp-{Guid.NewGuid():N}.yaml");
+        try
+        {
+            await File.WriteAllTextAsync(manifestPath, yaml, ct);
+            return await RunKubectlAsync(cluster, $"apply -f {manifestPath}", ct);
+        }
+        finally
+        {
+            if (File.Exists(manifestPath)) File.Delete(manifestPath);
+        }
+    }
+
+    /// <summary>Runs one kubectl command against a cluster with its kubeconfig in a temp file.</summary>
+    private async Task<(bool Success, string Output)> RunKubectlAsync(
+        KubernetesCluster cluster, string args, CancellationToken ct)
+    {
+        string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-kyverno-{Guid.NewGuid():N}.kubeconfig");
+        try
+        {
+            await File.WriteAllTextAsync(kubeconfigPath, cluster.Kubeconfig, ct);
+
+            System.Diagnostics.ProcessStartInfo psi = new("kubectl", $"{args} --kubeconfig {kubeconfigPath}")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                UseShellExecute        = false,
+                CreateNoWindow         = true
+            };
+
+            using System.Diagnostics.Process proc = new() { StartInfo = psi };
+            StringBuilder output = new();
+            proc.OutputDataReceived += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
+            proc.ErrorDataReceived  += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
+            proc.Start();
+            proc.BeginOutputReadLine();
+            proc.BeginErrorReadLine();
+            await proc.WaitForExitAsync(ct);
+
+            bool ok = proc.ExitCode == 0;
+            if (!ok)
+                logger.LogWarning("kubectl {Args} failed on {Cluster}: {Output}", args, cluster.Name, output);
+
+            return (ok, output.ToString().TrimEnd());
+        }
+        finally
+        {
+            if (File.Exists(kubeconfigPath)) File.Delete(kubeconfigPath);
+        }
     }
 
     /// <summary>
@@ -447,6 +639,7 @@ public class KyvernoPolicyService(
         ["require-resource-requests"]       = KyvernoPolicyType.RequireResourceRequests,
         ["require-seccomp-profile"]         = KyvernoPolicyType.RequireSeccompProfile,
         ["require-pod-labels"]              = KyvernoPolicyType.RequirePodLabels,
+        ["restrict-rbac"]                   = KyvernoPolicyType.RestrictRbac,
     };
 
     private static void ParseDiscoveredPolicies(
@@ -953,6 +1146,8 @@ public class KyvernoPolicyService(
 
             KyvernoPolicyType.RequirePodLabels => BuildRequirePodLabelsPolicy(policy, ns, mode, excl),
 
+            KyvernoPolicyType.RestrictRbac => BuildRestrictRbacPolicy(ns, mode, excl),
+
             KyvernoPolicyType.Custom when !string.IsNullOrWhiteSpace(policy.CustomYaml) =>
                 policy.CustomYaml,
 
@@ -998,6 +1193,190 @@ public class KyvernoPolicyService(
                           - key: "{jmesPath}"
                             operator: GreaterThan
                             value: "0"
+            """;
+    }
+
+    /// <summary>Name of the single cluster-scoped RBAC policy. One per cluster, not per namespace.</summary>
+    public const string ClusterRbacPolicyName = "restrict-cluster-rbac";
+
+    /// <summary>
+    /// Groups that are never an acceptable subject of a ClusterRoleBinding, whatever namespaces
+    /// exist. <c>system:serviceaccounts</c> is every ServiceAccount in the cluster; the other two
+    /// are every user who can authenticate, and every user who cannot.
+    /// </summary>
+    private static readonly string[] AlwaysDeniedGroups =
+        ["system:serviceaccounts", "system:authenticated", "system:anonymous"];
+
+    /// <summary>
+    /// Builds the cluster-scoped half of the RBAC deny-list: a Kyverno <c>ClusterPolicy</c> that
+    /// refuses to let a ClusterRoleBinding grant cluster-wide permissions to anything living in a
+    /// customer app namespace.
+    ///
+    /// The obvious design — deny ClusterRole and ClusterRoleBinding except from trusted callers —
+    /// cannot work here. EntKube installs catalog components and customer Helm charts with the same
+    /// cluster credential, so admission sees one subject for both and has nothing to tell them
+    /// apart. Excluding "component namespaces" fails for the same reason: a ClusterRoleBinding has
+    /// no namespace of its own to exclude.
+    ///
+    /// What distinguishes the two is not who created the binding but who it grants to. A component's
+    /// ClusterRoleBinding names a ServiceAccount in the component's own namespace; the escalation
+    /// this exists to stop names a ServiceAccount in an app namespace. So the policy carries the
+    /// list of app namespaces — which EntKube already computes to decide where to apply the
+    /// namespaced policies — and denies on the subject. Components need no exclusion list at all,
+    /// because they were never matched.
+    ///
+    /// Creating a ClusterRole is left alone deliberately. A ClusterRole that is bound to nothing
+    /// grants nothing, and denying the kind outright would break every operator chart in the
+    /// catalog for no gain.
+    ///
+    /// Returns null when <paramref name="appNamespaces"/> is empty — with no app namespaces the
+    /// subject list is empty, and an AnyIn against an empty list matches nothing, so the policy
+    /// would be an object that does nothing but look like protection.
+    /// </summary>
+    public static string? BuildClusterRbacPolicy(IReadOnlyCollection<string> appNamespaces, string mode)
+    {
+        if (appNamespaces.Count == 0) return null;
+
+        string[] ordered = appNamespaces
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Select(n => n.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        if (ordered.Length == 0) return null;
+
+        // A binding may name a namespace's ServiceAccounts collectively rather than one by name,
+        // which grants the same thing to everything the app runs.
+        string[] deniedGroups = AlwaysDeniedGroups
+            .Concat(ordered.Select(n => $"system:serviceaccounts:{n}"))
+            .ToArray();
+
+        string saNamespaces = string.Join("\n", ordered.Select(n => $"                  - \"{n}\""));
+        string groupNames   = string.Join("\n", deniedGroups.Select(g => $"                  - \"{g}\""));
+
+        // Composed rather than inlined: these contain {{ }}, which collides with C# interpolation.
+        // The `|| `[]`` defaults matter for the same reason they do in the namespaced policies — a
+        // binding with no ServiceAccount subject projects to null, and a rule that fails to
+        // evaluate denies the resource under the default failurePolicy of Fail.
+        const string saNamespacePath =
+            "{{ request.object.subjects[?kind=='ServiceAccount'].namespace || `[]` }}";
+        const string groupNamePath =
+            "{{ request.object.subjects[?kind=='Group'].name || `[]` }}";
+
+        return $"""
+            apiVersion: kyverno.io/v1
+            kind: ClusterPolicy
+            metadata:
+              name: {ClusterRbacPolicyName}
+            spec:
+              validationFailureAction: {mode}
+              background: true
+              rules:
+                - name: deny-cluster-rbac-to-app-namespaces
+                  match:
+                    any:
+                      - resources:
+                          kinds:
+                            - ClusterRoleBinding
+                  exclude:
+                    any:
+                      - resources:
+                          names:
+                            - "system:*"
+                  validate:
+                    message: "A ClusterRoleBinding may not grant cluster-wide permissions to a customer app namespace."
+                    deny:
+                      conditions:
+                        any:
+                          - key: "{saNamespacePath}"
+                            operator: AnyIn
+                            value:
+            {saNamespaces}
+                          - key: "{groupNamePath}"
+                            operator: AnyIn
+                            value:
+            {groupNames}
+            """;
+    }
+
+    private static string BuildRestrictRbacPolicy(string ns, string mode, string excl)
+    {
+        // Admission-time half of the RBAC deny-list. AppRbacRuleValidator enforces the same set
+        // when a rule is written through the governance UI; this catches every other way a Role
+        // can reach the namespace — a Helm chart's templates, a hand-applied manifest, an operator
+        // that creates RBAC for its own CRs. The two lists must stay identical: a difference
+        // between them shows up as a Role that saves cleanly and is then refused at apply, with
+        // nothing to say which side is right.
+        //
+        // The `|| `[]`` defaults are load-bearing for the same reason they are in the hostPath
+        // policy above. A Role whose rules omit apiGroups projects to null, AnyIn against null is
+        // an evaluation failure, and a rule that fails to evaluate under the default failurePolicy
+        // of Fail denies the resource — so the omission would block ordinary Roles rather than
+        // dangerous ones.
+        const string apiGroupsPath = "{{ request.object.rules[].apiGroups[] || `[]` }}";
+        const string resourcesPath = "{{ request.object.rules[].resources[] || `[]` }}";
+        const string verbsPath     = "{{ request.object.rules[].verbs[] || `[]` }}";
+        const string roleRefKind   = "{{ request.object.roleRef.kind }}";
+        const string roleRefName   = "{{ request.object.roleRef.name }}";
+
+        return $"""
+            apiVersion: kyverno.io/v1
+            kind: Policy
+            metadata:
+              name: restrict-rbac
+              namespace: {ns}
+            spec:
+              validationFailureAction: {mode}
+              background: true
+              rules:
+                - name: restrict-role-rules
+                  match:
+                    any:
+                      - resources:
+                          kinds:
+                            - Role
+            {excl}
+                  validate:
+                    message: "A Role may not use wildcards, manage RBAC, or grant exec, attach or port-forward."
+                    deny:
+                      conditions:
+                        any:
+                          - key: "{apiGroupsPath}"
+                            operator: AnyIn
+                            value: ["*"]
+                          - key: "{resourcesPath}"
+                            operator: AnyIn
+                            value:
+                              - "*"
+                              - "roles"
+                              - "rolebindings"
+                              - "clusterroles"
+                              - "clusterrolebindings"
+                              - "pods/exec"
+                              - "pods/attach"
+                              - "pods/portforward"
+                          - key: "{verbsPath}"
+                            operator: AnyIn
+                            value: ["*", "escalate", "bind", "impersonate"]
+                - name: restrict-rolebinding-target
+                  match:
+                    any:
+                      - resources:
+                          kinds:
+                            - RoleBinding
+            {excl}
+                  validate:
+                    message: "A RoleBinding may not bind to a privileged built-in ClusterRole."
+                    deny:
+                      conditions:
+                        all:
+                          - key: "{roleRefKind}"
+                            operator: Equals
+                            value: "ClusterRole"
+                          - key: "{roleRefName}"
+                            operator: AnyIn
+                            value: ["cluster-admin", "admin", "edit"]
             """;
     }
 

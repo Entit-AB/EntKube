@@ -13,6 +13,10 @@
     "//": "When true (default), every human-triggered change to Kubernetes cluster state pauses to show a server-side dry-run diff that an operator must acknowledge before it is applied. Automated/background flows are never gated. Set false to disable the gate.",
     "RequireAcknowledgment": true
   },
+  "Jit": {
+    "//": "Just-in-time customer cluster access. Empty (default) leaves the feature off: requests and approvals still work, but nothing can be minted. Set this to this instance's externally reachable URL to turn it on — it is what the kubeconfig handed to a customer points at, so a grant issued without it could not connect anyway. Approving also needs a role holding Manage on 'JIT cluster access', which nobody has until a tenant admin grants it.",
+    "PublicBaseUrl": ""
+  },
   "ConnectionStrings": {
     "DefaultConnection": "DataSource=Data/app.db;Cache=Shared"
   },

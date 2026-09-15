@@ -303,6 +303,33 @@ public class Program
         // These used to build a client per call, so each query paid its own TLS handshake to the API
         // server — a dozen per dashboard render. Singleton: the pool is shared across circuits.
         builder.Services.AddSingleton<KubernetesProxyClientPool>();
+
+        // Just-in-time customer access.
+        //
+        // Opt-in, and off unless Jit:PublicBaseUrl is set. The kubeconfig a grant hands out points
+        // at that URL, so without it a grant cannot work anyway — and a feature that issues cluster
+        // credentials should not come alive because someone deployed a new version. With it unset,
+        // the request/approve workflow still exists and refuses at the point of minting, which says
+        // what is wrong instead of failing somewhere further along.
+        bool jitEnabled = !string.IsNullOrWhiteSpace(builder.Configuration["Jit:PublicBaseUrl"]);
+
+        if (jitEnabled)
+        {
+            builder.Services.AddScoped<EntKube.Web.Services.Jit.IJitProvisioner,
+                EntKube.Web.Services.Jit.KubernetesJitProvisioner>();
+            builder.Services.AddHostedService<EntKube.Web.Services.Jit.JitGrantReaperService>();
+        }
+        else
+        {
+            builder.Services.AddScoped<EntKube.Web.Services.Jit.IJitProvisioner,
+                EntKube.Web.Services.Jit.NullJitProvisioner>();
+        }
+
+        // The provisioner is scoped because it takes the scoped change gate; the upstream pool is a
+        // singleton because its whole purpose is to keep connections warm across requests.
+        builder.Services.AddScoped<EntKube.Web.Services.Jit.JitAccessService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Jit.JitProxyService>();
+        builder.Services.AddSingleton<EntKube.Web.Services.Jit.JitUpstreamClientPool>();
         // Short-lived PromQL cache with single-flight: a dashboard render asks the same question from
         // several panels at once, and each one otherwise crosses the WAN on its own.
         builder.Services.AddSingleton(new EntKube.Web.Services.Telemetry.PromQueryCache(
@@ -944,6 +971,18 @@ public class Program
 
         // Egress agents dial in here from customer networks that permit no inbound
         // traffic. Token-authenticated inside the handler, not by the cookie scheme.
+        // The JIT access proxy. Authenticated by the grant's own token rather than by a cookie or
+        // an API token, so it sits outside the app's normal auth — a customer holding a kubeconfig
+        // is not signed in to anything.
+        app.Map("/jit/{grantId:guid}/{**path}", async (
+            Guid grantId,
+            string? path,
+            HttpContext http,
+            EntKube.Web.Services.Jit.JitProxyService proxy) =>
+        {
+            await proxy.HandleAsync(http, grantId, path);
+        }).AllowAnonymous();
+
         app.MapAgentEndpoint();
         EntKube.Web.Services.PublicApi.PublicApiEndpoints.MapPublicApi(app);
         EntKube.Web.Services.Scim.ScimEndpoints.MapScim(app);
