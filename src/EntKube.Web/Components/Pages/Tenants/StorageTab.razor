@@ -151,7 +151,7 @@
                                                    @bind="regFormAccessKey" />
                                         </div>
                                         <div class="mb-2">
-                                            <input type="password" class="form-control form-control-sm"
+                                            <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                                                    placeholder="Root Password / Secret Key"
                                                    @bind="regFormSecretKey" />
                                         </div>
@@ -679,11 +679,11 @@
                         </div>
                         <div class="col-md-6">
                             <label class="form-label small fw-semibold">Access Key</label>
-                            <input type="password" class="form-control form-control-sm" @bind="formAccessKey" placeholder="Stored in vault" />
+                            <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" @bind="formAccessKey" placeholder="Stored in vault" />
                         </div>
                         <div class="col-md-6">
                             <label class="form-label small fw-semibold">Secret Key</label>
-                            <input type="password" class="form-control form-control-sm" @bind="formSecretKey" placeholder="Stored in vault" />
+                            <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" @bind="formSecretKey" placeholder="Stored in vault" />
                         </div>
                     }
                     else

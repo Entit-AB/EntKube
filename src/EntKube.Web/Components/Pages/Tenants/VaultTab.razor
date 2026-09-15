@@ -473,7 +473,7 @@ else
                             <div class="col-md-4">
                                 <div class="input-group input-group-sm">
                                     <span class="input-group-text"><i class="bi bi-key"></i></span>
-                                    <input type="password" class="form-control" placeholder="Secret value"
+                                    <input type="password" @attributes="FormAutofill.Password" class="form-control" placeholder="Secret value"
                                            @bind="newSecretValue" @bind:event="oninput" />
                                 </div>
                             </div>
@@ -745,7 +745,7 @@ else
                                                 {
                                                     <div class="row g-2 p-2 align-items-center">
                                                         <div class="col-md-6">
-                                                            <input type="password" class="form-control form-control-sm"
+                                                            <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                                                                    placeholder="New secret value" @bind="editSecretValue" />
                                                         </div>
                                                         <div class="col-auto">

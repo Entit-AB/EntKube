@@ -38,7 +38,7 @@
                            @bind="newEmail" @bind:event="oninput" />
                 </div>
                 <div class="col-md-5">
-                    <input type="password" class="form-control" placeholder="Password"
+                    <input type="password" @attributes="FormAutofill.Password" class="form-control" placeholder="Password"
                            @bind="newPassword" @bind:event="oninput" />
                 </div>
                 <div class="col-md-2">

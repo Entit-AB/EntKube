@@ -194,7 +194,7 @@
                                             <div class="row g-2 mb-2">
                                                 <div class="col-md-6">
                                                     <label class="form-label small">Personal Access Token</label>
-                                                    <input type="password" class="form-control form-control-sm"
+                                                    <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                                                            @bind="credValue" placeholder="ghp_... or similar" autocomplete="new-password" />
                                                     <div class="form-text">Stored encrypted in the tenant vault.</div>
                                                 </div>
@@ -205,7 +205,7 @@
                                             <div class="row g-2 mb-2">
                                                 <div class="col-md-6">
                                                     <label class="form-label small">Password</label>
-                                                    <input type="password" class="form-control form-control-sm"
+                                                    <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                                                            @bind="credValue" placeholder="Password" autocomplete="new-password" />
                                                     <div class="form-text">Username: <code>@repo.Username</code> — stored encrypted in the tenant vault.</div>
                                                 </div>

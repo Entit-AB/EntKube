@@ -17,7 +17,7 @@
                        accept=".crt,.cer,.pem,.der,.pfx,.p12" />
         </div>
         <div class="col-md-5">
-            <input type="password" class="form-control form-control-sm"
+            <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                    placeholder="Password (PFX/P12 or encrypted PEM key)" @bind="importPassword" />
         </div>
     </div>

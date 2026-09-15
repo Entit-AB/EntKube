@@ -25,7 +25,7 @@
 
     <div class="col-12">
         <label class="form-label small mb-1">Client secret <span class="text-danger">*</span></label>
-        <input type="password" class="form-control form-control-sm"
+        <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                placeholder="client secret value" @bind="Bundle.ClientSecret" />
     </div>
 
