@@ -214,7 +214,10 @@ public static class CapiTemplateInputs
             ["OPENSTACK_IMAGE_NAME"] = config.NodeImageName,
             ["OPENSTACK_EXTERNAL_NETWORK_ID"] = config.ExternalNetworkId,
             ["OPENSTACK_DNS_NAMESERVERS"] = config.DnsNameservers,
-            ["OPENSTACK_FAILURE_DOMAIN"] = config.FailureDomain ?? "nova",
+            // Blank is as absent as null: configs saved by the old free-text AZ field hold
+            // "" where nothing was typed, and an empty failure domain is rejected by Nova
+            // rather than defaulted.
+            ["OPENSTACK_FAILURE_DOMAIN"] = string.IsNullOrWhiteSpace(config.FailureDomain) ? "nova" : config.FailureDomain,
             ["OPENSTACK_SSH_KEY_NAME"] = $"{config.ClusterName}-key",
         };
     }

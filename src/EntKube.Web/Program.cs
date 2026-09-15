@@ -450,6 +450,7 @@ public class Program
         builder.Services.AddScoped<OpenStackKeystoneClient>();
         builder.Services.AddScoped<OpenStackS3Service>();
         builder.Services.AddScoped<OpenStackComputeService>();
+        builder.Services.AddScoped<OpenStackInventoryService>();
         builder.Services.AddScoped<ClusterProvisioningService>();
         builder.Services.AddScoped<StorageService>();
         builder.Services.AddScoped<StorageLinkClientFactory>();

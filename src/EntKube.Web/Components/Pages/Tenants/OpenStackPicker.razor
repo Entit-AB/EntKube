@@ -1,0 +1,72 @@
+@* One provisioning field that prefers what the cloud actually has. Renders a picker of
+   discovered values, and a plain text box when discovery found nothing (or the operator
+   wants a value the project does not list yet).
+
+   The two are deliberately never mixed mid-load: a Blazor <select> only takes its selection
+   from the options present in the render that creates it, so options must never arrive after
+   the select — see the Components-tab dropdown bug. While Options is empty this renders the
+   text box, and the select is created in the same batch as its options. *@
+
+<label class="form-label small mb-0 d-flex align-items-center gap-2">
+    <span>@Label</span>
+    @if (Options.Count > 0)
+    {
+        <button type="button" class="btn btn-link p-0 small text-decoration-none lh-1"
+                @onclick="() => manual = !manual">
+            @(manual ? "pick from cloud" : "type manually")
+        </button>
+    }
+</label>
+
+@if (Options.Count == 0 || manual)
+{
+    <input class="form-control form-control-sm" placeholder="@Placeholder" @bind="Current" />
+}
+else
+{
+    <select class="form-select form-select-sm" @bind="Current">
+        <option value="">— select —</option>
+        @foreach (OpenStackPicker.Option option in Options)
+        {
+            <option value="@option.Value">@option.Label</option>
+        }
+        @* Keep a stored value that the project no longer offers selectable, rather than
+           silently resetting the field to the placeholder and saving that over it. *@
+        @if (!string.IsNullOrWhiteSpace(Value) && !Options.Any(o => o.Value == Value))
+        {
+            <option value="@Value">@Value — not found in this project</option>
+        }
+    </select>
+}
+
+@code {
+    /// <summary>One choosable value: what gets stored, and what the operator reads.</summary>
+    public sealed record Option(string Value, string Label);
+
+    [Parameter, EditorRequired] public string Label { get; set; } = "";
+
+    /// <summary>The stored value (a flavor/image/AZ name, or a network UUID).</summary>
+    [Parameter] public string? Value { get; set; }
+
+    [Parameter] public EventCallback<string?> ValueChanged { get; set; }
+
+    /// <summary>What the cloud offers. Empty means "no discovery" — the field falls back to free text.</summary>
+    [Parameter] public IReadOnlyList<Option> Options { get; set; } = [];
+
+    /// <summary>Placeholder for the free-text fallback, e.g. an example flavor name.</summary>
+    [Parameter] public string? Placeholder { get; set; }
+
+    private bool manual;
+
+    private string? Current
+    {
+        get => Value;
+        set
+        {
+            string? normalized = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+            if (normalized == Value) return;
+            Value = normalized;
+            ValueChanged.InvokeAsync(normalized);
+        }
+    }
+}
