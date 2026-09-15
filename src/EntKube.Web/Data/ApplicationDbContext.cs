@@ -25,6 +25,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<KubernetesCluster> KubernetesClusters => Set<KubernetesCluster>();
     public DbSet<EgressAgent> EgressAgents => Set<EgressAgent>();
     public DbSet<ApiToken> ApiTokens => Set<ApiToken>();
+    public DbSet<JitGrant> JitGrants => Set<JitGrant>();
     public DbSet<ClusterCostRate> ClusterCostRates => Set<ClusterCostRate>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
     public DbSet<CostLedgerCoverage> CostLedgerCoverages => Set<CostLedgerCoverage>();
@@ -185,6 +186,55 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                   .WithMany()
                   .HasForeignKey(t => t.TenantId)
                   .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // JitGrant — like ApiToken, only the hash of the credential is stored and the row
+        // outlives the credential so the trail survives. Unlike ApiToken, everything here
+        // cascades: a deleted tenant, customer or app must not leave a grant that still names
+        // a namespace somebody can reach. The cluster and user relationships are Restrict
+        // instead — deleting either out from under a live grant should fail loudly rather than
+        // silently drop the record of access that was given.
+
+        builder.Entity<JitGrant>(entity =>
+        {
+            entity.HasKey(g => g.Id);
+
+            // Every proxied request looks a grant up by token hash, so it is the hot path.
+            // Filtered unique would be better (the column is null until approval), but only
+            // two of the three providers support it — a plain index keeps the model portable
+            // and uniqueness is guaranteed by the 256 bits of CSPRNG behind the value anyway.
+            entity.HasIndex(g => g.TokenHash);
+            entity.HasIndex(g => new { g.TenantId, g.RequestedAt });
+            entity.HasIndex(g => g.UserId);
+
+            // The reaper sweeps on this: approved, not yet torn down, past its expiry.
+            entity.HasIndex(g => new { g.ExpiresAt, g.TornDownAt });
+
+            entity.Property(g => g.Namespace).HasMaxLength(63).IsRequired();
+            entity.Property(g => g.UserId).HasMaxLength(450).IsRequired();
+            entity.Property(g => g.Reason).HasMaxLength(1000).IsRequired();
+            entity.Property(g => g.TicketRef).HasMaxLength(200);
+            entity.Property(g => g.RequestedBy).HasMaxLength(256).IsRequired();
+            entity.Property(g => g.ApprovedBy).HasMaxLength(256);
+            entity.Property(g => g.DeniedBy).HasMaxLength(256);
+            entity.Property(g => g.RevokedBy).HasMaxLength(256);
+            entity.Property(g => g.RevokeReason).HasMaxLength(1000);
+            entity.Property(g => g.ServiceAccountName).HasMaxLength(63);
+            entity.Property(g => g.TokenHash).HasMaxLength(64);
+            entity.Property(g => g.DisplayPrefix).HasMaxLength(32);
+
+            entity.HasOne(g => g.Tenant).WithMany()
+                  .HasForeignKey(g => g.TenantId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(g => g.Customer).WithMany()
+                  .HasForeignKey(g => g.CustomerId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(g => g.App).WithMany()
+                  .HasForeignKey(g => g.AppId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(g => g.Environment).WithMany()
+                  .HasForeignKey(g => g.EnvironmentId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(g => g.KubernetesCluster).WithMany()
+                  .HasForeignKey(g => g.KubernetesClusterId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(g => g.User).WithMany()
+                  .HasForeignKey(g => g.UserId).OnDelete(DeleteBehavior.Restrict);
         });
 
         // ClusterCostRate — at most one price sheet per cluster, so the unique index is

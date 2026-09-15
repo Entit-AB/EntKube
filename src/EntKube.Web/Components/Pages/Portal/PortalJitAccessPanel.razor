@@ -1,0 +1,284 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Jit
+@inject JitAccessService Jit
+@inject ToastService Toasts
+@inject AuthenticationStateProvider AuthProvider
+
+@* ═══════════════════════════════════════════════════════════════════
+   Just-in-time cluster access, customer side.
+
+   Nothing here grants anything — a request is a request. The one moment
+   that matters is the approval landing: the kubeconfig is shown once and
+   is not recoverable afterwards, so it is rendered as a modal that has to
+   be dismissed deliberately rather than as a row in a table.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex align-items-center mb-3">
+    <i class="bi bi-terminal fs-4 me-2 text-primary"></i>
+    <div>
+        <h5 class="mb-0">Cluster access — @App.Name</h5>
+        <small class="text-muted">
+            Time-boxed <code>kubectl</code> access to this app's namespace. Every request needs
+            approval and expires on its own.
+        </small>
+    </div>
+</div>
+
+@if (loadError is not null)
+{
+    <div class="alert alert-danger py-2 small">
+        <i class="bi bi-exclamation-triangle me-1"></i>@loadError
+    </div>
+}
+
+@* ── The one-time credential ─────────────────────────────────────── *@
+@if (issued is not null)
+{
+    <div class="card border-success mb-3">
+        <div class="card-header bg-success-subtle py-2">
+            <i class="bi bi-key me-2"></i><strong>Your access is ready</strong>
+        </div>
+        <div class="card-body">
+            <p class="small mb-2">
+                Save this kubeconfig now — it is shown once and cannot be recovered. It expires
+                <strong>@Describe(issued.Grant.ExpiresAt)</strong>.
+            </p>
+            <pre class="bg-body-tertiary border rounded p-2 small mb-2"
+                 style="max-height:16rem;overflow:auto;">@issued.Kubeconfig</pre>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="() => issued = null">
+                I have saved it
+            </button>
+        </div>
+    </div>
+}
+
+@* ── Request form ────────────────────────────────────────────────── *@
+<div class="card shadow-sm mb-3">
+    <div class="card-header bg-white py-2">
+        <i class="bi bi-plus-circle me-2 text-secondary"></i><strong>Request access</strong>
+    </div>
+    <div class="card-body">
+        @if (exclusivity is { IsExclusive: false })
+        {
+            @* Surfaced before anyone fills the form in, because the answer will not change by
+               submitting it — the namespace has to be separated first. *@
+            <div class="alert alert-warning py-2 small mb-2">
+                <i class="bi bi-shield-exclamation me-1"></i>@exclusivity.Reason
+            </div>
+        }
+        else if (targets.Count == 0)
+        {
+            <div class="text-muted small">
+                This app has no deployment in this environment, so there is no namespace to reach.
+            </div>
+        }
+        else
+        {
+            <div class="row g-2 align-items-end">
+                @if (targets.Count > 1)
+                {
+                    <div class="col-md-4">
+                        <label class="form-label small">Cluster</label>
+                        <select class="form-select form-select-sm" @bind="selectedClusterId">
+                            @foreach (JitTarget target in targets)
+                            {
+                                <option value="@target.ClusterId">
+                                    @target.ClusterName — @target.Namespace
+                                </option>
+                            }
+                        </select>
+                    </div>
+                }
+                <div class="col-md-5">
+                    <label class="form-label small">Why do you need access?</label>
+                    <input class="form-control form-control-sm" @bind="reason"
+                           placeholder="Investigating checkout 500s since 14:10" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">Ticket (optional)</label>
+                    <input class="form-control form-control-sm" @bind="ticketRef" placeholder="INC-4821" />
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-sm btn-primary" disabled="@(submitting || string.IsNullOrWhiteSpace(reason))"
+                            @onclick="SubmitAsync">
+                        @if (submitting)
+                        {
+                            <span class="spinner-border spinner-border-sm me-1"></span>
+                        }
+                        Request
+                    </button>
+                </div>
+            </div>
+        }
+    </div>
+</div>
+
+@* ── History ─────────────────────────────────────────────────────── *@
+<div class="card shadow-sm">
+    <div class="card-header bg-white py-2">
+        <i class="bi bi-clock-history me-2 text-secondary"></i><strong>Your requests</strong>
+    </div>
+    <div class="card-body p-0">
+        @if (grants is null)
+        {
+            <div class="text-center py-4">
+                <span class="spinner-border spinner-border-sm text-secondary"></span>
+            </div>
+        }
+        else if (grants.Count == 0)
+        {
+            <div class="text-muted small p-3">No access has been requested for this app.</div>
+        }
+        else
+        {
+            <table class="table table-sm mb-0 align-middle">
+                <thead>
+                    <tr>
+                        <th class="small">Status</th>
+                        <th class="small">Level</th>
+                        <th class="small">Namespace</th>
+                        <th class="small">Reason</th>
+                        <th class="small">Expires</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (JitGrant grant in grants)
+                    {
+                        JitGrantStatus status = grant.StatusAt(DateTime.UtcNow);
+                        <tr>
+                            <td><span class="badge @BadgeClass(status)">@status</span></td>
+                            <td class="small">@(grant.ApprovedAt is null ? "—" : grant.Level.ToString())</td>
+                            <td class="small"><code>@grant.Namespace</code></td>
+                            <td class="small text-truncate" style="max-width:20rem;">@grant.Reason</td>
+                            <td class="small">@Describe(grant.ExpiresAt)</td>
+                            <td class="text-end">
+                                @if (status == JitGrantStatus.Active)
+                                {
+                                    @* Handing back access you no longer need should be the easiest
+                                       thing on the page, not something only an operator can do. *@
+                                    <button class="btn btn-sm btn-outline-danger py-0 px-1"
+                                            @onclick="() => RevokeAsync(grant)">
+                                        Hand back
+                                    </button>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public required Data.App App { get; set; }
+    [Parameter] public required Guid EnvironmentId { get; set; }
+
+    private List<JitGrant>? grants;
+    private List<JitTarget> targets = [];
+    private NamespaceExclusivityResult? exclusivity;
+    private JitApproval? issued;
+
+    private string reason = "";
+    private string ticketRef = "";
+    private Guid selectedClusterId;
+    private bool submitting;
+    private string? loadError;
+    private string userId = "";
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loadError = null;
+        try
+        {
+            AuthenticationState state = await AuthProvider.GetAuthenticationStateAsync();
+            userId = state.User.Identity?.Name ?? "";
+
+            targets = await Jit.ResolveTargetsAsync(App.Id, EnvironmentId);
+            if (targets.Count > 0 && selectedClusterId == Guid.Empty)
+                selectedClusterId = targets[0].ClusterId;
+
+            // Checked up front so the warning appears before the form, not after a submission
+            // that was never going to succeed.
+            exclusivity = targets.Count == 0
+                ? null
+                : await Jit.CheckNamespaceExclusivityAsync(
+                    App.Id, targets[0].ClusterId, targets[0].Namespace);
+
+            grants = (await Jit.ListForUserAsync(userId))
+                .Where(g => g.AppId == App.Id && g.EnvironmentId == EnvironmentId)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+            grants = [];
+        }
+    }
+
+    private async Task SubmitAsync()
+    {
+        submitting = true;
+        try
+        {
+            await Jit.RequestAsync(
+                App.Id, EnvironmentId, userId, reason, userId,
+                clusterId: targets.Count > 1 ? selectedClusterId : null,
+                ticketRef: ticketRef);
+
+            reason = ticketRef = "";
+            Toasts.Success("Access requested. Someone will review it.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+        finally
+        {
+            submitting = false;
+        }
+    }
+
+    private async Task RevokeAsync(JitGrant grant)
+    {
+        try
+        {
+            await Jit.RevokeAsync(grant.Id, userId, "handed back by the requester");
+            Toasts.Success("Access handed back.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private static string BadgeClass(JitGrantStatus status) => status switch
+    {
+        JitGrantStatus.Active => "text-bg-success",
+        JitGrantStatus.Pending => "text-bg-warning",
+        JitGrantStatus.Denied or JitGrantStatus.Revoked => "text-bg-danger",
+        _ => "text-bg-secondary",
+    };
+
+    /// <summary>
+    /// Time remaining rather than a timestamp. "in 42 minutes" is the thing someone reads this
+    /// column to find out; a UTC instant makes them work it out themselves.
+    /// </summary>
+    private static string Describe(DateTime? expiresAt)
+    {
+        if (expiresAt is null) return "—";
+
+        TimeSpan remaining = expiresAt.Value - DateTime.UtcNow;
+        if (remaining <= TimeSpan.Zero) return "expired";
+        if (remaining.TotalMinutes < 1) return "in under a minute";
+        if (remaining.TotalHours < 1) return $"in {(int)remaining.TotalMinutes} min";
+
+        return $"in {remaining.Hours}h {remaining.Minutes}m";
+    }
+}

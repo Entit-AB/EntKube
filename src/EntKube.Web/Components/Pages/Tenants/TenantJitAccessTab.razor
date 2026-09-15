@@ -1,0 +1,364 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Jit
+@inject JitAccessService Jit
+@inject ToastService Toasts
+@inject AuthenticationStateProvider AuthProvider
+
+@* ═══════════════════════════════════════════════════════════════════
+   Just-in-time cluster access, operator side.
+
+   The pending queue is first and oldest-first, because it is a queue
+   somebody works through — someone is waiting on each row. Everything
+   below it is the record, which is what this feature is ultimately for.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex align-items-center mb-3">
+    <i class="bi bi-terminal fs-4 me-2 text-primary"></i>
+    <div>
+        <h5 class="mb-0">Just-in-time access</h5>
+        <small class="text-muted">
+            Time-boxed <code>kubectl</code> access for customers, scoped to one app's namespace.
+        </small>
+    </div>
+</div>
+
+@if (!canApprove && loaded)
+{
+    <div class="alert alert-info py-2 small">
+        <i class="bi bi-info-circle me-1"></i>
+        Approving access needs <strong>Manage</strong> on <strong>JIT cluster access</strong> in
+        this tenant — a permission of its own, which nobody holds until a tenant admin grants it.
+        You can see the queue and the history, but not act on them.
+    </div>
+}
+
+@* ── Pending ─────────────────────────────────────────────────────── *@
+<div class="card shadow-sm mb-3">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span><i class="bi bi-hourglass-split me-2 text-warning"></i><strong>Awaiting a decision</strong></span>
+        @if (pending is { Count: > 0 })
+        {
+            <span class="badge text-bg-warning">@pending.Count</span>
+        }
+    </div>
+    <div class="card-body p-0">
+        @if (pending is null)
+        {
+            <div class="text-center py-4"><span class="spinner-border spinner-border-sm text-secondary"></span></div>
+        }
+        else if (pending.Count == 0)
+        {
+            <div class="text-muted small p-3">Nothing is waiting.</div>
+        }
+        else
+        {
+            <table class="table table-sm mb-0 align-middle">
+                <thead>
+                    <tr>
+                        <th class="small">Requested</th>
+                        <th class="small">For</th>
+                        <th class="small">App / namespace</th>
+                        <th class="small">Reason</th>
+                        <th class="small" style="width:9rem;">Level</th>
+                        <th class="small" style="width:8rem;">For how long</th>
+                        <th style="width:11rem;"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (JitGrant grant in pending)
+                    {
+                        bool ownRequest = IsOwn(grant);
+                        <tr>
+                            <td class="small text-muted">@grant.RequestedAt.ToString("MMM d HH:mm")</td>
+                            <td class="small">@grant.UserId</td>
+                            <td class="small">
+                                @grant.App.Name<br />
+                                <code class="text-muted">@grant.Namespace</code>
+                                <span class="text-muted">on @grant.KubernetesCluster.Name</span>
+                            </td>
+                            <td class="small">
+                                @grant.Reason
+                                @if (grant.TicketRef is not null)
+                                {
+                                    <br />
+                                    <span class="badge text-bg-light">@grant.TicketRef</span>
+                                }
+                            </td>
+                            <td>
+                                <select class="form-select form-select-sm" value="@LevelOf(grant)"
+                                        @onchange="e => levels[grant.Id] = Enum.Parse<JitAccessLevel>(e.Value!.ToString()!)">
+                                    @foreach (JitAccessLevel level in Enum.GetValues<JitAccessLevel>())
+                                    {
+                                        <option value="@level">@level</option>
+                                    }
+                                </select>
+                            </td>
+                            <td>
+                                <select class="form-select form-select-sm" value="@MinutesOf(grant)"
+                                        @onchange="e => minutes[grant.Id] = int.Parse(e.Value!.ToString()!)">
+                                    @foreach (int option in DurationOptions)
+                                    {
+                                        <option value="@option">@Humanise(option)</option>
+                                    }
+                                </select>
+                            </td>
+                            <td class="text-end">
+                                @if (ownRequest)
+                                {
+                                    @* Said plainly rather than left to fail on submit: the service
+                                       refuses this, and the reason is not guessable from a toast. *@
+                                    <span class="small text-muted">Needs another approver</span>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-success py-0 px-2 me-1"
+                                            disabled="@(!canApprove || busy == grant.Id)"
+                                            @onclick="() => ApproveAsync(grant)">
+                                        Approve
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-danger py-0 px-2"
+                                            disabled="@(!canApprove || busy == grant.Id)"
+                                            @onclick="() => DenyAsync(grant)">
+                                        Deny
+                                    </button>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@* ── Active ──────────────────────────────────────────────────────── *@
+<div class="card shadow-sm mb-3">
+    <div class="card-header bg-white py-2">
+        <i class="bi bi-broadcast me-2 text-success"></i><strong>Live now</strong>
+    </div>
+    <div class="card-body p-0">
+        @if (Active.Count == 0)
+        {
+            <div class="text-muted small p-3">Nobody currently holds access.</div>
+        }
+        else
+        {
+            <table class="table table-sm mb-0 align-middle">
+                <thead>
+                    <tr>
+                        <th class="small">Who</th>
+                        <th class="small">Level</th>
+                        <th class="small">Namespace</th>
+                        <th class="small">Expires</th>
+                        <th class="small">Last used</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (JitGrant grant in Active)
+                    {
+                        <tr>
+                            <td class="small">@grant.UserId</td>
+                            <td class="small"><span class="badge text-bg-secondary">@grant.Level</span></td>
+                            <td class="small"><code>@grant.Namespace</code></td>
+                            <td class="small">@Remaining(grant.ExpiresAt)</td>
+                            <td class="small text-muted">
+                                @(grant.LastUsedAt is null ? "never" : grant.LastUsedAt.Value.ToString("HH:mm"))
+                            </td>
+                            <td class="text-end">
+                                <button class="btn btn-sm btn-outline-danger py-0 px-2"
+                                        disabled="@(!canApprove || busy == grant.Id)"
+                                        @onclick="() => RevokeAsync(grant)">
+                                    Revoke now
+                                </button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@* ── History ─────────────────────────────────────────────────────── *@
+<div class="card shadow-sm">
+    <div class="card-header bg-white py-2">
+        <i class="bi bi-clock-history me-2 text-secondary"></i><strong>History</strong>
+        <span class="text-muted small ms-2">Grants are never deleted — a grant that was used is the record that it happened.</span>
+    </div>
+    <div class="card-body p-0">
+        @if (Finished.Count == 0)
+        {
+            <div class="text-muted small p-3">Nothing yet.</div>
+        }
+        else
+        {
+            <table class="table table-sm mb-0 align-middle">
+                <thead>
+                    <tr>
+                        <th class="small">When</th>
+                        <th class="small">Who</th>
+                        <th class="small">Outcome</th>
+                        <th class="small">Level</th>
+                        <th class="small">Namespace</th>
+                        <th class="small">Decided by</th>
+                        <th class="small">Reason</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (JitGrant grant in Finished)
+                    {
+                        JitGrantStatus status = grant.StatusAt(DateTime.UtcNow);
+                        <tr>
+                            <td class="small text-muted">@grant.RequestedAt.ToString("MMM d HH:mm")</td>
+                            <td class="small">@grant.UserId</td>
+                            <td><span class="badge @BadgeClass(status)">@status</span></td>
+                            <td class="small">@(grant.ApprovedAt is null ? "—" : grant.Level.ToString())</td>
+                            <td class="small"><code>@grant.Namespace</code></td>
+                            <td class="small text-muted">@(grant.ApprovedBy ?? grant.DeniedBy ?? "—")</td>
+                            <td class="small text-truncate" style="max-width:18rem;">@grant.Reason</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    /// <summary>
+    /// Offered lifetimes, all inside <see cref="JitAccessService.MaximumDuration"/>. A free-text
+    /// box would invite "24" and then silently clamp it, which teaches people the ceiling is
+    /// advisory.
+    /// </summary>
+    private static readonly int[] DurationOptions = [15, 30, 60, 120, 240, 480];
+
+    private List<JitGrant>? pending;
+    private List<JitGrant> all = [];
+    private readonly Dictionary<Guid, JitAccessLevel> levels = [];
+    private readonly Dictionary<Guid, int> minutes = [];
+
+    private string userId = "";
+    private bool canApprove;
+    private bool loaded;
+    private Guid? busy;
+
+    private List<JitGrant> Active =>
+        all.Where(g => g.StatusAt(DateTime.UtcNow) == JitGrantStatus.Active).ToList();
+
+    private List<JitGrant> Finished =>
+        all.Where(g => g.StatusAt(DateTime.UtcNow) is not (JitGrantStatus.Active or JitGrantStatus.Pending))
+           .ToList();
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        AuthenticationState state = await AuthProvider.GetAuthenticationStateAsync();
+        userId = state.User.Identity?.Name ?? "";
+
+        canApprove = await Jit.IsApproverAsync(TenantId, userId);
+        pending = await Jit.ListPendingAsync(TenantId);
+        all = await Jit.ListForTenantAsync(TenantId);
+        loaded = true;
+    }
+
+    private bool IsOwn(JitGrant grant) =>
+        string.Equals(grant.RequestedBy, userId, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(grant.UserId, userId, StringComparison.OrdinalIgnoreCase);
+
+    private JitAccessLevel LevelOf(JitGrant grant) =>
+        levels.TryGetValue(grant.Id, out JitAccessLevel level) ? level : JitAccessLevel.Observe;
+
+    private int MinutesOf(JitGrant grant) =>
+        minutes.TryGetValue(grant.Id, out int value) ? value : 60;
+
+    private async Task ApproveAsync(JitGrant grant)
+    {
+        busy = grant.Id;
+        try
+        {
+            await Jit.ApproveAsync(
+                grant.Id, userId, LevelOf(grant), TimeSpan.FromMinutes(MinutesOf(grant)));
+
+            // The credential itself is deliberately not shown here. It belongs to the person the
+            // grant is for, and they collect it from their own portal.
+            Toasts.Success($"Access granted to {grant.UserId} for {Humanise(MinutesOf(grant))}.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+        finally
+        {
+            busy = null;
+        }
+    }
+
+    private async Task DenyAsync(JitGrant grant)
+    {
+        busy = grant.Id;
+        try
+        {
+            await Jit.DenyAsync(grant.Id, userId);
+            Toasts.Success("Request denied.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+        finally
+        {
+            busy = null;
+        }
+    }
+
+    private async Task RevokeAsync(JitGrant grant)
+    {
+        busy = grant.Id;
+        try
+        {
+            await Jit.RevokeAsync(grant.Id, userId, "revoked by an operator");
+            Toasts.Success("Access revoked. The cluster credential has been removed.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+        finally
+        {
+            busy = null;
+        }
+    }
+
+    private static string Humanise(int totalMinutes) =>
+        totalMinutes < 60 ? $"{totalMinutes} min"
+        : totalMinutes % 60 == 0 ? $"{totalMinutes / 60} h"
+        : $"{totalMinutes / 60} h {totalMinutes % 60} min";
+
+    private static string Remaining(DateTime? expiresAt)
+    {
+        if (expiresAt is null) return "—";
+
+        TimeSpan left = expiresAt.Value - DateTime.UtcNow;
+        if (left <= TimeSpan.Zero) return "expired";
+
+        return left.TotalHours >= 1
+            ? $"in {left.Hours}h {left.Minutes}m"
+            : $"in {(int)Math.Max(1, left.TotalMinutes)} min";
+    }
+
+    private static string BadgeClass(JitGrantStatus status) => status switch
+    {
+        JitGrantStatus.Active => "text-bg-success",
+        JitGrantStatus.Pending => "text-bg-warning",
+        JitGrantStatus.Denied or JitGrantStatus.Revoked => "text-bg-danger",
+        _ => "text-bg-secondary",
+    };
+}
