@@ -2532,6 +2532,10 @@ else if (section == "components")
                     {
                         editFormFieldValues["storage-link"] = harborConfig.StorageLinkId.Value.ToString();
                     }
+                    if (!string.IsNullOrEmpty(harborConfig.RedisEndpoint))
+                    {
+                        editFormFieldValues["redis-endpoint"] = harborConfig.RedisEndpoint;
+                    }
                     editFormFieldValues["admin-username"] = harborConfig.AdminUsername;
                 }
 
@@ -3808,6 +3812,8 @@ else if (section == "components")
 
         fieldValues.TryGetValue("admin-password", out string? adminPassword);
         fieldValues.TryGetValue("admin-username", out string? adminUsername);
+        fieldValues.TryGetValue("redis-endpoint", out string? redisEndpoint);
+        fieldValues.TryGetValue("redis-password", out string? redisPassword);
         string hostname = fieldValues.TryGetValue("hostname", out string? h) ? h.Trim() : "";
         string registryUrl = string.IsNullOrEmpty(hostname) ? "" : $"https://{hostname}";
 
@@ -3816,7 +3822,9 @@ else if (section == "components")
             cnpgDatabaseId, storageLinkId,
             string.IsNullOrWhiteSpace(adminUsername) ? "admin" : adminUsername,
             string.IsNullOrWhiteSpace(adminPassword) ? null : adminPassword,
-            string.IsNullOrWhiteSpace(registryUrl) ? null : registryUrl);
+            string.IsNullOrWhiteSpace(registryUrl) ? null : registryUrl,
+            redisEndpoint,
+            redisPassword);
 
         // Inject externalURL and keep expose.clusterIP.name aligned with the release name so the
         // Gateway API route always targets the correct service (HarborService sets expose.clusterIP.name

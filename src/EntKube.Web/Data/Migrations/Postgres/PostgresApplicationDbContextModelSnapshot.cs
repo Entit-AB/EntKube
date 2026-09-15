@@ -3211,6 +3211,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("RedisEndpoint")
+                        .HasColumnType("text");
+
                     b.Property<string>("RegistryUrl")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");

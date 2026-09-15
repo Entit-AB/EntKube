@@ -290,6 +290,8 @@ public class CatalogComponentRegistrar(
 
         fieldValues.TryGetValue("admin-password", out string? adminPassword);
         fieldValues.TryGetValue("admin-username", out string? adminUsername);
+        fieldValues.TryGetValue("redis-endpoint", out string? redisEndpoint);
+        fieldValues.TryGetValue("redis-password", out string? redisPassword);
         string hostname = fieldValues.TryGetValue("hostname", out string? h) ? h.Trim() : "";
         string registryUrl = string.IsNullOrEmpty(hostname) ? "" : $"https://{hostname}";
 
@@ -298,7 +300,9 @@ public class CatalogComponentRegistrar(
             cnpgDatabaseId, storageLinkId,
             string.IsNullOrWhiteSpace(adminUsername) ? "admin" : adminUsername,
             string.IsNullOrWhiteSpace(adminPassword) ? null : adminPassword,
-            string.IsNullOrWhiteSpace(registryUrl) ? null : registryUrl);
+            string.IsNullOrWhiteSpace(registryUrl) ? null : registryUrl,
+            redisEndpoint,
+            redisPassword);
 
         if (!string.IsNullOrEmpty(registryUrl))
         {

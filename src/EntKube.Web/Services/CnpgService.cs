@@ -1388,6 +1388,73 @@ public class CnpgService(
     }
 
     /// <summary>
+    /// The golang-migrate state an application has left in a database: the schema version it last
+    /// reached, and whether that migration is half-applied.
+    ///
+    /// <para>Returns null when the database carries no such state at all — either it is empty, or whatever
+    /// lives in it does not use golang-migrate. That is not an error and must not read as one: an empty
+    /// database is the normal case for a fresh install, and the query failing is how Postgres reports a
+    /// missing table.</para>
+    ///
+    /// <para>Worth reading before an install because a schema only ever moves forward. An application
+    /// handed a database written by a newer version of itself does not fail at connect time, where it
+    /// would be obvious — it connects, migrates, and dies on the migration, minutes into a Helm wait that
+    /// then reports nothing but a lapsed deadline.</para>
+    /// </summary>
+    public async Task<(int Version, bool Dirty)?> ReadMigrateSchemaVersionAsync(
+        Guid tenantId, Guid cnpgClusterId, Guid databaseId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        CnpgCluster? cnpg = await db.CnpgClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == cnpgClusterId && c.TenantId == tenantId, ct);
+
+        CnpgDatabase? database = await db.CnpgDatabases
+            .FirstOrDefaultAsync(d => d.Id == databaseId && d.CnpgClusterId == cnpgClusterId, ct);
+
+        if (cnpg?.KubernetesCluster.Kubeconfig is null || database is null) return null;
+
+        const string sql = "SELECT version || '|' || dirty FROM schema_migrations LIMIT 1;";
+
+        string output;
+        try
+        {
+            output = await k8sFactory.ExecuteSqlInCnpgDatabaseWithOutputAsync(
+                cnpg.Name, cnpg.Namespace, database.Name, sql,
+                cnpg.KubernetesCluster.Kubeconfig!, ct);
+        }
+        catch (Exception)
+        {
+            // No schema_migrations table, or the cluster is not reachable right now. Both mean "nothing
+            // known", and neither is a reason to stand in the way of an install.
+            return null;
+        }
+
+        return ParseMigrateSchemaVersion(output);
+    }
+
+    /// <summary>
+    /// Reads <c>version|dirty</c> out of psql's tuples-only output. Null for anything else, including the
+    /// empty result a table with no rows produces.
+    /// </summary>
+    public static (int Version, bool Dirty)? ParseMigrateSchemaVersion(string? psqlOutput)
+    {
+        string line = (psqlOutput ?? "")
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault(l => l.Contains('|')) ?? "";
+
+        string[] parts = line.Split('|');
+
+        if (parts.Length != 2 || !int.TryParse(parts[0].Trim(), out int version)) return null;
+
+        string flag = parts[1].Trim();
+        bool dirty = flag is "t" or "true" or "T" or "True";
+
+        return (version, dirty);
+    }
+
+    /// <summary>
     /// Grants full ownership of all objects in the public schema to the database owner.
     /// Runs as the <c>postgres</c> superuser via <c>kubectl exec</c> (peer auth —
     /// no password needed). Use this to fix permission errors after restoring a

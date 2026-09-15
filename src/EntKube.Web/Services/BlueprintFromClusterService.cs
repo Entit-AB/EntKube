@@ -224,6 +224,7 @@ public class BlueprintFromClusterService(
                     return hc.CnpgDatabaseId is Guid g && g != Guid.Empty ? g.ToString() : null;
                 case "storage-link":
                     return hc.StorageLinkId is Guid s && s != Guid.Empty ? s.ToString() : null;
+                case "redis-endpoint": return hc.RedisEndpoint;
                 case "hostname": return HostOf(hc.RegistryUrl);
             }
         }
@@ -235,6 +236,7 @@ public class BlueprintFromClusterService(
     private static bool IsEnvSpecific(ComponentFormField field) =>
         field.Type is FormFieldType.CnpgDatabase or FormFieldType.ClusterIssuer
             or FormFieldType.StorageLink or FormFieldType.GatewaySelector
+            or FormFieldType.RedisSelector
         || LooksLikeHost(field.Key) || LooksLikeHost(field.YamlPath);
 
     private static bool LooksLikeHost(string s) =>

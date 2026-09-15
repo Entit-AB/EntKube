@@ -3212,6 +3212,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
 
+                    b.Property<string>("RedisEndpoint")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("RegistryUrl")
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
