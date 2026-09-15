@@ -172,6 +172,96 @@ public class RedisService(
     }
 
     /// <summary>
+    /// Why a string is not a Redis address, or null when it could be one. An empty string is not an
+    /// address at all — it is "no external Redis" — and is accepted here for callers to read as that.
+    ///
+    /// <para>The check is worth having because of what a wrong value costs. Nothing downstream
+    /// questions this string: it becomes <c>redis.external.addr</c>, the component starts, and the
+    /// dial either times out for ever or — if the string happens to resolve — connects somewhere it
+    /// has no business being. A browser password manager filling an operator's email address into
+    /// this box produced exactly that: a registry whose core dialled a mail provider on port 6379,
+    /// restarting every minute, with the address visible nowhere but a pod log.</para>
+    ///
+    /// <para>Deliberately a shape check, not a reachability one. It rejects what cannot be an
+    /// address — credentials, a URL, a path, whitespace, a port out of range — and says nothing
+    /// about whether the host exists, which is <see cref="InClusterServiceExistsAsync"/>'s job.</para>
+    /// </summary>
+    public static string? DescribeInvalidEndpoint(string? endpoint)
+    {
+        string value = (endpoint ?? "").Trim();
+
+        if (value.Length == 0) return null;
+
+        // A sentinel set is a comma-separated list of addresses; every element must stand on its own.
+        foreach (string part in value.Split(','))
+        {
+            string address = part.Trim();
+
+            if (address.Length == 0)
+            {
+                return $"'{value}' has an empty entry in its address list.";
+            }
+
+            if (address.Contains("://", StringComparison.Ordinal))
+            {
+                return $"'{address}' is a URL. Give the address as host:port — the scheme is Harbor's to add.";
+            }
+
+            if (address.Contains('@', StringComparison.Ordinal))
+            {
+                return $"'{address}' is not a host name — an address with an @ in it is a login or an "
+                    + "email address, not a Redis endpoint. Check whether the browser filled this box in.";
+            }
+
+            if (address.Contains('/', StringComparison.Ordinal) || address.Any(char.IsWhiteSpace))
+            {
+                return $"'{address}' is not a host name. Give the address as host:port, with no path or spaces.";
+            }
+
+            string host = address;
+
+            // host:port, or a bracketed IPv6 literal with an optional port.
+            if (address.StartsWith('['))
+            {
+                int close = address.IndexOf(']');
+                if (close < 0) return $"'{address}' is missing the closing bracket of its IPv6 address.";
+
+                host = address[1..close];
+                string rest = address[(close + 1)..];
+
+                if (rest.Length > 0 && (rest[0] != ':' || !IsPort(rest[1..])))
+                {
+                    return $"'{address}' does not end in a valid port.";
+                }
+            }
+            else if (address.LastIndexOf(':') is int colon && colon >= 0)
+            {
+                host = address[..colon];
+                if (!IsPort(address[(colon + 1)..]))
+                {
+                    return $"'{address}' does not end in a valid port (1-65535).";
+                }
+            }
+
+            if (host.Length == 0)
+            {
+                return $"'{address}' has no host in front of its port.";
+            }
+
+            if (!address.StartsWith('[')
+                && !host.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_'))
+            {
+                return $"'{host}' is not a host name or IP address.";
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsPort(string value) =>
+        int.TryParse(value, out int port) && port is > 0 and <= 65535;
+
+    /// <summary>
     /// Whether the cluster actually has a Service behind an in-cluster Redis address.
     ///
     /// <para>Null means "cannot say", and every uncertainty resolves to it: an address that is not an

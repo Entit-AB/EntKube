@@ -77,6 +77,64 @@ public class HarborSharedRedisTests
     }
 
     /// <summary>
+    /// The one that actually happened: a browser password manager saw a text box above a password box
+    /// and filled in the saved login. "nils.blomgren@gmail.com" resolves, so the registry's core spent
+    /// every restart dialling a mail provider on port 6379 — the address appearing nowhere but a pod log.
+    /// </summary>
+    [Fact]
+    public void An_email_address_is_not_a_redis_endpoint()
+    {
+        string? reason = RedisService.DescribeInvalidEndpoint("nils.blomgren@gmail.com");
+
+        reason.Should().NotBeNull();
+        reason.Should().Contain("browser");
+    }
+
+    [Theory]
+    // Empty is not an address, it is "no external Redis" — the caller reads it as that.
+    [InlineData("")]
+    [InlineData("redis.redis.svc.cluster.local:6379")]
+    [InlineData("redis.redis.svc.cluster.local")]
+    [InlineData("10.0.0.5:6379")]
+    // A sentinel set is a list of addresses, and all of them have to be addresses.
+    [InlineData("s1.redis:26379,s2.redis:26379,s3.redis:26379")]
+    [InlineData("[2001:db8::1]:6379")]
+    public void A_real_address_is_accepted(string endpoint)
+    {
+        RedisService.DescribeInvalidEndpoint(endpoint).Should().BeNull();
+    }
+
+    [Theory]
+    // A login, not a host.
+    [InlineData("user@redis.example.com:6379")]
+    // A URL: the scheme is Harbor's to add, and a string with one in it is not host:port.
+    [InlineData("redis://redis.redis.svc.cluster.local:6379")]
+    // A path, a space, a port out of range, a half-written list.
+    [InlineData("redis.redis.svc.cluster.local/0")]
+    [InlineData("redis host:6379")]
+    [InlineData("redis.redis.svc.cluster.local:99999")]
+    [InlineData("redis.redis.svc.cluster.local:")]
+    [InlineData("s1.redis:26379,")]
+    public void Anything_that_cannot_be_an_address_is_refused(string endpoint)
+    {
+        RedisService.DescribeInvalidEndpoint(endpoint).Should().NotBeNull();
+    }
+
+    /// <summary>
+    /// An address stored before the shape check existed still has to be caught, because the install it
+    /// would otherwise run ends in a Helm deadline with a pod log nobody is watching.
+    /// </summary>
+    [Fact]
+    public void A_stored_address_that_cannot_be_one_is_refused_before_the_install()
+    {
+        string message = HarborService.RedisEndpointUnusable(
+            "'nils.blomgren@gmail.com' is not a host name.", fromValues: false);
+
+        message.Should().Contain("nils.blomgren@gmail.com");
+        message.Should().Contain("Clear the Redis field");
+    }
+
+    /// <summary>
     /// The refusal an operator reads instead of waiting out a Helm deadline. It has to name the address —
     /// the whole difficulty of this failure is that the address appears nowhere in what Helm reports.
     /// </summary>
