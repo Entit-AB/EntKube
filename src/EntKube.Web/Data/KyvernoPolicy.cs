@@ -25,6 +25,10 @@ public enum KyvernoPolicyType
     // Metadata enforcement
     RequirePodLabels = 10,
 
+    // RBAC
+    RestrictRbac        = 14,
+    RestrictClusterRbac = 15,
+
     // Escape hatch
     Custom = 11
 }

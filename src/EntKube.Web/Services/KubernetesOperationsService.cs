@@ -121,6 +121,16 @@ public class KubernetesOperationsService(
 
             if (tenantId == Guid.Empty) return;
 
+            // Rewrite the cluster-scoped policy first. Its deny-list is a literal namespace list,
+            // so a namespace created by this very deploy is absent from whatever was applied
+            // before — and stays uncovered until something rewrites it.
+            (bool cpOk, string cpOutput) =
+                await kyvernoPolicyService.ReconcileClusterRbacPolicyAsync(deployment.Cluster, ct);
+            if (!cpOk && !string.IsNullOrWhiteSpace(cpOutput))
+                logger.LogWarning(
+                    "Cluster RBAC policy reconcile failed on {Cluster} after deployment {DeploymentId}: {Output}",
+                    deployment.Cluster.Name, deployment.Id, cpOutput);
+
             List<KyvernoPolicy> policies =
                 await kyvernoPolicyService.GetPoliciesAsync(tenantId, deployment.EnvironmentId, ct);
             if (policies.Count == 0) return;
@@ -1084,6 +1094,13 @@ public class KubernetesOperationsService(
             deployment.Namespace, lockedNs, manifests.Select(m => m.YamlContent));
         if (contentViolation is not null)
             return KubernetesOperationResult<string>.Failure(contentViolation);
+
+        // The namespace check above only catches resources that name a namespace. Cluster-scoped
+        // resources carry none, so RBAC and webhook kinds are refused by kind instead.
+        string? kindViolation = ManifestKindPolicy.CheckYaml(
+            manifests.Select(m => m.YamlContent), deployment.Namespace);
+        if (kindViolation is not null)
+            return KubernetesOperationResult<string>.Failure(kindViolation);
 
         // Prepend a Namespace manifest so the namespace is created automatically
         // if it doesn't exist yet — mirrors Helm's --create-namespace behaviour.

@@ -479,7 +479,10 @@ else
                 <div class="mb-2 d-flex align-items-center justify-content-between">
                     <span class="small fw-medium text-muted">Role rules</span>
                     <div class="d-flex gap-1">
-                        <button class="btn btn-sm btn-outline-secondary" @onclick='() => AddPreset("", "pods,services,configmaps,secrets", "get,list,watch")'>
+                        @* Deliberately no "secrets" here. Reading Secrets is a real need sometimes,
+                           but it is the app's own credentials in the clear and must be a decision
+                           someone makes, not the first button on the row. *@
+                        <button class="btn btn-sm btn-outline-secondary" @onclick='() => AddPreset("", "pods,services,configmaps", "get,list,watch")'>
                             + Read namespace
                         </button>
                         <button class="btn btn-sm btn-outline-secondary" @onclick='() => AddPreset("apps", "deployments", "get,list,watch,patch,update")'>
@@ -556,6 +559,19 @@ else
                             }
                         </tbody>
                     </table>
+
+                    @if (RbacWarnings.Count > 0)
+                    {
+                        <div class="alert alert-warning py-1 small mb-0">
+                            @foreach (RbacRuleViolation v in RbacWarnings)
+                            {
+                                <div>
+                                    <i class="bi @(v.Severity == RbacRuleSeverity.Blocked
+                                        ? "bi-shield-exclamation" : "bi-exclamation-triangle") me-1"></i>@v.Message
+                                </div>
+                            }
+                        </div>
+                    }
                 }
             }
         </div>
@@ -1162,20 +1178,51 @@ else
     private async Task AddPreset(string apiGroups, string resources, string verbs)
     {
         if (rbacPolicy is null) return;
-        AppRbacRule rule = await GovernanceService.AddRbacRuleAsync(
-            rbacPolicy.Id, apiGroups, resources, verbs);
-        rbacPolicy.Rules.Add(rule);
+        await AddRuleGuardedAsync(apiGroups, resources, verbs);
     }
 
     private async Task AddRbacRule()
     {
         if (rbacPolicy is null) return;
-        AppRbacRule rule = await GovernanceService.AddRbacRuleAsync(
-            rbacPolicy.Id, newRuleApiGroups, newRuleResources, newRuleVerbs);
-        rbacPolicy.Rules.Add(rule);
+        if (!await AddRuleGuardedAsync(newRuleApiGroups, newRuleResources, newRuleVerbs)) return;
+
         showAddRule = false;
         newRuleApiGroups = newRuleResources = newRuleVerbs = "";
     }
+
+    /// <summary>
+    /// Adds a rule, turning a deny-list refusal into a message on the card rather than an
+    /// unhandled exception that takes the circuit down. Returns false when the rule was refused.
+    /// </summary>
+    private async Task<bool> AddRuleGuardedAsync(string apiGroups, string resources, string verbs)
+    {
+        if (rbacPolicy is null) return false;
+
+        try
+        {
+            AppRbacRule rule = await GovernanceService.AddRbacRuleAsync(
+                rbacPolicy.Id, apiGroups, resources, verbs);
+            rbacPolicy.Rules.Add(rule);
+            rbacMessage = null;
+            return true;
+        }
+        catch (InvalidOperationException ex)
+        {
+            rbacOk = false;
+            rbacMessage = ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Warnings for rules already stored. Rules written before the deny-list existed are shown
+    /// here rather than blocking anything — an apply that refused them would take a running app
+    /// down over a grant it has had all along.
+    /// </summary>
+    private IReadOnlyList<RbacRuleViolation> RbacWarnings =>
+        rbacPolicy is null
+            ? []
+            : AppRbacRuleValidator.ValidateExisting(rbacPolicy.Rules);
 
     private async Task DeleteRbacRule(Guid id)
     {
