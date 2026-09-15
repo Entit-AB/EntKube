@@ -84,9 +84,18 @@
                                     <br />
                                     <span class="badge text-bg-light">@grant.TicketRef</span>
                                 }
+                                @* Kept visible beside the pickers rather than used only to seed
+                                   them: once an approver changes a picker, what was actually
+                                   asked for is otherwise gone from the screen. *@
+                                <br />
+                                <span class="text-muted">
+                                    asked for @grant.RequestedLevel,
+                                    @JitAccessService.HumaniseMinutes(grant.RequestedMinutes)
+                                </span>
                             </td>
                             <td>
                                 <select class="form-select form-select-sm" value="@LevelOf(grant)"
+                                        title="@JitAccessService.DescribeLevel(LevelOf(grant))"
                                         @onchange="e => levels[grant.Id] = Enum.Parse<JitAccessLevel>(e.Value!.ToString()!)">
                                     @foreach (JitAccessLevel level in Enum.GetValues<JitAccessLevel>())
                                     {
@@ -97,9 +106,9 @@
                             <td>
                                 <select class="form-select form-select-sm" value="@MinutesOf(grant)"
                                         @onchange="e => minutes[grant.Id] = int.Parse(e.Value!.ToString()!)">
-                                    @foreach (int option in DurationOptions)
+                                    @foreach (int option in JitAccessService.DurationOptionsMinutes)
                                     {
-                                        <option value="@option">@Humanise(option)</option>
+                                        <option value="@option">@JitAccessService.HumaniseMinutes(option)</option>
                                     }
                                 </select>
                             </td>
@@ -229,13 +238,6 @@
 @code {
     [Parameter] public required Guid TenantId { get; set; }
 
-    /// <summary>
-    /// Offered lifetimes, all inside <see cref="JitAccessService.MaximumDuration"/>. A free-text
-    /// box would invite "24" and then silently clamp it, which teaches people the ceiling is
-    /// advisory.
-    /// </summary>
-    private static readonly int[] DurationOptions = [15, 30, 60, 120, 240, 480];
-
     private List<JitGrant>? pending;
     private List<JitGrant> all = [];
     private readonly Dictionary<Guid, JitAccessLevel> levels = [];
@@ -275,11 +277,14 @@
         string.Equals(grant.RequestedBy, userDisplay, StringComparison.OrdinalIgnoreCase)
         || string.Equals(grant.UserId, userId, StringComparison.OrdinalIgnoreCase);
 
+    // Until the approver touches a picker, it sits on what the requester asked for. Seeding it
+    // with the safe default instead would quietly answer a different request than the one filed,
+    // and an approver who wants less can still say so — the request binds nobody.
     private JitAccessLevel LevelOf(JitGrant grant) =>
-        levels.TryGetValue(grant.Id, out JitAccessLevel level) ? level : JitAccessLevel.Observe;
+        levels.TryGetValue(grant.Id, out JitAccessLevel level) ? level : grant.RequestedLevel;
 
     private int MinutesOf(JitGrant grant) =>
-        minutes.TryGetValue(grant.Id, out int value) ? value : 60;
+        minutes.TryGetValue(grant.Id, out int value) ? value : grant.RequestedMinutes;
 
     private async Task ApproveAsync(JitGrant grant)
     {
@@ -291,7 +296,9 @@
 
             // The credential itself is deliberately not shown here. It belongs to the person the
             // grant is for, and they collect it from their own portal.
-            Toasts.Success($"Access granted to {JitAccessService.SubjectName(grant)} for {Humanise(MinutesOf(grant))}.");
+            Toasts.Success(
+                $"Access granted to {JitAccessService.SubjectName(grant)} "
+                + $"for {JitAccessService.HumaniseMinutes(MinutesOf(grant))}.");
             await LoadAsync();
         }
         catch (Exception ex)
@@ -341,11 +348,6 @@
             busy = null;
         }
     }
-
-    private static string Humanise(int totalMinutes) =>
-        totalMinutes < 60 ? $"{totalMinutes} min"
-        : totalMinutes % 60 == 0 ? $"{totalMinutes / 60} h"
-        : $"{totalMinutes / 60} h {totalMinutes % 60} min";
 
     private static string Remaining(DateTime? expiresAt)
     {
