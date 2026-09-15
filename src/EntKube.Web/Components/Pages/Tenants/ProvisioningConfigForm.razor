@@ -1,17 +1,22 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
+@inject OpenStackInventoryService InventoryService
 
 @* Shared editor for an OpenStackProvisioningConfig (Cluster API + CAPO). Used both by the
    blueprint editor and the New Cluster wizard so the sizing form lives in one place. The
    parent owns the Config object; this form writes directly into it (worker-pool edits are
-   synced into Config.WorkerPools on every change). *@
+   synced into Config.WorkerPools on every change).
+
+   Once a connection is selected the form reads the project's images, flavors, networks and
+   availability zones and offers them as pickers — nobody should have to paste a network UUID
+   out of Horizon. Discovery is best-effort: when it fails every field stays free text. *@
 
 <div class="row g-2">
     @if (ShowConnection)
     {
         <div class="col-md-6">
             <label class="form-label small mb-0">OpenStack connection</label>
-            <select class="form-select form-select-sm" @bind="ConnectionId">
+            <select class="form-select form-select-sm" @bind="ConnectionId" @bind:after="LoadInventoryAsync">
                 <option value="@Guid.Empty">— select a connection —</option>
                 @foreach (OpenStackConnection c in Connections)
                 {
@@ -29,21 +34,57 @@
         <input class="form-control form-control-sm" @bind="Config.KubernetesVersion" />
     </div>
 
+    @* ── What the cloud told us ── *@
+    <div class="col-12">
+        @if (loading)
+        {
+            <div class="small text-muted">
+                <span class="spinner-border spinner-border-sm me-1"></span>
+                Reading images, flavors and networks from OpenStack…
+            </div>
+        }
+        else if (inventory?.Error is { Length: > 0 } err)
+        {
+            <div class="alert alert-warning py-1 px-2 mb-0 small d-flex align-items-center gap-2">
+                <i class="bi bi-exclamation-triangle"></i>
+                <span class="flex-grow-1">
+                    Couldn't read this project's inventory (@err) — fill the fields in by hand.
+                </span>
+                <button class="btn btn-sm btn-outline-secondary py-0" @onclick="LoadInventoryAsync">Retry</button>
+            </div>
+        }
+        else if (inventory is not null)
+        {
+            <div class="small text-muted d-flex align-items-center gap-2">
+                <i class="bi bi-cloud-check"></i>
+                <span class="flex-grow-1">
+                    From this project: @inventory.Images.Count image(s), @inventory.Flavors.Count flavor(s),
+                    @inventory.ExternalNetworks.Count external and @inventory.TenantNetworks.Count project network(s),
+                    @inventory.AvailabilityZones.Count availability zone(s).
+                </span>
+                <button class="btn btn-sm btn-link py-0 text-decoration-none" @onclick="LoadInventoryAsync">Refresh</button>
+            </div>
+        }
+    </div>
+
     <div class="col-md-4">
-        <label class="form-label small mb-0">Node image (Glance)</label>
-        <input class="form-control form-control-sm" @bind="Config.NodeImageName" />
+        <OpenStackPicker Label="Node image (Glance)" Options="ImageOptions" Placeholder="ubuntu-22.04-kube-v1.31.4"
+                         Value="@Config.NodeImageName"
+                         ValueChanged="@(v => Config.NodeImageName = v ?? "")" />
     </div>
     <div class="col-md-2">
         <label class="form-label small mb-0">CP count</label>
         <input type="number" min="1" class="form-control form-control-sm" @bind="Config.ControlPlaneCount" />
     </div>
     <div class="col-md-3">
-        <label class="form-label small mb-0">CP flavor</label>
-        <input class="form-control form-control-sm" @bind="Config.ControlPlaneFlavor" />
+        <OpenStackPicker Label="CP flavor" Options="FlavorOptions" Placeholder="b.4c8gb"
+                         Value="@Config.ControlPlaneFlavor"
+                         ValueChanged="@(v => Config.ControlPlaneFlavor = v ?? "")" />
     </div>
     <div class="col-md-3">
-        <label class="form-label small mb-0">Failure domain / AZ</label>
-        <input class="form-control form-control-sm" @bind="Config.FailureDomain" />
+        <OpenStackPicker Label="Failure domain / AZ" Options="ZoneOptions" Placeholder="nova"
+                         Value="@Config.FailureDomain"
+                         ValueChanged="@(v => Config.FailureDomain = v)" />
     </div>
 
     <div class="col-12"><hr class="my-1" /><span class="small text-muted">Worker pool</span></div>
@@ -52,12 +93,15 @@
         <input type="number" min="0" class="form-control form-control-sm" @bind="workerPool.Count" @bind:after="SyncPool" />
     </div>
     <div class="col-md-4">
-        <label class="form-label small mb-0">Worker flavor</label>
-        <input class="form-control form-control-sm" @bind="workerPool.Flavor" @bind:after="SyncPool" />
+        <OpenStackPicker Label="Worker flavor" Options="FlavorOptions" Placeholder="b.4c8gb"
+                         Value="@workerPool.Flavor"
+                         ValueChanged="@(v => { workerPool.Flavor = v ?? ""; SyncPool(); })" />
     </div>
     <div class="col-md-6">
-        <label class="form-label small mb-0">External network ID (floating IPs / API LB)</label>
-        <input class="form-control form-control-sm" @bind="Config.ExternalNetworkId" />
+        <OpenStackPicker Label="External network (floating IPs / API LB)" Options="ExternalNetworkOptions"
+                         Placeholder="external network UUID"
+                         Value="@Config.ExternalNetworkId"
+                         ValueChanged="@(v => Config.ExternalNetworkId = v ?? "")" />
     </div>
 
     <div class="col-12">
@@ -87,22 +131,28 @@
 
     <div class="col-12"><hr class="my-1" /><span class="small text-muted">Ephemeral bootstrap VM</span></div>
     <div class="col-md-4">
-        <label class="form-label small mb-0">Bootstrap image</label>
-        <input class="form-control form-control-sm" @bind="Config.BootstrapImageName" />
+        <OpenStackPicker Label="Bootstrap image" Options="ImageOptions" Placeholder="ubuntu-22.04"
+                         Value="@Config.BootstrapImageName"
+                         ValueChanged="@(v => Config.BootstrapImageName = v ?? "")" />
     </div>
     <div class="col-md-3">
-        <label class="form-label small mb-0">Bootstrap flavor</label>
-        <input class="form-control form-control-sm" @bind="Config.BootstrapFlavor" />
+        <OpenStackPicker Label="Bootstrap flavor" Options="FlavorOptions" Placeholder="b.2c4gb"
+                         Value="@Config.BootstrapFlavor"
+                         ValueChanged="@(v => Config.BootstrapFlavor = v ?? "")" />
     </div>
     <div class="col-md-5">
-        <label class="form-label small mb-0">Bootstrap network ID</label>
-        <input class="form-control form-control-sm" @bind="Config.BootstrapNetworkId" />
+        <OpenStackPicker Label="Bootstrap network" Options="TenantNetworkOptions" Placeholder="project network UUID"
+                         Value="@Config.BootstrapNetworkId"
+                         ValueChanged="@(v => Config.BootstrapNetworkId = v ?? "")" />
     </div>
 </div>
 
 @code {
     /// <summary>The config being edited. The parent owns it; this form mutates it in place.</summary>
     [Parameter, EditorRequired] public OpenStackProvisioningConfig Config { get; set; } = new();
+
+    /// <summary>Tenant the connection belongs to — needed to read its vaulted password for discovery.</summary>
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     /// <summary>OpenStack connections to choose from (when <see cref="ShowConnection"/> is true).</summary>
     [Parameter] public List<OpenStackConnection> Connections { get; set; } = [];
@@ -115,17 +165,103 @@
     private WorkerPool workerPool = new();
     private bool autoscale;
 
+    // What this project actually has, for the connection it was read from. Null until the first
+    // read completes — every picker falls back to free text while it is.
+    private OpenStackInventory? inventory;
+    private Guid inventoryConnectionId;
+    private bool loading;
+
     private Guid ConnectionId
     {
         get => Config.OpenStackConnectionId;
         set => Config.OpenStackConnectionId = value;
     }
 
+    private IReadOnlyList<OpenStackPicker.Option> ImageOptions =>
+        inventory is null ? [] : [.. inventory.Images
+            .Select(i => new OpenStackPicker.Option(i.Name, i.Display))
+            .DistinctBy(o => o.Value, StringComparer.Ordinal)];
+
+    private IReadOnlyList<OpenStackPicker.Option> FlavorOptions =>
+        inventory is null ? [] : [.. inventory.Flavors
+            .Select(f => new OpenStackPicker.Option(f.Name, f.Display))
+            .DistinctBy(o => o.Value, StringComparer.Ordinal)];
+
+    private IReadOnlyList<OpenStackPicker.Option> ExternalNetworkOptions =>
+        inventory is null ? [] : [.. inventory.ExternalNetworks.Select(n => new OpenStackPicker.Option(n.Id, n.Display))];
+
+    private IReadOnlyList<OpenStackPicker.Option> TenantNetworkOptions =>
+        inventory is null ? [] : [.. inventory.TenantNetworks.Select(n => new OpenStackPicker.Option(n.Id, n.Display))];
+
+    private IReadOnlyList<OpenStackPicker.Option> ZoneOptions =>
+        inventory is null ? [] : [.. inventory.AvailabilityZones.Select(z => new OpenStackPicker.Option(z, z))];
+
     protected override void OnParametersSet()
     {
         workerPool = Config.WorkerPools.FirstOrDefault() ?? new WorkerPool();
         autoscale = workerPool.Autoscale;
         SyncPool();
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // The wizard picks the connection a step earlier, so the first read happens here
+        // rather than on a change event.
+        if (Config.OpenStackConnectionId != inventoryConnectionId)
+        {
+            await LoadInventoryAsync();
+        }
+    }
+
+    private async Task LoadInventoryAsync()
+    {
+        Guid connectionId = Config.OpenStackConnectionId;
+
+        inventory = null;
+        inventoryConnectionId = connectionId;
+
+        if (connectionId == Guid.Empty || TenantId == Guid.Empty) return;
+
+        loading = true;
+        try
+        {
+            OpenStackInventory result = await InventoryService.GetInventoryAsync(TenantId, connectionId);
+
+            // The operator may have switched connections while this was in flight.
+            if (connectionId != Config.OpenStackConnectionId) return;
+
+            inventory = result;
+            ApplyUnambiguousDefaults(result);
+        }
+        finally
+        {
+            // Only the newest read owns the spinner — an older one finishing late must not
+            // clear it while the connection the operator just picked is still loading.
+            if (connectionId == inventoryConnectionId) loading = false;
+        }
+    }
+
+    /// <summary>
+    /// Fills in the fields where the project leaves no real choice — most projects have exactly
+    /// one external network, and a blank value here is only ever a UUID the operator was about
+    /// to go and look up. Anything already set is left alone.
+    /// </summary>
+    private void ApplyUnambiguousDefaults(OpenStackInventory found)
+    {
+        if (string.IsNullOrWhiteSpace(Config.ExternalNetworkId) && found.ExternalNetworks.Count == 1)
+        {
+            Config.ExternalNetworkId = found.ExternalNetworks[0].Id;
+        }
+
+        if (string.IsNullOrWhiteSpace(Config.BootstrapNetworkId) && found.TenantNetworks.Count == 1)
+        {
+            Config.BootstrapNetworkId = found.TenantNetworks[0].Id;
+        }
+
+        if (string.IsNullOrWhiteSpace(Config.FailureDomain) && found.AvailabilityZones.Count == 1)
+        {
+            Config.FailureDomain = found.AvailabilityZones[0];
+        }
     }
 
     private void OnToggleAutoscale(ChangeEventArgs e)

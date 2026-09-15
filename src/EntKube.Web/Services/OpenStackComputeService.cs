@@ -20,9 +20,11 @@ public sealed class BootstrapVm
 
 /// <summary>
 /// Thin Nova/Neutron/Glance client scoped to what provisioning needs: standing up
-/// (and tearing down) the throwaway k3s bootstrap VM. All calls use the public
-/// service-catalog endpoints from a <see cref="KeystoneSession"/> and the token as
-/// <c>X-Auth-Token</c>. This is deliberately not a general-purpose OpenStack SDK.
+/// (and tearing down) the throwaway k3s bootstrap VM, plus the read-only inventory
+/// the provisioning form offers as pickers (images, flavors, networks, AZs). All
+/// calls use the public service-catalog endpoints from a <see cref="KeystoneSession"/>
+/// and the token as <c>X-Auth-Token</c>. This is deliberately not a general-purpose
+/// OpenStack SDK.
 /// </summary>
 public class OpenStackComputeService(OpenStackHttpFactory httpFactory, ILogger<OpenStackComputeService> logger)
 {
@@ -219,6 +221,161 @@ public class OpenStackComputeService(OpenStackHttpFactory httpFactory, ILogger<O
     {
         object body = new { floatingip = new { port_id = portId } };
         await SendAsync(HttpMethod.Put, $"{network}/v2.0/floatingips/{floatingIpId}", session, body, ct);
+    }
+
+    // ──────── Discovery (read-only inventory for the provisioning UI) ────────
+
+    /// <summary>
+    /// Lists the Glance images the project can boot, following pagination. Only active
+    /// images are returned — a queued or deactivated image cannot boot a node.
+    /// </summary>
+    public async Task<IReadOnlyList<OpenStackImage>> ListImagesAsync(KeystoneSession session, CancellationToken ct = default)
+    {
+        string image = session.RequireEndpoint("image");
+        Uri baseUri = new(image + "/");
+        string? next = $"{image}/v2/images?status=active&limit=200&sort_key=name&sort_dir=asc";
+
+        List<OpenStackImage> images = [];
+
+        // Glance pages with an opaque root-relative "next"; cap the walk so a huge
+        // catalog cannot hold the wizard open indefinitely.
+        for (int page = 0; page < 20 && next is not null; page++)
+        {
+            using JsonDocument doc = await SendJsonAsync(HttpMethod.Get, next, session, null, ct);
+
+            foreach (JsonElement img in doc.RootElement.GetProperty("images").EnumerateArray())
+            {
+                if (!TryReadString(img, "id", out string id) || !TryReadString(img, "name", out string name)) continue;
+                images.Add(new OpenStackImage(id, name, ReadInt(img, "min_disk"), ReadInt(img, "min_ram")));
+            }
+
+            next = TryReadString(doc.RootElement, "next", out string path)
+                ? new Uri(baseUri, path).ToString()
+                : null;
+        }
+
+        return images;
+    }
+
+    /// <summary>
+    /// Lists the flavors available to the project, with their sizing so the picker can
+    /// show "4 vCPU / 8 GiB" rather than an opaque name.
+    /// </summary>
+    public async Task<IReadOnlyList<OpenStackFlavor>> ListFlavorsAsync(KeystoneSession session, CancellationToken ct = default)
+    {
+        string compute = session.RequireEndpoint("compute");
+        string? next = $"{compute}/flavors/detail?limit=500";
+
+        List<OpenStackFlavor> flavors = [];
+
+        for (int page = 0; page < 20 && next is not null; page++)
+        {
+            using JsonDocument doc = await SendJsonAsync(HttpMethod.Get, next, session, null, ct);
+
+            foreach (JsonElement f in doc.RootElement.GetProperty("flavors").EnumerateArray())
+            {
+                if (!TryReadString(f, "name", out string name)) continue;
+                TryReadString(f, "id", out string id);
+                flavors.Add(new OpenStackFlavor(
+                    id, name, ReadInt(f, "vcpus") ?? 0, ReadInt(f, "ram") ?? 0, ReadInt(f, "disk") ?? 0));
+            }
+
+            next = NextLink(doc.RootElement, "flavors_links");
+        }
+
+        return flavors;
+    }
+
+    /// <summary>
+    /// Lists the Neutron networks visible to the project. Whether a network is external
+    /// is what separates "floating IPs come from here" from "nodes attach here", so it is
+    /// carried through rather than guessed from the name.
+    /// </summary>
+    public async Task<IReadOnlyList<OpenStackNetwork>> ListNetworksAsync(KeystoneSession session, CancellationToken ct = default)
+    {
+        string network = session.RequireEndpoint("network");
+        using JsonDocument doc = await SendJsonAsync(HttpMethod.Get, $"{network}/v2.0/networks", session, null, ct);
+
+        List<OpenStackNetwork> networks = [];
+
+        foreach (JsonElement n in doc.RootElement.GetProperty("networks").EnumerateArray())
+        {
+            if (!TryReadString(n, "id", out string id)) continue;
+            TryReadString(n, "name", out string name);
+
+            networks.Add(new OpenStackNetwork(
+                id,
+                name,
+                External: n.TryGetProperty("router:external", out JsonElement ext) && ext.ValueKind == JsonValueKind.True,
+                Shared: n.TryGetProperty("shared", out JsonElement shared) && shared.ValueKind == JsonValueKind.True,
+                SubnetCount: n.TryGetProperty("subnets", out JsonElement subnets) && subnets.ValueKind == JsonValueKind.Array
+                    ? subnets.GetArrayLength()
+                    : 0));
+        }
+
+        return networks;
+    }
+
+    /// <summary>
+    /// Lists the Nova availability zones the project may schedule into. Zones reporting
+    /// themselves unavailable are dropped — offering a failure domain that cannot take a
+    /// boot request only moves the failure later.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ListAvailabilityZonesAsync(KeystoneSession session, CancellationToken ct = default)
+    {
+        string compute = session.RequireEndpoint("compute");
+        using JsonDocument doc = await SendJsonAsync(HttpMethod.Get, $"{compute}/os-availability-zone", session, null, ct);
+
+        List<string> zones = [];
+
+        foreach (JsonElement z in doc.RootElement.GetProperty("availabilityZoneInfo").EnumerateArray())
+        {
+            if (!TryReadString(z, "zoneName", out string name)) continue;
+            if (z.TryGetProperty("zoneState", out JsonElement state)
+                && state.TryGetProperty("available", out JsonElement available)
+                && available.ValueKind == JsonValueKind.False)
+            {
+                continue;
+            }
+            zones.Add(name);
+        }
+
+        return zones;
+    }
+
+    /// <summary>Reads a non-empty string property, tolerating absent and null fields.</summary>
+    private static bool TryReadString(JsonElement element, string property, out string value)
+    {
+        value = element.TryGetProperty(property, out JsonElement found) && found.ValueKind == JsonValueKind.String
+            ? found.GetString() ?? ""
+            : "";
+        return value.Length > 0;
+    }
+
+    /// <summary>Reads a numeric property, tolerating absent, null and out-of-range values.</summary>
+    private static int? ReadInt(JsonElement element, string property) =>
+        element.TryGetProperty(property, out JsonElement value)
+        && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt32(out int number)
+            ? number
+            : null;
+
+    /// <summary>Follows Nova's "next" rel in a <c>*_links</c> collection, or null at the last page.</summary>
+    private static string? NextLink(JsonElement root, string linksProperty)
+    {
+        if (!root.TryGetProperty(linksProperty, out JsonElement links) || links.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (JsonElement link in links.EnumerateArray())
+        {
+            if (link.TryGetProperty("rel", out JsonElement rel) && rel.GetString() == "next"
+                && TryReadString(link, "href", out string url))
+            {
+                return url;
+            }
+        }
+
+        return null;
     }
 
     // ──────── HTTP plumbing ────────
