@@ -380,6 +380,47 @@ public class ExternalRouteService(
         // No TLS section belongs in HTTPRoute.spec.
 
         var rule = new System.Text.StringBuilder();
+
+        // A component whose chart expects a path-aware proxy in front of it (Harbor) is described
+        // by several backends rather than one, so its hostname renders one rule per backend. Every
+        // rule still carries the same filters, timeout and retry policy as a single-backend route —
+        // they are the platform's policy for the hostname, not a property of one backend.
+        IReadOnlyList<(IReadOnlyList<string> Paths, string Service, int Port)> split =
+            ResolveSplitBackends(route);
+
+        if (split.Count > 0)
+        {
+            foreach ((IReadOnlyList<string> paths, string service, int port) in split)
+            {
+                rule.AppendLine("    - matches:");
+                foreach (string path in paths)
+                {
+                    rule.AppendLine("        - path:");
+                    rule.AppendLine("            type: PathPrefix");
+                    rule.AppendLine($"            value: {path}");
+                }
+                rule.AppendLine("      backendRefs:");
+                rule.AppendLine($"        - name: {service}");
+                rule.AppendLine($"          port: {port}");
+                rule.Append(RenderHstsFilter("      "));
+                rule.Append(RenderTimeouts(route.RequestTimeoutSeconds, "      "));
+                rule.Append(RenderRetry("      "));
+            }
+
+            return
+                $"apiVersion: gateway.networking.k8s.io/v1\n" +
+                $"kind: HTTPRoute\n" +
+                $"metadata:\n" +
+                $"  name: {routeName}\n" +
+                $"  namespace: {ns}\n" +
+                $"spec:\n" +
+                RenderParentRefs(route.GatewayName, route.GatewayNamespace, [ToListenerName(route.Hostname)]) +
+                $"  hostnames:\n" +
+                $"    - {route.Hostname}\n" +
+                $"  rules:\n" +
+                rule.ToString().TrimEnd() + "\n";
+        }
+
         if (route.PathPrefix != "/")
         {
             rule.AppendLine("    - matches:");
@@ -413,6 +454,96 @@ public class ExternalRouteService(
             $"    - {route.Hostname}\n" +
             $"  rules:\n" +
             rule.ToString().TrimEnd() + "\n";
+    }
+
+    /// <summary>
+    /// The backends one route spreads a hostname across, resolved from the component's catalog
+    /// entry, or empty when the hostname goes to a single Service (which is every component but
+    /// Harbor).
+    ///
+    /// <para>A route that was given an explicit path prefix is left alone: the operator asked for
+    /// one path to go to one place, and silently replacing that with the chart's own path layout
+    /// would serve something they did not ask for.</para>
+    /// </summary>
+    public static IReadOnlyList<(IReadOnlyList<string> Paths, string Service, int Port)>
+        ResolveSplitBackends(ExternalRoute route)
+    {
+        if (route.Component is null || route.PathPrefix != "/")
+        {
+            return [];
+        }
+
+        CatalogEntry? catalog = ComponentCatalog.ResolveForComponent(
+            route.Component.Name, route.Component.HelmChartName);
+
+        if (catalog is null || catalog.RouteBackends.Count == 0)
+        {
+            return [];
+        }
+
+        string fullname = ChartFullname(
+            route.Component.ReleaseName ?? route.Component.Name, catalog.HelmChartName);
+
+        return [.. catalog.RouteBackends.Select(b =>
+            (b.PathPrefixes, b.ServiceNameTemplate.Replace("{fullname}", fullname), b.Port))];
+    }
+
+    /// <summary>
+    /// Every Service a route sends traffic to — its own backend, or the several a path split names.
+    /// The DestinationRule a route needs is per Service, so this is what that grouping walks.
+    /// </summary>
+    public static IEnumerable<string> BackendServiceNames(ExternalRoute route)
+    {
+        IReadOnlyList<(IReadOnlyList<string> Paths, string Service, int Port)> split =
+            ResolveSplitBackends(route);
+
+        return split.Count > 0
+            ? split.Select(b => b.Service)
+            : string.IsNullOrWhiteSpace(route.ServiceName) ? [] : [route.ServiceName!];
+    }
+
+    /// <summary>
+    /// The Service a route record should name for a component whose hostname is split across several
+    /// of them, or null when the component has no split. The first entry in the catalog's list is the
+    /// primary one — Harbor's core, the half that serves the API a caller is most likely to mean.
+    ///
+    /// <para>The rules of the route come from the split either way; this is what the route record
+    /// carries for everything that reasonably asks "which Service is behind this hostname": the
+    /// routes list in the UI, and the per-Service DestinationRule.</para>
+    /// </summary>
+    public static string? PrimaryBackendService(string componentName, string? chartName, string releaseName)
+    {
+        CatalogEntry? catalog = ComponentCatalog.ResolveForComponent(componentName, chartName);
+
+        if (catalog is null || catalog.RouteBackends.Count == 0)
+        {
+            return null;
+        }
+
+        return catalog.RouteBackends[0].ServiceNameTemplate
+            .Replace("{fullname}", ChartFullname(releaseName, catalog.HelmChartName));
+    }
+
+    /// <summary>
+    /// The name a Helm chart gives its own resources, as the standard scaffold computes it: the
+    /// release name when it already contains the chart name, and "{release}-{chart}" otherwise.
+    ///
+    /// <para>This has to be computed, never written down. A chart installed under its own name
+    /// collapses the two together — release "harbor" produces "harbor-core", not
+    /// "harbor-harbor-core" — so a Service name hard-coded from one install is wrong for every
+    /// release named anything else, and wrong in a way that only shows up as a route to a Service
+    /// that does not exist.</para>
+    /// </summary>
+    public static string ChartFullname(string releaseName, string chartName)
+    {
+        if (string.IsNullOrWhiteSpace(chartName))
+        {
+            return releaseName;
+        }
+
+        return releaseName.Contains(chartName, StringComparison.Ordinal)
+            ? releaseName
+            : $"{releaseName}-{chartName}";
     }
 
     /// <summary>

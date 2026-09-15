@@ -172,6 +172,72 @@ public class RedisService(
     }
 
     /// <summary>
+    /// Whether the cluster actually has a Service behind an in-cluster Redis address.
+    ///
+    /// <para>Null means "cannot say", and every uncertainty resolves to it: an address that is not an
+    /// in-cluster Service name (a managed cloud Redis, a bare IP, a sentinel list), a cluster with no
+    /// stored kubeconfig, or a listing that failed. Callers use this to refuse an install that is about
+    /// to wait half an hour for a connection that can never be made, and refusing on a question we
+    /// could not answer would be worse than the failure it prevents.</para>
+    /// </summary>
+    public async Task<bool?> InClusterServiceExistsAsync(
+        Guid kubernetesClusterId, string endpoint, CancellationToken ct = default)
+    {
+        string host = (endpoint ?? "").Split(',')[0].Split(':')[0].Trim();
+
+        // Only cluster-local DNS names are judged. Anything else is somebody else's network.
+        if (!host.EndsWith(".svc.cluster.local", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        KubernetesCluster? cluster = await db.KubernetesClusters
+            .FirstOrDefaultAsync(c => c.Id == kubernetesClusterId, ct);
+
+        if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        {
+            return null;
+        }
+
+        try
+        {
+            string json = await k8s.GetJsonAllNamespacesAsync("services", cluster.Kubeconfig!, ct: ct);
+
+            // Every Service, not only the Redis-looking ones: the question here is whether the name
+            // resolves at all, and a Redis on a non-standard port is still a Redis.
+            return ServiceDnsNames(json).Any(n => string.Equals(n, host, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The cluster-local DNS name of every Service in a <c>kubectl get services -A -o json</c> payload.</summary>
+    public static IEnumerable<string> ServiceDnsNames(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) yield break;
+
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("items", out System.Text.Json.JsonElement items)) yield break;
+
+        foreach (System.Text.Json.JsonElement item in items.EnumerateArray())
+        {
+            if (!item.TryGetProperty("metadata", out System.Text.Json.JsonElement meta)) continue;
+
+            string? name = meta.TryGetProperty("name", out System.Text.Json.JsonElement n) ? n.GetString() : null;
+            string? ns = meta.TryGetProperty("namespace", out System.Text.Json.JsonElement nsEl) ? nsEl.GetString() : null;
+
+            if (name is not null && ns is not null)
+            {
+                yield return $"{name}.{ns}.svc.cluster.local";
+            }
+        }
+    }
+
+    /// <summary>
     /// Picks the Redis-looking Services out of a <c>kubectl get services -A -o json</c> payload: anything
     /// exposing the Redis port, or a port named for it. Headless Services are skipped — they resolve to
     /// pod IPs, which is not an address a client should be handed as a stable endpoint.

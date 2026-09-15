@@ -64,6 +64,14 @@ public class ComponentInstallOrchestrator(
             return new HelmExecutionResult { Success = false, Output = conflict };
         }
 
+        // And for the same reason, a Harbor pointed at a Redis the cluster does not have: the core never
+        // becomes ready, so every way of finding that out costs the full Helm deadline and then points at
+        // a namespace with no Redis pod in it.
+        if (await harborService.DescribeRedisConflictAsync(tenantId, componentId, ct) is string redisConflict)
+        {
+            return new HelmExecutionResult { Success = false, Output = redisConflict };
+        }
+
         if (options.IsUpgrade)
         {
             await lifecycleService.PrepareUpgradeAsync(componentId, ct);
