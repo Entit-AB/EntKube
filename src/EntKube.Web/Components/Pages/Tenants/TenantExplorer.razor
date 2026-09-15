@@ -382,6 +382,11 @@ else
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
         [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon") ]),
+        // Its own place in the tree because it is a queue with somebody waiting on it. It lived
+        // under Environments ▸ <env>, below the cluster list, which is both hard to find and the
+        // wrong scope — the queue is tenant-wide and a grant names its own environment.
+        new("Access", "bi-terminal",
+        [ new("jit-access", "JIT cluster access", "bi-terminal") ]),
         new("Networking", "bi-signpost-split",
         [ new("ingress", "Routes & Ingress", "bi-signpost-split"), new("networking", "VPN mesh", "bi-hdd-network") ]),
         new("Disaster recovery", "bi-shield-check",
@@ -876,6 +881,11 @@ else
                 break;
             case "api-tokens":
                 builder.OpenComponent<ApiTokensTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.CloseComponent();
+                break;
+            case "jit-access":
+                builder.OpenComponent<TenantJitAccessTab>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);
                 builder.CloseComponent();
                 break;

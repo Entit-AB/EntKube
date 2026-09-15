@@ -120,9 +120,12 @@ token, so the level is worth no more than those safeguards together are worth.
 ## Lifecycle
 
 1. **Request** — a customer portal user asks for access to an app+environment,
-   with a required reason and an optional ticket reference.
+   with a required reason, an optional ticket reference, and the level and length
+   they think they need.
 2. **Approve** — a tenant operator approves, choosing level and duration (capped;
-   default 1h, maximum 8h). Approval runs through
+   default 1h, maximum 8h). The pickers open on what was asked for and the ask is
+   shown beside them, so trimming a request is a deliberate act and stays visible
+   afterwards as "asked for Operate, granted Observe". Approval runs through
    [`IClusterChangeGate`](../src/EntKube.Web/Services/ClusterChanges/IClusterChangeGate.cs)
    like any other cluster mutation, so the operator sees the exact RBAC being
    applied before it lands.
@@ -161,9 +164,16 @@ One table, `JitGrant`, modelled on
 | --- | --- |
 | Scope | `TenantId`, `CustomerId`, `AppId`, `EnvironmentId`, `KubernetesClusterId`, `Namespace` (snapshot, not a lookup) |
 | Subject | `UserId`, `Level` |
-| Justification | `Reason` (required), `TicketRef` |
+| Justification | `Reason` (required), `TicketRef`, `RequestedLevel`, `RequestedMinutes` |
 | Workflow | `RequestedAt/By`, `ApprovedAt/By`, `ExpiresAt`, `RevokedAt/By`, `RevokeReason` |
 | Credential | `ServiceAccountName`, `TokenHash`, `DisplayPrefix`, `LastUsedAt`, `TokenExpiresAt` |
+
+`RequestedLevel`/`RequestedMinutes` and `Level`/`ExpiresAt` are two different facts:
+what was asked for and what was decided. They are separate columns so the record can
+show a request being trimmed, and so a pending row does not read as an Observe grant
+of no duration. The request is clamped into the allowed window as it is made — the
+queue never offers an approver a length it would have to silently shorten — and binds
+nobody: it seeds the approver's pickers and nothing more.
 
 `Namespace` is a snapshot on purpose. If governance later re-points the app at a
 different namespace, the live grant must keep meaning what it meant when it was
@@ -214,7 +224,7 @@ new version.
 | Expiry and orphan sweep | [`JitGrantReaperService`](../src/EntKube.Web/Services/Jit/JitGrantReaperService.cs) |
 | Namespace enforcement | [`JitPathPolicy`](../src/EntKube.Web/Services/Jit/JitPathPolicy.cs) |
 | The proxy | [`JitProxyService`](../src/EntKube.Web/Services/Jit/JitProxyService.cs), [`JitUpstreamClientPool`](../src/EntKube.Web/Services/Jit/JitUpstreamClientPool.cs) |
-| UI | `PortalJitAccessPanel`, `TenantJitAccessTab` |
+| UI | `PortalJitAccessPanel` (portal → app → Cluster access), `TenantJitAccessTab` (tenant → Operations → Access → JIT cluster access) |
 
 ### The trap in the upstream connection
 

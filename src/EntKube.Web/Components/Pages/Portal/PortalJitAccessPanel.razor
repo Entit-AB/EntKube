@@ -99,6 +99,27 @@
                     <label class="form-label small">Ticket (optional)</label>
                     <input class="form-control form-control-sm" @bind="ticketRef" placeholder="INC-4821" />
                 </div>
+                @* Asking for a level and a length rather than leaving both blank until approval.
+                   Neither binds the approver — they seed the pickers in the queue, and the record
+                   keeps both, so "asked for Operate, granted Observe" stays visible afterwards. *@
+                <div class="col-md-5">
+                    <label class="form-label small">What do you need to do?</label>
+                    <select class="form-select form-select-sm" @bind="requestedLevel">
+                        @foreach (JitAccessLevel level in Enum.GetValues<JitAccessLevel>())
+                        {
+                            <option value="@level">@JitAccessService.DescribeLevel(level)</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">For how long?</label>
+                    <select class="form-select form-select-sm" @bind="requestedMinutes">
+                        @foreach (int option in JitAccessService.DurationOptionsMinutes)
+                        {
+                            <option value="@option">@JitAccessService.HumaniseMinutes(option)</option>
+                        }
+                    </select>
+                </div>
                 <div class="col-auto">
                     <button class="btn btn-sm btn-primary" disabled="@(submitting || string.IsNullOrWhiteSpace(reason))"
                             @onclick="SubmitAsync">
@@ -136,7 +157,7 @@
                 <thead>
                     <tr>
                         <th class="small">Status</th>
-                        <th class="small">Level</th>
+                        <th class="small">Access</th>
                         <th class="small">Namespace</th>
                         <th class="small">Reason</th>
                         <th class="small">Expires</th>
@@ -149,10 +170,30 @@
                         JitGrantStatus status = grant.StatusAt(DateTime.UtcNow);
                         <tr>
                             <td><span class="badge @BadgeClass(status)">@status</span></td>
-                            <td class="small">@(grant.ApprovedAt is null ? "—" : grant.Level.ToString())</td>
+                            <td class="small">
+                                @if (grant.ApprovedAt is null)
+                                {
+                                    @grant.RequestedLevel<span class="text-muted"> asked</span>
+                                }
+                                else
+                                {
+                                    @grant.Level
+                                }
+                            </td>
                             <td class="small"><code>@grant.Namespace</code></td>
                             <td class="small text-truncate" style="max-width:20rem;">@grant.Reason</td>
-                            <td class="small">@Describe(grant.ExpiresAt)</td>
+                            <td class="small">
+                                @if (grant.ApprovedAt is null)
+                                {
+                                    <span class="text-muted">
+                                        @JitAccessService.HumaniseMinutes(grant.RequestedMinutes) asked
+                                    </span>
+                                }
+                                else
+                                {
+                                    @Describe(grant.ExpiresAt)
+                                }
+                            </td>
                             <td class="text-end">
                                 @if (status == JitGrantStatus.Active)
                                 {
@@ -183,6 +224,8 @@
 
     private string reason = "";
     private string ticketRef = "";
+    private JitAccessLevel requestedLevel = JitAccessLevel.Observe;
+    private int requestedMinutes = 60;
     private Guid selectedClusterId;
     private bool submitting;
     private string? loadError;
@@ -235,8 +278,12 @@
             await Jit.RequestAsync(
                 App.Id, EnvironmentId, userId, reason, userDisplay,
                 clusterId: targets.Count > 1 ? selectedClusterId : null,
-                ticketRef: ticketRef);
+                ticketRef: ticketRef,
+                requestedLevel: requestedLevel,
+                requestedDuration: TimeSpan.FromMinutes(requestedMinutes));
 
+            // The level and the length are deliberately left as they were. Somebody filing a
+            // second request is usually asking for the same thing again.
             reason = ticketRef = "";
             Toasts.Success("Access requested. Someone will review it.");
             await LoadAsync();

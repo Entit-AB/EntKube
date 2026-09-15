@@ -3422,6 +3422,12 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
 
+                    b.Property<int>("RequestedLevel")
+                        .HasColumnType("int");
+
+                    b.Property<int>("RequestedMinutes")
+                        .HasColumnType("int");
+
                     b.Property<string>("RevokeReason")
                         .HasMaxLength(1000)
                         .HasColumnType("nvarchar(1000)");

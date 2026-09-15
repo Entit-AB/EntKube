@@ -81,6 +81,11 @@ public class JitGrant
     /// <summary>The person the grant is for. Not necessarily the person who requested it.</summary>
     public required string UserId { get; set; }
 
+    /// <summary>
+    /// What was actually granted. Meaningless until <see cref="ApprovedAt"/> is set — read it
+    /// through <see cref="StatusAt"/> rather than on its own, or a pending request looks like an
+    /// Observe grant.
+    /// </summary>
     public JitAccessLevel Level { get; set; } = JitAccessLevel.Observe;
 
     // ── Justification ─────────────────────────────────────────────────────────
@@ -90,6 +95,24 @@ public class JitGrant
 
     /// <summary>Optional pointer to a ticket or incident.</summary>
     public string? TicketRef { get; set; }
+
+    /// <summary>
+    /// What the requester said they need, and for how long.
+    ///
+    /// Part of the ask, not of the grant: <see cref="Level"/> and <see cref="ExpiresAt"/> are what
+    /// an approver actually decided, and stay unset until they do. Keeping the two apart is what
+    /// lets the queue show "asked for Operate, granted Observe" — a record of a request being
+    /// trimmed, which is exactly the kind of decision this table exists to preserve.
+    ///
+    /// Neither binds the approver. They seed the pickers and no more.
+    /// </summary>
+    public JitAccessLevel RequestedLevel { get; set; } = JitAccessLevel.Observe;
+
+    /// <summary>
+    /// How long the requester asked for, in minutes. Clamped into the allowed window on the way
+    /// in, so a stored value is always one an approver could grant as it stands.
+    /// </summary>
+    public int RequestedMinutes { get; set; } = 60;
 
     // ── Workflow ──────────────────────────────────────────────────────────────
 
