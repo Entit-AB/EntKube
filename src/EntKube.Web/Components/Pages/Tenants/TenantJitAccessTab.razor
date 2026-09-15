@@ -71,7 +71,7 @@
                         bool ownRequest = IsOwn(grant);
                         <tr>
                             <td class="small text-muted">@grant.RequestedAt.ToString("MMM d HH:mm")</td>
-                            <td class="small">@grant.UserId</td>
+                            <td class="small">@JitAccessService.SubjectName(grant)</td>
                             <td class="small">
                                 @grant.App.Name<br />
                                 <code class="text-muted">@grant.Namespace</code>
@@ -159,7 +159,7 @@
                     @foreach (JitGrant grant in Active)
                     {
                         <tr>
-                            <td class="small">@grant.UserId</td>
+                            <td class="small">@JitAccessService.SubjectName(grant)</td>
                             <td class="small"><span class="badge text-bg-secondary">@grant.Level</span></td>
                             <td class="small"><code>@grant.Namespace</code></td>
                             <td class="small">@Remaining(grant.ExpiresAt)</td>
@@ -212,7 +212,7 @@
                         JitGrantStatus status = grant.StatusAt(DateTime.UtcNow);
                         <tr>
                             <td class="small text-muted">@grant.RequestedAt.ToString("MMM d HH:mm")</td>
-                            <td class="small">@grant.UserId</td>
+                            <td class="small">@JitAccessService.SubjectName(grant)</td>
                             <td><span class="badge @BadgeClass(status)">@status</span></td>
                             <td class="small">@(grant.ApprovedAt is null ? "—" : grant.Level.ToString())</td>
                             <td class="small"><code>@grant.Namespace</code></td>
@@ -241,7 +241,11 @@
     private readonly Dictionary<Guid, JitAccessLevel> levels = [];
     private readonly Dictionary<Guid, int> minutes = [];
 
+    // The signed-in operator, both ways round. Tenant membership — and so the approver check —
+    // is keyed to the account id; the display name is what gets written into the grant as
+    // "decided by" and compared against the requester's own display name.
     private string userId = "";
+    private string userDisplay = "";
     private bool canApprove;
     private bool loaded;
     private Guid? busy;
@@ -258,7 +262,8 @@
     private async Task LoadAsync()
     {
         AuthenticationState state = await AuthProvider.GetAuthenticationStateAsync();
-        userId = state.User.Identity?.Name ?? "";
+        userId = state.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "";
+        userDisplay = state.User.Identity?.Name ?? userId;
 
         canApprove = await Jit.IsApproverAsync(TenantId, userId);
         pending = await Jit.ListPendingAsync(TenantId);
@@ -267,7 +272,7 @@
     }
 
     private bool IsOwn(JitGrant grant) =>
-        string.Equals(grant.RequestedBy, userId, StringComparison.OrdinalIgnoreCase)
+        string.Equals(grant.RequestedBy, userDisplay, StringComparison.OrdinalIgnoreCase)
         || string.Equals(grant.UserId, userId, StringComparison.OrdinalIgnoreCase);
 
     private JitAccessLevel LevelOf(JitGrant grant) =>
@@ -282,11 +287,11 @@
         try
         {
             await Jit.ApproveAsync(
-                grant.Id, userId, LevelOf(grant), TimeSpan.FromMinutes(MinutesOf(grant)));
+                grant.Id, userId, userDisplay, LevelOf(grant), TimeSpan.FromMinutes(MinutesOf(grant)));
 
             // The credential itself is deliberately not shown here. It belongs to the person the
             // grant is for, and they collect it from their own portal.
-            Toasts.Success($"Access granted to {grant.UserId} for {Humanise(MinutesOf(grant))}.");
+            Toasts.Success($"Access granted to {JitAccessService.SubjectName(grant)} for {Humanise(MinutesOf(grant))}.");
             await LoadAsync();
         }
         catch (Exception ex)
@@ -304,7 +309,7 @@
         busy = grant.Id;
         try
         {
-            await Jit.DenyAsync(grant.Id, userId);
+            await Jit.DenyAsync(grant.Id, userDisplay);
             Toasts.Success("Request denied.");
             await LoadAsync();
         }
@@ -323,7 +328,7 @@
         busy = grant.Id;
         try
         {
-            await Jit.RevokeAsync(grant.Id, userId, "revoked by an operator");
+            await Jit.RevokeAsync(grant.Id, userDisplay, "revoked by an operator");
             Toasts.Success("Access revoked. The cluster credential has been removed.");
             await LoadAsync();
         }

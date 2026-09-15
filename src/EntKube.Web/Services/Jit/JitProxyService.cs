@@ -64,10 +64,10 @@ public class JitProxyService(
         {
             logger.LogWarning(
                 "JIT grant {GrantId} ({User}) refused {Method} {Path}: {Reason}",
-                grant.Id, grant.UserId, http.Request.Method, path, verdict.Reason);
+                grant.Id, JitAccessService.SubjectName(grant), http.Request.Method, path, verdict.Reason);
 
             await auditService.RecordAsync(null, "JitAccessRefused", "JitGrant", grant.Id.ToString(),
-                $"{http.Request.Method} /{path} — {verdict.Reason}", grant.UserId, ct);
+                $"{http.Request.Method} /{path} — {verdict.Reason}", JitAccessService.SubjectName(grant), ct);
 
             await WriteStatusAsync(http, HttpStatusCode.Forbidden, verdict.Reason!);
             return;
@@ -104,6 +104,7 @@ public class JitProxyService(
 
         JitGrant? grant = await db.JitGrants
             .Include(g => g.KubernetesCluster)
+            .Include(g => g.User)
             .FirstOrDefaultAsync(g => g.Id == grantId, ct);
 
         if (grant?.TokenHash is null) return (null, null, null);
@@ -242,7 +243,7 @@ public class JitProxyService(
     private async Task RecordUseAsync(JitGrant grant, string method, string? path, CancellationToken ct)
     {
         logger.LogInformation(
-            "JIT grant {GrantId} ({User}) {Method} /{Path}", grant.Id, grant.UserId, method, path);
+            "JIT grant {GrantId} ({User}) {Method} /{Path}", grant.Id, JitAccessService.SubjectName(grant), method, path);
 
         bool isDiscovery = JitPathPolicy.Check(path, grant.Namespace).Allowed
                            && !(path ?? "").Contains("/namespaces/", StringComparison.Ordinal);
@@ -250,7 +251,7 @@ public class JitProxyService(
         if (!isDiscovery)
         {
             await auditService.RecordAsync(null, "JitAccessUsed", "JitGrant", grant.Id.ToString(),
-                $"{method} /{path}", grant.UserId, ct);
+                $"{method} /{path}", JitAccessService.SubjectName(grant), ct);
         }
 
         DateTime now = DateTime.UtcNow;

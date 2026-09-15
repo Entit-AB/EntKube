@@ -31,9 +31,22 @@ public class JitAccessServiceTests : IDisposable
     private readonly Guid clusterId = Guid.NewGuid();
     private const string Namespace = "acme-billing";
 
-    private const string Requester = "customer@acme.example";
-    private const string Subject = "customer@acme.example";
-    private const string Approver = "operator@entit.se";
+    // Account ids and email addresses are deliberately different values here, because in
+    // production they are: an account's id is a GUID and its username is an email. A fixture that
+    // sets Id = email cannot tell a grant keyed correctly from one keyed to the wrong identifier —
+    // which is exactly how a request nobody could see, and a queue nobody could approve, passed a
+    // full suite.
+    private const string SubjectId = "0c3e6a24-2b17-4a1e-9f0e-9f7b31c2a1d4";
+    private const string SubjectEmail = "customer@acme.example";
+
+    private const string ApproverId = "f26b8d91-6f4c-4f9b-8c2d-6a1f0b5e7c33";
+    private const string ApproverEmail = "operator@entit.se";
+
+    private const string DeployerId = "9b41c7e2-5a68-43d1-90b7-2f8c4d6e1a05";
+    private const string DeployerEmail = "viewer@entit.se";
+
+    private const string OtherSubjectId = "3d7a52f8-8c19-4b62-a5d3-7e0b94c1f682";
+    private const string OtherSubjectEmail = "someone@acme.example";
 
     public JitAccessServiceTests()
     {
@@ -103,7 +116,7 @@ public class JitAccessServiceTests : IDisposable
         AddApp(Guid.NewGuid(), "Globex API", deployNamespace: Namespace);
         await db.SaveChangesAsync();
 
-        Func<Task> act = () => sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
+        Func<Task> act = () => sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*shared*");
     }
@@ -113,7 +126,7 @@ public class JitAccessServiceTests : IDisposable
     [Fact]
     public async Task A_request_starts_pending_with_no_clock_running()
     {
-        JitGrant grant = await sut.RequestAsync(appId, envId, Subject, "debugging a 500", Requester);
+        JitGrant grant = await sut.RequestAsync(appId, envId, SubjectId, "debugging a 500", SubjectEmail);
 
         grant.StatusAt(DateTime.UtcNow).Should().Be(JitGrantStatus.Pending);
         grant.ExpiresAt.Should().BeNull("nothing has been granted yet");
@@ -125,7 +138,7 @@ public class JitAccessServiceTests : IDisposable
     [Fact]
     public async Task A_request_without_a_reason_is_refused()
     {
-        Func<Task> act = () => sut.RequestAsync(appId, envId, Subject, "   ", Requester);
+        Func<Task> act = () => sut.RequestAsync(appId, envId, SubjectId, "   ", SubjectEmail);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*reason*");
     }
@@ -137,7 +150,7 @@ public class JitAccessServiceTests : IDisposable
         db.Apps.Add(new App { Id = emptyApp, CustomerId = customerId, Name = "Undeployed" });
         await db.SaveChangesAsync();
 
-        Func<Task> act = () => sut.RequestAsync(emptyApp, envId, Subject, "why not", Requester);
+        Func<Task> act = () => sut.RequestAsync(emptyApp, envId, SubjectId, "why not", SubjectEmail);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*no deployment*");
     }
@@ -154,11 +167,11 @@ public class JitAccessServiceTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        Func<Task> act = () => sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
+        Func<Task> act = () => sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*more than one cluster*");
 
         JitGrant grant = await sut.RequestAsync(
-            appId, envId, Subject, "debugging", Requester, clusterId: secondCluster);
+            appId, envId, SubjectId, "debugging", SubjectEmail, clusterId: secondCluster);
         grant.KubernetesClusterId.Should().Be(secondCluster);
     }
 
@@ -171,9 +184,44 @@ public class JitAccessServiceTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        JitGrant grant = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
+        JitGrant grant = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
         grant.Namespace.Should().Be("locked-ns");
+    }
+
+    // ── Identity ──────────────────────────────────────────────────────────────
+    //
+    // A grant names a person twice: once as an account id, which is a key, and once as a display
+    // name, which is not. Shipping those the wrong way round is silent — the request simply never
+    // arrives and the queue simply has no approvers — so each direction is pinned here.
+
+    [Fact]
+    public async Task An_email_address_is_refused_as_the_subject_of_a_grant()
+    {
+        // The subject is a foreign key to an account. An email reaches the database as a key that
+        // matches nothing, which used to surface as an unreadable constraint violation after the
+        // request had apparently been accepted.
+        Func<Task> act = () => sut.RequestAsync(appId, envId, SubjectEmail, "debugging", SubjectEmail);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*could not be identified*");
+    }
+
+    [Fact]
+    public async Task A_request_reaches_both_the_requester_and_the_tenant_queue()
+    {
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
+
+        (await sut.ListForUserAsync(SubjectId)).Should().ContainSingle(g => g.Id == requested.Id);
+        (await sut.ListPendingAsync(tenantId)).Should().ContainSingle(g => g.Id == requested.Id);
+    }
+
+    [Fact]
+    public async Task The_approver_permission_is_held_by_an_account_not_by_an_email()
+    {
+        (await sut.IsApproverAsync(tenantId, ApproverId)).Should().BeTrue();
+
+        (await sut.IsApproverAsync(tenantId, ApproverEmail)).Should()
+            .BeFalse("membership is keyed to an account id, so an email is a lookup that never matches");
     }
 
     // ── Approval ──────────────────────────────────────────────────────────────
@@ -181,9 +229,9 @@ public class JitAccessServiceTests : IDisposable
     [Fact]
     public async Task Approval_mints_a_credential_and_starts_the_clock()
     {
-        JitGrant requested = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
-        JitApproval approval = await sut.ApproveAsync(requested.Id, Approver, JitAccessLevel.Observe);
+        JitApproval approval = await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
         approval.Plaintext.Should().NotBeNullOrEmpty();
         approval.Grant.StatusAt(DateTime.UtcNow).Should().Be(JitGrantStatus.Active);
@@ -195,8 +243,8 @@ public class JitAccessServiceTests : IDisposable
     [Fact]
     public async Task The_plaintext_token_is_never_stored()
     {
-        JitGrant requested = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
-        JitApproval approval = await sut.ApproveAsync(requested.Id, Approver, JitAccessLevel.Observe);
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
+        JitApproval approval = await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
         JitGrant stored = (await sut.GetAsync(requested.Id))!;
 
@@ -208,9 +256,10 @@ public class JitAccessServiceTests : IDisposable
     [Fact]
     public async Task The_requester_cannot_approve_their_own_request()
     {
-        JitGrant requested = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
-        Func<Task> act = () => sut.ApproveAsync(requested.Id, Requester, JitAccessLevel.Observe);
+        Func<Task> act = () =>
+            sut.ApproveAsync(requested.Id, SubjectId, SubjectEmail, JitAccessLevel.Observe);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*person who made it*");
         provisioner.Minted.Should().BeEmpty();
@@ -222,10 +271,10 @@ public class JitAccessServiceTests : IDisposable
         // Approving your own request and approving one somebody filed for you are the same thing
         // from the cluster's side.
         JitGrant requested = await sut.RequestAsync(
-            appId, envId, userId: "someone@acme.example", "debugging", requestedBy: Approver);
+            appId, envId, subjectUserId: OtherSubjectId, "debugging", requestedBy: ApproverEmail);
 
         Func<Task> act = () =>
-            sut.ApproveAsync(requested.Id, "someone@acme.example", JitAccessLevel.Observe);
+            sut.ApproveAsync(requested.Id, OtherSubjectId, OtherSubjectEmail, JitAccessLevel.Observe);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*grants access to*");
     }
@@ -236,9 +285,10 @@ public class JitAccessServiceTests : IDisposable
         // The reuse that was tempting and wrong. This user holds Manage on Deployments and can
         // change what runs in the namespace; that is not the same authority as letting somebody
         // outside the organisation into it.
-        JitGrant requested = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
-        Func<Task> act = () => sut.ApproveAsync(requested.Id, "viewer@entit.se", JitAccessLevel.Observe);
+        Func<Task> act = () =>
+            sut.ApproveAsync(requested.Id, DeployerId, DeployerEmail, JitAccessLevel.Observe);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*permission*");
         provisioner.Minted.Should().BeEmpty();
@@ -249,12 +299,12 @@ public class JitAccessServiceTests : IDisposable
     {
         // Governance can re-point an app in the gap. Approval is where the namespace is frozen,
         // so it is where the check has to run again.
-        JitGrant requested = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
         AddApp(Guid.NewGuid(), "Globex API", deployNamespace: Namespace);
         await db.SaveChangesAsync();
 
-        Func<Task> act = () => sut.ApproveAsync(requested.Id, Approver, JitAccessLevel.Observe);
+        Func<Task> act = () => sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*shared*");
     }
@@ -262,10 +312,10 @@ public class JitAccessServiceTests : IDisposable
     [Fact]
     public async Task An_already_decided_request_cannot_be_approved_again()
     {
-        JitGrant requested = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
-        await sut.ApproveAsync(requested.Id, Approver, JitAccessLevel.Observe);
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
+        await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
-        Func<Task> act = () => sut.ApproveAsync(requested.Id, Approver, JitAccessLevel.Operate);
+        Func<Task> act = () => sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Operate);
 
         await act.Should().ThrowAsync<InvalidOperationException>();
         provisioner.Minted.Should().ContainSingle("a second approval must not mint a second credential");
@@ -287,10 +337,10 @@ public class JitAccessServiceTests : IDisposable
     public async Task A_grant_longer_than_the_ceiling_is_shortened_not_refused()
     {
         // Refusing would only push people to approve twice in a row for the same effect.
-        JitGrant requested = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
         JitApproval approval = await sut.ApproveAsync(
-            requested.Id, Approver, JitAccessLevel.Observe, TimeSpan.FromDays(7));
+            requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe, TimeSpan.FromDays(7));
 
         approval.Grant.ExpiresAt.Should().BeCloseTo(
             DateTime.UtcNow.Add(JitAccessService.MaximumDuration), TimeSpan.FromMinutes(1));
@@ -349,13 +399,13 @@ public class JitAccessServiceTests : IDisposable
     [Fact]
     public async Task Denying_keeps_the_row()
     {
-        JitGrant requested = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
-        await sut.DenyAsync(requested.Id, Approver, "not needed");
+        await sut.DenyAsync(requested.Id, ApproverEmail, "not needed");
 
         JitGrant stored = (await sut.GetAsync(requested.Id))!;
         stored.StatusAt(DateTime.UtcNow).Should().Be(JitGrantStatus.Denied);
-        stored.DeniedBy.Should().Be(Approver);
+        stored.DeniedBy.Should().Be(ApproverEmail);
     }
 
     [Fact]
@@ -363,10 +413,10 @@ public class JitAccessServiceTests : IDisposable
     {
         // A bound token cannot be invalidated early, so deleting the RoleBinding is what actually
         // stops it working. Marking the row only stops the proxy.
-        JitGrant requested = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
-        await sut.ApproveAsync(requested.Id, Approver, JitAccessLevel.Observe);
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
+        await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
-        await sut.RevokeAsync(requested.Id, Approver, "finished");
+        await sut.RevokeAsync(requested.Id, ApproverEmail, "finished");
 
         provisioner.TornDown.Should().ContainSingle();
         JitGrant stored = (await sut.GetAsync(requested.Id))!;
@@ -377,11 +427,11 @@ public class JitAccessServiceTests : IDisposable
     [Fact]
     public async Task Revoking_twice_tears_down_once()
     {
-        JitGrant requested = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
-        await sut.ApproveAsync(requested.Id, Approver, JitAccessLevel.Observe);
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
+        await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
-        await sut.RevokeAsync(requested.Id, Approver);
-        await sut.RevokeAsync(requested.Id, Approver);
+        await sut.RevokeAsync(requested.Id, ApproverEmail);
+        await sut.RevokeAsync(requested.Id, ApproverEmail);
 
         provisioner.TornDown.Should().ContainSingle();
     }
@@ -389,9 +439,9 @@ public class JitAccessServiceTests : IDisposable
     [Fact]
     public async Task Revoking_a_request_that_was_never_approved_touches_no_cluster()
     {
-        JitGrant requested = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
-        await sut.RevokeAsync(requested.Id, Approver, "withdrawn");
+        await sut.RevokeAsync(requested.Id, ApproverEmail, "withdrawn");
 
         provisioner.TornDown.Should().BeEmpty("nothing was ever created in the cluster");
     }
@@ -399,12 +449,12 @@ public class JitAccessServiceTests : IDisposable
     [Fact]
     public async Task Finished_grants_stay_in_the_history()
     {
-        JitGrant requested = await sut.RequestAsync(appId, envId, Subject, "debugging", Requester);
-        await sut.ApproveAsync(requested.Id, Approver, JitAccessLevel.Observe);
-        await sut.RevokeAsync(requested.Id, Approver, "done");
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
+        await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
+        await sut.RevokeAsync(requested.Id, ApproverEmail, "done");
 
         (await sut.ListForTenantAsync(tenantId)).Should().ContainSingle();
-        (await sut.ListForUserAsync(Subject)).Should().ContainSingle();
+        (await sut.ListForUserAsync(SubjectId)).Should().ContainSingle();
         (await sut.ListPendingAsync(tenantId)).Should().BeEmpty();
     }
 
@@ -412,9 +462,9 @@ public class JitAccessServiceTests : IDisposable
     public async Task The_pending_queue_is_oldest_first()
     {
         // It is a queue somebody works through, not a feed.
-        JitGrant first = await sut.RequestAsync(appId, envId, Subject, "first", Requester);
+        JitGrant first = await sut.RequestAsync(appId, envId, SubjectId, "first", SubjectEmail);
         await Task.Delay(10);
-        JitGrant second = await sut.RequestAsync(appId, envId, Subject, "second", Requester);
+        JitGrant second = await sut.RequestAsync(appId, envId, SubjectId, "second", SubjectEmail);
 
         List<JitGrant> pending = await sut.ListPendingAsync(tenantId);
 
@@ -427,8 +477,11 @@ public class JitAccessServiceTests : IDisposable
     {
         Id = Guid.NewGuid(), TenantId = tenantId, CustomerId = customerId, AppId = appId,
         EnvironmentId = envId, KubernetesClusterId = clusterId, Namespace = Namespace,
-        UserId = Subject, Reason = "debugging", RequestedBy = Requester,
+        UserId = SubjectId, Reason = "debugging", RequestedBy = SubjectEmail,
     };
+
+    private void AddUser(string id, string email) =>
+        db.Users.Add(new ApplicationUser { Id = id, UserName = email, Email = email });
 
     private void Seed()
     {
@@ -442,16 +495,10 @@ public class JitAccessServiceTests : IDisposable
         AddCluster("primary", clusterId);
         AddApp(appId, "Billing API", deployNamespace: Namespace);
 
-        db.Users.Add(new ApplicationUser { Id = Subject, UserName = Subject, Email = Subject });
-        db.Users.Add(new ApplicationUser { Id = Approver, UserName = Approver, Email = Approver });
-        db.Users.Add(new ApplicationUser
-        {
-            Id = "viewer@entit.se", UserName = "viewer@entit.se", Email = "viewer@entit.se"
-        });
-        db.Users.Add(new ApplicationUser
-        {
-            Id = "someone@acme.example", UserName = "someone@acme.example", Email = "someone@acme.example"
-        });
+        AddUser(SubjectId, SubjectEmail);
+        AddUser(ApproverId, ApproverEmail);
+        AddUser(DeployerId, DeployerEmail);
+        AddUser(OtherSubjectId, OtherSubjectEmail);
 
         // The approver holds Manage on JIT access. The "viewer" here is not a nobody — they hold
         // Manage on Deployments, which is the permission this check used to reuse. That is the
@@ -480,11 +527,11 @@ public class JitAccessServiceTests : IDisposable
         });
         db.TenantMemberships.Add(new TenantMembership
         {
-            UserId = Approver, TenantId = tenantId, RoleId = managerRole
+            UserId = ApproverId, TenantId = tenantId, RoleId = managerRole
         });
         db.TenantMemberships.Add(new TenantMembership
         {
-            UserId = "viewer@entit.se", TenantId = tenantId, RoleId = viewerRole
+            UserId = DeployerId, TenantId = tenantId, RoleId = viewerRole
         });
 
         db.SaveChanges();

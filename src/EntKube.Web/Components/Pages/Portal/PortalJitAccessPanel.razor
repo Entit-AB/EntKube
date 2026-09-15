@@ -186,7 +186,13 @@
     private Guid selectedClusterId;
     private bool submitting;
     private string? loadError;
+
+    // Two identifiers for one person. A grant is keyed to the account id — it is a foreign key,
+    // and it is what the approver's self-approval check and the proxy are matched against — while
+    // the email is only ever the name a human reads. They are not interchangeable: the account id
+    // is a GUID and the email is not a key of anything.
     private string userId = "";
+    private string userDisplay = "";
 
     protected override async Task OnParametersSetAsync() => await LoadAsync();
 
@@ -196,7 +202,8 @@
         try
         {
             AuthenticationState state = await AuthProvider.GetAuthenticationStateAsync();
-            userId = state.User.Identity?.Name ?? "";
+            userId = state.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "";
+            userDisplay = state.User.Identity?.Name ?? userId;
 
             targets = await Jit.ResolveTargetsAsync(App.Id, EnvironmentId);
             if (targets.Count > 0 && selectedClusterId == Guid.Empty)
@@ -226,7 +233,7 @@
         try
         {
             await Jit.RequestAsync(
-                App.Id, EnvironmentId, userId, reason, userId,
+                App.Id, EnvironmentId, userId, reason, userDisplay,
                 clusterId: targets.Count > 1 ? selectedClusterId : null,
                 ticketRef: ticketRef);
 
@@ -248,7 +255,7 @@
     {
         try
         {
-            await Jit.RevokeAsync(grant.Id, userId, "handed back by the requester");
+            await Jit.RevokeAsync(grant.Id, userDisplay, "handed back by the requester");
             Toasts.Success("Access handed back.");
             await LoadAsync();
         }

@@ -44,7 +44,7 @@ public class KubernetesJitProvisioner(
             Kubeconfig = cluster.Kubeconfig!,
             ClusterLabel = cluster.Name,
             Namespace = grant.Namespace,
-            Summary = $"Grant {grant.Level} JIT access to {grant.UserId} in {grant.Namespace} "
+            Summary = $"Grant {grant.Level} JIT access to {JitAccessService.SubjectName(grant)} in {grant.Namespace} "
                       + $"until {grant.ExpiresAt:u}",
             Manifest = manifest,
         }, ct);

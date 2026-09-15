@@ -138,11 +138,18 @@ public class JitAccessService(
     /// <summary>
     /// Records a request for access. Nothing is granted here and no cluster is touched — the row
     /// exists so an approver has something to act on.
+    ///
+    /// The two people involved are identified differently on purpose.
+    /// <paramref name="subjectUserId"/> is an account id, because it is a foreign key and the
+    /// thing every later authorisation decision is made against; <paramref name="requestedBy"/>
+    /// is a display name, because it is only ever read by a human working the queue. Passing an
+    /// email as the subject is the one mistake this signature invites, so it is refused below
+    /// rather than left to surface as a foreign-key violation.
     /// </summary>
     public async Task<JitGrant> RequestAsync(
         Guid appId,
         Guid environmentId,
-        string userId,
+        string subjectUserId,
         string reason,
         string requestedBy,
         Guid? clusterId = null,
@@ -187,6 +194,16 @@ public class JitAccessService(
             .FirstOrDefaultAsync(ct)
             ?? throw new InvalidOperationException("App not found.");
 
+        var subject = await db.Users
+            .Where(u => u.Id == subjectUserId)
+            .Select(u => new { u.Email, u.UserName })
+            .FirstOrDefaultAsync(ct)
+            ?? throw new InvalidOperationException(
+                "The person this access is for could not be identified. A grant is keyed to an "
+                + "account, not to an email address.");
+
+        string subjectName = subject.Email ?? subject.UserName ?? subjectUserId;
+
         JitGrant grant = new()
         {
             Id = Guid.NewGuid(),
@@ -196,7 +213,7 @@ public class JitAccessService(
             EnvironmentId = environmentId,
             KubernetesClusterId = target.ClusterId,
             Namespace = target.Namespace,
-            UserId = userId,
+            UserId = subjectUserId,
             Reason = reason.Trim(),
             TicketRef = string.IsNullOrWhiteSpace(ticketRef) ? null : ticketRef.Trim(),
             RequestedBy = requestedBy,
@@ -207,12 +224,12 @@ public class JitAccessService(
         await db.SaveChangesAsync(ct);
 
         await auditService.RecordAsync(null, "JitAccessRequested", "JitGrant", grant.Id.ToString(),
-            $"{target.Namespace} on {target.ClusterName} for {userId}: {grant.Reason}",
+            $"{target.Namespace} on {target.ClusterName} for {subjectName}: {grant.Reason}",
             requestedBy, ct);
 
         logger.LogInformation(
             "JIT access requested for {User} on {Namespace} (grant {GrantId}) by {RequestedBy}",
-            userId, target.Namespace, grant.Id, requestedBy);
+            subjectName, target.Namespace, grant.Id, requestedBy);
 
         return grant;
     }
@@ -226,10 +243,16 @@ public class JitAccessService(
     /// The exclusivity check runs again here rather than trusting the one from request time:
     /// governance can re-point an app between the two, and this is the moment the grant's
     /// namespace is frozen.
+    ///
+    /// The approver arrives as both an account id and a display name for the same reason the
+    /// requester does: <paramref name="approverUserId"/> is what the permission check and the
+    /// subject comparison are made against, <paramref name="approverDisplay"/> is what a person
+    /// reads in the history and what <see cref="JitGrant.RequestedBy"/> is compared to.
     /// </summary>
     public async Task<JitApproval> ApproveAsync(
         Guid grantId,
-        string approvedBy,
+        string approverUserId,
+        string approverDisplay,
         JitAccessLevel level,
         TimeSpan? duration = null,
         CancellationToken ct = default)
@@ -238,6 +261,7 @@ public class JitAccessService(
 
         JitGrant grant = await db.JitGrants
             .Include(g => g.KubernetesCluster)
+            .Include(g => g.User)
             .FirstOrDefaultAsync(g => g.Id == grantId, ct)
             ?? throw new InvalidOperationException("Grant not found.");
 
@@ -248,14 +272,16 @@ public class JitAccessService(
 
         // Self-approval defeats the point of an approval step. Checked on both the requester and
         // the subject: approving your own request and approving a request someone filed on your
-        // behalf are the same thing from the cluster's side.
-        if (string.Equals(grant.RequestedBy, approvedBy, StringComparison.OrdinalIgnoreCase))
+        // behalf are the same thing from the cluster's side. Each is compared against the
+        // identifier it was stored as — an id against an id, a display name against a display
+        // name — because comparing across the two silently never matches.
+        if (string.Equals(grant.RequestedBy, approverDisplay, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("A request cannot be approved by the person who made it.");
 
-        if (string.Equals(grant.UserId, approvedBy, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(grant.UserId, approverUserId, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("A request cannot be approved by the person it grants access to.");
 
-        if (!await IsApproverAsync(db, grant.TenantId, approvedBy, ct))
+        if (!await IsApproverAsync(db, grant.TenantId, approverUserId, ct))
             throw new InvalidOperationException(
                 "Approving JIT access needs the 'JIT cluster access' permission at Manage in this tenant.");
 
@@ -268,7 +294,7 @@ public class JitAccessService(
 
         grant.Level = level;
         grant.ApprovedAt = now;
-        grant.ApprovedBy = approvedBy;
+        grant.ApprovedBy = approverDisplay;
         grant.ExpiresAt = now.Add(window);
 
         MintedCredential credential = await provisioner.MintAsync(grant, window, ct);
@@ -281,15 +307,24 @@ public class JitAccessService(
         await db.SaveChangesAsync(ct);
 
         await auditService.RecordAsync(null, "JitAccessApproved", "JitGrant", grant.Id.ToString(),
-            $"{level} on {grant.Namespace} until {grant.ExpiresAt:u} for {grant.UserId}",
-            approvedBy, ct);
+            $"{level} on {grant.Namespace} until {grant.ExpiresAt:u} for {SubjectName(grant)}",
+            approverDisplay, ct);
 
         logger.LogInformation(
             "JIT grant {GrantId} approved by {Approver} at {Level} until {ExpiresAt}",
-            grant.Id, approvedBy, level, grant.ExpiresAt);
+            grant.Id, approverDisplay, level, grant.ExpiresAt);
 
         return new JitApproval(grant, credential.Plaintext, credential.Kubeconfig);
     }
+
+    /// <summary>
+    /// Who a grant is for, written the way a person reads it. <see cref="JitGrant.UserId"/> is an
+    /// account id: right as a key, meaningless in an audit row or a confirmation dialog. Falls
+    /// back to the id when the account was not loaded, so a caller that forgot the include gets a
+    /// less useful string rather than a null reference.
+    /// </summary>
+    public static string SubjectName(JitGrant grant) =>
+        grant.User?.Email ?? grant.User?.UserName ?? grant.UserId;
 
     /// <summary>
     /// Clamps a requested lifetime into the allowed window. A caller asking for longer than
@@ -305,7 +340,8 @@ public class JitAccessService(
 
     /// <summary>
     /// Whether a user may approve grants in a tenant. Membership alone is not enough — a viewer
-    /// is a member.
+    /// is a member. <paramref name="userId"/> is an account id: tenant membership is keyed to
+    /// one, so an email here is not a permission failure but a lookup that never matches.
     /// </summary>
     public async Task<bool> IsApproverAsync(Guid tenantId, string userId, CancellationToken ct = default)
     {
@@ -403,6 +439,7 @@ public class JitAccessService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.JitGrants
+            .Include(g => g.User)
             .Include(g => g.App)
             .Include(g => g.KubernetesCluster)
             .Include(g => g.Environment)
@@ -417,6 +454,7 @@ public class JitAccessService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.JitGrants
+            .Include(g => g.User)
             .Include(g => g.App)
             .Include(g => g.KubernetesCluster)
             .Include(g => g.Environment)
