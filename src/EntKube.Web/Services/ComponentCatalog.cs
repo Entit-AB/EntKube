@@ -125,7 +125,36 @@ public class CatalogEntry
     /// An "Advanced" accordion always remains available for full YAML editing.
     /// </summary>
     public IReadOnlyList<ComponentFormField> FormFields { get; init; } = [];
+
+    /// <summary>
+    /// How one hostname is split across several of this chart's Services, for charts that expect a
+    /// path-aware proxy in front of them. When set, an external route to this component renders one
+    /// HTTPRoute rule per entry instead of sending the whole hostname to a single backend.
+    ///
+    /// <para>Harbor is the reason this exists. Its chart only omits the bundled nginx proxy when it is
+    /// told something else is doing the path split — so EntKube has to do it, sending the registry and
+    /// API paths to the core Service and everything else to the portal. Leaving it null keeps the
+    /// single-backend behaviour every other component uses.</para>
+    /// </summary>
+    public IReadOnlyList<RouteBackend> RouteBackends { get; init; } = [];
 }
+
+/// <summary>
+/// One rule of a component's path split: the paths it claims, the Service they go to, and its port.
+/// </summary>
+/// <param name="PathPrefixes">
+/// Path prefixes this backend serves. The catch-all entry is simply "/" — Gateway API matches the
+/// longest prefix first, so the order rules appear in does not decide which one wins.
+/// </param>
+/// <param name="ServiceNameTemplate">
+/// The Service name, with <c>{fullname}</c> standing in for the chart's own fullname (the release
+/// name, or "{release}-{chart}" when the release name does not already contain the chart name).
+/// Never a literal: a release named something other than the chart names every Service differently,
+/// and a literal would route to a Service that does not exist on exactly those clusters.
+/// </param>
+/// <param name="Port">The Service port to send this traffic to.</param>
+public sealed record RouteBackend(
+    IReadOnlyList<string> PathPrefixes, string ServiceNameTemplate, int Port);
 
 /// <summary>
 /// A section of the tenant's Services tree, as the Components tab links to it.
@@ -3546,6 +3575,16 @@ public static class ComponentCatalog
             // Very heavy: core, registry, jobservice, portal, trivy, database, redis.
             InstallTimeout = "30m0s",
             Dependencies = ["cert-manager", "letsencrypt-issuer", "cloudnative-pg"],
+            // Harbor is two Services behind one hostname, not one: the core API (which also serves
+            // the registry's own /v2/ endpoints and the token service) and the portal that serves
+            // the UI. The chart's nginx exists to split them, and EntKube does not install it —
+            // these are the rules its HTTPRoute carries instead. Mirrors the chart's own
+            // templates/gateway-apis/route.yaml, which is the definition of correct here.
+            RouteBackends =
+            [
+                new RouteBackend(["/api/", "/service/", "/v2/", "/c/"], "{fullname}-core", 80),
+                new RouteBackend(["/"], "{fullname}-portal", 80)
+            ],
             FormFields =
             [
                 new ComponentFormField
@@ -3661,13 +3700,27 @@ public static class ComponentCatalog
                 }
             ],
             DefaultValues = """
+                # The chart's bundled nginx proxy — the one that splits /api/, /v2/ and /c/ off from
+                # the portal — is skipped only for expose.type "ingress" and "route". EntKube publishes
+                # Harbor through the cluster's existing gateway and does that split itself, in the
+                # HTTPRoute it owns (see the RouteBackends above), so nginx would be a second proxy
+                # sitting in front of the first one for no gain.
+                #
+                # "ingress" rather than "route": "route" makes the chart write its own HTTPRoute for
+                # this same hostname, and two descriptions of one hostname is exactly the fight this
+                # codebase refuses everywhere else — whichever applied last wins. The Ingress left
+                # behind instead is pinned to an IngressClass no controller serves, so it carries no
+                # traffic. Its host, and externalURL, are written by EntKube from the configured
+                # hostname; the values here are only placeholders for a component with none yet.
                 expose:
-                  type: clusterIP
+                  type: ingress
                   tls:
                     enabled: false
+                  ingress:
+                    className: entkube-unused
+                    hosts:
+                      core: registry.example.com
 
-                # externalURL and expose.clusterIP.name are written by EntKube when a hostname
-                # is configured, so they always match the release name used for the route backend.
                 externalURL: https://registry.example.com
 
                 # Use internal Postgres by default; overridden to 'external' by HarborService

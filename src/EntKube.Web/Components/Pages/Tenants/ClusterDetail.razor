@@ -3826,25 +3826,13 @@ else if (section == "components")
             redisEndpoint,
             redisPassword);
 
-        // Inject externalURL and keep expose.clusterIP.name aligned with the release name so the
-        // Gateway API route always targets the correct service (HarborService sets expose.clusterIP.name
-        // to releaseName; EnsureHarborRouteAsync routes to releaseName as the backend service).
+        // externalURL and the expose mode come from ConfigureAsync, which writes them against a
+        // fresh read of the component. Merging them into the page's copy instead — loaded before
+        // ConfigureAsync ran — wrote back values from before it, undoing the database, storage and
+        // Redis settings it had just stored. That is what left a Harbor whose Redis field had been
+        // cleared still installing against the external Redis it no longer pointed at.
         if (!string.IsNullOrEmpty(registryUrl))
         {
-            ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == componentId);
-            if (comp is not null)
-            {
-                string harborReleaseName = comp.ReleaseName ?? comp.Name;
-                comp.HelmValues = YamlFormMerger.MergeFormValues(
-                    comp.HelmValues ?? "",
-                    new Dictionary<string, string>
-                    {
-                        ["externalURL"] = registryUrl,
-                        ["expose.clusterIP.name"] = harborReleaseName
-                    });
-                await LifecycleService.UpdateConfigurationAsync(componentId, comp.HelmValues);
-            }
-
             await EnsureHarborRouteAsync(componentId, fieldValues, hostname);
         }
     }
@@ -3864,11 +3852,13 @@ else if (section == "components")
         string tlsKey = fieldValues.TryGetValue("tls-key", out string? k) ? k : "";
         bool isManual = string.Equals(tlsMode, "Manual", StringComparison.Ordinal);
 
-        // Harbor's expose ClusterIP service is named by expose.clusterIP.name.
-        // HarborService sets this to the release name so they always align.
+        // Harbor is two Services behind one hostname — the HTTPRoute names both, from the catalog's
+        // path split. The route record carries the core Service: the one an operator reading the
+        // route list wants to see, and the one a per-Service DestinationRule is built for.
         ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == componentId);
         string releaseName = comp?.ReleaseName ?? comp?.Name ?? "harbor";
-        string serviceName = releaseName;
+        string serviceName = ExternalRouteService.PrimaryBackendService(
+            comp?.Name ?? "harbor", comp?.HelmChartName ?? "harbor", releaseName) ?? releaseName;
 
         ExternalRouteRequest routeRequest = new()
         {

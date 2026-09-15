@@ -76,6 +76,49 @@ public class HarborSharedRedisTests
         managed.ClusterMode.Should().BeTrue();
     }
 
+    /// <summary>
+    /// The refusal an operator reads instead of waiting out a Helm deadline. It has to name the address —
+    /// the whole difficulty of this failure is that the address appears nowhere in what Helm reports.
+    /// </summary>
+    [Fact]
+    public void A_redis_that_is_not_on_the_cluster_is_refused_by_name()
+    {
+        string message = HarborService.RedisEndpointMissing(
+            "cache-leader.cache.svc.cluster.local", fromValues: false);
+
+        message.Should().Contain("cache-leader.cache.svc.cluster.local");
+        message.Should().Contain("Clear the Redis field");
+    }
+
+    /// <summary>
+    /// A component with no config record has no field to clear — its address lives in the values, and
+    /// telling the operator to clear a field they cannot see would send them looking for one.
+    /// </summary>
+    [Fact]
+    public void An_address_that_came_from_the_values_is_described_as_a_values_change()
+    {
+        string message = HarborService.RedisEndpointMissing("redis.redis.svc.cluster.local", fromValues: true);
+
+        message.Should().Contain("redis.external.addr");
+        message.Should().NotContain("Clear the Redis field");
+    }
+
+    /// <summary>
+    /// The existence check only judges cluster-local names. Everything else — a managed cloud Redis, a
+    /// bare IP, a sentinel list — is somebody else's network, and refusing an install over it would be a
+    /// guess dressed as a fact.
+    /// </summary>
+    [Theory]
+    [InlineData("{\"items\":[{\"metadata\":{\"name\":\"redis\",\"namespace\":\"cache\"}}]}", "redis.cache.svc.cluster.local", true)]
+    [InlineData("{\"items\":[{\"metadata\":{\"name\":\"redis\",\"namespace\":\"cache\"}}]}", "redis.other.svc.cluster.local", false)]
+    [InlineData("{\"items\":[]}", "redis.cache.svc.cluster.local", false)]
+    public void A_service_is_found_by_its_cluster_local_name(string json, string host, bool expected)
+    {
+        RedisService.ServiceDnsNames(json)
+            .Any(n => string.Equals(n, host, StringComparison.OrdinalIgnoreCase))
+            .Should().Be(expected);
+    }
+
     /// <summary>A Service merely found on the cluster tells us nothing about its mode, so we claim nothing.</summary>
     [Fact]
     public void A_discovered_service_is_not_assumed_to_be_a_cluster()

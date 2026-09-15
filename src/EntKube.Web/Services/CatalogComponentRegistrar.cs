@@ -306,21 +306,17 @@ public class CatalogComponentRegistrar(
 
         if (!string.IsNullOrEmpty(registryUrl))
         {
+            // externalURL and the expose mode are written by ConfigureAsync above, against a fresh
+            // read of the component — merging them into a copy loaded here would undo the database,
+            // storage and Redis values it just wrote.
             ClusterComponent? comp = await GetComponentAsync(componentId);
-            if (comp is not null)
-            {
-                string harborReleaseName = comp.ReleaseName ?? comp.Name;
-                string updated = YamlFormMerger.MergeFormValues(
-                    comp.HelmValues ?? "",
-                    new Dictionary<string, string>
-                    {
-                        ["externalURL"] = registryUrl,
-                        ["expose.clusterIP.name"] = harborReleaseName
-                    });
-                await lifecycleService.UpdateConfigurationAsync(componentId, updated);
-            }
+            string harborRelease = comp?.ReleaseName ?? comp?.Name ?? "harbor";
 
-            await EnsureRouteAsync(componentId, fieldValues, hostname, "harbor", isKeycloak: false);
+            // Harbor is two Services behind one hostname; the route record carries the primary one.
+            await EnsureRouteAsync(
+                componentId, fieldValues, hostname, "harbor", isKeycloak: false,
+                serviceName: ExternalRouteService.PrimaryBackendService(
+                    comp?.Name ?? "harbor", comp?.HelmChartName ?? "harbor", harborRelease));
         }
     }
 

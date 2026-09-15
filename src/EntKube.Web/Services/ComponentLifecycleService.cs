@@ -1898,10 +1898,19 @@ public class ComponentLifecycleService(
                 // Service, so two routes onto the same Service would otherwise produce two
                 // documents with the same name and the second would silently overwrite the
                 // first — including its session affinity.
+                //
+                // A route that splits its hostname across several Services (Harbor: core and portal)
+                // contributes each of them — a DestinationRule naming only the route's own backend
+                // would leave the other half of the hostname without one, which is how a
+                // TLS-serving backend ends up with the gateway connecting to it in plaintext.
                 IEnumerable<IGrouping<(string Namespace, string Service), ExternalRoute>> byService = allRoutes
-                    .Where(r => r.TlsMode != TlsMode.Passthrough && !string.IsNullOrWhiteSpace(r.ServiceName))
+                    .Where(r => r.TlsMode != TlsMode.Passthrough)
                     .OrderBy(r => r.Hostname, StringComparer.Ordinal)
-                    .GroupBy(r => (Namespace: r.Component?.Namespace ?? "default", Service: r.ServiceName!));
+                    .SelectMany(r => ExternalRouteService.BackendServiceNames(r)
+                        .Select(svc => (
+                            Key: (Namespace: r.Component?.Namespace ?? "default", Service: svc),
+                            Route: r)))
+                    .GroupBy(x => x.Key, x => x.Route);
 
                 foreach (IGrouping<(string Namespace, string Service), ExternalRoute> group in byService)
                 {
@@ -3022,16 +3031,31 @@ public class ComponentLifecycleService(
     /// </summary>
     private static void FixRouteServiceName(ExternalRoute route, ClusterComponent comp)
     {
-        if (comp.HelmChartName != "keycloakx")
-            return;
-
         string releaseName = comp.ReleaseName ?? comp.Name;
-        // keycloakx chart creates two services: {rel}-keycloakx-headless (headless/StatefulSet)
-        // and {rel}-keycloakx-http (ClusterIP with ports 80/8443/9000). Route to the latter.
-        string expected = $"{releaseName}-keycloakx-http";
 
-        if (!string.Equals(route.ServiceName, expected, StringComparison.OrdinalIgnoreCase))
-            route.ServiceName = expected;
+        if (comp.HelmChartName == "keycloakx")
+        {
+            // keycloakx chart creates two services: {rel}-keycloakx-headless (headless/StatefulSet)
+            // and {rel}-keycloakx-http (ClusterIP with ports 80/8443/9000). Route to the latter.
+            string expected = $"{releaseName}-keycloakx-http";
+
+            if (!string.Equals(route.ServiceName, expected, StringComparison.OrdinalIgnoreCase))
+                route.ServiceName = expected;
+
+            return;
+        }
+
+        // A component whose hostname is split across several Services (Harbor) used to have its route
+        // pointed at the chart's bundled proxy, named after the release. EntKube no longer installs
+        // that proxy — it does the split itself — so the stored name is a Service that is about to
+        // stop existing. The rules come from the catalog either way; this keeps what the UI shows,
+        // and what a DestinationRule is built for, pointing at something real.
+        if (ExternalRouteService.PrimaryBackendService(comp.Name, comp.HelmChartName, releaseName)
+            is string primary
+            && !string.Equals(route.ServiceName, primary, StringComparison.OrdinalIgnoreCase))
+        {
+            route.ServiceName = primary;
+        }
     }
 }
 

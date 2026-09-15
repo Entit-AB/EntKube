@@ -287,7 +287,90 @@ public class HarborService(
 
         await WriteRedisHelmValuesAsync(tenantId, clusterComponentId, config.RedisEndpoint, redisPassword, ct);
 
+        // Last, and from here rather than from the page that collected the form: every Write* above
+        // re-reads the component and saves it, so a caller holding a ClusterComponent it loaded
+        // before this call is holding values that are now several writes out of date. Merging into
+        // that copy and saving it put the database back the way it was before Harbor was configured
+        // — which is how a Harbor with no Redis selected ended up still pointed at an external one.
+        await WriteExposeHelmValuesAsync(tenantId, clusterComponentId, config.RegistryUrl, ct);
+
         return config;
+    }
+
+    /// <summary>The IngressClass the chart's leftover Ingress is pinned to. Nothing serves it.</summary>
+    /// <remarks>
+    /// The chart omits its bundled nginx proxy only when told that something in front is doing the
+    /// path split, which it expresses as <c>expose.type</c> being "ingress" or "route" — and both of
+    /// those make it write a routing object of its own. EntKube publishes Harbor through the
+    /// cluster's gateway with an HTTPRoute it owns, so the chart's object must carry no traffic:
+    /// "ingress" leaves an Ingress, and an Ingress with a class no controller watches is inert.
+    /// ("route" would leave an HTTPRoute for the same hostname as EntKube's, and two of those is a
+    /// fight over one object.)
+    /// </remarks>
+    public const string UnusedIngressClass = "entkube-unused";
+
+    /// <summary>
+    /// Writes the values that follow from Harbor's public hostname: the external URL Harbor hands to
+    /// docker clients, and the expose mode that keeps the chart's nginx proxy out of the namespace.
+    ///
+    /// <para>Re-reads the component itself, deliberately. It is called at the end of a sequence of
+    /// writers that each open their own context, so anything merged into a copy loaded earlier would
+    /// silently undo them.</para>
+    /// </summary>
+    public async Task WriteExposeHelmValuesAsync(
+        Guid tenantId,
+        Guid clusterComponentId,
+        string? registryUrl,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ClusterComponent component = await db.ClusterComponents
+            .Include(c => c.Cluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Component not found.");
+
+        // The expose mode is written whether or not a hostname is configured: it is what keeps the
+        // chart's nginx proxy uninstalled, and a Harbor nobody has published yet should not be
+        // running one either.
+        Dictionary<string, string> values = new()
+        {
+            ["expose.type"] = "ingress",
+            ["expose.ingress.className"] = UnusedIngressClass
+        };
+
+        // The URL Harbor prints in its docker commands and signs its registry tokens for. Only known
+        // once a hostname is, and wrong to guess: a token issued for the wrong audience is refused by
+        // the registry with an error about authentication rather than about the URL.
+        if (HostnameOf(registryUrl) is { Length: > 0 } hostname)
+        {
+            values["externalURL"] = $"https://{hostname}";
+            values["expose.ingress.hosts.core"] = hostname;
+        }
+
+        component.HelmValues = YamlFormMerger.MergeFormValues(component.HelmValues ?? "", values);
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>The host part of a stored registry URL, with or without its scheme or trailing path.</summary>
+    private static string HostnameOf(string? registryUrl)
+    {
+        string value = (registryUrl ?? "").Trim();
+
+        if (value.Length == 0)
+        {
+            return "";
+        }
+
+        int scheme = value.IndexOf("://", StringComparison.Ordinal);
+        if (scheme >= 0)
+        {
+            value = value[(scheme + 3)..];
+        }
+
+        int slash = value.IndexOf('/');
+        return slash >= 0 ? value[..slash] : value;
     }
 
     /// <summary>
@@ -464,6 +547,66 @@ public class HarborService(
     }
 
     /// <summary>
+    /// Why this Harbor cannot be installed against the Redis it is pointed at, or null when it can.
+    ///
+    /// <para>Harbor holds its sessions, its job queue and its scan results in Redis, so a Redis it cannot
+    /// reach is not a degraded registry — it is a core that never becomes ready. What an operator sees
+    /// instead is the Helm deadline lapsing half an hour later, with the address nowhere in the message,
+    /// and a namespace where the obvious missing thing is a Redis pod the chart was told not to run.</para>
+    ///
+    /// <para>Only ever objects to an in-cluster address with no Service behind it. A Redis outside the
+    /// cluster, a cluster that cannot be read, a component with no stored values — all of those are "no
+    /// objection", for the same reason the schema check is silent about a database it cannot read.</para>
+    /// </summary>
+    public async Task<string?> DescribeRedisConflictAsync(
+        Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ClusterComponent? component = await db.ClusterComponents
+            .Include(c => c.Cluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+
+        if (component is null) return null;
+
+        HarborComponentConfig? config = await db.HarborComponentConfigs
+            .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId && c.TenantId == tenantId, ct);
+
+        // What the install will actually use. With a config record the refresh that runs just before it
+        // rewrites redis.type from the stored endpoint, so the record is the authority and an empty one
+        // means the chart's own Redis. Without a record — an adopted release, or values hand-edited in
+        // the advanced editor — the values are all there is, and they are taken at their word.
+        string endpoint = config is not null
+            ? config.RedisEndpoint ?? ""
+            : string.Equals(
+                YamlFormMerger.ExtractValue(component.HelmValues ?? "", "redis.type"), "external",
+                StringComparison.OrdinalIgnoreCase)
+                ? YamlFormMerger.ExtractValue(component.HelmValues ?? "", "redis.external.addr") ?? ""
+                : "";
+
+        if (endpoint.Trim().Length == 0) return null;
+
+        bool? exists = await redisService.InClusterServiceExistsAsync(component.ClusterId, endpoint, ct);
+
+        return exists == false ? RedisEndpointMissing(endpoint.Trim(), config is null) : null;
+    }
+
+    /// <summary>
+    /// The message for an external Redis that is not on the cluster. Separated from the lookup so the
+    /// wording is testable — it is the only thing an operator will have to go on.
+    /// </summary>
+    public static string RedisEndpointMissing(string endpoint, bool fromValues) =>
+        $"This Harbor is configured to use a Redis at '{endpoint}', and no Service of that name exists on "
+        + "the cluster. Harbor keeps its sessions, its job queue and its scan results there, so the core "
+        + "would start, fail to connect, and never become ready — the install would end in a Helm "
+        + "deadline half an hour from now.\n\n"
+        + (fromValues
+            ? "That address comes from this component's Helm values (redis.external.addr). Point it at a "
+              + "Redis that exists, or set redis.type back to \"internal\" to let Harbor run its own."
+            : "Clear the Redis field on this component to let Harbor run its own Redis, or pick one the "
+              + "cluster actually has.");
+
+    /// <summary>
     /// Refuses a Redis endpoint Harbor cannot actually speak to, so the form says no now rather than the
     /// registry misbehaving a week later.
     ///
@@ -603,6 +746,10 @@ public class HarborService(
         // rotated password. No password is passed because there is none to pass here — the operator's
         // own is already in the vault, and an unmanaged endpoint leaves it exactly where it is.
         await WriteRedisHelmValuesAsync(tenantId, clusterComponentId, config.RedisEndpoint, null, ct);
+
+        // Also on every install, not just when the hostname is first set: this is what moves a Harbor
+        // installed before EntKube took over the path split off the chart's bundled nginx proxy.
+        await WriteExposeHelmValuesAsync(tenantId, clusterComponentId, config.RegistryUrl, ct);
     }
 
     // ── Queries ───────────────────────────────────────────────────────────────
