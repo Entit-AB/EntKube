@@ -459,7 +459,6 @@ else if (section == "components")
                                             <input type="text" class="form-control form-control-sm"
                                                    placeholder="@(field.Placeholder ?? "letsencrypt-prod")"
                                                    value="@GetFormFieldValue(field.Key)"
-                                                   @attributes="NoAutofill"
                                                    @onchange="@(e => OnRegFieldChanged(field.Key, e))" />
                                         }
                                     }
@@ -526,7 +525,6 @@ else if (section == "components")
                                             <input type="text" class="form-control form-control-sm"
                                                    placeholder="@(field.Placeholder ?? "redis.redis.svc.cluster.local:6379")"
                                                    value="@GetFormFieldValue(field.Key)"
-                                                   @attributes="NoAutofill"
                                                    @onchange="@(e => OnRegFieldChanged(field.Key, e))" />
                                             <div class="form-text small text-muted">
                                                 No Redis Service found on this cluster — create one on the Cache tab, or type an endpoint.
@@ -566,14 +564,12 @@ else if (section == "components")
                                         <input type="password" class="form-control form-control-sm"
                                                placeholder="@field.Placeholder"
                                                value="@GetFormFieldValue(field.Key)"
-                                               @attributes="NoAutofillPassword"
                                                @onchange="@(e => OnRegFieldChanged(field.Key, e))" />
                                     }
                                     else if (field.Type == FormFieldType.Number)
                                     {
                                         <input type="number" class="form-control form-control-sm"
                                                value="@GetFormFieldValue(field.Key)"
-                                               @attributes="NoAutofill"
                                                @onchange="@(e => OnRegFieldChanged(field.Key, e))" />
                                     }
                                     else
@@ -581,7 +577,6 @@ else if (section == "components")
                                         <input type="text" class="form-control form-control-sm"
                                                placeholder="@field.Placeholder"
                                                value="@GetFormFieldValue(field.Key)"
-                                               @attributes="NoAutofill"
                                                @onchange="@(e => OnRegFieldChanged(field.Key, e))" />
                                     }
                                     @if (!string.IsNullOrEmpty(field.HelpText))
@@ -1229,7 +1224,6 @@ else if (section == "components")
                                                             <input type="text" class="form-control form-control-sm"
                                                                    placeholder="@(field.Placeholder ?? "letsencrypt-prod")"
                                                                    value="@GetEditFormFieldValue(field.Key)"
-                                                                   @attributes="NoAutofill"
                                                                    @onchange="@(e => OnEditFieldChanged(field.Key, e))" />
                                                         }
                                                     }
@@ -1294,7 +1288,6 @@ else if (section == "components")
                                                             <input type="text" class="form-control form-control-sm"
                                                                    placeholder="@(field.Placeholder ?? "redis.redis.svc.cluster.local:6379")"
                                                                    value="@GetEditFormFieldValue(field.Key)"
-                                                                   @attributes="NoAutofill"
                                                                    @onchange="@(e => OnEditFieldChanged(field.Key, e))" />
                                                         }
                                                     }
@@ -1331,14 +1324,12 @@ else if (section == "components")
                                                         <input type="password" class="form-control form-control-sm"
                                                                placeholder="@field.Placeholder"
                                                                value="@GetEditFormFieldValue(field.Key)"
-                                                               @attributes="NoAutofillPassword"
                                                                @onchange="@(e => OnEditFieldChanged(field.Key, e))" />
                                                     }
                                                     else if (field.Type == FormFieldType.Number)
                                                     {
                                                         <input type="number" class="form-control form-control-sm"
                                                                value="@GetEditFormFieldValue(field.Key)"
-                                                               @attributes="NoAutofill"
                                                                @onchange="@(e => OnEditFieldChanged(field.Key, e))" />
                                                     }
                                                     else
@@ -1346,7 +1337,6 @@ else if (section == "components")
                                                         <input type="text" class="form-control form-control-sm"
                                                                placeholder="@field.Placeholder"
                                                                value="@GetEditFormFieldValue(field.Key)"
-                                                               @attributes="NoAutofill"
                                                                @onchange="@(e => OnEditFieldChanged(field.Key, e))" />
                                                     }
                                                     @if (!string.IsNullOrEmpty(field.HelpText))
@@ -1433,7 +1423,6 @@ else if (section == "components")
                                             <div class="input-group input-group-sm">
                                                 <span class="input-group-text"><i class="bi bi-tag"></i></span>
                                                 <input type="text" class="form-control" placeholder="SECRET_NAME"
-                                                       @attributes="NoAutofill"
                                                        @bind="newSecretName" @bind:event="oninput" />
                                             </div>
                                         </div>
@@ -1441,7 +1430,6 @@ else if (section == "components")
                                             <div class="input-group input-group-sm">
                                                 <span class="input-group-text"><i class="bi bi-key"></i></span>
                                                 <input type="password" class="form-control" placeholder="Value"
-                                                       @attributes="NoAutofillPassword"
                                                        @bind="newSecretValue" @bind:event="oninput" />
                                             </div>
                                         </div>
@@ -1942,36 +1930,6 @@ else if (section == "components")
     private bool showHelmDetails;
     private Dictionary<string, string> regFormFieldValues = new();
     private Dictionary<string, string> editFormFieldValues = new();
-
-    /// <summary>
-    /// Attributes that keep a browser's password manager out of these fields.
-    ///
-    /// <para>A component form is a column of text boxes above a password box, which is exactly the
-    /// shape a saved login is filled into: the manager writes the stored username into the nearest
-    /// preceding text input and the password into the password input, and Blazor's change handler
-    /// records both as if they had been typed. That is not hypothetical — a Harbor was installed
-    /// with its Redis address set to the operator's email address, which resolved, so the core spent
-    /// every restart dialling a mail provider on port 6379.</para>
-    ///
-    /// <para><c>autocomplete</c> alone is not enough: Chrome ignores "off" on a login-looking form,
-    /// and the third-party managers key off their own attributes. Hence the set — "new-password" is
-    /// the one value Chrome honours for a password box, and it also stops it looking for a username
-    /// box to fill.</para>
-    /// </summary>
-    private static readonly Dictionary<string, object> NoAutofill = new()
-    {
-        ["autocomplete"] = "off",
-        ["data-lpignore"] = "true",
-        ["data-1p-ignore"] = "true",
-        ["data-bwignore"] = "true",
-        ["data-form-type"] = "other"
-    };
-
-    /// <summary><see cref="NoAutofill"/> for a password box, where "off" is ignored but "new-password" is not.</summary>
-    private static readonly Dictionary<string, object> NoAutofillPassword = new(NoAutofill)
-    {
-        ["autocomplete"] = "new-password"
-    };
     private List<CnpgDatabase>? keycloakDatabases;
     private List<string>? keycloakAvailableIssuers;
 

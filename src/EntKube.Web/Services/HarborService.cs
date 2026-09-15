@@ -586,30 +586,10 @@ public class HarborService(
 
         if (endpoint.Trim().Length == 0) return null;
 
-        // A stored address that cannot be one at all — the shape check now refuses these on save, so
-        // what reaches here was stored before it existed, or written straight into the values.
-        if (RedisService.DescribeInvalidEndpoint(endpoint) is string malformed)
-        {
-            return RedisEndpointUnusable(malformed, config is null);
-        }
-
         bool? exists = await redisService.InClusterServiceExistsAsync(component.ClusterId, endpoint, ct);
 
         return exists == false ? RedisEndpointMissing(endpoint.Trim(), config is null) : null;
     }
-
-    /// <summary>
-    /// The message for a stored Redis address that is not an address. Kept beside the missing-Service
-    /// one because an operator meets them in the same place and has to act on them the same way.
-    /// </summary>
-    public static string RedisEndpointUnusable(string reason, bool fromValues) =>
-        $"This Harbor is configured to use an external Redis, and the address it was given cannot be "
-        + $"one: {reason}\n\nHarbor keeps its sessions, its job queue and its scan results in Redis, so "
-        + "the core would never become ready.\n\n"
-        + (fromValues
-            ? "The address is in this component's Helm values (redis.external.addr). Correct it, or set "
-              + "redis.type back to \"internal\" to let Harbor run its own Redis."
-            : "Clear the Redis field on this component to let Harbor run its own Redis.");
 
     /// <summary>
     /// The message for an external Redis that is not on the cluster. Separated from the lookup so the
@@ -641,15 +621,6 @@ public class HarborService(
     {
         string endpoint = (redisEndpoint ?? "").Trim();
         if (endpoint.Length == 0) return;
-
-        // Before anything asks whether this Redis is reachable or sharded: whether it is an address
-        // at all. Nothing downstream questions the string, so a box a password manager filled in
-        // becomes redis.external.addr and the registry dials it for ever.
-        if (RedisService.DescribeInvalidEndpoint(endpoint) is string malformed)
-        {
-            throw new InvalidOperationException(
-                $"That is not a Redis address: {malformed} Leave the field empty to let Harbor run its own.");
-        }
 
         RedisEndpointOption? managed = await redisService.ResolveManagedEndpointAsync(
             kubernetesClusterId, endpoint, ct);
@@ -700,17 +671,9 @@ public class HarborService(
 
         if (endpoint.Length == 0)
         {
-            // The address is cleared with the type, not merely ignored. The chart reads neither once
-            // the type is internal, but `helm get values` and the advanced editor both still show it,
-            // and an address nothing uses is worse than no address when the next person is working out
-            // which Redis this registry talks to — especially when it got there by autofill.
             component.HelmValues = YamlFormMerger.MergeFormValues(
                 component.HelmValues ?? "",
-                new Dictionary<string, string>
-                {
-                    ["redis.type"] = "internal",
-                    ["redis.external.addr"] = ""
-                });
+                new Dictionary<string, string> { ["redis.type"] = "internal" });
 
             await db.SaveChangesAsync(ct);
             return;
