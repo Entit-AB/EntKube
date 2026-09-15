@@ -169,6 +169,26 @@ One table, `JitGrant`, modelled on
 different namespace, the live grant must keep meaning what it meant when it was
 approved, and the proxy must compare against that frozen value.
 
+### Two ways of naming a person
+
+A grant names people twice, and the two are not interchangeable.
+
+`UserId` is an **account id** — a foreign key to `AspNetUsers`, and the value every
+later decision is made against: the approver's own id is compared to it to refuse
+self-approval, and tenant membership (and so the approver permission) is keyed to one
+as well. In a Blazor component it comes from the `NameIdentifier` claim.
+
+`RequestedBy`, `ApprovedBy`, `DeniedBy` and `RevokedBy` are **display names** — the
+email a person recognises, read straight off `Identity.Name`, stored so the history
+says who decided rather than which key did.
+
+`Identity.Name` is the username, which is an email here, so using it as an account id
+fails in two ways that both look like nothing happening: the insert violates a
+foreign key, and a membership lookup matches no row, leaving a queue with no
+approvers. `RequestAsync` therefore refuses a subject that is not a known account,
+and `JitAccessService.SubjectName` is the one place that turns the key back into a
+name for a screen or an audit row.
+
 ## Configuration
 
 Two things must be done before a grant can be issued: set `Jit:PublicBaseUrl`, and
