@@ -19,8 +19,9 @@ public class FederatedLogBackendTests
     private static readonly Guid Cluster = Guid.NewGuid();
     private static readonly DateTime T0 = new(2026, 8, 26, 12, 0, 0, DateTimeKind.Utc);
 
-    private static FederatedLogBackend Federated(ILogBackend sealedTier, ILogBackend hotTier) =>
-        new(sealedTier, hotTier, NullLogger<FederatedLogBackend>.Instance);
+    private static FederatedLogBackend Federated(
+        ILogBackend sealedTier, ILogBackend hotTier, TimeSpan? halfBudget = null) =>
+        new(sealedTier, hotTier, NullLogger<FederatedLogBackend>.Instance, halfBudget);
 
     private static LokiLogStream Stream(string pod, params (DateTime Ts, string Line)[] entries) => new()
     {
@@ -176,6 +177,61 @@ public class FederatedLogBackendTests
     }
 
     /// <summary>A stand-in tier that returns whatever it was configured with, or fails.</summary>
+    [Fact]
+    public async Task A_half_that_stops_answering_costs_the_budget_not_its_own_timeout()
+    {
+        // The hot tier's HTTP client allows 30s. Awaiting both halves spent all of it on EVERY query
+        // before handing back a sealed answer that was already in hand — the difference between a
+        // degraded search and a page that looks hung.
+        FederatedLogBackend sut = Federated(
+            new FakeLogBackend { Streams = [Stream("api-1", (T0, "sealed line"))] },
+            new FakeLogBackend { Delay = TimeSpan.FromSeconds(30) },
+            halfBudget: TimeSpan.FromMilliseconds(150));
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        KubernetesOperationResult<List<LokiLogStream>> result =
+            await sut.QueryAsync(Cluster, Filter, T0.AddHours(-1), T0.AddHours(1));
+        sw.Stop();
+
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5));
+        result.IsSuccess.Should().BeTrue("the sealed half answered, and that is most of the data");
+        result.Data!.SelectMany(s => s.Entries).Select(e => e.Line).Should().Equal("sealed line");
+    }
+
+    [Fact]
+    public async Task The_routing_probe_is_budgeted_too()
+    {
+        // HasDataAsync runs before the viewer renders anything, so an unanswerable half here delays the
+        // page before it has started loading.
+        FederatedLogBackend sut = Federated(
+            new FakeLogBackend { Streams = [Stream("api-1", (T0, "sealed line"))] },
+            new FakeLogBackend { Delay = TimeSpan.FromSeconds(30) },
+            halfBudget: TimeSpan.FromMilliseconds(150));
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        bool hasData = await sut.HasDataAsync(Cluster);
+        sw.Stop();
+
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5));
+        hasData.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_healthy_pair_is_not_delayed_by_the_budget()
+    {
+        FederatedLogBackend sut = Federated(
+            new FakeLogBackend { Labels = ["api-1"] },
+            new FakeLogBackend { Labels = ["api-2"] },
+            halfBudget: TimeSpan.FromSeconds(5));
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        KubernetesOperationResult<List<string>> pods = await sut.GetPodsAsync(Cluster, "prod");
+        sw.Stop();
+
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1));
+        pods.Data.Should().BeEquivalentTo(["api-1", "api-2"]);
+    }
+
     private sealed class FakeLogBackend : ILogBackend
     {
         public List<LokiLogStream> Streams { get; init; } = [];
@@ -184,15 +240,24 @@ public class FederatedLogBackendTests
         public long Count { get; init; }
         public string? Error { get; init; }
 
+        /// <summary>How long every call takes to answer — a hot tier that has stopped answering at all.</summary>
+        public TimeSpan Delay { get; init; }
+
         public bool IsEnabled => true;
 
-        private Task<KubernetesOperationResult<T>> Result<T>(T value) =>
-            Task.FromResult(Error is null
+        private async Task<KubernetesOperationResult<T>> Result<T>(T value)
+        {
+            if (Delay > TimeSpan.Zero) await Task.Delay(Delay);
+            return Error is null
                 ? KubernetesOperationResult<T>.Success(value)
-                : KubernetesOperationResult<T>.Failure(Error));
+                : KubernetesOperationResult<T>.Failure(Error);
+        }
 
-        public Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
-            => Task.FromResult(Error is null && Streams.Count > 0);
+        public async Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
+        {
+            if (Delay > TimeSpan.Zero) await Task.Delay(Delay);
+            return Error is null && Streams.Count > 0;
+        }
 
         public Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(
             Guid clusterId, int windowMinutes = 60, CancellationToken ct = default) => Result(Labels);

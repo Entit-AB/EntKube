@@ -370,7 +370,18 @@ else
 
         KubernetesOperationResult<List<string>> podResult =
             await Logs.GetPodsAsync(ClusterId, selectedNamespace, backend, windowMinutes: timeRangeMinutes);
-        if (podResult.IsSuccess) pods = podResult.Data ?? [];
+        if (podResult.IsSuccess)
+        {
+            pods = podResult.Data ?? [];
+        }
+        else
+        {
+            // Say so. This used to drop the error on the floor, so a backend that could not answer and a
+            // namespace with genuinely no pods produced the identical screen: an empty dropdown and no
+            // explanation. Searching still works — the pod filter is optional — so this is a warning
+            // beside the results, not a blocked page.
+            queryError = $"Could not list pods for {selectedNamespace}: {podResult.Error}";
+        }
     }
 
     private async Task Search()
