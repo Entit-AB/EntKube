@@ -138,6 +138,30 @@ token, so the level is worth no more than those safeguards together are worth.
 5. **End** — on expiry or explicit revoke, the RoleBinding, Role and SA are
    deleted and the grant row is kept (never deleted) so the trail survives.
 
+A request can also end without ever being decided. The requester can **withdraw**
+one nobody has answered, and one nobody answers at all **lapses** after
+`JitGrant.PendingWindow` (24h) and leaves the queue. Both are derived from the
+same timestamps as every other status, so neither depends on a job having run:
+
+- *Withdrawn* — `RevokedAt` set while `ApprovedAt` is null. Same column as a
+  revocation because both are "somebody stopped this", but a different word,
+  because there was no access to revoke.
+- *Lapsed* — undecided past `RequestedAt + PendingWindow`. Distinct from
+  *Expired*, which is access that was given and ran out. This is access that was
+  never given, and the difference is between "your access ended" and "nobody ever
+  answered you".
+
+A day-old request for just-in-time access is answering a question nobody is still
+asking. Approving one late is worse than not approving it: the credential lands
+after the need for it is gone, with nobody expecting it. Leaving lapsed requests
+in the queue also teaches an approver to scroll past rows, which is how the next
+live one gets missed.
+
+The portal offers one button for both endings — withdraw while pending, hand back
+while live — through `EndOwnGrantAsync`, which checks ownership itself rather than
+trusting the page. `RevokeAsync` takes an operator's word for it, because an
+operator is acting on somebody else's grant by definition; a customer is not.
+
 Self-approval is rejected: the requester and the approver must be different users —
 and the subject cannot approve either, since approving your own request and approving
 one somebody filed on your behalf are the same thing from the cluster's side.
@@ -203,6 +227,21 @@ name for a screen or an audit row.
 
 Two things must be done before a grant can be issued: set `Jit:PublicBaseUrl`, and
 grant somebody **Manage** on *JIT cluster access* under **Admin → Roles**.
+
+### Nobody has to open the queue to know it is there
+
+A waiting request is a person blocked on an answer, and the queue only shows it to
+somebody who goes looking. Pending requests are therefore also findings in the
+[operations advisor](../src/EntKube.Web/Services/OperationsAdvisor.cs) —
+`BuildJitFindingsAsync`, category Security, scoped to the customer so it appears in
+the customer lens too. Under half the window they are *Today*; past it they are
+*Overdue* and Critical, because a request that old will lapse rather than ever be
+useful. `DueAt` is the lapse, not the request: a deadline is when something changes
+if nobody acts.
+
+The queue and the advisor share one predicate, `JitAccessService.AwaitingDecision`.
+Two copies would drift, and the way that shows up is an advisor nagging about a
+request the queue no longer displays.
 
 `Jit:PublicBaseUrl` is the externally reachable URL of this EntKube instance, and it
 is also the switch. Setting it turns the feature on; leaving it empty leaves the

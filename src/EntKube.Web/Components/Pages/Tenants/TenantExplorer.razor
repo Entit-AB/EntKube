@@ -269,6 +269,32 @@ else
                     }
                 }
 
+                @* ── Operations ── *@
+                <div class="tree-section-head"><span class="tree-section-label">Operations</span></div>
+                @foreach (TreeGroup g in OperationsGroups)
+                {
+                    List<SectionItem> gi = VisibleGroupItems(g);
+                    if (HasFilter && gi.Count == 0) { continue; }
+                    bool gopen = GroupOpen(g.Name);
+                    <button type="button" class="node group indent-1" @onclick="() => ToggleGroup(g.Name)" aria-expanded="@gopen">
+                        <span class="caret">@(gopen ? "▾" : "▸")</span>
+                        <i class="ico bi @g.Icon" aria-hidden="true"></i>
+                        <span class="label">@g.Name</span>
+                        <span class="badge-count">@g.Items.Length</span>
+                    </button>
+                    @if (gopen)
+                    {
+                        @foreach (SectionItem item in gi)
+                        {
+                            <button type="button" class="node leaf indent-2 @(selectedSection == item.Key ? "selected" : "")" @onclick="() => SelectSection(item.Key)">
+                                <span class="caret"></span>
+                                <i class="ico bi @item.Icon" aria-hidden="true"></i>
+                                <span class="label">@item.Label</span>
+                            </button>
+                        }
+                    }
+                }
+
                 @* ── Observability ── *@
                 <div class="tree-section-head"><span class="tree-section-label">Observability</span></div>
                 @foreach (TreeGroup g in OpsGroups)
@@ -382,11 +408,6 @@ else
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
         [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon") ]),
-        // Its own place in the tree because it is a queue with somebody waiting on it. It lived
-        // under Environments ▸ <env>, below the cluster list, which is both hard to find and the
-        // wrong scope — the queue is tenant-wide and a grant names its own environment.
-        new("Access", "bi-terminal",
-        [ new("jit-access", "JIT cluster access", "bi-terminal") ]),
         new("Networking", "bi-signpost-split",
         [ new("ingress", "Routes & Ingress", "bi-signpost-split"), new("networking", "VPN mesh", "bi-hdd-network") ]),
         new("Disaster recovery", "bi-shield-check",
@@ -400,6 +421,19 @@ else
         new("Cost", "bi-cash-coin",
         [ new("cost", "Cost & chargeback", "bi-cash-coin") ]),
     ];
+    /// <summary>
+    /// Things an operator does, as opposed to things an operator watches.
+    ///
+    /// Separate from <see cref="OpsGroups"/> because that heading reads "Observability", and a
+    /// queue of people waiting for an answer is not something you observe — filing it there says
+    /// it is a dashboard, which is exactly how it gets scrolled past.
+    /// </summary>
+    private static readonly TreeGroup[] OperationsGroups =
+    [
+        new("Access", "bi-terminal",
+        [ new("jit-access", "JIT cluster access", "bi-terminal") ]),
+    ];
+
     private static readonly SectionItem[] ManageItems =
     [
         new("customers", "Customers", "bi-people"),

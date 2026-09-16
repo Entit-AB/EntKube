@@ -70,7 +70,14 @@
                     {
                         bool ownRequest = IsOwn(grant);
                         <tr>
-                            <td class="small text-muted">@grant.RequestedAt.ToString("MMM d HH:mm")</td>
+                            <td class="small text-muted">
+                                @grant.RequestedAt.ToString("MMM d HH:mm")<br />
+                                @* Somebody is waiting on this row, and a timestamp does not say
+                                   how long. The lapse is the deadline on the answer. *@
+                                <span class="@(IsStale(grant) ? "text-danger" : "")">
+                                    waiting @JitAccessService.HumaniseMinutes(WaitedMinutes(grant))
+                                </span>
+                            </td>
                             <td class="small">@JitAccessService.SubjectName(grant)</td>
                             <td class="small">
                                 @grant.App.Name<br />
@@ -273,6 +280,13 @@
         loaded = true;
     }
 
+    private static int WaitedMinutes(JitGrant grant) =>
+        Math.Max(0, (int)(DateTime.UtcNow - grant.RequestedAt).TotalMinutes);
+
+    /// <summary>Past halfway to lapsing — the point where waiting has become the answer.</summary>
+    private static bool IsStale(JitGrant grant) =>
+        DateTime.UtcNow - grant.RequestedAt > JitGrant.PendingWindow / 2;
+
     private bool IsOwn(JitGrant grant) =>
         string.Equals(grant.RequestedBy, userDisplay, StringComparison.OrdinalIgnoreCase)
         || string.Equals(grant.UserId, userId, StringComparison.OrdinalIgnoreCase);
@@ -366,6 +380,9 @@
         JitGrantStatus.Active => "text-bg-success",
         JitGrantStatus.Pending => "text-bg-warning",
         JitGrantStatus.Denied or JitGrantStatus.Revoked => "text-bg-danger",
+        // A lapsed request is a queue that was not worked, which is worth seeing in the history
+        // as its own thing rather than as a denial nobody made.
+        JitGrantStatus.Lapsed or JitGrantStatus.Withdrawn => "text-bg-secondary",
         _ => "text-bg-secondary",
     };
 }

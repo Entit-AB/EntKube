@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Services.Jit;
 using EntKube.Web.Services.Upgrades;
 
 namespace EntKube.Web.Services;
@@ -158,6 +159,7 @@ public class OperationsAdvisorService(
 
         findings.AddRange(await BuildSecretFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildIncidentFindingsAsync(tenantId, now, ct));
+        findings.AddRange(await BuildJitFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildSloFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildBackupFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildPostureFindingsAsync(tenantId, ct));
@@ -373,6 +375,78 @@ public class OperationsAdvisorService(
                 ClusterId = g.ClusterId,
                 IncidentId = g.LeadIncidentId,
                 Source = "incident",
+            });
+        }
+
+        return result;
+    }
+
+    // ── Security: just-in-time access requests waiting for a decision ──
+    //
+    // The only finding here where the deadline is a person rather than a certificate. A JIT
+    // request is somebody blocked on an answer, and it lapses on its own — so an unworked queue
+    // does not pile up, it quietly stops helping anyone. That is precisely the failure this feed
+    // exists to prevent, and it is invisible unless somebody opens the queue.
+    private async Task<List<OperationsFinding>> BuildJitFindingsAsync(
+        Guid tenantId, DateTime now, CancellationToken ct)
+    {
+        var result = new List<OperationsFinding>();
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        var waiting = await db.JitGrants
+            .Where(JitAccessService.AwaitingDecision(tenantId, now))
+            .OrderBy(g => g.RequestedAt)
+            .Select(g => new
+            {
+                g.Id,
+                g.RequestedAt,
+                g.RequestedLevel,
+                g.RequestedMinutes,
+                g.Reason,
+                g.TicketRef,
+                g.Namespace,
+                g.CustomerId,
+                CustomerName = g.Customer.Name,
+                AppName = g.App.Name,
+                EnvironmentName = g.Environment.Name,
+                g.KubernetesClusterId,
+                // The subject as a person. UserId is an account id, which nobody recognises.
+                SubjectEmail = g.User.Email ?? g.User.UserName ?? g.UserId,
+            })
+            .ToListAsync(ct);
+
+        foreach (var g in waiting)
+        {
+            TimeSpan waited = now - g.RequestedAt;
+            DateTime lapsesAt = g.RequestedAt + JitGrant.PendingWindow;
+
+            // Half the window gone is the point where waiting has effectively become the answer:
+            // whatever they were debugging has moved on, and the request will lapse rather than
+            // ever be useful.
+            bool stale = waited > JitGrant.PendingWindow / 2;
+
+            result.Add(new OperationsFinding
+            {
+                Id = $"jit:{g.Id}",
+                Category = AdvisorCategory.Security,
+                Severity = stale ? AdvisorSeverity.Critical : AdvisorSeverity.Warning,
+                Horizon = stale ? AdvisorHorizon.Overdue : AdvisorHorizon.Today,
+                Title = $"Cluster access request waiting — {g.AppName}",
+                Detail = $"{g.SubjectEmail} asked for {g.RequestedLevel} in {g.Namespace} "
+                         + $"for {JitAccessService.HumaniseMinutes(g.RequestedMinutes)}: {g.Reason}"
+                         + (g.TicketRef is null ? "" : $" ({g.TicketRef})"),
+                ScopeLabel = $"{g.CustomerName} / {g.EnvironmentName}",
+                TimingText = $"waiting {HumanSpan(waited)}",
+                // The lapse, not the request — a deadline is when something changes if nobody acts.
+                DueAt = lapsesAt,
+                Remediation = $"Approve or deny it. Unanswered, it lapses in {HumanSpan(lapsesAt - now)} "
+                              + "and the customer has to ask again.",
+                LinkSection = "jit-access",
+                CustomerId = g.CustomerId,
+                CustomerName = g.CustomerName,
+                ClusterId = g.KubernetesClusterId,
+                Source = "jit",
             });
         }
 
