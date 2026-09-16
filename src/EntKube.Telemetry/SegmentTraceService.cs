@@ -68,7 +68,10 @@ public sealed class SegmentTraceService(
         // Scan only the window the viewer is actually searching (default 1h) instead of a fixed 24h —
         // the dropdown then reflects the selected range and, by default, opens ~24× fewer segments.
         if (windowMinutes <= 0) windowMinutes = 60;
-        string cacheKey = $"{clusterId:N}|{windowMinutes}|{string.Join(",", namespaces ?? [])}|{podPattern}";
+        // Scope-keyed for the same reason the log label cache is: this service is instantiated more than
+        // once in a process (All for the public routes, Hot for the querier's internal ones) and the cache
+        // is static, so without it one tier's answer is served as the other's.
+        string cacheKey = $"{Scope}|{clusterId:N}|{windowMinutes}|{string.Join(",", namespaces ?? [])}|{podPattern}";
         if (ServiceListCache.TryGetValue(cacheKey, out (DateTime At, List<string> Services) hit)
             && DateTime.UtcNow - hit.At < ServiceListTtl)
         {
