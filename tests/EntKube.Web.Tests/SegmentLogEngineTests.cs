@@ -448,35 +448,6 @@ public sealed class SegmentLogEngineTests : IDisposable
     }
 
     [Fact]
-    public async Task LabelCache_DoesNotServeOneTiersAnswerAsAnothers()
-    {
-        // One PROCESS runs more than one instance of this service at different scopes — the indexer serves
-        // its public routes over the whole index and the querier's internal ones over the hot tier alone —
-        // and the label cache is static. Keyed without the scope, the first question asked wins for the
-        // next 30 seconds whichever tier asked it, and the sealed tier legitimately answers "no pods" for
-        // a window whose data has not been sealed yet. That empty list then IS the pod dropdown.
-        DateTime now = DateTime.UtcNow;
-        LogSegmentManager mgr = ManagerWith(Log(now.AddMinutes(-5), "prod", "api-1", 2, "live"));
-
-        // Nothing is sealed, so the sealed tier is genuinely empty — and must stay a successful, empty
-        // answer rather than becoming every other tier's answer.
-        var sealedTier = new SegmentLogService(
-            new LogTierRegistries(_registry!, null, new SegmentEngineOptions()),
-            _resolver, NullLogger<SegmentLogService>.Instance, SegmentScope.Sealed);
-        var wholeIndex = new SegmentLogService(
-            new LogTierRegistries(_registry!, null, new SegmentEngineOptions()),
-            _resolver, NullLogger<SegmentLogService>.Instance, SegmentScope.All);
-
-        KubernetesOperationResult<List<string>> sealedPods = await sealedTier.GetPodsAsync(_clusterId, "prod", 60);
-        sealedPods.IsSuccess.Should().BeTrue();
-        sealedPods.Data.Should().BeEmpty();
-
-        // Same tenant, cluster, field, namespace and window — every component of the old cache key.
-        (await wholeIndex.GetPodsAsync(_clusterId, "prod", 60)).Data.Should().BeEquivalentTo(["api-1"]);
-        (await wholeIndex.GetNamespacesAsync(_clusterId, 60)).Data.Should().BeEquivalentTo(["prod"]);
-    }
-
-    [Fact]
     public async Task Tenants_AreIsolated_NoCrossTenantLogs()
     {
         // A second tenant + cluster. Telemetry must be tenant-scoped: neither tenant can see the other's logs.

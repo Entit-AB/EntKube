@@ -21,23 +21,16 @@ namespace EntKube.TelemetryNode;
 public sealed class FederatedLogBackend(
     ILogBackend sealedTier,
     ILogBackend hotTier,
-    ILogger<FederatedLogBackend> logger,
-    TimeSpan? halfBudget = null) : ILogBackend
+    ILogger<FederatedLogBackend> logger) : ILogBackend
 {
     public bool IsEnabled => true;
 
     public async Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
     {
-        // Budgeted like every other merge, and this one matters most: it is the read-routing probe, so it
-        // runs before the first thing an operator sees. A hot half that cannot answer must cost a few
-        // seconds, not its client's whole timeout, in front of a page that has not started loading yet.
-        KubernetesOperationResult<bool>[] both = await Task.WhenAll(
-            WithinBudgetAsync(Wrap(sealedTier.HasDataAsync(clusterId, ct)), "sealed", "has-data"),
-            WithinBudgetAsync(Wrap(hotTier.HasDataAsync(clusterId, ct)), "hot", "has-data"));
-        return both.Any(r => r is { IsSuccess: true, Data: true });
-
-        static async Task<KubernetesOperationResult<bool>> Wrap(Task<bool> probe)
-            => KubernetesOperationResult<bool>.Success(await probe);
+        bool[] both = await Task.WhenAll(
+            sealedTier.HasDataAsync(clusterId, ct),
+            hotTier.HasDataAsync(clusterId, ct));
+        return both[0] || both[1];
     }
 
     public Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(
@@ -169,29 +162,15 @@ public sealed class FederatedLogBackend(
     /// returned; only both failing is a failed query, and then the sealed tier's error is reported since
     /// that is where the bulk of the data — and the more likely misconfiguration — lives.
     /// </summary>
-    /// <summary>
-    /// How long a half may keep the other waiting before it is counted as failed for this query.
-    ///
-    /// <para>Returning the working half was always the intent; paying the full HTTP client timeout first
-    /// was not. The hot tier is one in-cluster hop to an index bounded by the roll trigger — under a
-    /// second when it is healthy — but its client's ceiling is 30s, and a federation that awaits both
-    /// halves spends every one of those seconds on every query before it hands back a sealed answer it
-    /// already had. That is not a degraded search, it is a page that looks hung, and it is what a
-    /// wedged or unreachable indexer costs each time an operator opens a log view.</para>
-    ///
-    /// <para>The overrunning half is left running rather than cancelled: it is already in flight, and its
-    /// failure is worth logging. The client timeout stays as the hard ceiling behind this one.</para>
-    /// </summary>
-    private readonly TimeSpan _halfBudget = halfBudget ?? TimeSpan.FromSeconds(5);
-
     private async Task<KubernetesOperationResult<T>> MergeAsync<T>(
         Task<KubernetesOperationResult<T>> sealedTask,
         Task<KubernetesOperationResult<T>> hotTask,
         Func<T, T, T> merge,
         string what)
     {
-        KubernetesOperationResult<T> sealedResult = await WithinBudgetAsync(sealedTask, "sealed", what);
-        KubernetesOperationResult<T> hotResult = await WithinBudgetAsync(hotTask, "hot", what);
+        await Task.WhenAll(sealedTask, hotTask);
+        KubernetesOperationResult<T> sealedResult = sealedTask.Result;
+        KubernetesOperationResult<T> hotResult = hotTask.Result;
 
         if (sealedResult.IsSuccess && hotResult.IsSuccess)
             return KubernetesOperationResult<T>.Success(merge(sealedResult.Data!, hotResult.Data!));
@@ -214,26 +193,5 @@ public sealed class FederatedLogBackend(
 
         return KubernetesOperationResult<T>.Failure(
             $"Both telemetry tiers failed for {what}. Sealed: {sealedResult.Error}. Hot: {hotResult.Error}.");
-    }
-
-    /// <summary>
-    /// Waits <see cref="_halfBudget"/> for one half and treats an overrun as that half failing, so the
-    /// query costs the budget rather than the slow half's own timeout.
-    /// </summary>
-    private async Task<KubernetesOperationResult<T>> WithinBudgetAsync<T>(
-        Task<KubernetesOperationResult<T>> half, string which, string what)
-    {
-        if (half == await Task.WhenAny(half, Task.Delay(_halfBudget))) return await half;
-
-        // Nobody awaits it now, so its exception would be unobserved — and what it eventually says is the
-        // only record of why this half was missing from the answer.
-        _ = half.ContinueWith(
-            t => logger.LogWarning(t.Exception,
-                "The {Which} tier finished {What} after the federation stopped waiting ({Budget}s).",
-                which, what, _halfBudget.TotalSeconds),
-            TaskScheduler.Default);
-
-        return KubernetesOperationResult<T>.Failure(
-            $"the {which} tier did not answer within {_halfBudget.TotalSeconds:0}s");
     }
 }
