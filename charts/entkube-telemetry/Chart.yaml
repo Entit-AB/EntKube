@@ -5,11 +5,18 @@ description: >-
   PersistentVolume, and an optional querier that scales the read path out over object storage.
 type: application
 
-# Chart version — bump on every chart change.
-version: 0.5.0
+# Chart version — bump on every chart change, AND on every change to the node's own code.
+#
+# The second half is the one that gets missed, because nothing about editing a .cs file suggests editing a
+# Helm chart. But appVersion below IS the deployed image tag (values.yaml leaves image.tag empty on
+# purpose) and pullPolicy is IfNotPresent, so leaving these alone means `helm upgrade` re-deploys the
+# identical image reference and the kubelet never re-pulls: the node keeps running the exact bits it
+# already had. A fix to the query path, the federation or the segment engine then ships to the management
+# plane and reaches the cluster not at all — which looks, from the log viewer, like the fix not working.
+version: 0.5.1
 
 # Version of the entkube-telemetry image this chart is tested against. Used as the default image tag.
-appVersion: "0.5.0"
+appVersion: "0.5.1"
 
 keywords:
   - logging
