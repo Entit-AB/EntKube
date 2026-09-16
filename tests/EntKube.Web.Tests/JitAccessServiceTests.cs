@@ -383,6 +383,93 @@ public class JitAccessServiceTests : IDisposable
         provisioner.Minted.Should().ContainSingle("a second approval must not mint a second credential");
     }
 
+    // ── Withdrawing and lapsing ───────────────────────────────────────────────
+
+    [Fact]
+    public async Task The_requester_can_take_back_a_request_nobody_has_answered()
+    {
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
+
+        await sut.EndOwnGrantAsync(requested.Id, SubjectId, SubjectEmail);
+
+        JitGrant stored = (await sut.GetAsync(requested.Id))!;
+        stored.StatusAt(DateTime.UtcNow).Should().Be(JitGrantStatus.Withdrawn,
+            "nothing was granted, so there was nothing to revoke");
+        stored.RevokeReason.Should().Be("withdrawn by the requester");
+
+        (await sut.ListPendingAsync(tenantId)).Should().BeEmpty();
+        provisioner.TornDown.Should().BeEmpty("a pending request never reached a cluster");
+    }
+
+    [Fact]
+    public async Task Handing_back_a_live_grant_removes_its_cluster_objects()
+    {
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
+        await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
+
+        await sut.EndOwnGrantAsync(requested.Id, SubjectId, SubjectEmail);
+
+        JitGrant stored = (await sut.GetAsync(requested.Id))!;
+        stored.StatusAt(DateTime.UtcNow).Should().Be(JitGrantStatus.Revoked,
+            "access existed, so ending it is a revocation and the record should say so");
+        provisioner.TornDown.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task A_request_belonging_to_somebody_else_cannot_be_ended()
+    {
+        JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
+
+        Func<Task> act = () =>
+            sut.EndOwnGrantAsync(requested.Id, OtherSubjectId, OtherSubjectEmail);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*somebody else*");
+        (await sut.ListPendingAsync(tenantId)).Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task A_request_nobody_answers_lapses_and_leaves_the_queue()
+    {
+        JitGrant stale = NewGrant();
+        stale.RequestedAt = DateTime.UtcNow - JitGrant.PendingWindow - TimeSpan.FromMinutes(1);
+        db.JitGrants.Add(stale);
+        await db.SaveChangesAsync();
+
+        stale.StatusAt(DateTime.UtcNow).Should().Be(JitGrantStatus.Lapsed);
+
+        (await sut.ListPendingAsync(tenantId)).Should().BeEmpty(
+            "an approver cannot act on it, so it is not a queue item");
+        (await sut.ListForUserAsync(SubjectId)).Should().ContainSingle(
+            "the request still happened, and rows are never deleted");
+    }
+
+    [Fact]
+    public async Task A_lapsed_request_cannot_be_approved()
+    {
+        JitGrant stale = NewGrant();
+        stale.RequestedAt = DateTime.UtcNow - JitGrant.PendingWindow - TimeSpan.FromMinutes(1);
+        db.JitGrants.Add(stale);
+        await db.SaveChangesAsync();
+
+        Func<Task> act = () =>
+            sut.ApproveAsync(stale.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*lapsed*");
+        provisioner.Minted.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_request_still_inside_the_window_is_untouched()
+    {
+        JitGrant waiting = NewGrant();
+        waiting.RequestedAt = DateTime.UtcNow - JitGrant.PendingWindow + TimeSpan.FromMinutes(5);
+        db.JitGrants.Add(waiting);
+        await db.SaveChangesAsync();
+
+        waiting.StatusAt(DateTime.UtcNow).Should().Be(JitGrantStatus.Pending);
+        (await sut.ListPendingAsync(tenantId)).Should().ContainSingle();
+    }
+
     // ── Duration ──────────────────────────────────────────────────────────────
 
     [Fact]

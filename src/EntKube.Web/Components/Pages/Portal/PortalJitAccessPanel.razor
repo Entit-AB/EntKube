@@ -183,7 +183,14 @@
                             <td class="small"><code>@grant.Namespace</code></td>
                             <td class="small text-truncate" style="max-width:20rem;">@grant.Reason</td>
                             <td class="small">
-                                @if (grant.ApprovedAt is null)
+                                @if (status == JitGrantStatus.Pending)
+                                {
+                                    <span class="text-muted">
+                                        @JitAccessService.HumaniseMinutes(grant.RequestedMinutes) asked ·
+                                        lapses @Describe(grant.LapsesAt)
+                                    </span>
+                                }
+                                else if (grant.ApprovedAt is null)
                                 {
                                     <span class="text-muted">
                                         @JitAccessService.HumaniseMinutes(grant.RequestedMinutes) asked
@@ -195,13 +202,15 @@
                                 }
                             </td>
                             <td class="text-end">
-                                @if (status == JitGrantStatus.Active)
+                                @* Handing back access you no longer need — or taking back a request
+                                   nobody has answered — should be the easiest thing on the page,
+                                   not something only an operator can do. *@
+                                @if (status is JitGrantStatus.Active or JitGrantStatus.Pending)
                                 {
-                                    @* Handing back access you no longer need should be the easiest
-                                       thing on the page, not something only an operator can do. *@
                                     <button class="btn btn-sm btn-outline-danger py-0 px-1"
-                                            @onclick="() => RevokeAsync(grant)">
-                                        Hand back
+                                            disabled="@(ending == grant.Id)"
+                                            @onclick="() => EndAsync(grant)">
+                                        @(status == JitGrantStatus.Pending ? "Withdraw" : "Hand back")
                                     </button>
                                 }
                             </td>
@@ -228,6 +237,7 @@
     private int requestedMinutes = 60;
     private Guid selectedClusterId;
     private bool submitting;
+    private Guid? ending;
     private string? loadError;
 
     // Two identifiers for one person. A grant is keyed to the account id — it is a foreign key,
@@ -298,17 +308,23 @@
         }
     }
 
-    private async Task RevokeAsync(JitGrant grant)
+    private async Task EndAsync(JitGrant grant)
     {
+        bool wasPending = grant.StatusAt(DateTime.UtcNow) == JitGrantStatus.Pending;
+        ending = grant.Id;
         try
         {
-            await Jit.RevokeAsync(grant.Id, userDisplay, "handed back by the requester");
-            Toasts.Success("Access handed back.");
+            await Jit.EndOwnGrantAsync(grant.Id, userId, userDisplay);
+            Toasts.Success(wasPending ? "Request withdrawn." : "Access handed back.");
             await LoadAsync();
         }
         catch (Exception ex)
         {
             Toasts.Error(ex.Message);
+        }
+        finally
+        {
+            ending = null;
         }
     }
 
@@ -317,6 +333,9 @@
         JitGrantStatus.Active => "text-bg-success",
         JitGrantStatus.Pending => "text-bg-warning",
         JitGrantStatus.Denied or JitGrantStatus.Revoked => "text-bg-danger",
+        // Nobody refused it and nobody granted it. Neutral, because neither the requester nor
+        // the approver did anything wrong — the clock ran out.
+        JitGrantStatus.Lapsed or JitGrantStatus.Withdrawn => "text-bg-secondary",
         _ => "text-bg-secondary",
     };
 

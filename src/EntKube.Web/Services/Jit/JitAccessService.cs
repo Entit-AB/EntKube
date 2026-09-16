@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 
@@ -300,7 +301,9 @@ public class JitAccessService(
         DateTime now = DateTime.UtcNow;
         if (grant.StatusAt(now) != JitGrantStatus.Pending)
             throw new InvalidOperationException(
-                $"This request is {grant.StatusAt(now).ToString().ToLowerInvariant()} and cannot be approved.");
+                grant.StatusAt(now) == JitGrantStatus.Lapsed
+                    ? "This request went unanswered for too long and has lapsed. Ask for a new one."
+                    : $"This request is {grant.StatusAt(now).ToString().ToLowerInvariant()} and cannot be approved.");
 
         // Self-approval defeats the point of an approval step. Checked on both the requester and
         // the subject: approving your own request and approving a request someone filed on your
@@ -424,6 +427,71 @@ public class JitAccessService(
     }
 
     /// <summary>
+    /// Ends a grant its own subject holds — withdrawing it if nobody has decided yet, handing it
+    /// back if it is live.
+    ///
+    /// One method for both because the portal offers one button, and because the difference is
+    /// not the caller's to assert: a request approved while somebody was reading the page would
+    /// otherwise be withdrawn as though it were still pending. The status a grant ends up with is
+    /// derived from whether it had been approved, so this cannot mislabel the record.
+    ///
+    /// Ownership is checked here rather than trusted from the UI. <see cref="RevokeAsync"/> takes
+    /// an operator's word for it because an operator is acting on somebody else's grant by
+    /// definition; a customer is not, and the portal renders its own rows, so an id arriving here
+    /// for a grant belonging to somebody else did not come from the page.
+    /// </summary>
+    public async Task<JitGrant> EndOwnGrantAsync(
+        Guid grantId, string subjectUserId, string endedBy, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        JitGrant grant = await db.JitGrants
+            .Include(g => g.KubernetesCluster)
+            .Include(g => g.User)
+            .FirstOrDefaultAsync(g => g.Id == grantId, ct)
+            ?? throw new InvalidOperationException("Grant not found.");
+
+        bool isOwn = string.Equals(grant.UserId, subjectUserId, StringComparison.OrdinalIgnoreCase)
+                     || string.Equals(grant.RequestedBy, endedBy, StringComparison.OrdinalIgnoreCase);
+
+        if (!isOwn)
+            throw new InvalidOperationException("This request belongs to somebody else.");
+
+        DateTime now = DateTime.UtcNow;
+        JitGrantStatus status = grant.StatusAt(now);
+
+        if (status is not (JitGrantStatus.Pending or JitGrantStatus.Active))
+            throw new InvalidOperationException(
+                $"This request is {status.ToString().ToLowerInvariant()} and cannot be ended.");
+
+        bool wasApproved = grant.ApprovedAt is not null;
+
+        // A pending request never reached a cluster, so there is nothing to tear down. Going
+        // through RevokeAsync anyway keeps the teardown-before-the-row order in one place.
+        return wasApproved
+            ? await RevokeAsync(grantId, endedBy, "handed back by the requester", ct)
+            : await WithdrawAsync(db, grant, endedBy, ct);
+    }
+
+    private async Task<JitGrant> WithdrawAsync(
+        ApplicationDbContext db, JitGrant grant, string withdrawnBy, CancellationToken ct)
+    {
+        grant.RevokedAt = DateTime.UtcNow;
+        grant.RevokedBy = withdrawnBy;
+        grant.RevokeReason = "withdrawn by the requester";
+
+        await db.SaveChangesAsync(ct);
+
+        await auditService.RecordAsync(null, "JitAccessWithdrawn", "JitGrant", grant.Id.ToString(),
+            $"{grant.RequestedLevel} on {grant.Namespace} for {SubjectName(grant)}",
+            withdrawnBy, ct);
+
+        logger.LogInformation("JIT request {GrantId} withdrawn by {WithdrawnBy}", grant.Id, withdrawnBy);
+
+        return grant;
+    }
+
+    /// <summary>
     /// Ends a live grant immediately.
     ///
     /// The cluster objects go first. A bound ServiceAccount token cannot be invalidated before it
@@ -481,7 +549,28 @@ public class JitAccessService(
             .ToListAsync(ct);
     }
 
-    /// <summary>Requests awaiting a decision in a tenant, oldest first — a queue, not a feed.</summary>
+    /// <summary>
+    /// What "still waiting for a decision" means, as one expression everything asking the question
+    /// shares — the queue and the operations advisor both do.
+    ///
+    /// Two copies of this predicate would drift, and the way it would show up is an advisor
+    /// nagging an operator about a request the queue no longer displays.
+    /// </summary>
+    public static Expression<Func<JitGrant, bool>> AwaitingDecision(Guid tenantId, DateTime now)
+    {
+        DateTime lapsedBefore = now - JitGrant.PendingWindow;
+
+        return g => g.TenantId == tenantId
+                    && g.ApprovedAt == null && g.DeniedAt == null && g.RevokedAt == null
+                    && g.RequestedAt > lapsedBefore;
+    }
+
+    /// <summary>
+    /// Requests awaiting a decision in a tenant, oldest first — a queue, not a feed.
+    ///
+    /// Requests that have lapsed are left out. They are still in the history, but a queue that
+    /// keeps handing an approver things they can no longer act on stops being a queue.
+    /// </summary>
     public async Task<List<JitGrant>> ListPendingAsync(Guid tenantId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
@@ -490,8 +579,7 @@ public class JitAccessService(
             .Include(g => g.App)
             .Include(g => g.KubernetesCluster)
             .Include(g => g.Environment)
-            .Where(g => g.TenantId == tenantId
-                        && g.ApprovedAt == null && g.DeniedAt == null && g.RevokedAt == null)
+            .Where(AwaitingDecision(tenantId, DateTime.UtcNow))
             .OrderBy(g => g.RequestedAt)
             .ToListAsync(ct);
     }

@@ -37,6 +37,16 @@ public enum JitGrantStatus
     Active,
     Expired,
     Revoked,
+
+    /// <summary>The requester took it back before anybody decided.</summary>
+    Withdrawn,
+
+    /// <summary>
+    /// Nobody decided in time. Distinct from <see cref="Expired"/>, which is a grant that was
+    /// given and ran out — this one was never given, and saying so is the difference between
+    /// "your access ended" and "nobody ever answered you".
+    /// </summary>
+    Lapsed,
 }
 
 /// <summary>
@@ -201,11 +211,30 @@ public class JitGrant
     /// depends on a background job having run is not actually time-boxed.
     /// </summary>
     public JitGrantStatus StatusAt(DateTime now) =>
-        RevokedAt is not null ? JitGrantStatus.Revoked
+        // Ended before it was decided is a withdrawal, not a revocation: there was no access to
+        // revoke. Same column, because both are "somebody stopped this", and the record keeps
+        // who and why either way.
+        RevokedAt is not null
+            ? ApprovedAt is null ? JitGrantStatus.Withdrawn : JitGrantStatus.Revoked
         : DeniedAt is not null ? JitGrantStatus.Denied
-        : ApprovedAt is null ? JitGrantStatus.Pending
+        : ApprovedAt is null
+            ? LapsesAt <= now ? JitGrantStatus.Lapsed : JitGrantStatus.Pending
         : ExpiresAt is null || ExpiresAt <= now ? JitGrantStatus.Expired
         : JitGrantStatus.Active;
+
+    /// <summary>
+    /// When an undecided request gives up waiting.
+    ///
+    /// Derived like every other status, so a request stops being actionable on its own rather
+    /// than because a job ran. A day-old request for just-in-time access is answering a question
+    /// nobody is still asking, and leaving it in the queue teaches an approver to scroll past it.
+    /// Approving late would also be worse than not approving: the credential would land after the
+    /// need for it had gone, with nobody expecting it.
+    /// </summary>
+    public DateTime LapsesAt => RequestedAt + PendingWindow;
+
+    /// <summary>How long a request waits for a decision before it lapses.</summary>
+    public static readonly TimeSpan PendingWindow = TimeSpan.FromHours(24);
 
     /// <summary>True when the grant may still be used to reach the cluster.</summary>
     public bool IsLiveAt(DateTime now) => StatusAt(now) == JitGrantStatus.Active;
