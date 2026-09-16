@@ -204,7 +204,13 @@ public sealed class SegmentLogService(
         if (tenantId is null) return Fail<List<string>>();
 
         if (windowMinutes <= 0) windowMinutes = DefaultDiscoveryWindowMinutes;
-        string cacheKey = $"{tenantId.Value:N}|{clusterId:N}|{field}|{namespaceName}|{windowMinutes}";
+        // The SCOPE belongs in this key. One process runs more than one instance of this service — the
+        // indexer serves its public routes at SegmentScope.All and the querier's internal ones at
+        // SegmentScope.Hot — and the cache is static, so without the scope a question asked of one tier
+        // is answered with the other tier's list. The sealed tier legitimately answers "no pods" for a
+        // window whose data has not been sealed yet, and that empty list would then be served as the
+        // whole cluster's pod dropdown for the next 30 seconds.
+        string cacheKey = $"{scope}|{tenantId.Value:N}|{clusterId:N}|{field}|{namespaceName}|{windowMinutes}";
         if (LabelCache.TryGetValue(cacheKey, out (DateTime At, List<string> Values) c)
             && DateTime.UtcNow - c.At < LabelTtl)
         {
