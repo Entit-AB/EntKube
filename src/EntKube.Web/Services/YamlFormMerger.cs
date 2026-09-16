@@ -549,6 +549,99 @@ public static class YamlFormMerger
         return SerializeToYaml(root);
     }
 
+    /// <summary>
+    /// Fills in the OpenTelemetry eBPF Instrumentation memory bounds that any component registered before
+    /// they existed is missing, without touching a value that is already there.
+    ///
+    /// <para>The catalog's defaults are read once, at registration, and
+    /// <c>ComponentLifecycleService.FillMissingCatalogDefaults</c> deliberately fills only TOP-LEVEL keys
+    /// afterwards. For this chart that is the whole difference between a fix shipping and a fix arriving:
+    /// every bound except <c>env</c> lives under <c>config.data</c>, and an install made before them has a
+    /// <c>config</c> key — so the entire block is "present" and left exactly as it was. The agent then keeps
+    /// running with the configuration that made it cost gigabytes:</para>
+    /// <list type="bullet">
+    /// <item><c>otel_traces_export.instrumentations</c> absent → OBI loads all THIRTEEN protocol probe sets
+    ///   (http, grpc, sql, redis, kafka, mqtt, nats, amqp, mongo, couchbase, memcached, sunrpc, aerospike)
+    ///   on every instrumented executable. The earlier catalog wrote <c>instrumentations</c> at the top
+    ///   level of the config, which OBI does not read — so nothing was ever selected, by us or by the
+    ///   operator.</item>
+    /// <item><c>ebpf.maps_config</c> absent → every eBPF map is preallocated at upstream's full size, per
+    ///   instrumented executable, as kernel memory charged to this pod's cgroup where the Go runtime can
+    ///   neither see nor free it.</item>
+    /// <item><c>prometheus_export</c> absent → the CHART's own default of <c>:9090</c> survives the merge,
+    ///   so OBI aggregates RED metrics per service and per route in its heap for a scrape endpoint that
+    ///   nothing reads (the chart's ServiceMonitor is off by default).</item>
+    /// <item><c>routes</c> absent → the <c>heuristic</c> decorator collapses only the path segments that
+    ///   look like ids, so a path shaped like a directory tree stays unique forever and every variant
+    ///   becomes another permanent series behind those metrics.</item>
+    /// </list>
+    ///
+    /// <para>Strictly additive, and that is the whole safety argument: a key the operator has set — to
+    /// anything at all — is left alone, exactly as the top-level fill-in treats one. Absent-means-
+    /// unconsidered holds here more strongly than usual, because these keys did not exist in any values
+    /// document EntKube ever wrote before 2026-09-10. Settings that ARE present and expensive
+    /// (<c>ebpf.context_propagation: all</c>, an <c>otel_metrics_export</c> endpoint) are deliberately not
+    /// touched — they are form fields instead, so changing them stays the operator's decision.</para>
+    /// </summary>
+    public static string EnsureObiResourceBounds(string yaml)
+    {
+        if (string.IsNullOrWhiteSpace(yaml)) return yaml;
+
+        YamlMappingNode root = ParseOrCreateRoot(yaml);
+        if (!TryGetMapping(root, "config", out YamlMappingNode? config)) return yaml;
+        if (!TryGetMapping(config!, "data", out YamlMappingNode? data)) return yaml;
+
+        bool changed = false;
+
+        // Protocol probe sets. Absent here even on installs whose values say `instrumentations: ["*"]`,
+        // because that key belongs to the exporter section and is ignored at the top level.
+        if (TryGetMapping(data!, "otel_traces_export", out YamlMappingNode? traces)
+            && !TryGetValue(traces!, "instrumentations", out _))
+        {
+            var protocols = new YamlSequenceNode(
+                new YamlScalarNode("http"), new YamlScalarNode("grpc"), new YamlScalarNode("sql"));
+            traces!.Children.Add(new YamlScalarNode("instrumentations"), protocols);
+            changed = true;
+        }
+
+        // eBPF map sizes — kernel memory, preallocated, charged to this cgroup.
+        YamlMappingNode ebpf = GetOrCreateMapping(data!, "ebpf");
+        if (!TryGetValue(ebpf, "maps_config", out _))
+        {
+            YamlMappingNode maps = GetOrCreateMapping(ebpf, "maps_config");
+            SetScalar(maps, "global_scale_factor", "-1");
+            changed = true;
+        }
+
+        // The chart's own :9090 default, and the unbounded route cardinality behind it.
+        if (!TryGetValue(data!, "prometheus_export", out _))
+        {
+            SetScalar(GetOrCreateMapping(data!, "prometheus_export"), "port", "0");
+            changed = true;
+        }
+        if (!TryGetValue(data!, "routes", out _))
+        {
+            YamlMappingNode routes = GetOrCreateMapping(data!, "routes");
+            SetScalar(routes, "unmatched", "low-cardinality");
+            SetScalar(routes, "max_path_segment_cardinality", "10");
+            changed = true;
+        }
+
+        // The metadata cache is a second Go process under a second limit, and it got its own heap
+        // ceiling in the same pass. Same rule: only when nothing is set.
+        if (TryGetMapping(root, "k8sCache", out YamlMappingNode? cache))
+        {
+            YamlMappingNode cacheEnv = GetOrCreateMapping(cache!, "env");
+            if (!TryGetValue(cacheEnv, "GOMEMLIMIT", out _))
+            {
+                SetScalar(cacheEnv, "GOMEMLIMIT", "350MiB");
+                changed = true;
+            }
+        }
+
+        return changed ? SerializeToYaml(root) : yaml;
+    }
+
     private static bool TryGetMapping(YamlMappingNode parent, string key, out YamlMappingNode? mapping)
     {
         mapping = TryGetValue(parent, key, out YamlNode? value) ? value as YamlMappingNode : null;

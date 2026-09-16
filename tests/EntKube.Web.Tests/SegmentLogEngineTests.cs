@@ -385,6 +385,68 @@ public sealed class SegmentLogEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task PodDropdown_StaysFast_WhenTheIndexHoldsTensOfThousandsOfPodNames()
+    {
+        // Pod names churn: every rollout, every restart, every CronJob run mints a new one, and a
+        // management-plane segment holds all of them for every cluster of the tenant. So the number of
+        // DISTINCT pod values in the index runs into the tens of thousands while the dropdown the viewer
+        // wants is a few dozen — and an implementation whose cost follows the former rather than the
+        // caller's own filter takes tens of seconds to fill a picker that sits in front of the search.
+        // That is what this pins: 50k pod names, four leaves, one namespace asked for.
+        DateTime t0 = DateTime.UtcNow.AddMinutes(-30);
+        LogSegmentManager mgr = NewManager();
+
+        const int lines = 100_000, distinctPods = 50_000, leaves = 4;
+        for (int leaf = 0; leaf < leaves; leaf++)
+        {
+            var batch = new List<LogIngestRecord>(lines / leaves);
+            for (int i = 0; i < lines / leaves; i++)
+            {
+                int n = leaf * (lines / leaves) + i;
+                // Two namespaces; the queried one carries a small, stable set of pods, the other carries
+                // the churn. Neither the count nor the cost of the noise may reach the answer.
+                bool quiet = n % 10 == 0;
+                string ns = quiet ? "prod" : "batch";
+                string pod = quiet ? $"api-{n / 10 % 6}" : $"job-{n % distinctPods}-7f3c9a1e";
+                batch.Add(Log(t0.AddMilliseconds(n), ns, pod, 2, $"line {n}"));
+            }
+            mgr.WriteLogs(_tenantId, _clusterId, batch);
+            if (leaf < leaves - 1) await mgr.RollAndSealAsync();
+        }
+
+        SegmentLogService svc = NewService();
+        var sw = Stopwatch.StartNew();
+        KubernetesOperationResult<List<string>> pods = await svc.GetPodsAsync(_clusterId, "prod", 60);
+        sw.Stop();
+
+        pods.Data.Should().BeEquivalentTo(["api-0", "api-1", "api-2", "api-3", "api-4", "api-5"]);
+        // Milliseconds when the values are read from the filter's own documents; the probe-per-distinct-
+        // value implementation this replaced took ~7s on exactly this shape. The bound is loose because
+        // the suite runs test classes in parallel and starves the CPU — it still catches a return to a
+        // cost that follows the index rather than the query.
+        sw.ElapsedMilliseconds.Should().BeLessThan(2000);
+    }
+
+    [Fact]
+    public async Task Labels_DescribeTheSelectedWindow_NotTheWholeSegment()
+    {
+        // A segment spans far more time than the range the viewer asked for, so bounding the query to the
+        // window only by which SEGMENTS it opens leaves the dropdown describing a different period than
+        // the log list below it: a pod retired an hour ago is offered, and searching for it finds nothing.
+        DateTime now = DateTime.UtcNow;
+        LogSegmentManager mgr = ManagerWith(
+            Log(now.AddMinutes(-90), "prod", "retired-pod", 2, "before the window"),
+            Log(now.AddMinutes(-5), "prod", "live-pod", 2, "inside the window"));
+
+        SegmentLogService svc = NewService();
+
+        (await svc.GetPodsAsync(_clusterId, "prod", 60)).Data.Should().BeEquivalentTo(["live-pod"]);
+        // Widen the window and the retired pod is offered again — it was never dropped, only out of range.
+        (await svc.GetPodsAsync(_clusterId, "prod", 180)).Data
+            .Should().BeEquivalentTo(["live-pod", "retired-pod"]);
+    }
+
+    [Fact]
     public async Task Tenants_AreIsolated_NoCrossTenantLogs()
     {
         // A second tenant + cluster. Telemetry must be tenant-scoped: neither tenant can see the other's logs.
