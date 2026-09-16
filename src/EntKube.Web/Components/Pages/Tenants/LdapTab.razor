@@ -132,11 +132,11 @@
                             <div class="row g-2">
                                 <div class="col">
                                     <label class="form-label small">Admin password</label>
-                                    <input type="password" class="form-control form-control-sm" placeholder="unchanged" @bind="adminPassword" />
+                                    <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" placeholder="unchanged" @bind="adminPassword" />
                                 </div>
                                 <div class="col">
                                     <label class="form-label small">Config password</label>
-                                    <input type="password" class="form-control form-control-sm" placeholder="unchanged" @bind="configPassword" />
+                                    <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" placeholder="unchanged" @bind="configPassword" />
                                 </div>
                             </div>
                         </div></div>
@@ -364,7 +364,7 @@
                                 { <option value="@ou.Id">@ou.Name</option> }
                             </select>
                         </div>
-                        <div class="col-md-2"><label class="form-label small">Password</label><input type="password" class="form-control form-control-sm" @bind="newUserPassword" /></div>
+                        <div class="col-md-2"><label class="form-label small">Password</label><input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" @bind="newUserPassword" /></div>
                         <div class="col-md-1"><button class="btn btn-sm btn-secondary w-100" @onclick="AddUserAsync" disabled="@(busy || string.IsNullOrWhiteSpace(nu.Uid) || string.IsNullOrWhiteSpace(nu.Cn))"><i class="bi bi-plus-lg"></i></button></div>
                     </div>
                     <div class="form-check form-switch mt-2">

@@ -288,7 +288,8 @@
                                             else
                                             {
                                                 <input class="form-control form-control-sm" placeholder="@sp.Placeholder"
-                                                       value="@GetParam(sp.Key)" @onchange="e => SetParam(sp.Key, e.Value?.ToString())" />
+                                                       value="@GetParam(sp.Key)" @attributes="FormAutofill.Fields"
+                                                       @onchange="e => SetParam(sp.Key, e.Value?.ToString())" />
                                             }
                                         </div>
                                     }
@@ -838,13 +839,18 @@
             return;
         }
 
+        bool isPassword = field.Type == FormFieldType.Password;
+
         builder.OpenElement(0, "input");
         builder.AddAttribute(1, "class", "form-control form-control-sm");
-        builder.AddAttribute(2, "type", field.Type == FormFieldType.Password ? "password"
+        builder.AddAttribute(2, "type", isPassword ? "password"
             : field.Type == FormFieldType.Number ? "number" : "text");
         builder.AddAttribute(3, "placeholder", field.Placeholder ?? "");
         builder.AddAttribute(4, "value", GetParam(field.Key));
-        builder.AddAttribute(5, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this,
+        // A blueprint step edits the same catalog fields the Components tab does, so it is the same
+        // column of text boxes above a password box that a password manager fills a saved login into.
+        builder.AddMultipleAttributes(5, isPassword ? FormAutofill.Password : FormAutofill.Fields);
+        builder.AddAttribute(6, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this,
             e => SetParam(field.Key, e.Value?.ToString())));
         builder.CloseElement();
     };

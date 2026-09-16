@@ -108,7 +108,7 @@
                                     <InputText class="form-control form-control-sm" placeholder="Last name" @bind-Value="addUserForm.LastName" />
                                 </div>
                                 <div class="col-md-4">
-                                    <InputText type="password" class="form-control form-control-sm" placeholder="Password (optional)" @bind-Value="addUserForm.Password" />
+                                    <InputText type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" placeholder="Password (optional)" @bind-Value="addUserForm.Password" />
                                 </div>
                             </div>
                             <div class="mt-2 d-flex gap-2">
@@ -339,7 +339,7 @@
                                         <div class="row g-2" style="max-width:360px">
                                             <div class="col-12">
                                                 <label class="form-label small">New Password</label>
-                                                <input type="password" class="form-control form-control-sm"
+                                                <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                                                        @bind="editUserNewPassword" />
                                             </div>
                                             <div class="col-12">
@@ -452,7 +452,7 @@
                                     <InputText class="form-control form-control-sm" placeholder="Client ID" @bind-Value="addIdpForm.ClientId" />
                                 </div>
                                 <div class="col-md-3">
-                                    <InputText type="password" class="form-control form-control-sm" placeholder="Client Secret" @bind-Value="addIdpForm.ClientSecret" />
+                                    <InputText type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" placeholder="Client Secret" @bind-Value="addIdpForm.ClientSecret" />
                                 </div>
                             </div>
                             <div class="mt-2 d-flex gap-2">
@@ -1677,7 +1677,7 @@
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label small">Password</label>
-                                <input type="password" class="form-control form-control-sm" @bind="realmSettings.SmtpPassword" />
+                                <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" @bind="realmSettings.SmtpPassword" />
                             </div>
                         }
                     </div>
@@ -1792,7 +1792,7 @@ else if (selectedKeycloak is not null)
                     </div>
                     <div class="col-md-6">
                         <label class="form-label small">New Admin Password <span class="text-muted">(leave blank to keep)</span></label>
-                        <input type="password" class="form-control form-control-sm" @bind="editAdminPassword" />
+                        <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" @bind="editAdminPassword" />
                     </div>
                 </div>
                 <div class="mt-2 d-flex gap-2">
@@ -1886,7 +1886,7 @@ else if (selectedKeycloak is not null)
                     </div>
                     <div class="col-md-6">
                         <label class="form-label small fw-semibold">Admin Password</label>
-                        <input type="password" class="form-control form-control-sm" @bind="setupPassword" />
+                        <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" @bind="setupPassword" />
                     </div>
                 </div>
                 <div class="mt-3">
@@ -2439,7 +2439,7 @@ else
                         </div>
                         <div class="col-md-6">
                             <label class="form-label small fw-semibold">Admin Password</label>
-                            <InputText type="password" class="form-control form-control-sm" @bind-Value="registerExternalForm.Password" />
+                            <InputText type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" @bind-Value="registerExternalForm.Password" />
                             <ValidationMessage For="() => registerExternalForm.Password" class="text-danger small" />
                         </div>
                     </div>

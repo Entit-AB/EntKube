@@ -1356,7 +1356,7 @@
                                         {
                                             <div class="input-group input-group-sm">
                                                 <span class="input-group-text">PAT</span>
-                                                <input type="password" class="form-control form-control-sm"
+                                                <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                                                        placeholder="Personal Access Token"
                                                        @bind="credSecretValues[cred.Id]" @bind:event="oninput" />
                                                 <button class="btn btn-sm btn-outline-secondary"
@@ -1367,7 +1367,7 @@
                                         {
                                             <div class="input-group input-group-sm">
                                                 <span class="input-group-text">Password</span>
-                                                <input type="password" class="form-control form-control-sm"
+                                                <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                                                        placeholder="Password"
                                                        @bind="credSecretValues[cred.Id]" @bind:event="oninput" />
                                                 <button class="btn btn-sm btn-outline-secondary"

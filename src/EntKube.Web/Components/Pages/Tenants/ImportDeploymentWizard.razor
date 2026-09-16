@@ -290,7 +290,7 @@
                                             <div class="row g-1 mt-1">
                                                 <div class="col"><input class="form-control form-control-sm" placeholder="admin pod" @bind="pg.AdminPodName" /></div>
                                                 <div class="col"><input class="form-control form-control-sm" placeholder="admin user" @bind="pg.AdminUsername" /></div>
-                                                <div class="col"><input class="form-control form-control-sm" type="password" placeholder="admin password" @bind="pg.AdminPassword" /></div>
+                                                <div class="col"><input class="form-control form-control-sm" type="password" @attributes="FormAutofill.Password" placeholder="admin password" @bind="pg.AdminPassword" /></div>
                                                 <div class="col"><input class="form-control form-control-sm" placeholder="service name" @bind="pg.ServiceName" /></div>
                                             </div>
                                         }

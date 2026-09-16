@@ -89,7 +89,7 @@ else
                                         <span class="text-muted ms-1">or service principal secret</span>
                                     }
                                 </label>
-                                <InputText type="password" class="form-control form-control-sm"
+                                <InputText type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                                            @bind-Value="addForm.Password" />
                                 <ValidationMessage For="() => addForm.Password" class="text-danger small" />
                             </div>
@@ -350,7 +350,7 @@ else
                                                 </div>
                                                 <div class="col-md-4">
                                                     <label class="form-label small mb-1">New password / token</label>
-                                                    <input type="password" class="form-control form-control-sm"
+                                                    <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                                                            placeholder="Leave blank to keep existing"
                                                            @bind="editPassword" />
                                                 </div>

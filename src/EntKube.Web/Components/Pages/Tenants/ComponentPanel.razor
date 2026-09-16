@@ -89,7 +89,7 @@
                                                        placeholder="Secret name" @bind="newSecretName" @bind:event="oninput" />
                                             </div>
                                             <div class="col-5">
-                                                <input type="password" class="form-control form-control-sm"
+                                                <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                                                        placeholder="Secret value" @bind="newSecretValue" @bind:event="oninput" />
                                             </div>
                                             <div class="col-auto">

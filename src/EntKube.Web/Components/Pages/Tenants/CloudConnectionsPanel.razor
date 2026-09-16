@@ -194,7 +194,7 @@
                         </div>
                         <div class="col-md-6">
                             <label class="form-label small fw-semibold">Password</label>
-                            <input type="password" class="form-control form-control-sm" @bind="osFormPassword" placeholder="Stored in vault" />
+                            <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" @bind="osFormPassword" placeholder="Stored in vault" />
                         </div>
                         <div class="col-12">
                             <label class="form-label small fw-semibold">S3 Endpoint <span class="text-muted fw-normal">(optional)</span></label>
@@ -337,7 +337,7 @@
                             </div>
                             <div class="col-md-3">
                                 <label class="form-label small fw-semibold">Proxy Password</label>
-                                <input type="password" class="form-control form-control-sm" @bind="osFormProxyPassword" placeholder="Stored in vault" />
+                                <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" @bind="osFormProxyPassword" placeholder="Stored in vault" />
                             </div>
                         </div>
                     }

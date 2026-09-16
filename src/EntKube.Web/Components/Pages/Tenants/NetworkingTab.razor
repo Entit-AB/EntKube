@@ -234,7 +234,7 @@
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-semibold">Pre-Shared Key (PSK)</label>
-                        <input type="password" class="form-control" @bind="remotePsk"
+                        <input type="password" @attributes="FormAutofill.Password" class="form-control" @bind="remotePsk"
                                placeholder="Strong random secret, min 32 chars" autocomplete="new-password" />
                         <div class="form-text">Stored encrypted in the tenant vault.</div>
                     </div>
@@ -639,7 +639,7 @@
                                                         @if (rotatePskEndpointId == rep.Id)
                                                         {
                                                             <div class="mt-2 d-flex gap-1 align-items-center">
-                                                                <input type="password" class="form-control form-control-sm"
+                                                                <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm"
                                                                        style="max-width:200px"
                                                                        @bind="rotatePskValue"
                                                                        placeholder="New PSK"
@@ -686,7 +686,7 @@
                                             </div>
                                             <div class="col-md-4 mb-2">
                                                 <label class="form-label small">Pre-Shared Key <span class="text-muted">(stored in vault)</span></label>
-                                                <input type="password" class="form-control form-control-sm" @bind="addRemotePsk"
+                                                <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" @bind="addRemotePsk"
                                                        autocomplete="new-password" placeholder="Strong random secret" />
                                             </div>
                                             <div class="col-md-4 mb-2">

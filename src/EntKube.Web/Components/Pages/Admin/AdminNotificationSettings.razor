@@ -75,7 +75,7 @@ else
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-semibold">Password</label>
-                        <input class="form-control" type="password" @bind="smtpPassword" placeholder="@(smtpConfig is not null ? "••••••••  (leave blank to keep current)" : "(optional)")" autocomplete="current-password" />
+                        <input class="form-control" type="password" @attributes="FormAutofill.Password" @bind="smtpPassword" placeholder="@(smtpConfig is not null ? "••••••••  (leave blank to keep current)" : "(optional)")" autocomplete="current-password" />
                     </div>
                     <div class="mb-3 form-check form-switch">
                         <input class="form-check-input" type="checkbox" role="switch" id="smtpSsl" @bind="smtpEnableSsl" />
@@ -150,7 +150,7 @@ else
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-semibold">Client Secret</label>
-                        <input class="form-control" type="password" @bind="teamsClientSecret"
+                        <input class="form-control" type="password" @attributes="FormAutofill.Password" @bind="teamsClientSecret"
                                placeholder="@(teamsConfig is not null ? "••••••••  (leave blank to keep current)" : "")"
                                autocomplete="current-password" />
                     </div>

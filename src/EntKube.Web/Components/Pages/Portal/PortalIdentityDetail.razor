@@ -75,7 +75,7 @@
                                 <InputText class="form-control form-control-sm" placeholder="Last name" @bind-Value="createUserModel.LastName" />
                             </div>
                             <div class="col-md-4">
-                                <InputText type="password" class="form-control form-control-sm" placeholder="Password (optional)" @bind-Value="createUserModel.Password" />
+                                <InputText type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" placeholder="Password (optional)" @bind-Value="createUserModel.Password" />
                             </div>
                         </div>
                         <div class="mt-2 d-flex gap-2">
@@ -256,7 +256,7 @@
                                         <div class="row g-2" style="max-width:360px">
                                             <div class="col-12">
                                                 <label class="form-label small">New Password</label>
-                                                <InputText class="form-control form-control-sm" type="password" @bind-Value="portalPasswordModel.NewPassword" />
+                                                <InputText class="form-control form-control-sm" type="password" @attributes="FormAutofill.Password" @bind-Value="portalPasswordModel.NewPassword" />
                                                 <ValidationMessage For="() => portalPasswordModel.NewPassword" class="text-danger small" />
                                             </div>
                                             <div class="col-12">
@@ -820,7 +820,7 @@
                                 <ValidationMessage For="() => createIdpModel.ClientId" class="text-danger small" />
                             </div>
                             <div class="col-md-3">
-                                <InputText type="password" class="form-control form-control-sm" placeholder="Client Secret" @bind-Value="createIdpModel.ClientSecret" />
+                                <InputText type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" placeholder="Client Secret" @bind-Value="createIdpModel.ClientSecret" />
                                 <ValidationMessage For="() => createIdpModel.ClientSecret" class="text-danger small" />
                             </div>
                         </div>
