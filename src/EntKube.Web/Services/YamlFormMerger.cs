@@ -595,13 +595,25 @@ public static class YamlFormMerger
 
         // Protocol probe sets. Absent here even on installs whose values say `instrumentations: ["*"]`,
         // because that key belongs to the exporter section and is ignored at the top level.
-        if (TryGetMapping(data!, "otel_traces_export", out YamlMappingNode? traces)
-            && !TryGetValue(traces!, "instrumentations", out _))
+        if (TryGetMapping(data!, "otel_traces_export", out YamlMappingNode? traces))
         {
-            var protocols = new YamlSequenceNode(
-                new YamlScalarNode("http"), new YamlScalarNode("grpc"), new YamlScalarNode("sql"));
-            traces!.Children.Add(new YamlScalarNode("instrumentations"), protocols);
-            changed = true;
+            if (!TryGetValue(traces!, "instrumentations", out _))
+            {
+                var protocols = new YamlSequenceNode(
+                    new YamlScalarNode("http"), new YamlScalarNode("grpc"), new YamlScalarNode("sql"));
+                traces!.Children.Add(new YamlScalarNode("instrumentations"), protocols);
+                changed = true;
+            }
+
+            // The exporter's own logger, which upstream leaves off. Not a memory bound — it is the
+            // reason an agent that cannot deliver a single span still looks perfectly healthy, logging
+            // "instrumenting process" for every workload it finds while the Traces view stays empty for
+            // weeks. Filling it in is what makes the next failure of this component say so.
+            if (!TryGetValue(traces!, "otel_sdk_log_level", out _))
+            {
+                SetScalar(traces!, "otel_sdk_log_level", "error");
+                changed = true;
+            }
         }
 
         // eBPF map sizes — kernel memory, preallocated, charged to this cgroup.

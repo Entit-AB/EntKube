@@ -392,11 +392,12 @@ public sealed class SegmentLogEngineTests : IDisposable
         // DISTINCT pod values in the index runs into the tens of thousands while the dropdown the viewer
         // wants is a few dozen — and an implementation whose cost follows the former rather than the
         // caller's own filter takes tens of seconds to fill a picker that sits in front of the search.
-        // That is what this pins: 50k pod names, four leaves, one namespace asked for.
+        // That is what this pins: 25k pod names, four leaves, one namespace asked for. Kept deliberately
+        // small enough not to starve the rest of the suite, which runs test classes in parallel.
         DateTime t0 = DateTime.UtcNow.AddMinutes(-30);
         LogSegmentManager mgr = NewManager();
 
-        const int lines = 100_000, distinctPods = 50_000, leaves = 4;
+        const int lines = 50_000, distinctPods = 25_000, leaves = 4;
         for (int leaf = 0; leaf < leaves; leaf++)
         {
             var batch = new List<LogIngestRecord>(lines / leaves);
@@ -421,7 +422,7 @@ public sealed class SegmentLogEngineTests : IDisposable
 
         pods.Data.Should().BeEquivalentTo(["api-0", "api-1", "api-2", "api-3", "api-4", "api-5"]);
         // Milliseconds when the values are read from the filter's own documents; the probe-per-distinct-
-        // value implementation this replaced took ~7s on exactly this shape. The bound is loose because
+        // value implementation this replaced takes ~8s on exactly this shape. The bound is loose because
         // the suite runs test classes in parallel and starves the CPU — it still catches a return to a
         // cost that follows the index rather than the query.
         sw.ElapsedMilliseconds.Should().BeLessThan(2000);

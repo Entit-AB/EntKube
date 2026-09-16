@@ -75,6 +75,10 @@ public class ObiResourceBoundsTests
         var traces = (Dictionary<object, object>)data["otel_traces_export"];
         ((List<object>)traces["instrumentations"]).Should().BeEquivalentTo(["http", "grpc", "sql"]);
 
+        // Not a memory bound, and the most important line here: upstream ships the OTLP exporter's
+        // logger OFF, so an agent that cannot deliver a span looks exactly like one with no traffic.
+        traces["otel_sdk_log_level"].Should().Be("error");
+
         // eBPF maps are preallocated kernel memory charged to this pod; halve them.
         var maps = (Dictionary<object, object>)((Dictionary<object, object>)data["ebpf"])["maps_config"];
         maps["global_scale_factor"].Should().Be("-1");
@@ -160,6 +164,7 @@ public class ObiResourceBoundsTests
         List<string?> paths = [.. obi.FormFields.Select(f => f.YamlPath)];
 
         paths.Should().Contain("config.data.ebpf.context_propagation");
+        paths.Should().Contain("config.data.otel_traces_export.otel_sdk_log_level");
         paths.Should().Contain("config.data.otel_metrics_export.endpoint");
         paths.Should().Contain("config.data.ebpf.maps_config.global_scale_factor");
         paths.Should().Contain("config.data.prometheus_export.port");

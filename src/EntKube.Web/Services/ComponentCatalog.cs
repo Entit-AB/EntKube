@@ -1899,6 +1899,14 @@ public static class ComponentCatalog
                 },
                 new ComponentFormField
                 {
+                    Key = "exporter-log-level", Label = "Exporter Log Level",
+                    YamlPath = "config.data.otel_traces_export.otel_sdk_log_level", Type = FormFieldType.Select,
+                    DefaultValue = "error",
+                    Options = ["error", "warn", "info", "debug"],
+                    HelpText = "How loudly OBI's OTLP exporter reports its own failures. Upstream leaves this OFF, which is why an agent that cannot reach the collector looks exactly like a cluster with no traffic — it keeps logging every process it instruments while nothing is delivered. Keep at `error`. Raise to `debug` only while diagnosing an empty Traces view; upstream warns it prints gigabytes."
+                },
+                new ComponentFormField
+                {
                     Key = "context-propagation", Label = "Context Propagation",
                     YamlPath = "config.data.ebpf.context_propagation", Type = FormFieldType.Select,
                     DefaultValue = "headers",
@@ -2097,6 +2105,15 @@ public static class ComponentCatalog
                     otel_traces_export:
                       endpoint: http://otel-collector.monitoring:4317
                       protocol: grpc
+                      # The OTLP exporter's own logger, which upstream leaves OFF. That default is the
+                      # reason a broken export is indistinguishable from a quiet cluster: OBI keeps
+                      # logging "instrumenting process" for every workload it finds while not one span
+                      # leaves the node, and nothing anywhere says so. A dropped batch, a refused
+                      # connection, a DNS failure reaching the collector Service, a deadline exceeded —
+                      # all of it is silent, and the only symptom is an empty Traces view weeks later.
+                      # `error` costs nothing when the export works and names the problem when it does
+                      # not. Raise to debug only while diagnosing; upstream warns it prints gigabytes.
+                      otel_sdk_log_level: error
                       # The protocols to load probes for. The default is a dozen (redis, kafka,
                       # mqtt, nats, amqp, mongo, couchbase, memcached, sunrpc...), and each one is
                       # another program plus its maps on every instrumented executable. These three
