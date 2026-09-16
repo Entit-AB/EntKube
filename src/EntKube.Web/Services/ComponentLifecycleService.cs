@@ -886,6 +886,15 @@ public class ComponentLifecycleService(
             valuesYaml = YamlFormMerger.EnsureTrustManagerSecretTargets(valuesYaml ?? "");
         }
 
+        // OBI: same shape, same reason. Its memory bounds all live under config.data, so a component
+        // registered before they existed has the key "present" and the fill-in above leaves every one of
+        // them behind — the agent keeps loading thirteen protocol probe sets per executable, full-size
+        // eBPF maps, and a RED-metrics endpoint nothing scrapes. Only genuinely absent keys are filled.
+        if (component.HelmChartName == "opentelemetry-ebpf-instrumentation")
+        {
+            valuesYaml = YamlFormMerger.EnsureObiResourceBounds(valuesYaml ?? "");
+        }
+
         string releaseName = component.ReleaseName ?? component.Name;
         string chartRef = !string.IsNullOrWhiteSpace(component.HelmRepoUrl)
             ? $"{component.HelmRepoUrl}/{component.HelmChartName}"

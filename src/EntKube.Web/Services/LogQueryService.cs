@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using EntKube.Web.Data;
 using EntKube.Web.Services.Telemetry;
 using Microsoft.EntityFrameworkCore;
@@ -36,8 +37,13 @@ public class LogQueryService(
     // call — ~5 extra round-trips per log-panel load. Memoize per cluster for a few seconds: long
     // enough for one page render to share a single probe, short enough to pick up newly-arriving
     // native data. The service is scoped (per circuit), so this cache is per user session.
-    private readonly Dictionary<Guid, (bool UseNative, DateTime At)> _routeCache = [];
-    private readonly Dictionary<Guid, (bool Installed, DateTime At)> _installedCache = [];
+    //
+    // Concurrent, because the viewers deliberately issue facade calls in parallel — a search and its
+    // histogram together, every deployment's pod and container dropdowns at once — and every one of
+    // those routes through here first. A plain Dictionary written from two of them at the same moment
+    // is not merely a lost entry: it can corrupt the bucket chain and throw, or spin, on a later read.
+    private readonly ConcurrentDictionary<Guid, (bool UseNative, DateTime At)> _routeCache = new();
+    private readonly ConcurrentDictionary<Guid, (bool Installed, DateTime At)> _installedCache = new();
 
     // True when the EntKube telemetry collector (otel-collector) is installed on the cluster.
     // This is the signal that EntKube native telemetry OWNS logs/traces for the cluster — so it

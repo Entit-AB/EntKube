@@ -5,10 +5,25 @@
 
 @if (!available && !isLoading)
 {
+    @* This state means one thing only: no spans have been stored for this cluster. It cannot tell
+       "nothing is installed" from "everything is installed and not one span is arriving", and for
+       weeks it only said the former — so an agent that was running, discovering processes and
+       failing to deliver read as a cluster nobody had set up yet. Both readings are on screen now. *@
     <div class="alert alert-light border text-muted small py-2">
         <span class="bi bi-diagram-3 me-1"></span>
-        No traces for this cluster yet. Install the <strong>EntKube Telemetry Collector</strong> and instrument
-        your apps with OpenTelemetry (send OTLP traces) to populate this view.
+        <strong>No traces have arrived for this cluster.</strong>
+        <div class="mt-1">
+            If you have not set tracing up yet: install the <strong>EntKube Telemetry Collector</strong>,
+            then either <strong>Trace Auto-Instrumentation (eBPF)</strong> for zero-code spans or an
+            OpenTelemetry SDK in your apps.
+        </div>
+        <div class="mt-1">
+            If those are already installed and running, the spans are being produced but not delivered,
+            and the eBPF agent will not say so on its own — upstream ships its OTLP exporter's logger
+            switched off, so a refused connection to the collector looks identical to a quiet cluster.
+            Set <code>Exporter Log Level</code> on the component to <code>error</code> (the default for
+            anything installed or re-applied from EntKube 2026-09-16 on) and read its log.
+        </div>
     </div>
 }
 else

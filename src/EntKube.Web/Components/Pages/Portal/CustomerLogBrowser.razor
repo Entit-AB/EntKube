@@ -427,22 +427,30 @@ else
         loadingFacets = true;
         StateHasChanged();
 
+        List<(Guid ClusterId, string Namespace)> pairs = TargetDeployments()
+            .Select(d => (d.ClusterId, d.Namespace))
+            .Distinct()
+            .ToList();
+
+        // Two lookups per (cluster, namespace), and an app's deployments routinely span several of
+        // both — each one a round trip to that cluster's telemetry. Awaited one after another, the
+        // dropdowns cost the SUM of every lookup, and the customer waits through all of it before the
+        // page settles. None of them depends on any other, so they go out together and cost the
+        // slowest instead.
+        List<Task<KubernetesOperationResult<List<string>>>> podTasks =
+            [.. pairs.Select(pair => Logs.GetPodsAsync(pair.ClusterId, pair.Namespace))];
+        List<Task<KubernetesOperationResult<List<string>>>> containerTasks =
+            [.. pairs.Select(pair => Logs.GetContainersAsync(pair.ClusterId, pair.Namespace))];
+        await Task.WhenAll(podTasks.Concat(containerTasks));
+
         SortedSet<string> podSet = [];
         SortedSet<string> containerSet = [];
-        foreach (var pair in TargetDeployments()
-                     .Select(d => (d.ClusterId, d.Namespace))
-                     .Distinct())
-        {
-            KubernetesOperationResult<List<string>> pr =
-                await Logs.GetPodsAsync(pair.ClusterId, pair.Namespace);
-            if (pr.IsSuccess && pr.Data is not null)
+        foreach (Task<KubernetesOperationResult<List<string>>> t in podTasks)
+            if (t.Result is { IsSuccess: true, Data: not null } pr)
                 foreach (string p in pr.Data) podSet.Add(p);
-
-            KubernetesOperationResult<List<string>> cr =
-                await Logs.GetContainersAsync(pair.ClusterId, pair.Namespace);
-            if (cr.IsSuccess && cr.Data is not null)
+        foreach (Task<KubernetesOperationResult<List<string>>> t in containerTasks)
+            if (t.Result is { IsSuccess: true, Data: not null } cr)
                 foreach (string c in cr.Data) containerSet.Add(c);
-        }
 
         pods = [.. podSet];
         containers = [.. containerSet];
@@ -610,13 +618,20 @@ else
         List<string> errors = [];
         int failed = 0;
 
-        foreach (var cluster in byCluster)
+        // One search per cluster the app is deployed to, issued together. Serialized, a customer whose
+        // app spans three clusters waited for three searches end to end even though the slowest one
+        // bounds what they can see; the results are combined below either way.
+        List<Task<KubernetesOperationResult<List<LokiLogStream>>>> searches =
+            [.. byCluster.Select(c => Logs.QueryAsync(
+                c.ClusterId,
+                new LogQueryFilter { Namespaces = c.Namespaces, Pod = pod, Container = container, Text = text },
+                from, to, limit))];
+        await Task.WhenAll(searches);
+
+        foreach ((var cluster, Task<KubernetesOperationResult<List<LokiLogStream>>> search)
+                 in byCluster.Zip(searches))
         {
-            KubernetesOperationResult<List<LokiLogStream>> result =
-                await Logs.QueryAsync(
-                    cluster.ClusterId,
-                    new LogQueryFilter { Namespaces = cluster.Namespaces, Pod = pod, Container = container, Text = text },
-                    from, to, limit);
+            KubernetesOperationResult<List<LokiLogStream>> result = search.Result;
 
             if (result.IsSuccess && result.Data is not null)
             {

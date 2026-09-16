@@ -1899,6 +1899,29 @@ public static class ComponentCatalog
                 },
                 new ComponentFormField
                 {
+                    Key = "exporter-log-level", Label = "Exporter Log Level",
+                    YamlPath = "config.data.otel_traces_export.otel_sdk_log_level", Type = FormFieldType.Select,
+                    DefaultValue = "error",
+                    Options = ["error", "warn", "info", "debug"],
+                    HelpText = "How loudly OBI's OTLP exporter reports its own failures. Upstream leaves this OFF, which is why an agent that cannot reach the collector looks exactly like a cluster with no traffic — it keeps logging every process it instruments while nothing is delivered. Keep at `error`. Raise to `debug` only while diagnosing an empty Traces view; upstream warns it prints gigabytes."
+                },
+                new ComponentFormField
+                {
+                    Key = "context-propagation", Label = "Context Propagation",
+                    YamlPath = "config.data.ebpf.context_propagation", Type = FormFieldType.Select,
+                    DefaultValue = "headers",
+                    Options = ["headers", "all", "ip", "disabled"],
+                    HelpText = "`headers` propagates trace context in HTTP headers. `all` adds the TCP/packet-level path, which attaches traffic-control and socket programs to EVERY socket on the node and costs memory per connection across all of them — it buys context across TLS between OBI-instrumented services, and needs kernel 5.17+. This is editable because it is the single most expensive setting here and the one an existing install is most likely to have on: `all` was the default EntKube shipped before 2026-09-10, and a value already in a component's stored values is never rewritten behind the operator's back."
+                },
+                new ComponentFormField
+                {
+                    Key = "metrics-endpoint", Label = "OTLP Metrics Endpoint (blank = off)",
+                    YamlPath = "config.data.otel_metrics_export.endpoint", Type = FormFieldType.Text,
+                    DefaultValue = "", Placeholder = "blank — the collector has no metrics pipeline",
+                    HelpText = "Leave blank. The EntKube Telemetry Collector deliberately has no metrics pipeline (EntKube has no native metrics ingest — app and host metrics go to Prometheus), so anything sent here is aggregated in OBI's heap for the whole export interval and then refused at the far end. Installs made before 2026-09-10 have this pointing at the collector; clearing it is a straight memory saving with nothing lost."
+                },
+                new ComponentFormField
+                {
                     Key = "bpf-map-scale", Label = "eBPF Map Scale Factor",
                     YamlPath = "config.data.ebpf.maps_config.global_scale_factor", Type = FormFieldType.Number,
                     DefaultValue = "-1",
@@ -2082,6 +2105,15 @@ public static class ComponentCatalog
                     otel_traces_export:
                       endpoint: http://otel-collector.monitoring:4317
                       protocol: grpc
+                      # The OTLP exporter's own logger, which upstream leaves OFF. That default is the
+                      # reason a broken export is indistinguishable from a quiet cluster: OBI keeps
+                      # logging "instrumenting process" for every workload it finds while not one span
+                      # leaves the node, and nothing anywhere says so. A dropped batch, a refused
+                      # connection, a DNS failure reaching the collector Service, a deadline exceeded —
+                      # all of it is silent, and the only symptom is an empty Traces view weeks later.
+                      # `error` costs nothing when the export works and names the problem when it does
+                      # not. Raise to debug only while diagnosing; upstream warns it prints gigabytes.
+                      otel_sdk_log_level: error
                       # The protocols to load probes for. The default is a dozen (redis, kafka,
                       # mqtt, nats, amqp, mongo, couchbase, memcached, sunrpc...), and each one is
                       # another program plus its maps on every instrumented executable. These three

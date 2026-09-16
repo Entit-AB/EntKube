@@ -213,20 +213,30 @@ public sealed class SegmentLogService(
 
         try
         {
+            // Scan only the requested window (default 1h) instead of ALL segments — with 90-day
+            // retention, unbounded discovery opened a reader per segment and visited every doc.
+            DateTime from = DateTime.UtcNow.AddMinutes(-windowMinutes);
+
             // Named "filter", not "scope": SegmentScope now means which index TIER to read, and having a
             // Lucene query by the same name one line from a QueryAsync(Scope, …) call is a trap.
             var filter = new BooleanQuery
             {
                 { new TermQuery(new Term(LogSegmentSchema.TenantId, tenantId.Value.ToString("N"))), Occur.MUST },
                 { new TermQuery(new Term(LogSegmentSchema.ClusterId, clusterId.ToString("N"))), Occur.MUST },
+                // The window bounds the SEGMENTS opened; without this it does not bound what is read
+                // inside them, and a segment may hold an hour either side of the range the viewer asked
+                // for. It belongs in the query for the same reason the trace side already carries it: the
+                // dropdown should describe the window on screen, and the scan should cost what that window
+                // costs. Lower bound only — an upper one would turn a clock-skewed future timestamp into a
+                // pod missing from its own dropdown.
+                { NumericRangeQuery.NewInt64Range(
+                    LogSegmentSchema.Ts, LogSegmentSchema.ToEpochMillis(from), null, true, true), Occur.MUST },
             };
             if (field != LogSegmentSchema.Namespace && !string.IsNullOrEmpty(namespaceName))
                 filter.Add(new TermQuery(new Term(LogSegmentSchema.Namespace, namespaceName)), Occur.MUST);
 
-            // Scan only the requested window (default 1h) instead of ALL segments — with 90-day
-            // retention, unbounded discovery opened a reader per segment and visited every doc. A label may
-            // exist in only one tier (e.g. a namespace that logs only INFO), so union both into one sink.
-            DateTime from = DateTime.UtcNow.AddMinutes(-windowMinutes);
+            // A label may exist in only one tier (e.g. a namespace that logs only INFO), so union both
+            // tiers into one sink.
             var sink = new HashSet<string>(StringComparer.Ordinal);
             foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value))
                 await segments.QueryAsync(Scope, from, null,
