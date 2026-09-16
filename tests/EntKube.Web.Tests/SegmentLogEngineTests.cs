@@ -14,8 +14,13 @@ namespace EntKube.Web.Tests;
 /// The Lucene/S3 telemetry segment engine (logs): verifies the query backend
 /// (<see cref="SegmentLogService"/> over <see cref="LogSegmentManager"/>) returns the same DTOs as the old
 /// Postgres path for search, trace-correlation, label dropdowns, and the volume histogram; that a filtered
-/// search over a realistic row count stays well under the ~5s the Postgres store took; and that sealing a
+/// search over a realistic row count stays cheap against the ~5s the Postgres store took; and that sealing a
 /// segment to (local) object storage, cataloging it, and querying it back round-trips — including retention.
+///
+/// <para>The two performance guards here state their budget as a RATIO against work measured in the same
+/// run — indexing the same rows, or the search the dropdown sits in front of — never as a millisecond
+/// constant. Both used to assert constants and both failed on a developer machine that was busy compiling
+/// something else, which is a test reporting on the host rather than on the code.</para>
 /// </summary>
 public sealed class SegmentLogEngineTests : IDisposable
 {
@@ -357,7 +362,7 @@ public sealed class SegmentLogEngineTests : IDisposable
     }
 
     [Fact]
-    public async Task Search_Over_50k_Logs_Is_SubSecond()
+    public async Task Search_Over_50k_Logs_CostsAFractionOfIndexingThem()
     {
         DateTime t0 = new(2026, 7, 7, 0, 0, 0, DateTimeKind.Utc);
         var records = new List<LogIngestRecord>(50_000);
@@ -369,19 +374,46 @@ public sealed class SegmentLogEngineTests : IDisposable
                 i % 25 == 0 ? $"trace-{i}" : null));
         }
         LogSegmentManager mgr = NewManager();
+
+        // Indexing these same 50,000 rows is the yardstick. It is a substantial, known unit of work over
+        // exactly this data on exactly this machine in this run, so it absorbs whatever else the host
+        // happens to be doing — which a millisecond constant cannot. This test used to assert one, and it
+        // failed on a developer machine that was merely busy compiling something else; a bound that
+        // measures the host rather than the code teaches a team to re-run rather than to read.
+        var ingestWatch = Stopwatch.StartNew();
         mgr.WriteLogs(_tenantId, _clusterId, records);
+        ingestWatch.Stop();
+
         SegmentLogService svc = NewService();
 
         var filter = new LogQueryFilter { Namespaces = ["prod"], Text = "timeout", MinLevel = LogLevel.Error };
-        var sw = Stopwatch.StartNew();
-        var result = await svc.QueryAsync(_clusterId, filter, t0, t0.AddDays(1), limit: 200);
-        sw.Stop();
 
-        result.IsSuccess.Should().BeTrue();
+        // Best of three, not one. Contention on a shared machine is BURSTY: a single measurement can land
+        // entirely inside someone else's compile and read several times the true cost, which is what makes
+        // a one-shot timing test flap. The minimum is the sample least polluted by whatever else was
+        // running, and for a regression guard — comparing implementations, not measuring cold latency —
+        // that is the number worth asserting on.
+        long searchMs = long.MaxValue;
+        KubernetesOperationResult<List<LokiLogStream>>? result = null;
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            var sw = Stopwatch.StartNew();
+            result = await svc.QueryAsync(_clusterId, filter, t0, t0.AddDays(1), limit: 200);
+            sw.Stop();
+            searchMs = Math.Min(searchMs, sw.ElapsedMilliseconds);
+        }
+
+        result!.IsSuccess.Should().BeTrue();
         result.Data!.SelectMany(s => s.Entries).Should().NotBeEmpty();
-        // Sub-second in isolation; the CI bound is loose because the full suite runs test classes in
-        // parallel and starves the CPU. Even so this is far under the >5s the Postgres store took.
-        sw.ElapsedMilliseconds.Should().BeLessThan(3000);
+
+        // An inverted index answers a selective query in a small fraction of what it cost to build:
+        // measured idle, ~2.7s to index and ~40ms to search, about 70x. A tenth of the indexing time
+        // leaves an order of magnitude of headroom and still fails the case this guards — the Postgres
+        // store this replaced took over 5s on the same shape, roughly TWICE its own ingest time.
+        long budget = Math.Max(1000, ingestWatch.ElapsedMilliseconds / 10);
+        searchMs.Should().BeLessThan(budget,
+            "a filtered search must cost a fraction of what indexing the same rows cost "
+            + "(indexing {0} rows took {1}ms)", records.Count, ingestWatch.ElapsedMilliseconds);
     }
 
     [Fact]
@@ -416,16 +448,31 @@ public sealed class SegmentLogEngineTests : IDisposable
         }
 
         SegmentLogService svc = NewService();
-        var sw = Stopwatch.StartNew();
+
+        // Baseline: the SEARCH this dropdown sits in front of, over the same index. Measuring against it
+        // rather than against a millisecond constant is what makes this test about the code instead of
+        // about the machine — a loaded laptop or a small CI runner slows both numbers together, and the
+        // ratio is what the defect changed. (Absolute bounds here failed on a developer machine that was
+        // merely busy, which teaches a team to re-run rather than to read.)
+        var searchWatch = Stopwatch.StartNew();
+        await svc.QueryAsync(_clusterId, new LogQueryFilter { Namespaces = ["prod"] }, t0.AddHours(-1), DateTime.UtcNow, 200);
+        searchWatch.Stop();
+
+        var podWatch = Stopwatch.StartNew();
         KubernetesOperationResult<List<string>> pods = await svc.GetPodsAsync(_clusterId, "prod", 60);
-        sw.Stop();
+        podWatch.Stop();
 
         pods.Data.Should().BeEquivalentTo(["api-0", "api-1", "api-2", "api-3", "api-4", "api-5"]);
-        // Milliseconds when the values are read from the filter's own documents; the probe-per-distinct-
-        // value implementation this replaced takes ~8s on exactly this shape. The bound is loose because
-        // the suite runs test classes in parallel and starves the CPU — it still catches a return to a
-        // cost that follows the index rather than the query.
-        sw.ElapsedMilliseconds.Should().BeLessThan(2000);
+
+        // Reading the values off the filter's own matched documents costs about what matching them costs,
+        // so the dropdown lands at a fraction of the search. The probe-per-distinct-value implementation
+        // this replaced cost roughly 250x the search on this shape (10.4s against 41ms when it was first
+        // measured), because its work followed the whole index rather than the query. Ten times the search
+        // is far above the former and far below the latter.
+        long budget = Math.Max(1000, searchWatch.ElapsedMilliseconds * 10);
+        podWatch.ElapsedMilliseconds.Should().BeLessThan(budget,
+            "filling the pod dropdown must cost what the query costs, not what the index holds "
+            + "(search took {0}ms)", searchWatch.ElapsedMilliseconds);
     }
 
     [Fact]
