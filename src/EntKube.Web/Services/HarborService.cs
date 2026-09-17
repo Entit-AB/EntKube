@@ -136,6 +136,31 @@ public class HarborRegistryInfo
     public DateTime CreatedAt { get; set; }
 }
 
+/// <summary>
+/// One registry provider Harbor actually has an adapter for, as reported by
+/// /replication/adapterinfos. <see cref="Type"/> is the only spelling Harbor accepts in the
+/// "type" field of a registry — an adapter name it does not know makes Harbor's own registry
+/// controller fail before it reaches any error it has a code for, which reaches the caller as a
+/// bare 500 "internal server error".
+/// </summary>
+public class HarborRegistryAdapter
+{
+    /// <summary>Harbor's adapter identifier, e.g. "docker-hub", "github-ghcr", "google-gcr".</summary>
+    public string Type { get; set; } = "";
+
+    /// <summary>Human-readable name for the picker; falls back to <see cref="Type"/>.</summary>
+    public string Label { get; set; } = "";
+
+    /// <summary>
+    /// The one endpoint this provider can ever have (Harbor's "EndpointPatternTypeFix"), e.g.
+    /// https://hub.docker.com for Docker Hub. Null when the URL is the operator's to choose.
+    /// </summary>
+    public string? FixedUrl { get; set; }
+
+    /// <summary>Endpoints Harbor suggests for this provider; empty when it has no opinion.</summary>
+    public List<string> SuggestedUrls { get; set; } = [];
+}
+
 public class HarborReplicationInfo
 {
     public long Id { get; set; }
@@ -1318,6 +1343,116 @@ public class HarborService(
 
     // ── Remote Registries (proxy cache endpoints) ─────────────────────────────
 
+    /// <summary>
+    /// The providers offered when Harbor cannot be asked which adapters it has. Every identifier
+    /// here must be one of Harbor's own adapter names: Harbor resolves the "type" field against an
+    /// adapter factory, and the "not found" raised there carries no error code, so a misspelled
+    /// provider comes back as a bare 500 "internal server error" naming nothing.
+    /// </summary>
+    public static readonly IReadOnlyList<HarborRegistryAdapter> FallbackRegistryAdapters =
+    [
+        new() { Type = "docker-hub",        Label = "Docker Hub", FixedUrl = "https://hub.docker.com" },
+        new() { Type = "quay",              Label = "Quay.io" },
+        new() { Type = "github-ghcr",       Label = "GitHub Container Registry" },
+        new() { Type = "google-gcr",        Label = "Google Container Registry" },
+        new() { Type = "docker-registry",   Label = "Docker Registry V2" },
+        new() { Type = "harbor",            Label = "Another Harbor" },
+        new() { Type = "aws-ecr",           Label = "Amazon ECR" },
+        new() { Type = "azure-acr",         Label = "Azure Container Registry" },
+        new() { Type = "jfrog-artifactory", Label = "JFrog Artifactory" },
+        new() { Type = "gitlab",            Label = "GitLab Registry" }
+    ];
+
+    /// <summary>
+    /// Friendly names for the adapters Harbor ships with. Only cosmetic — the identifiers come
+    /// from Harbor itself, and an adapter missing from this table is shown under its own name.
+    /// </summary>
+    private static readonly Dictionary<string, string> AdapterLabels = new()
+    {
+        ["harbor"] = "Another Harbor",
+        ["docker-hub"] = "Docker Hub",
+        ["docker-registry"] = "Docker Registry V2",
+        ["github-ghcr"] = "GitHub Container Registry",
+        ["google-gcr"] = "Google Container Registry",
+        ["aws-ecr"] = "Amazon ECR",
+        ["azure-acr"] = "Azure Container Registry",
+        ["ali-acr"] = "Alibaba Cloud Container Registry",
+        ["huawei-SWR"] = "Huawei SWR",
+        ["tencent-tcr"] = "Tencent Container Registry",
+        ["volcengine-cr"] = "Volcengine Container Registry",
+        ["jfrog-artifactory"] = "JFrog Artifactory",
+        ["quay"] = "Quay.io",
+        ["gitlab"] = "GitLab Registry",
+        ["dtr"] = "Docker Trusted Registry",
+        ["helm-hub"] = "Helm Hub",
+        ["artifact-hub"] = "Artifact Hub"
+    };
+
+    /// <summary>
+    /// Asks Harbor which registry providers it has adapters for, rather than guessing. Harbor
+    /// rejects a "type" it does not recognise deep inside its registry controller, where the error
+    /// carries no code, so the caller gets an unexplained 500 instead of "no such provider" — the
+    /// only safe source for this list is the running Harbor.
+    ///
+    /// /replication/adapterinfos also carries each provider's endpoint pattern, which is what
+    /// decides whether the URL is the operator's to type (Docker Registry V2) or fixed by the
+    /// provider (Docker Hub is always https://hub.docker.com).
+    /// </summary>
+    public async Task<List<HarborRegistryAdapter>> GetRegistryAdaptersAsync(
+        Guid tenantId, HarborComponentConfig config, CancellationToken ct = default)
+    {
+        using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
+
+        HttpResponseMessage response = await http.GetAsync("/api/v2.0/replication/adapterinfos", ct);
+        if (response.IsSuccessStatusCode)
+        {
+            JsonObject? infos = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsObject();
+            if (infos is not null)
+            {
+                List<HarborRegistryAdapter> adapters = [];
+                foreach ((string type, JsonNode? info) in infos)
+                {
+                    JsonNode? pattern = info?["endpoint_pattern"];
+                    List<string> endpoints = pattern?["endpoints"]?.AsArray()
+                        .Select(e => e?["value"]?.GetValue<string>())
+                        .Where(v => !string.IsNullOrWhiteSpace(v))
+                        .Select(v => v!)
+                        .ToList() ?? [];
+
+                    // "EndpointPatternTypeFix" means the provider only ever lives at one address,
+                    // so the URL box is filled in and locked rather than left to be mistyped.
+                    bool fixedEndpoint =
+                        pattern?["endpoint_type"]?.GetValue<string>() == "EndpointPatternTypeFix";
+
+                    adapters.Add(new HarborRegistryAdapter
+                    {
+                        Type = type,
+                        Label = AdapterLabels.TryGetValue(type, out string? label) ? label : type,
+                        FixedUrl = fixedEndpoint && endpoints.Count == 1 ? endpoints[0] : null,
+                        SuggestedUrls = endpoints
+                    });
+                }
+                return adapters.OrderBy(a => a.Label, StringComparer.OrdinalIgnoreCase).ToList();
+            }
+        }
+
+        // Older Harbors, and any Harbor that answers adapterinfos oddly, still list the bare names.
+        response = await http.GetAsync("/api/v2.0/replication/adapters", ct);
+        await ThrowIfErrorAsync(response, ct, config);
+
+        JsonArray? names = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))?.AsArray();
+        return (names ?? [])
+            .Select(n => n?.GetValue<string>())
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Select(n => new HarborRegistryAdapter
+            {
+                Type = n!,
+                Label = AdapterLabels.TryGetValue(n!, out string? label) ? label : n!
+            })
+            .OrderBy(a => a.Label, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     public async Task<List<HarborRegistryInfo>> GetRegistriesAsync(
         Guid tenantId, HarborComponentConfig config, CancellationToken ct = default)
     {
@@ -1372,7 +1507,16 @@ public class HarborService(
             "/api/v2.0/registries",
             new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
             ct);
-        await ThrowIfErrorAsync(response, ct);
+
+        // Harbor validates the provider by looking up an adapter factory, and the "not found" it
+        // raises there carries no error code — Harbor turns that into a bare 500 "internal server
+        // error" with nothing to act on. Name the real cause before handing the 500 on.
+        if (response.StatusCode == HttpStatusCode.InternalServerError)
+        {
+            await ThrowIfUnknownProviderAsync(tenantId, config, type, ct);
+        }
+
+        await ThrowIfErrorAsync(response, ct, config);
 
         JsonNode? result = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
         return new HarborRegistryInfo
@@ -1385,12 +1529,31 @@ public class HarborService(
         };
     }
 
+    /// <summary>
+    /// Turns Harbor's unexplained 500 into the provider mismatch it almost always is. Best effort:
+    /// when the adapter list cannot be read, the caller falls through to the original error.
+    /// </summary>
+    private async Task ThrowIfUnknownProviderAsync(
+        Guid tenantId, HarborComponentConfig config, string type, CancellationToken ct)
+    {
+        List<HarborRegistryAdapter> adapters;
+        try { adapters = await GetRegistryAdaptersAsync(tenantId, config, ct); }
+        catch { return; }
+
+        if (adapters.Count == 0 || adapters.Any(a => a.Type == type)) return;
+
+        throw new InvalidOperationException(
+            $"Harbor has no registry adapter called \"{type}\", and reports that as an unexplained "
+            + "500 rather than a validation error. This Harbor accepts: "
+            + string.Join(", ", adapters.Select(a => a.Type)) + ".");
+    }
+
     public async Task DeleteRegistryAsync(
         Guid tenantId, HarborComponentConfig config, long registryId, CancellationToken ct = default)
     {
         using HttpClient http = await GetHarborClientAsync(tenantId, config, ct);
         HttpResponseMessage response = await http.DeleteAsync($"/api/v2.0/registries/{registryId}", ct);
-        await ThrowIfErrorAsync(response, ct);
+        await ThrowIfErrorAsync(response, ct, config);
     }
 
     public async Task<string> PingRegistryAsync(

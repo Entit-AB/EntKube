@@ -579,11 +579,17 @@ else if (selectedHarbor is not null)
                                 <label class="form-label form-label-sm">Registry type</label>
                                 <select class="form-select form-select-sm" @bind="newRegistryType"
                                         @bind:after="OnRegistryTypeChanged">
-                                    @foreach ((string id, string label) in RegistryTypes)
+                                    @foreach (HarborRegistryAdapter adapter in RegistryTypes)
                                     {
-                                        <option value="@id">@label</option>
+                                        <option value="@adapter.Type">@adapter.Label</option>
                                     }
                                 </select>
+                                @if (registryAdapters is null)
+                                {
+                                    <div class="form-text small text-muted">
+                                        Harbor did not report its providers — this is the built-in list.
+                                    </div>
+                                }
                             </div>
                             <div class="col-md-4">
                                 <label class="form-label form-label-sm">
@@ -591,8 +597,17 @@ else if (selectedHarbor is not null)
                                 </label>
                                 <input class="form-control form-control-sm font-monospace"
                                        placeholder="https://registry.example.com"
+                                       list="harbor-registry-endpoints"
                                        @bind="newRegistryUrl"
                                        disabled="@RegistryHasFixedUrl(newRegistryType)" />
+                                @* Providers that live at several known addresses — GCR's regional
+                                   mirrors, for one — are offered rather than left to be recalled. *@
+                                <datalist id="harbor-registry-endpoints">
+                                    @foreach (string endpoint in SelectedRegistryAdapter?.SuggestedUrls ?? [])
+                                    {
+                                        <option value="@endpoint"></option>
+                                    }
+                                </datalist>
                             </div>
                             <div class="col-md-4">
                                 <label class="form-label form-label-sm">Username / Access Key (optional)</label>
@@ -1255,26 +1270,6 @@ else
         ("info",        "System Info")
     ];
 
-    private static readonly (string Id, string Label)[] RegistryTypes =
-    [
-        ("docker-hub",      "Docker Hub"),
-        ("quay",            "Quay.io"),
-        ("ghcr",            "GitHub Container Registry"),
-        ("gcr",             "Google Container Registry"),
-        ("docker-registry", "Docker Registry V2"),
-        ("harbor",          "Another Harbor"),
-        ("aws-ecr",         "Amazon ECR"),
-        ("gitlab",          "GitLab Registry")
-    ];
-
-    private static readonly Dictionary<string, string> RegistryDefaultUrls = new()
-    {
-        ["docker-hub"] = "https://hub.docker.com",
-        ["quay"]       = "https://quay.io",
-        ["ghcr"]       = "https://ghcr.io",
-        ["gcr"]        = "https://gcr.io"
-    };
-
     private static readonly string[] WebhookEventTypes =
     [
         "PUSH_ARTIFACT", "PULL_ARTIFACT", "DELETE_ARTIFACT",
@@ -1341,6 +1336,7 @@ else
     private bool showCreateRegistry;
     private bool savingRegistry;
     private string newRegistryName = "";
+    private List<HarborRegistryAdapter>? registryAdapters;
     private string newRegistryType = "docker-hub";
     private string newRegistryUrl = "https://hub.docker.com";
     private string newRegistryAccessKey = "";
@@ -1416,6 +1412,7 @@ else
         trackedProjects = null;
         portalLinkProjectName = null;
         registries = null;
+        registryAdapters = null;
         replications = null;
         pingResults = [];
         triggerResults = [];
@@ -1440,6 +1437,7 @@ else
         robots = null;
         systemInfo = null;
         registries = null;
+        registryAdapters = null;
         replications = null;
         trackedProjects = null;
         allApps = null;
@@ -1531,6 +1529,32 @@ else
         }
         catch (Exception ex) { registryListError = ex.Message; }
         finally { loadingRegistries = false; }
+
+        await EnsureRegistryAdaptersLoaded();
+    }
+
+    /// <summary>
+    /// Which providers this Harbor actually has adapters for. Best effort — the form falls back to
+    /// the built-in list, which carries the same identifiers, so a failure here only costs the
+    /// providers a newer Harbor may have added.
+    /// </summary>
+    private async Task EnsureRegistryAdaptersLoaded()
+    {
+        if (registryAdapters is not null) return;
+        if (selectedHarbor?.Config is null) return;
+        try
+        {
+            List<HarborRegistryAdapter> adapters =
+                await HarborService.GetRegistryAdaptersAsync(TenantId, selectedHarbor.Config);
+            if (adapters.Count > 0)
+            {
+                registryAdapters = adapters;
+                if (!adapters.Any(a => a.Type == newRegistryType))
+                    newRegistryType = adapters[0].Type;
+                OnRegistryTypeChanged();
+            }
+        }
+        catch { /* non-fatal; the built-in provider list stands in */ }
     }
 
     private async Task LoadReplications()
@@ -1691,25 +1715,31 @@ else
 
     // ── Registries ────────────────────────────────────────────────────────────
 
+    private IReadOnlyList<HarborRegistryAdapter> RegistryTypes =>
+        registryAdapters ?? HarborService.FallbackRegistryAdapters;
+
+    private HarborRegistryAdapter? SelectedRegistryAdapter =>
+        RegistryTypes.FirstOrDefault(a => a.Type == newRegistryType);
+
     private void OnRegistryTypeChanged()
     {
-        if (RegistryDefaultUrls.TryGetValue(newRegistryType, out string? url))
-            newRegistryUrl = url;
-        else if (!RegistryHasFixedUrl(newRegistryType))
-            newRegistryUrl = "";
+        HarborRegistryAdapter? adapter = SelectedRegistryAdapter;
+        newRegistryUrl = adapter?.FixedUrl
+            ?? (adapter?.SuggestedUrls.Count == 1 ? adapter.SuggestedUrls[0] : "");
     }
 
-    private static bool RegistryHasFixedUrl(string type) =>
-        RegistryDefaultUrls.ContainsKey(type);
+    private bool RegistryHasFixedUrl(string type) =>
+        RegistryTypes.FirstOrDefault(a => a.Type == type)?.FixedUrl is not null;
 
     private static string RegistryTypeIcon(string type) => type switch
     {
         "docker-hub"      => "bi-boxes",
         "quay"            => "bi-shield-check",
-        "ghcr"            => "bi-github",
-        "gcr"             => "bi-google",
+        "github-ghcr"     => "bi-github",
+        "google-gcr"      => "bi-google",
         "harbor"          => "bi-archive",
         "aws-ecr"         => "bi-cloud",
+        "azure-acr"       => "bi-cloud",
         "gitlab"          => "bi-git",
         _                 => "bi-box-seam"
     };
@@ -1732,8 +1762,8 @@ else
             registries = await HarborService.GetRegistriesAsync(TenantId, selectedHarbor.Config);
             showCreateRegistry = false;
             newRegistryName = "";
-            newRegistryType = "docker-hub";
-            newRegistryUrl = "https://hub.docker.com";
+            newRegistryType = RegistryTypes.FirstOrDefault()?.Type ?? "docker-hub";
+            OnRegistryTypeChanged();
             newRegistryAccessKey = "";
             newRegistryAccessSecret = "";
             newRegistryInsecure = false;
