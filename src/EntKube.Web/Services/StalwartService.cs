@@ -864,6 +864,90 @@ public class StalwartService(
         }
     }
 
+    /// <summary>One thing the running server is complaining about, as it wrote it.</summary>
+    /// <param name="EventName">Stalwart's event id, e.g. <c>registry.build-error</c>.</param>
+    /// <param name="Line">The log line, trimmed.</param>
+    /// <param name="IsConfigurationError">
+    /// True when the server rejected part of the configuration EntKube just applied, rather than
+    /// hitting a runtime problem. That distinction decides whether the apply can call itself a
+    /// success.
+    /// </param>
+    public sealed record ServerLogIssue(string EventName, string Line, bool IsConfigurationError);
+
+    /// <summary>Stalwart's event id for "I could not build this configuration object".</summary>
+    private const string BuildErrorEvent = "registry.build-error";
+
+    /// <summary>
+    /// The errors a freshly-restarted server is reporting, one per distinct event.
+    ///
+    /// <para>This exists because of how the first real HA deployment failed. The apply reported
+    /// success and the pods were ready, while every login died on a Redis redirection and the
+    /// server rejected a configuration object on every start — all of it in <c>kubectl logs</c>,
+    /// none of it anywhere EntKube would show an operator. An apply that has just restarted the
+    /// server twice is the one moment when reading its log costs nothing.</para>
+    ///
+    /// <para>Deduplicated by event id: a failure that repeats on every request would otherwise bury
+    /// the one that only appears at startup.</para>
+    /// </summary>
+    public static List<ServerLogIssue> ParseServerErrors(string logs)
+    {
+        List<ServerLogIssue> issues = [];
+        HashSet<string> seen = new(StringComparer.Ordinal);
+
+        foreach (string raw in logs.Split('\n'))
+        {
+            string line = raw.Trim();
+            // Stalwart writes "<timestamp> ERROR <text> (<event.id>) key = value…". The level is a
+            // whole word: matching it loosely would catch every line mentioning an error.
+            if (line.Length == 0 || !line.Contains(" ERROR ", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            int open = line.IndexOf('(', StringComparison.Ordinal);
+            int close = open >= 0 ? line.IndexOf(')', open) : -1;
+            string eventName = close > open + 1 ? line[(open + 1)..close] : "unknown";
+
+            if (!seen.Add(eventName))
+            {
+                continue;
+            }
+
+            issues.Add(new(eventName, line, eventName == BuildErrorEvent));
+
+            // Enough to name what is wrong without turning the apply output into a log viewer.
+            if (issues.Count == 8)
+            {
+                break;
+            }
+        }
+
+        return issues;
+    }
+
+    /// <summary>
+    /// Reads the mail pods' recent logs and returns what they are complaining about. Best-effort:
+    /// a log that cannot be read is not an apply failure, so this returns an empty list and says
+    /// nothing rather than inventing a verdict.
+    /// </summary>
+    private async Task<List<ServerLogIssue>> ReadServerErrorsAsync(
+        string releaseName, string ns, string kubeconfig, CancellationToken ct)
+    {
+        try
+        {
+            // Every replica, prefixed, so an error on one node of a cluster is not missed because
+            // kubectl happened to pick a healthy one.
+            string logs = await k8sFactory.GetPodLogsAsync(
+                $"-l app={releaseName} --prefix", ns, kubeconfig, tailLines: 100, ct);
+            return ParseServerErrors(logs);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not read {Release} pod logs in {Namespace} after the apply.", releaseName, ns);
+            return [];
+        }
+    }
+
     /// <summary>
     /// Deletes the StatefulSet when the deployment is changing between single-node and HA, because
     /// that change rewrites a field Kubernetes will not let us update.
@@ -1764,6 +1848,24 @@ public class StalwartService(
                 return Failure(string.Join("\n", output));
             }
 
+            // The server has just restarted onto this configuration. Ask it what it thinks of it,
+            // rather than reporting success and leaving the answer in kubectl logs.
+            List<ServerLogIssue> serverIssues = await ReadServerErrorsAsync(releaseName, ns, kubeconfig, ct);
+            bool rejectedConfiguration = serverIssues.Any(i => i.IsConfigurationError);
+            if (serverIssues.Count > 0)
+            {
+                output.Add(rejectedConfiguration
+                    ? "--- The server REJECTED part of this configuration ---"
+                    : "--- The server is reporting errors ---");
+                output.AddRange(serverIssues.Select(i => $"• {i.Line}"));
+            }
+            if (rejectedConfiguration)
+            {
+                output.Add(
+                    "The configuration was applied and the server restarted, but it refused at least one "
+                    + "object and is running without it. Fix what the line above names and apply again.");
+            }
+
             using (ApplicationDbContext db = dbFactory.CreateDbContext())
             {
                 StalwartComponentConfig? stored = await db.StalwartComponentConfigs
@@ -1775,7 +1877,13 @@ public class StalwartService(
                 }
             }
 
-            return new HelmExecutionResult { Success = back, Output = string.Join("\n", output) };
+            // A configuration the server refused is not an apply that worked, however cleanly the
+            // Job exited — that combination is exactly how a broken deployment reported success.
+            return new HelmExecutionResult
+            {
+                Success = back && !rejectedConfiguration,
+                Output = string.Join("\n", output),
+            };
         }
         catch (Exception ex)
         {

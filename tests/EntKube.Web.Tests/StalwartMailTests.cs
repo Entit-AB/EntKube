@@ -1926,6 +1926,42 @@ public class StalwartMailTests
     // ── Rollout detection ─────────────────────────────────────────────────────
 
     [Fact]
+    public void WhatTheServerSaysAfterAnApplyIsReadBackFromItsLog()
+    {
+        // These are the real lines from the first HA deployment, where the apply reported success,
+        // the pods were ready, and every login died anyway. One of them is the server refusing an
+        // object EntKube just applied; the other is a runtime failure. Only the first can make the
+        // apply a failure — a transient store error must not.
+        const string logs = """
+            2026-09-17T13:16:25Z INFO Starting Stalwart Server (server.startup) hostname = "stalwart-1"
+            2026-09-17T13:16:25Z WARN Log collector error (telemetry.log-error) details = "Failed to create log file"
+            2026-09-17T13:16:25Z ERROR Configuration build error (registry.build-error) source = "Tracer", reason = "Only one console tracer is allowed"
+            2026-09-17T13:16:25Z INFO Network listener started (network.listen-start) listenerId = "public-web"
+            2026-09-17T13:16:25Z ERROR Redis error (store.redis-error) reason = "Moved: 5938 100.96.4.17:6379"
+            2026-09-17T13:16:31Z ERROR Redis error (store.redis-error) reason = "Moved: 798 100.96.5.13:6379"
+            """;
+
+        List<StalwartService.ServerLogIssue> issues = StalwartService.ParseServerErrors(logs);
+
+        // One per distinct event: the repeated Redis error must not bury the startup one.
+        issues.Select(i => i.EventName).Should().Equal("registry.build-error", "store.redis-error");
+        issues.Should().ContainSingle(i => i.IsConfigurationError)
+            .Which.Line.Should().Contain("Only one console tracer is allowed");
+
+        // INFO and WARN are not errors, however alarming the words in them are.
+        issues.Should().NotContain(i => i.EventName == "server.startup");
+        issues.Should().NotContain(i => i.EventName == "telemetry.log-error");
+    }
+
+    [Fact]
+    public void AQuietLogProducesNoFindings()
+    {
+        StalwartService.ParseServerErrors("").Should().BeEmpty();
+        StalwartService.ParseServerErrors(
+            "2026-09-17T13:16:25Z INFO Starting Stalwart Server (server.startup)").Should().BeEmpty();
+    }
+
+    [Fact]
     public void AStatefulSetIsOnlyReadyOnceTheUpdatedPodIsTheReadyOne()
     {
         // Ready but still on the old revision: the pod from before the mode switch. Treating this
