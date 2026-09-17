@@ -29,6 +29,7 @@ public class StalwartService(
     ExternalRouteService routeService,
     KeycloakService keycloakService,
     ComponentLifecycleService lifecycleService,
+    RedisService redisService,
     ILogger<StalwartService> logger) : IComponentFormValueProvider
 {
     // Explicit implementation: the class already exposes CatalogKey as a const, and the interface
@@ -643,11 +644,16 @@ public class StalwartService(
 
         CnpgDatabase? cnpg;
         StorageLink? link;
+        Guid kubernetesClusterId;
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
             cnpg = await db.CnpgDatabases.Include(d => d.CnpgCluster)
                 .FirstOrDefaultAsync(d => d.Id == dbId, ct);
             link = await db.StorageLinks.FirstOrDefaultAsync(l => l.Id == linkId, ct);
+            kubernetesClusterId = await db.ClusterComponents
+                .Where(c => c.Id == clusterComponentId)
+                .Select(c => c.ClusterId)
+                .FirstOrDefaultAsync(ct);
         }
         if (cnpg?.CnpgCluster is null || link is null)
         {
@@ -675,18 +681,50 @@ public class StalwartService(
                 k8sSecretName: credentialsSecret, k8sNamespace: ns);
         }
 
-        // The standalone-Redis store carries no secret field, so a password rides in the URL.
+        // Which Redis this is decides the whole store shape. A sharded Redis Cluster answers a key
+        // it does not own with a MOVED redirection, which the standalone client does not follow — so
+        // addressing one as a single server gives a server that starts, authenticates a login, and
+        // then fails every lookup behind it. Every Redis EntKube manages is a cluster (the operator
+        // it uses only builds those), which is exactly what a picker fills in.
+        //
+        // An endpoint EntKube does not manage is treated as a single server, because that is all it
+        // can honestly say: the resolve is database-only by design, and guessing from a live probe
+        // on the install path would make the answer depend on whether Redis happened to be up.
+        string endpoint = $"{config.CoordinatorRedisHost!.Trim()}:{config.CoordinatorRedisPort}";
+        RedisEndpointOption? managedRedis =
+            await redisService.ResolveManagedEndpointAsync(kubernetesClusterId, endpoint, ct);
+        bool redisIsCluster = managedRedis?.ClusterMode == true;
+
         string? redisPassword = await Secret(tenantId, clusterComponentId, "STALWART_COORDINATOR_REDIS_PASSWORD", ct);
-        string redisAuth = string.IsNullOrWhiteSpace(redisPassword)
-            ? ""
-            : $":{Uri.EscapeDataString(redisPassword)}@";
-        string redisUrl = $"redis://{redisAuth}{config.CoordinatorRedisHost!.Trim()}:{config.CoordinatorRedisPort}";
+
+        string redisUrl;
+        if (redisIsCluster)
+        {
+            // The cluster store reads its password from the environment, so the URL stays clean and
+            // the credential never lands in the applied plan.
+            redisUrl = $"redis://{endpoint}";
+            if (!string.IsNullOrWhiteSpace(redisPassword))
+            {
+                await vaultService.SetComponentSecretAsync(
+                    tenantId, clusterComponentId, StalwartPlanBuilder.RedisPasswordEnv, redisPassword, ct,
+                    k8sSecretName: credentialsSecret, k8sNamespace: ns);
+            }
+        }
+        else
+        {
+            // The standalone store carries no secret field, so a password rides in the URL.
+            string redisAuth = string.IsNullOrWhiteSpace(redisPassword)
+                ? ""
+                : $":{Uri.EscapeDataString(redisPassword)}@";
+            redisUrl = $"redis://{redisAuth}{endpoint}";
+        }
 
         return new StalwartPlanBuilder.StalwartHaBackend(
             DbHost: dbHost, DbPort: 5432, DbName: cnpg.Name, DbUser: cnpg.Owner,
             S3Endpoint: link.Endpoint ?? "", S3Region: link.Region ?? "us-east-1", S3Bucket: link.BucketName ?? "",
             S3AccessKey: accessKey,
             RedisUrl: redisUrl,
+            RedisIsCluster: redisIsCluster,
             Replicas: Math.Max(2, config.Replicas));
     }
 
