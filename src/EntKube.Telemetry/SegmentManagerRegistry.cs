@@ -23,8 +23,33 @@ public sealed class SegmentManagerRegistry<TManager>(Func<Guid, TManager> create
     private readonly ConcurrentDictionary<Guid, Lazy<TManager>> _managers = new();
 
     /// <summary>The tenant's manager, created on first use (Lazy ensures the Lucene index is opened once).</summary>
+    /// <remarks>
+    /// A failed open is forgotten rather than remembered. <see cref="Lazy{T}"/> caches its factory's
+    /// exception for the lifetime of the instance, so a manager that failed to open once could never be
+    /// retried: every later ingest and query for that tenant rethrew the same error instantly, with no path
+    /// back even after the cause was gone.
+    ///
+    /// <para>Worse, it was silent and it compounded. <see cref="ActiveManagers"/> filters on
+    /// <c>IsValueCreated</c>, which stays false for a faulted <see cref="Lazy{T}"/> — so the seal service
+    /// never saw the tenant, never rolled its active index, and the index grew without bound. The one
+    /// failure mode that makes an index hard to open is an index that is too large, so each restart
+    /// recovered a bigger one than the last and the node could only get worse. Dropping the faulted entry
+    /// makes the next call try again, which is what lets a restart actually be a remedy.</para>
+    /// </remarks>
     public TManager For(Guid tenantId)
-        => _managers.GetOrAdd(tenantId, id => new Lazy<TManager>(() => create(id))).Value;
+    {
+        Lazy<TManager> lazy = _managers.GetOrAdd(tenantId, id => new Lazy<TManager>(() => create(id)));
+        try
+        {
+            return lazy.Value;
+        }
+        catch
+        {
+            // Remove this exact entry: another thread may already have replaced it with a fresh attempt.
+            _managers.TryRemove(new KeyValuePair<Guid, Lazy<TManager>>(tenantId, lazy));
+            throw;
+        }
+    }
 
     public IReadOnlyCollection<SegmentManagerBase> ActiveManagers =>
         _managers.Values.Where(l => l.IsValueCreated).Select(l => (SegmentManagerBase)l.Value).ToArray();

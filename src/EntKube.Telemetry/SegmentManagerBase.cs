@@ -251,10 +251,58 @@ public abstract class SegmentManagerBase : IDisposable
     /// exactly where it is, and the next roll re-opens that directory in <c>CREATE_OR_APPEND</c> mode and
     /// absorbs its documents into the following segment.</para>
     /// </summary>
+    /// <summary>
+    /// Opens one active directory and, if what is in it was written by a schema this build can no longer
+    /// append to, discards and recreates it.
+    ///
+    /// <para>The case is narrow and it is not a judgement call. Such an index cannot be sealed — the
+    /// catalog row needs time bounds that only that DocValue can supply — and it cannot safely be written
+    /// into either. Lucene does not refuse the mix, which is the trap: append documents that carry the
+    /// DocValue and the merge backfills the older ones with <b>zero</b>, so they read back as 1970 from
+    /// every columnar path while their stored <c>ts</c> still looks correct. Sealing that produces a
+    /// catalog row dated to the epoch, which retention deletes on sight — current telemetry, discarded
+    /// silently for being fifty-six years old. Discarding the directory is the only outcome that neither
+    /// corrupts nor strands. Only UNSEALED data is lost; sealed segments live in object storage and are not
+    /// touched. See <c>SegmentSchemaInvariantTests</c>, which pins the backfill behaviour.</para>
+    ///
+    /// <para>This has to happen here, at startup, rather than in a runbook. It is the same reason
+    /// MigrationReconciler exists: production has no console and no one can reach a PersistentVolume, so a
+    /// repair that an operator has to perform by hand is a repair that never happens.</para>
+    /// </summary>
+    private ActiveSegmentIndex OpenAndRepair(string dir)
+    {
+        ActiveSegmentIndex index = ActiveSegmentIndex.OpenAt(dir, _analyzer, _logger);
+        if (!index.TsDocValuesMissing) return index;
+
+        long lost = index.DocCount;
+        index.Dispose();
+
+        _logger.LogError(
+            "Discarding the {Signal} active index at {Dir}: its {Docs} unsealed documents were written by a "
+            + "schema with no columnar 'ts', which this build can neither append to nor seal. Sealed "
+            + "segments in object storage are unaffected. Ingest for this signal resumes immediately.",
+            Signal, dir, lost);
+
+        if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        return ActiveSegmentIndex.OpenAt(dir, _analyzer, _logger);
+    }
+
     private (ActiveSegmentIndex Active, bool IsA) AdoptExistingActive()
     {
-        ActiveSegmentIndex a = ActiveSegmentIndex.OpenAt(_dirA, _analyzer);
-        ActiveSegmentIndex b = ActiveSegmentIndex.OpenAt(_dirB, _analyzer);
+        ActiveSegmentIndex a = OpenAndRepair(_dirA);
+        ActiveSegmentIndex b;
+        try
+        {
+            b = OpenAndRepair(_dirB);
+        }
+        catch
+        {
+            // A is already open and holds its directory's write lock. Letting it dangle would make every
+            // later attempt fail on the lock instead of on whatever actually went wrong with B — turning a
+            // retryable fault into a permanent one, which is the trap the registry now exists to avoid.
+            a.Dispose();
+            throw;
+        }
 
         bool useA = (a.HasData, b.HasData) switch
         {
@@ -508,14 +556,26 @@ public abstract class SegmentManagerBase : IDisposable
             if (!_active.HasData) return null;
             sealing = _active;
             // Ping-pong to the other on-disk directory so the new active never collides with the sealing one.
-            _active = ActiveSegmentIndex.OpenAt(_activeIsA ? _dirB : _dirA, _analyzer);
+            _active = OpenAndRepair(_activeIsA ? _dirB : _dirA);
             _activeIsA = !_activeIsA;
             _activeSince = DateTime.UtcNow;
         }
 
         var segId = Guid.NewGuid();
-        DateTime min = sealing.MinTs!.Value;
-        DateTime max = sealing.MaxTs!.Value;
+        if (sealing.MinTs is not DateTime min || sealing.MaxTs is not DateTime max)
+        {
+            // Documents present but no recoverable time bounds. OpenAndRepair should have made this
+            // unreachable, so say so rather than dereferencing a null and reporting it as a NullReference
+            // from inside the seal loop — the catalog row cannot be written without these.
+            _logger.LogError(
+                "Refusing to seal the {Signal} active index at {Dir}: it holds {Docs} documents but no "
+                + "recoverable time bounds, so no catalog row can describe it.",
+                Signal, sealing.DirectoryPath, sealing.DocCount);
+            // _active has already ping-ponged to the other directory, so release this one's handles. Its
+            // files stay put; the next roll swings back and OpenAndRepair deals with them there.
+            sealing.Dispose();
+            return null;
+        }
         long docs = sealing.DocCount;
         string sealingDir = sealing.DirectoryPath!;
 
