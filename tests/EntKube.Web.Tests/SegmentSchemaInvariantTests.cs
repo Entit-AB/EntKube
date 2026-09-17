@@ -150,6 +150,55 @@ public class SegmentSchemaInvariantTests
     }
 
     /// <summary>
+    /// Why the old directory has to be discarded rather than written into — and it is not because Lucene
+    /// refuses. It accepts the mix without complaint, and that is the problem.
+    ///
+    /// <para>Appending documents that carry <c>NumericDocValuesField(ts)</c> to an index whose existing
+    /// segments wrote <c>ts</c> without one succeeds, and the merge backfills the older documents' missing
+    /// DocValue with <b>zero</b>. Their stored <c>ts</c> still says what it always said, so nothing looks
+    /// wrong — but every columnar read of them now answers epoch 0. <c>BoundaryTs</c> would report a MinTs
+    /// of 1970, the catalog row sealed from it would claim the same, and retention would then delete a
+    /// segment of current telemetry for being fifty-six years old.</para>
+    ///
+    /// <para>Silent, and it destroys data — so the repair discards the directory instead, and it has to run
+    /// before the first append, which is why it lives in the manager's constructor path.</para>
+    /// </summary>
+    [Fact]
+    public void MixingSchemasInOneIndex_SilentlyBackfillsTheOlderDocumentsWithEpochZero()
+    {
+        using var dir = new RAMDirectory();
+        var analyzer = new KeywordAnalyzer();
+
+        const long realTs = 1_789_000_000_000; // a plausible 2026 timestamp
+        using var writer = new IndexWriter(dir, new IndexWriterConfig(LuceneVersion.LUCENE_48, analyzer));
+
+        // Written by the broken schema: indexed + stored, no columnar copy.
+        writer.AddDocument(new Document { new Int64Field("ts", realTs, Field.Store.YES) });
+        writer.Commit();
+
+        // Written by the fixed schema, into the same index.
+        writer.AddDocument(new Document
+        {
+            new Int64Field("ts", realTs + 1000, Field.Store.YES),
+            new NumericDocValuesField("ts", realTs + 1000),
+        });
+        writer.Commit();
+        writer.ForceMerge(1);
+        writer.Commit();
+
+        using DirectoryReader reader = DirectoryReader.Open(dir);
+        NumericDocValues ts = reader.Leaves.Single().AtomicReader.GetNumericDocValues("ts");
+
+        ts.Should().NotBeNull("the merge gives the whole field a DocValue — including the documents that never had one");
+
+        long[] columnar = [.. Enumerable.Range(0, reader.MaxDoc).Select(ts.Get)];
+        columnar.Should().Contain(0L,
+            "the pre-existing document's DocValue is backfilled with zero, so a columnar read dates it to "
+            + "1970 while its stored ts still reads correctly — which is exactly what makes this silent");
+        columnar.Should().Contain(realTs + 1000, "the document written by the fixed schema keeps its value");
+    }
+
+    /// <summary>
     /// A manager whose construction fails must not be remembered as failed.
     ///
     /// <see cref="Lazy{T}"/> caches its factory's exception for good, so the registry used to answer every

@@ -82,7 +82,7 @@ public sealed class ActiveSegmentIndex : IDisposable
     /// drain or an upgrade included — accumulates an index it can never let go of.</para>
     ///
     /// <para>Cheap enough to do unconditionally: an empty index short-circuits on the doc count, and a
-    /// populated one pays two sorted top-1 searches once per open.</para>
+    /// populated one pays one columnar pass over <c>ts</c> once per open.</para>
     /// </summary>
     private void RecoverFromDisk()
     {
@@ -132,10 +132,17 @@ public sealed class ActiveSegmentIndex : IDisposable
             NumericDocValues values = reader.GetNumericDocValues(TsField);
             if (values is null)
             {
+                // Recorded, not merely logged. This index was written by a schema with no columnar ts,
+                // and the danger is that Lucene does NOT refuse to keep using it: append documents that do
+                // carry the DocValue and the merge backfills these older ones with zero, so they read back
+                // as 1970 from every columnar path while their stored ts still looks right. Sealing that
+                // writes a catalog row retention deletes on sight. The manager discards the directory on
+                // this signal — see SegmentManagerBase.OpenAndRepair.
+                TsDocValuesMissing = true;
                 _logger?.LogWarning(
                     "The active index at {Path} has no '{Field}' DocValues in one of its segments, so its "
-                    + "unsealed time bounds cannot be recovered and it will not seal by age until it next "
-                    + "rolls. This means a schema is not writing NumericDocValuesField({Field}).",
+                    + "unsealed time bounds cannot be recovered and nothing can be appended to it. A schema "
+                    + "is not writing NumericDocValuesField({Field}).",
                     DirectoryPath ?? "(in-memory)", TsField, TsField);
                 return (null, null);
             }
@@ -153,6 +160,15 @@ public sealed class ActiveSegmentIndex : IDisposable
 
         return any ? (min, max) : (null, null);
     }
+
+    /// <summary>
+    /// True when this index holds documents written without a <c>ts</c> DocValue — a schema older than the
+    /// one this build writes. Such an index can be read, but not appended to and not sealed (its time
+    /// bounds, which the catalog row needs, are unrecoverable). The owning manager discards and recreates
+    /// the directory on this signal; nothing else can, because the data is unsealed and no operator has a
+    /// way to reach a PersistentVolume.
+    /// </summary>
+    public bool TsDocValuesMissing { get; private set; }
 
     /// <summary>Documents in the active index, recovered from disk on open — its future segment size.</summary>
     public long DocCount => Interlocked.Read(ref _count);
