@@ -864,6 +864,64 @@ public class StalwartService(
         }
     }
 
+    /// <summary>
+    /// What cert-manager says about the mail certificate: null when it is Ready, otherwise the
+    /// reason it is not, as cert-manager wrote it.
+    ///
+    /// <para>This is checked because of what adding names to a live certificate can do. The
+    /// certificate carries the autodiscovery names of every served domain, so adding a domain adds
+    /// names — and if the issuer cannot solve a challenge for one of them, the whole certificate
+    /// fails to re-issue. cert-manager keeps serving the existing Secret while that happens, so
+    /// nothing breaks on the day: the mail server keeps working until the old certificate expires,
+    /// weeks later, with the explanation sitting in a Certificate resource nobody thought to read.
+    /// The Secret existing is therefore not evidence that the certificate is healthy.</para>
+    ///
+    /// <para>Returns null when the status cannot be read at all — an unreadable check must not turn
+    /// into a reported failure.</para>
+    /// </summary>
+    public static string? DescribeCertificateProblem(string json)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("status", out JsonElement status)
+                || !status.TryGetProperty("conditions", out JsonElement conditions)
+                || conditions.ValueKind != JsonValueKind.Array)
+            {
+                return null;
+            }
+
+            foreach (JsonElement condition in conditions.EnumerateArray())
+            {
+                if (!condition.TryGetProperty("type", out JsonElement type)
+                    || type.GetString() != "Ready")
+                {
+                    continue;
+                }
+                if (condition.TryGetProperty("status", out JsonElement state)
+                    && state.GetString() == "True")
+                {
+                    return null;
+                }
+
+                string reason = condition.TryGetProperty("reason", out JsonElement r)
+                    ? r.GetString() ?? "" : "";
+                string message = condition.TryGetProperty("message", out JsonElement m)
+                    ? m.GetString() ?? "" : "";
+
+                return string.IsNullOrWhiteSpace(message)
+                    ? (string.IsNullOrWhiteSpace(reason) ? "cert-manager reports it as not ready." : reason)
+                    : $"{reason}: {message}".TrimStart(':', ' ');
+            }
+
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>One thing the running server is complaining about, as it wrote it.</summary>
     /// <param name="EventName">Stalwart's event id, e.g. <c>registry.build-error</c>.</param>
     /// <param name="Line">The log line, trimmed.</param>
@@ -1223,6 +1281,48 @@ public class StalwartService(
                     "Set at least two replicas on the Components tab, or turn high availability off there "
                     + "— a one-node HA deployment carries the cost of shared backends with none of the "
                     + "redundancy."));
+            }
+        }
+
+        // A certificate that is not Ready is the one failure here that hides for weeks: the old
+        // Secret keeps being served, so mail keeps working until it expires. Only asked when there
+        // is a cert-manager certificate to ask about, and never allowed to block — an issuer having
+        // a bad day must not stop an operator applying an unrelated change.
+        if (config.TlsMode == StalwartTlsMode.ClusterIssuer)
+        {
+            ClusterComponent? component = await db.ClusterComponents
+                .Include(c => c.Cluster)
+                .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+
+            if (component?.Status == ComponentStatus.Installed
+                && component.Cluster?.Kubeconfig is { Length: > 0 } certKubeconfig)
+            {
+                string release = component.ReleaseName ?? component.Name;
+                string certNs = component.Namespace ?? DefaultNamespace;
+                string certName = $"{release}{StalwartManifestBuilder.TlsSecretSuffix}";
+
+                try
+                {
+                    string json = await k8sFactory.GetJsonAsync(
+                        $"certificate/{certName}", certNs, certKubeconfig, ct: ct);
+
+                    if (DescribeCertificateProblem(json) is string problem)
+                    {
+                        issues.Add(new(false,
+                            $"The mail certificate ({certName}) is not ready: {problem}",
+                            "It covers the mail hostname and the client-autodiscovery names of every "
+                            + $"domain — {string.Join(", ", StalwartPlanBuilder.CertificateNames(config.Hostname.Trim(), domains))} "
+                            + $"— and the issuer ({config.ClusterIssuer}) has to be able to solve a challenge "
+                            + "for each. One it cannot fails the whole certificate. The existing certificate "
+                            + "keeps being served until it expires, so mail works today and stops later."));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // No cert-manager, no such Certificate, no reachable cluster — none of which is
+                    // a finding about this configuration.
+                    logger.LogDebug(ex, "Could not read Certificate {Name} in {Namespace}.", certName, certNs);
+                }
             }
         }
 
