@@ -1136,7 +1136,8 @@ public class StalwartMailTests
     private static StalwartPlanBuilder.StalwartHaBackend Ha() => new(
         DbHost: "mail-db-rw.mail.svc.cluster.local", DbPort: 5432, DbName: "stalwart", DbUser: "stalwart",
         S3Endpoint: "https://s3.cleura.cloud", S3Region: "eu-north-1", S3Bucket: "mail-blobs",
-        S3AccessKey: "AKIA…", RedisUrl: "redis://redis.redis.svc.cluster.local:6379", Replicas: 3);
+        S3AccessKey: "AKIA…", RedisUrl: "redis://redis.redis.svc.cluster.local:6379",
+        RedisIsCluster: false, Replicas: 3);
 
     [Fact]
     public void ConfigJsonIsRocksDbSingleNodeAndPostgreSqlInHa()
@@ -1192,10 +1193,10 @@ public class StalwartMailTests
     }
 
     [Fact]
-    public void TheRedisCoordinatorNeverEmitsAnAuthSecretObject()
+    public void TheStandaloneRedisCoordinatorNeverEmitsAnAuthSecretObject()
     {
-        // Whatever the URL contains, the Coordinator/InMemoryStore objects only ever carry `url` —
-        // the Redis store struct has no secret field, so an authSecret would fail the apply.
+        // Whatever the URL contains, a STANDALONE Redis Coordinator/InMemoryStore only ever carries
+        // `url` — RedisStore has no secret field, so an authSecret would fail the apply.
         StalwartComponentConfig config = Config();
         StalwartPlanBuilder.StalwartHaBackend ha = Ha() with { RedisUrl = "redis://:s3cr3t@redis:6379" };
         string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], [], ha: ha);
@@ -1206,6 +1207,73 @@ public class StalwartMailTests
             v.TryGetProperty("authSecret", out _).Should().BeFalse();
             v.GetProperty("url").GetString().Should().Be("redis://:s3cr3t@redis:6379");
         }
+    }
+
+    [Fact]
+    public void AShardedRedisGetsTheClusterStoreAndItsPasswordFromTheEnvironment()
+    {
+        // The failure this prevents is not a start-up error. A Redis Cluster addressed as a single
+        // server starts cleanly, authenticates a login, and then answers every lookup behind it with
+        // `Moved: 5938 10.0.0.1:6379` — the standalone client does not follow a MOVED redirection —
+        // so what breaks is logging in, and nothing in the failure names the address. EntKube's own
+        // managed Redis is always a cluster.
+        StalwartComponentConfig config = Config();
+        StalwartPlanBuilder.StalwartHaBackend ha = Ha() with
+        {
+            RedisUrl = "redis://redis-leader.redis.svc.cluster.local:6379",
+            RedisIsCluster = true,
+        };
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], [], ha: ha);
+
+        foreach (string obj in new[] { "Coordinator", "InMemoryStore" })
+        {
+            JsonElement v = Operation(plan, obj)!.Value.GetProperty("value");
+            v.GetProperty("@type").GetString().Should().Be("RedisCluster");
+
+            // urls is a Map<String>, which serialises as {member: true} — the listener-bind
+            // encoding, not an array. An array is rejected as an invalid patch.
+            JsonElement urls = v.GetProperty("urls");
+            urls.ValueKind.Should().Be(JsonValueKind.Object);
+            urls.GetProperty("redis://redis-leader.redis.svc.cluster.local:6379").GetBoolean().Should().BeTrue();
+
+            // Only the cluster store has a secret field, so this is the one shape where the password
+            // can stay out of the applied plan.
+            v.GetProperty("authSecret").GetProperty("@type").GetString().Should().Be("EnvironmentVariable");
+            v.GetProperty("authSecret").GetProperty("variableName").GetString()
+                .Should().Be(StalwartPlanBuilder.RedisPasswordEnv);
+            v.TryGetProperty("url", out _).Should().BeFalse();
+        }
+
+        // …and the pod has to be given it.
+        string manifest = StalwartManifestBuilder.Build(config, "stalwart", "stalwart", ha: ha);
+        manifest.Should().Contain(StalwartPlanBuilder.RedisPasswordEnv);
+    }
+
+    [Fact]
+    public void AStandaloneRedisGetsNoPasswordEnvironmentVariable()
+    {
+        // The mirror image: RedisStore has no secret field at all, so injecting an env var the store
+        // cannot read would only look like a configured credential.
+        string manifest = StalwartManifestBuilder.Build(
+            Config(), "stalwart", "stalwart", ha: Ha() with { RedisIsCluster = false });
+
+        manifest.Should().NotContain(StalwartPlanBuilder.RedisPasswordEnv);
+    }
+
+    [Fact]
+    public void TheTracerSetIsReplacedSoRaisingTheLevelDoesNotAddASecondConsole()
+    {
+        // An upsert here matches on every property, so applying at debug and then at info left two
+        // enabled console tracers — and Stalwart allows one, rejecting the extra on every start
+        // with "Only one console tracer is allowed". Replacing the set also drops the default file
+        // tracer, which writes to a /var/log path no container has.
+        StalwartComponentConfig config = Config();
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+        JsonElement tracer = Operation(plan, "Tracer")!.Value;
+        tracer.GetProperty("@type").GetString().Should().Be("reconcile");
+        tracer.GetProperty("value").EnumerateObject().Should().ContainSingle()
+            .Which.Value.GetProperty("@type").GetString().Should().Be("Stdout");
     }
 
     [Fact]

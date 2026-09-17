@@ -200,13 +200,19 @@ public static class StalwartManifestBuilder
             // so no identity env is needed.
             env.Add("            - name: STALWART_ROLE");
             env.Add($"              value: {StalwartPlanBuilder.ClusterRoleName}");
-            foreach ((string envName, string secretKey) in new[]
-            {
+            List<(string EnvName, string SecretKey)> backendSecrets =
+            [
                 (StalwartPlanBuilder.DbPasswordEnv, StalwartPlanBuilder.DbPasswordEnv),
                 (StalwartPlanBuilder.S3SecretKeyEnv, StalwartPlanBuilder.S3SecretKeyEnv),
-                // The Redis password is not injected: the standalone-Redis store reads no env var,
-                // so the coordinator/in-memory URL carries the password inline instead.
-            })
+            ];
+            if (ha.RedisIsCluster)
+            {
+                // Only the cluster store can read a password from the environment; the standalone
+                // one has no secret field at all and carries it inside the URL instead.
+                backendSecrets.Add((StalwartPlanBuilder.RedisPasswordEnv, StalwartPlanBuilder.RedisPasswordEnv));
+            }
+
+            foreach ((string envName, string secretKey) in backendSecrets)
             {
                 env.Add($"            - name: {envName}");
                 env.Add("              valueFrom:");

@@ -3243,7 +3243,7 @@ public static class ComponentCatalog
                     YamlPath = "stalwart:ha-coordinator-redis", Type = FormFieldType.RedisSelector,
                     Placeholder = "redis.redis.svc.cluster.local:6379",
                     DependsOnKey = "ha-enabled", DependsOnValue = "true",
-                    HelpText = "How the nodes stay in step, and where rate limits and caches live. The same Redis rspamd uses is fine; picking one EntKube manages fills its password in below."
+                    HelpText = "How the nodes stay in step, and where rate limits and caches live. The same Redis rspamd uses is fine; picking one EntKube manages fills its password in below and is configured as a Redis Cluster, which is what those are. An endpoint typed by hand is treated as a single server — if it is in fact a sharded cluster, the server will start, authenticate a login and then fail every lookup behind it with a MOVED redirection."
                 },
                 new ComponentFormField
                 {
@@ -3252,7 +3252,7 @@ public static class ComponentCatalog
                     Key = "redis-password", Label = "Coordinator Redis Password",
                     YamlPath = "stalwart:redis-password", Type = FormFieldType.Password,
                     DependsOnKey = "ha-enabled", DependsOnValue = "true",
-                    HelpText = "Leave blank for a Redis with no authentication, which is what a network-isolated coordinator should be: the standalone-Redis store takes no secret reference, so a password can only travel inside the connection URL and is therefore visible in the applied configuration."
+                    HelpText = "Leave blank for a Redis with no authentication. A Redis Cluster reads this from the pod's environment, so it stays out of the applied configuration; a single server has nowhere to put it but the connection URL, where it is visible — so a network-isolated coordinator with no password is the better shape for that case."
                 },
                 new ComponentFormField
                 {
