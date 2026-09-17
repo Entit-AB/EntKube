@@ -261,7 +261,51 @@ else
                     }
                     else
                     {
-                        <div class="text-muted small py-2">No logs carry this trace id (apps must propagate trace context into their logs).</div>
+                        @* The old copy here said only "apps must propagate trace context into their
+                           logs", which names the requirement and leaves out the one thing that makes it
+                           actionable. It was also, at the time, asking for something most apps could not
+                           do without an edit to collector config shared by every app on the cluster.
+                           OtlpLogsParser now recovers a trace id from the record's attributes or from the
+                           log line itself, so the remaining advice is about what the APP logs — which is
+                           the app owner's own business and needs nobody else's cooperation. *@
+                        <div class="text-muted small py-2">
+                            <div>No logs carry this trace id.</div>
+                            <details class="mt-2">
+                                <summary style="cursor:pointer">How to correlate logs with traces</summary>
+                                <div class="mt-2 ps-1" style="max-width:56rem">
+                                    <p class="mb-2">
+                                        EntKube looks for the trace id in the log record, in its attributes,
+                                        and in the log line itself — so an app only has to <em>write</em> its
+                                        trace id somewhere in the line. No collector configuration is needed,
+                                        and nothing outside your own app has to change. These are all picked
+                                        up automatically:
+                                    </p>
+<pre class="border rounded p-2 mb-2" style="background:#1e1e1e;color:#d4d4d4;font-size:.75rem">{"level":"error","trace_id":"4bf92f35…","msg":"checkout failed"}
+level=error trace_id=4bf92f35… msg="checkout failed"
+ERROR checkout failed trace-id: 4bf92f35…</pre>
+                                    <p class="mb-2">
+                                        <code>trace_id</code>, <code>traceId</code>, <code>TraceId</code> and
+                                        <code>trace-id</code> all work, in JSON, logfmt or plain text. The id
+                                        must be the full 32-character trace id — a 16-character span id is
+                                        not enough to identify a trace.
+                                    </p>
+                                    <p class="mb-2">
+                                        Seeing this message means the app is not logging its trace id at all.
+                                        Most logging libraries can add it to every line once: in .NET it is
+                                        already on <code>Activity.Current.TraceId</code>, in Java it is in the
+                                        Logback/Log4j2 MDC, and the OpenTelemetry logging integrations for
+                                        Python, Go and Node expose the active span context the same way.
+                                    </p>
+                                    <p class="mb-0">
+                                        Alternatively, export logs over OTLP from the app and the SDK's log
+                                        bridge attaches the span context itself — the collector already accepts
+                                        OTLP on <code>4317</code> and <code>4318</code>, so nothing needs
+                                        deploying. Either way, only lines written after the change are
+                                        correlated; existing logs are not reindexed.
+                                    </p>
+                                </div>
+                            </details>
+                        </div>
                     }
                 }
             </div>
