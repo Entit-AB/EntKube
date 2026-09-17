@@ -112,10 +112,14 @@ public class StalwartComponentConfig
     public required string Hostname { get; set; }
 
     /// <summary>
-    /// Public hostname for the web surfaces: the admin UI, JMAP, autoconfig/autodiscover and the
-    /// OAuth endpoints. Published through the cluster's gateway (Istio or Traefik) as an
-    /// ExternalRoute, so it is a normal HTTPS hostname and not one of the mail ports. Null leaves
-    /// the HTTP listener reachable only inside the cluster.
+    /// Public hostname for the administrative web surfaces: the admin UI, JMAP and the OAuth
+    /// endpoints. Published through the cluster's gateway (Istio or Traefik) as an ExternalRoute, so
+    /// it is a normal HTTPS hostname and not one of the mail ports. Null leaves the HTTP listener
+    /// reachable only inside the cluster.
+    ///
+    /// <para>Client auto-configuration and MTA-STS are deliberately NOT here: those are names of the
+    /// mail service and are answered on the mail address, so leaving this null costs the admin UI
+    /// and nothing else.</para>
     /// </summary>
     public string? AdminHostname { get; set; }
 

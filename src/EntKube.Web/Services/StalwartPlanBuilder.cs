@@ -83,7 +83,10 @@ public static class StalwartPlanBuilder
         string S3Endpoint, string S3Region, string S3Bucket, string S3AccessKey,
         string RedisUrl, int Replicas);
 
-    /// <summary>The HTTP port serving JMAP, the admin UI, autoconfig and the OAuth endpoints.</summary>
+    /// <summary>
+    /// The in-cluster HTTP port: JMAP, the admin UI, the OAuth endpoints — and the public
+    /// autodiscovery paths, which are also answered on the mail address's own HTTPS listener.
+    /// </summary>
     public const int HttpPort = 8080;
 
     private static readonly JsonSerializerOptions Compact = new() { WriteIndented = false };
@@ -629,10 +632,12 @@ public static class StalwartPlanBuilder
     /// The <c>Http.allowedEndpoints</c> expression: which requests each HTTP listener will answer.
     ///
     /// <para>This is what makes opening ports 80 and 443 on the public mail address safe. Those
-    /// listeners exist only so the CA can complete a challenge, and Stalwart's endpoint policy is
-    /// global rather than per-listener — so without this, publishing port 80 would put the admin
-    /// interface and JMAP on a public address in cleartext. The rules deny everything on the ACME
-    /// listeners except the challenge path itself, and leave every other listener untouched.</para>
+    /// listeners exist only for requests that are public by nature — a CA completing a challenge, a
+    /// client asking where to find its mailbox, a sending server fetching an MTA-STS policy — and
+    /// Stalwart's endpoint policy is global rather than per-listener, so without this, publishing
+    /// them would put the admin interface and JMAP on a public address as well. The rules allow the
+    /// public paths, refuse everything else on those listeners by name, and leave every other
+    /// listener untouched.</para>
     ///
     /// <para>Written as separate match arms rather than one boolean expression on purpose: each arm
     /// is a single comparison, so there is no operator precedence to get subtly wrong in a rule
@@ -640,48 +645,57 @@ public static class StalwartPlanBuilder
     /// </summary>
     private static Dictionary<string, object?> BuildEndpointPolicy(StalwartComponentConfig config)
     {
-        List<object?> arms = [];
-
-        if (StalwartManifestBuilder.NeedsAcmeHttpPort(config) || StalwartManifestBuilder.NeedsAcmeTlsPort(config))
+        // Every listener published on the mail LoadBalancer's web ports. Whatever is not explicitly
+        // allowed below is refused on each of them by name — an allow-list keyed on the listener,
+        // never on "everything else", because this expression gates every HTTP request the server
+        // serves and the failure mode of getting it wrong is a bare Forbidden on the admin UI.
+        List<string> publicListeners = [];
+        if (StalwartManifestBuilder.NeedsAcmeHttpPort(config))
         {
-            // `path` is the HttpVariable for the request path. The access-control doc page shows
-            // `url_path` in its example and the server rejects it with "Invalid variable or
-            // constant" — which aborted a real apply at this very line. HttpVariable is the
-            // authoritative list; the test below pins every identifier used here to it.
-            // The mail LoadBalancer's HTTP(S) ports are public. Three kinds of request are safe to
-            // answer there and one is not: the ACME challenge and the client-autodiscovery
-            // endpoints are public by nature, while the admin UI and JMAP must never be reachable on
-            // a public address. So allow exactly the public paths and 403 the rest of the ACME
-            // listeners — /.well-known/ covers the ACME challenge, MTA-STS and PACC; the other two
-            // are Thunderbird's and Outlook's fixed paths (Outlook varies the case).
-            foreach (string prefix in PublicHttpPaths)
-            {
-                arms.Add(new Dictionary<string, object?>
-                {
-                    ["if"] = $"starts_with(path, '{prefix}')",
-                    ["then"] = "200",
-                });
-            }
+            publicListeners.Add(StalwartManifestBuilder.AcmeHttpListener);
+        }
+        if (StalwartManifestBuilder.NeedsPublicWebPort(config))
+        {
+            publicListeners.Add(StalwartManifestBuilder.PublicWebListener);
+        }
+
+        if (publicListeners.Count == 0)
+        {
+            // Nothing is published on the mail address, so there is nothing to restrict: write the
+            // documented default — {"else": "200"}, no match key — and nothing else. Two earlier
+            // attempts here invented shapes (an empty match set, then an always-true arm) for a
+            // global setting that gates every HTTP request on the server; the only shape with
+            // evidence behind it is the one the reference lists as the default. Written rather than
+            // skipped so that unpublishing repairs a deployment that had the restrictive form.
+            return new Dictionary<string, object?> { ["else"] = "200" };
+        }
+
+        // `path` is the HttpVariable for the request path. The access-control doc page shows
+        // `url_path` in its example and the server rejects it with "Invalid variable or
+        // constant" — which aborted a real apply at this very line. HttpVariable is the
+        // authoritative list; the test below pins every identifier used here to it.
+        //
+        // Two kinds of request are safe to answer on a public mail address and one is not: the ACME
+        // challenge and the client-autodiscovery endpoints are public by nature, while the admin UI
+        // and JMAP must never be reachable there. So allow exactly the public paths and refuse the
+        // rest on those listeners — /.well-known/ covers the ACME challenge, MTA-STS and PACC; the
+        // other two are Thunderbird's and Outlook's fixed paths (Outlook varies the case).
+        List<object?> arms = [];
+        foreach (string prefix in PublicHttpPaths)
+        {
             arms.Add(new Dictionary<string, object?>
             {
-                ["if"] = $"listener == '{StalwartManifestBuilder.AcmeHttpListener}'",
-                ["then"] = "403",
-            });
-            arms.Add(new Dictionary<string, object?>
-            {
-                ["if"] = $"listener == '{StalwartManifestBuilder.AcmeTlsListener}'",
-                ["then"] = "403",
+                ["if"] = $"starts_with(path, '{prefix}')",
+                ["then"] = "200",
             });
         }
-        else
+        foreach (string listener in publicListeners)
         {
-            // Nothing to restrict, so write the documented default — {"else": "200"}, no match key —
-            // and nothing else. Two earlier attempts here invented shapes (an empty match set, then
-            // an always-true arm) for a global setting that gates every HTTP request on the server;
-            // the only shape with evidence behind it is the one the reference lists as the default.
-            // Written rather than skipped so that turning ACME off repairs a deployment that had
-            // the restrictive form applied.
-            return new Dictionary<string, object?> { ["else"] = "200" };
+            arms.Add(new Dictionary<string, object?>
+            {
+                ["if"] = $"listener == '{listener}'",
+                ["then"] = "403",
+            });
         }
 
         return new Dictionary<string, object?>
@@ -690,9 +704,6 @@ public static class StalwartPlanBuilder
             ["else"] = "200",
         };
     }
-
-    /// <summary>Path prefix a CA fetches an HTTP-01 challenge response from.</summary>
-    private const string AcmeChallengePath = "/.well-known/acme-challenge";
 
     /// <summary>
     /// The request paths that are safe to answer on the public mail address: everything under
@@ -751,18 +762,22 @@ public static class StalwartPlanBuilder
         // second one for a hop nothing outside the cluster can reach.
         Add("http", HttpPort, "http", implicitTls: false, useTls: false);
 
-        // Stalwart answers its own ACME challenge, so in ACME mode the CA has to be able to reach
-        // it on the port that challenge type uses. These carry nothing else — see BuildEndpointPolicy.
+        // Stalwart answers its own ACME challenge, so in HTTP-01 mode the CA has to be able to reach
+        // it on port 80. That listener carries nothing else — see BuildEndpointPolicy.
         if (StalwartManifestBuilder.NeedsAcmeHttpPort(config))
         {
             Add(StalwartManifestBuilder.AcmeHttpListener, MailPorts.AcmeHttp, "http",
                 implicitTls: false, useTls: false);
         }
-        if (StalwartManifestBuilder.NeedsAcmeTlsPort(config))
+
+        // HTTPS on the mail address, in every TLS mode. This is what answers the lookups a client
+        // makes before it has any settings — autoconfig, autodiscover, MTA-STS, PACC — on the names
+        // that belong to the mail service rather than to the admin UI. In ACME TLS-ALPN-01 mode the
+        // CA's handshake arrives here too, which needs no extra binding: the challenge is answered
+        // during the handshake via the acme-tls/1 ALPN protocol, before any HTTP request exists.
+        if (StalwartManifestBuilder.NeedsPublicWebPort(config))
         {
-            // The challenge is answered during the handshake via the acme-tls/1 ALPN protocol, so
-            // this listener never has to serve an HTTP request to do its job.
-            Add(StalwartManifestBuilder.AcmeTlsListener, MailPorts.AcmeTls, "http",
+            Add(StalwartManifestBuilder.PublicWebListener, MailPorts.PublicWeb, "http",
                 implicitTls: true, useTls: true);
         }
 
@@ -835,6 +850,47 @@ public static class StalwartPlanBuilder
 
     // ── DNS ───────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The host prefixes a mail client or a sending server looks up before it has any settings, and
+    /// what each one is for. One list, used three ways: the DNS records an operator is told to
+    /// publish, the names on the mail certificate, and — in ACME mode — the names Stalwart orders
+    /// for itself. They must agree, because each of these lookups is an HTTPS request that validates
+    /// the name it asked for.
+    /// </summary>
+    public static readonly (string Prefix, string Purpose)[] AutodiscoveryHosts =
+    [
+        ("autoconfig", "Thunderbird / Apple Mail autoconfig."),
+        ("autodiscover", "Outlook autodiscover."),
+        ("mta-sts", "MTA-STS policy host — how a sending server learns this domain requires TLS."),
+        ("ua-auto-config", "PACC (RFC-standard client autoconfig)."),
+    ];
+
+    /// <summary>
+    /// Every name the mail certificate has to carry: the server's own hostname, plus the
+    /// autodiscovery names of each served domain. Deduplicated and lower-cased, hostname first, so
+    /// the common name is also the first SAN.
+    /// </summary>
+    public static IReadOnlyList<string> CertificateNames(
+        string hostname, IReadOnlyList<StalwartMailDomain> domains)
+    {
+        List<string> names = [hostname.Trim().TrimEnd('.').ToLowerInvariant()];
+
+        foreach (StalwartMailDomain domain in domains)
+        {
+            string name = domain.Name.Trim().TrimEnd('.').ToLowerInvariant();
+            if (name.Length == 0)
+            {
+                continue;
+            }
+            foreach ((string prefix, _) in AutodiscoveryHosts)
+            {
+                names.Add($"{prefix}.{name}");
+            }
+        }
+
+        return names.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
     /// <summary>One DNS record an operator has to publish for a domain to send and receive mail.</summary>
     /// <param name="Name">Record name, relative to the zone where that is natural.</param>
     /// <param name="Type">Record type (MX, TXT, CNAME…).</param>
@@ -865,31 +921,22 @@ public static class StalwartPlanBuilder
                 "DMARC — tells receivers what to do with mail that fails SPF and DKIM."),
         ];
 
-        // Client autodiscovery (autoconfig / autodiscover / MTA-STS / PACC). Where these point
-        // depends on who serves and certifies them, which the TLS mode decides:
+        // Client autodiscovery (autoconfig / autodiscover / MTA-STS / PACC) always points at the
+        // mail host, in every TLS mode. These are names of the MAIL service: Stalwart answers them
+        // itself, on the public web listener of its own address, and the certificate on that address
+        // carries them — its own ACME order in ACME mode, the cert-manager Certificate otherwise.
         //
-        //  • ACME mode: Stalwart serves them on the mail address and its own ACME certificate
-        //    covers those names — so they MUST resolve to the mail host, or the certificate order
-        //    fails for every one that does not (which is exactly what exhausted a Let's Encrypt
-        //    rate limit here: the records pointed at the gateway and the order kept failing).
-        //  • cert-manager mode: Stalwart runs no ACME; these are served through the cluster gateway,
-        //    so they point at the web host. Publishing routes + a certificate for them there is not
-        //    yet automatic, so in this mode they are optional client-convenience records.
-        bool acme = config.TlsMode == StalwartTlsMode.Acme;
-        string target = acme
-            ? host
-            : (string.IsNullOrWhiteSpace(config.AdminHostname) ? host : config.AdminHostname!.Trim().TrimEnd('.'));
-        string note = acme
-            ? "Required in ACME TLS mode — the mail server's certificate covers this name, so it must resolve to the mail host."
-            : "Optional — client auto-configuration, served through the gateway.";
-
-        // In cert-manager mode with no web host there is nowhere sensible to point these, so skip them.
-        if (acme || !string.IsNullOrWhiteSpace(config.AdminHostname))
+        // They used to point at the gateway's web host in cert-manager mode, which made client
+        // auto-configuration and MTA-STS depend on the admin UI being published — so a deployment
+        // that kept the admin interface internal had neither, and the records were omitted entirely
+        // when no web host was set. (In ACME mode, pointing them at the gateway also failed the
+        // certificate order for every name that did not resolve to the mail host, which is what
+        // exhausted a Let's Encrypt rate limit here.)
+        foreach ((string prefix, string note) in AutodiscoveryHosts)
         {
-            records.Add(new($"autoconfig.{name}", "CNAME", $"{target}.", "Thunderbird / Apple Mail autoconfig. " + note));
-            records.Add(new($"autodiscover.{name}", "CNAME", $"{target}.", "Outlook autodiscover. " + note));
-            records.Add(new($"mta-sts.{name}", "CNAME", $"{target}.", "MTA-STS policy host. " + note));
-            records.Add(new($"ua-auto-config.{name}", "CNAME", $"{target}.", "PACC (RFC-standard client autoconfig). " + note));
+            records.Add(new($"{prefix}.{name}", "CNAME", $"{host}.",
+                note + " Answered by the mail server on its own address, over HTTPS — so this must "
+                + "resolve to the mail host, whose certificate covers the name."));
         }
 
         return records;
@@ -919,6 +966,10 @@ public static class MailPorts
     /// <summary>Where a CA looks for an HTTP-01 challenge response. Not negotiable.</summary>
     public const int AcmeHttp = 80;
 
-    /// <summary>Where a CA opens the TLS-ALPN-01 handshake. Also not negotiable.</summary>
-    public const int AcmeTls = 443;
+    /// <summary>
+    /// HTTPS on the mail address. Serves the endpoints a mail client looks up before it has any
+    /// settings — autoconfig, autodiscover, MTA-STS, PACC — and, in ACME TLS-ALPN-01 mode, the
+    /// handshake the CA opens. Both are fixed by the protocols, so this is not negotiable either.
+    /// </summary>
+    public const int PublicWeb = 443;
 }

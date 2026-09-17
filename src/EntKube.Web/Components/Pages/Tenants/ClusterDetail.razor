@@ -394,7 +394,17 @@ else if (section == "components")
                         </div>
                     </div>
 
-                    @if (selectedCatalogEntry.FormFields.Count > 0)
+                    @* Same reason as the edit form below: the pickers cannot show a selection
+                       before their options exist. Here it is the catalog default that would be
+                       lost — a Cluster Issuer of "letsencrypt-prod" silently becoming whichever
+                       issuer happens to be listed first. *@
+                    @if (catalogFormLoading)
+                    {
+                        <div class="text-muted small mb-2">
+                            <span class="spinner-border spinner-border-sm me-2"></span>Loading options…
+                        </div>
+                    }
+                    else if (selectedCatalogEntry.FormFields.Count > 0)
                     {
                         <div class="row g-2 mb-2">
                             @foreach (ComponentFormField field in selectedCatalogEntry.FormFields)
@@ -1163,7 +1173,22 @@ else if (section == "components")
                                     @* ── Configuration ── *@
 
                                     @* Form fields first (if catalog component) *@
-                                    @if (GetCatalogMatchForSelected()?.FormFields.Count > 0)
+                                    @*
+                                        Held back until the pickers' options have loaded, and not merely
+                                        for tidiness: a <select> takes its selection from the options
+                                        present in the render that creates it. Rendering the dropdowns
+                                        first and their options a moment later leaves every one of them
+                                        showing its placeholder while the stored value sits in
+                                        editFormFieldValues — and saving from that form writes the
+                                        placeholder over a working configuration.
+                                    *@
+                                    @if (componentDetailLoading)
+                                    {
+                                        <div class="text-muted small mb-3">
+                                            <span class="spinner-border spinner-border-sm me-2"></span>Loading configuration…
+                                        </div>
+                                    }
+                                    else if (GetCatalogMatchForSelected()?.FormFields.Count > 0)
                                     {
                                         <div class="row g-2 mb-3">
                                             @foreach (ComponentFormField field in GetCatalogMatchForSelected()!.FormFields)
@@ -1939,6 +1964,18 @@ else if (section == "components")
     private bool showHelmDetails;
     private Dictionary<string, string> regFormFieldValues = new();
     private Dictionary<string, string> editFormFieldValues = new();
+
+    /// <summary>
+    /// True while a component's detail panel is still fetching what its form needs — the vault
+    /// values and, above all, the contents of its pickers (Redis endpoints, Keycloak realms, OIDC
+    /// app registrations, ClusterIssuers, databases, storage links). The form is not rendered until
+    /// this clears, because a &lt;select&gt; only takes a selection from options that exist in the
+    /// same render.
+    /// </summary>
+    private bool componentDetailLoading;
+
+    /// <summary>The same, for the add-from-catalog form.</summary>
+    private bool catalogFormLoading;
     private List<CnpgDatabase>? keycloakDatabases;
     private List<string>? keycloakAvailableIssuers;
 
@@ -2259,7 +2296,25 @@ else if (section == "components")
         regReleaseName = entry.DefaultReleaseName ?? entry.Key;
         regValues = entry.DefaultValues ?? "";
         showAdvancedYaml = false;
+        catalogFormLoading = true;
 
+        try
+        {
+            await LoadCatalogFormAsync(entry);
+        }
+        finally
+        {
+            catalogFormLoading = false;
+        }
+    }
+
+    /// <summary>
+    /// Fills the add-from-catalog form: field defaults, the values EntKube derives rather than asks
+    /// for (telemetry ingest, indexer address), and the contents of every picker. Held back from
+    /// rendering until it returns, for the reason given on <c>catalogFormLoading</c>.
+    /// </summary>
+    private async Task LoadCatalogFormAsync(CatalogEntry entry)
+    {
         // Initialize form field values from their defaults.
 
         regFormFieldValues = new();
@@ -2426,7 +2481,26 @@ else if (section == "components")
         componentSecrets = null;
         showAdvancedYaml = false;
         showHelmDetails = false;
+        componentDetailLoading = true;
 
+        try
+        {
+            await LoadComponentDetailAsync(componentId);
+        }
+        finally
+        {
+            componentDetailLoading = false;
+        }
+    }
+
+    /// <summary>
+    /// Fetches everything the detail panel's config form needs: the component's own values, the
+    /// vault-backed and provider-supplied field values, and the contents of every picker the form
+    /// shows. Split out so <see cref="ToggleComponentDetail"/> can hold the form back until it is
+    /// all here — see <c>componentDetailLoading</c> for why that matters.
+    /// </summary>
+    private async Task LoadComponentDetailAsync(Guid componentId)
+    {
         // Populate the config editor fields from the component.
 
         ClusterComponent? comp = components?.FirstOrDefault(c => c.Id == componentId);

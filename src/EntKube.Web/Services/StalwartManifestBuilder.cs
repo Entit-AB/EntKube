@@ -439,17 +439,34 @@ public static class StalwartManifestBuilder
 
     /// <summary>
     /// True when Stalwart answers its own ACME challenge over plain HTTP, so port 80 has to be
-    /// published on the mail address the certificate is for.
+    /// published on the mail address the certificate is for. Only with a mail address to publish it
+    /// on: a CA cannot reach a ClusterIP, so binding 80 there would open a port for a challenge that
+    /// can never arrive.
     /// </summary>
     public static bool NeedsAcmeHttpPort(StalwartComponentConfig config) =>
-        config.TlsMode == StalwartTlsMode.Acme && config.AcmeChallenge == StalwartAcmeChallenge.Http01;
+        config.TlsMode == StalwartTlsMode.Acme
+        && config.AcmeChallenge == StalwartAcmeChallenge.Http01
+        && config.ExposeMode == StalwartMailExposeMode.LoadBalancer;
 
     /// <summary>
-    /// True when the challenge is answered inside the TLS handshake (ALPN <c>acme-tls/1</c>), which
-    /// the CA always attempts on port 443.
+    /// True when HTTPS is published on the mail address. Always, whatever the TLS mode — because
+    /// this is where a mail client looks before it has any settings, and where a receiving server
+    /// fetches the MTA-STS policy.
+    ///
+    /// <para>Those lookups are the mail server's own business: <c>autoconfig.example.com</c>,
+    /// <c>autodiscover.example.com</c> and <c>mta-sts.example.com</c> are names of the MAIL service,
+    /// and every one of them is fetched over HTTPS from whatever they resolve to. Routing them
+    /// through the gateway instead made them depend on the admin UI being published — so a
+    /// deployment that deliberately kept the admin interface internal had no client
+    /// auto-configuration at all, and no MTA-STS. They are served here, on the address the MX record
+    /// already points at, in every TLS mode.</para>
+    ///
+    /// <para>What is served on this listener is exactly <see cref="StalwartPlanBuilder"/>'s public
+    /// path list; the admin UI and JMAP are refused on it. In ACME TLS-ALPN-01 mode this is also the
+    /// listener the CA opens its handshake against — same port, same listener, no second binding.</para>
     /// </summary>
-    public static bool NeedsAcmeTlsPort(StalwartComponentConfig config) =>
-        config.TlsMode == StalwartTlsMode.Acme && config.AcmeChallenge == StalwartAcmeChallenge.TlsAlpn01;
+    public static bool NeedsPublicWebPort(StalwartComponentConfig config) =>
+        config.ExposeMode == StalwartMailExposeMode.LoadBalancer;
 
     /// <summary>The ports the container listens on, given which protocols are enabled.</summary>
     public static IEnumerable<(string Name, int Port)> ContainerPorts(StalwartComponentConfig config)
@@ -487,9 +504,9 @@ public static class StalwartManifestBuilder
         {
             yield return (AcmeHttpListener, MailPorts.AcmeHttp);
         }
-        if (NeedsAcmeTlsPort(config))
+        if (NeedsPublicWebPort(config))
         {
-            yield return (AcmeTlsListener, MailPorts.AcmeTls);
+            yield return (PublicWebListener, MailPorts.PublicWeb);
         }
 
         yield return ("http", StalwartPlanBuilder.HttpPort);
@@ -498,16 +515,37 @@ public static class StalwartManifestBuilder
     /// <summary>Listener name for the HTTP-01 challenge port. Referenced by the endpoint policy.</summary>
     public const string AcmeHttpListener = "acme-http";
 
-    /// <summary>Listener name for the TLS-ALPN-01 challenge port.</summary>
-    public const string AcmeTlsListener = "acme-tls";
+    /// <summary>
+    /// Listener name for HTTPS on the mail address — client auto-configuration, MTA-STS, and the
+    /// TLS-ALPN-01 challenge. Referenced by the endpoint policy, which allows only the public paths
+    /// on it and refuses everything else.
+    /// </summary>
+    public const string PublicWebListener = "public-web";
 
     /// <summary>
-    /// A cert-manager Certificate for the mail hostname, issued into the Secret the StatefulSet
-    /// mounts. Only the mail hostname is on it — the web hostname's certificate belongs to the
-    /// gateway, which terminates that TLS itself.
+    /// A cert-manager Certificate for the mail hostname and the client-autodiscovery names of every
+    /// served domain, issued into the Secret the StatefulSet mounts.
+    ///
+    /// <para>The autodiscovery names are on it because the mail server itself answers them, on its
+    /// own address: <c>autoconfig.</c>, <c>autodiscover.</c>, <c>mta-sts.</c> and
+    /// <c>ua-auto-config.</c> are all fetched over HTTPS and all validate the name, so a certificate
+    /// carrying only the mail hostname means a client that reaches the right server and refuses to
+    /// talk to it. In ACME mode Stalwart orders exactly the same set itself; this is the
+    /// cert-manager spelling of it.</para>
+    ///
+    /// <para>The cost is that the issuer has to be able to solve a challenge for each of those
+    /// names. That is the same DNS-01 solver the mail hostname already needs (the mail address is
+    /// not behind the gateway, so HTTP-01 cannot reach it) and the same zone — but a name it cannot
+    /// solve fails the whole certificate, so <c>PreflightAsync</c> lists what will be requested.
+    /// cert-manager keeps the existing Secret until a new one is issued, so a failure here stalls a
+    /// renewal rather than taking the current certificate away.</para>
+    ///
+    /// <para>The web hostname is deliberately absent: that certificate belongs to the gateway,
+    /// which terminates that TLS itself.</para>
     /// </summary>
     public static string BuildTlsCertificateManifest(
-        string clusterIssuer, string hostname, string releaseName, string ns)
+        string clusterIssuer, string hostname, string releaseName, string ns,
+        IReadOnlyList<StalwartMailDomain>? domains = null)
     {
         List<string> y =
         [
@@ -525,8 +563,13 @@ public static class StalwartManifestBuilder
             "    kind: ClusterIssuer",
             $"  commonName: {hostname}",
             "  dnsNames:",
-            $"    - {hostname}",
         ];
+
+        foreach (string name in StalwartPlanBuilder.CertificateNames(hostname, domains ?? []))
+        {
+            y.Add($"    - {name}");
+        }
+
         return string.Join("\n", y) + "\n";
     }
 
