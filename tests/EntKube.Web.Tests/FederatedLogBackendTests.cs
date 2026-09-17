@@ -20,8 +20,9 @@ public class FederatedLogBackendTests
     private static readonly DateTime T0 = new(2026, 8, 26, 12, 0, 0, DateTimeKind.Utc);
 
     private static FederatedLogBackend Federated(
-        ILogBackend sealedTier, ILogBackend hotTier, TimeSpan? halfBudget = null) =>
-        new(sealedTier, hotTier, NullLogger<FederatedLogBackend>.Instance, halfBudget);
+        ILogBackend sealedTier, ILogBackend hotTier,
+        TimeSpan? halfBudget = null, TimeSpan? sealedBudget = null) =>
+        new(sealedTier, hotTier, NullLogger<FederatedLogBackend>.Instance, halfBudget, sealedBudget);
 
     private static LokiLogStream Stream(string pod, params (DateTime Ts, string Line)[] entries) => new()
     {
@@ -214,6 +215,80 @@ public class FederatedLogBackendTests
 
         sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5));
         hasData.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The inverse of the cases above, and the one that reached a user: the SEALED half is the slow one.
+    ///
+    /// <para>Every other budget test models a dead hot tier, because that is what the budget was written
+    /// for — one in-cluster hop that should answer in under a second. The sealed tier is not that. It reads
+    /// immutable archives from object storage, and on a cold querier the first query of a window downloads
+    /// and opens them, which legitimately takes longer than a hop. Abandoning it on the same short budget
+    /// hands back the hot half alone; when the data being searched is already sealed, that half is empty,
+    /// and an empty success is indistinguishable in the viewer from "this namespace has no logs".</para>
+    ///
+    /// <para>The reported symptom was exactly that shape: search a namespace, get nothing, search the same
+    /// namespace again and the logs appear — because the abandoned first query finished in the background
+    /// and left the segment readers open for the second.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_slow_sealed_half_does_not_come_back_as_an_empty_answer()
+    {
+        FederatedLogBackend sut = Federated(
+            new FakeLogBackend { Streams = [Stream("api-1", (T0, "sealed line"))], Delay = TimeSpan.FromMilliseconds(400) },
+            new FakeLogBackend(),   // hot tier: healthy, fast, and holds nothing — everything is sealed
+            halfBudget: TimeSpan.FromMilliseconds(100),
+            sealedBudget: TimeSpan.FromMilliseconds(100));
+
+        KubernetesOperationResult<List<LokiLogStream>> result =
+            await sut.QueryAsync(Cluster, Filter, T0.AddHours(-1), T0.AddHours(1));
+
+        result.IsSuccess.Should().BeFalse(
+            "returning the empty hot half as a complete answer tells the viewer there are no logs, when in "
+            + "fact the tier holding them was abandoned — the one outcome worse than being slow");
+        result.Error.Should().Contain("sealed");
+    }
+
+    /// <summary>
+    /// The sealed tier gets a budget of its own, long enough to cover a cold read from object storage —
+    /// otherwise the fix above just turns a silent empty into a reliable error.
+    /// </summary>
+    [Fact]
+    public async Task The_sealed_tier_is_given_longer_than_the_hot_one()
+    {
+        FederatedLogBackend sut = Federated(
+            new FakeLogBackend { Streams = [Stream("api-1", (T0, "sealed line"))], Delay = TimeSpan.FromMilliseconds(300) },
+            new FakeLogBackend(),
+            halfBudget: TimeSpan.FromMilliseconds(100),
+            sealedBudget: TimeSpan.FromSeconds(5));
+
+        KubernetesOperationResult<List<LokiLogStream>> result =
+            await sut.QueryAsync(Cluster, Filter, T0.AddHours(-1), T0.AddHours(1));
+
+        result.IsSuccess.Should().BeTrue("the sealed tier was well inside its own budget");
+        result.Data!.SelectMany(s => s.Entries).Select(e => e.Line).Should().Equal("sealed line");
+    }
+
+    /// <summary>
+    /// Both budgets run against the same clock. They used to be awaited one after the other, so the hot
+    /// tier's window only opened once the sealed tier had finished or given up — two slow halves cost the
+    /// sum of the budgets rather than the larger of them.
+    /// </summary>
+    [Fact]
+    public async Task The_two_budgets_run_concurrently_not_one_after_the_other()
+    {
+        FederatedLogBackend sut = Federated(
+            new FakeLogBackend { Streams = [Stream("api-1", (T0, "sealed"))], Delay = TimeSpan.FromSeconds(30) },
+            new FakeLogBackend { Streams = [Stream("api-2", (T0, "hot"))], Delay = TimeSpan.FromSeconds(30) },
+            halfBudget: TimeSpan.FromMilliseconds(300),
+            sealedBudget: TimeSpan.FromMilliseconds(300));
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await sut.QueryAsync(Cluster, Filter, T0.AddHours(-1), T0.AddHours(1));
+        sw.Stop();
+
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(550),
+            "both halves are already in flight; the budgets must overlap, not queue");
     }
 
     [Fact]

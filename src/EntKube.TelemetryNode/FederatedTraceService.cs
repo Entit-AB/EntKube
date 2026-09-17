@@ -24,15 +24,16 @@ public sealed class FederatedTraceService(
     ITraceQueryService hotTier,
     ITraceQueryService allTiers,
     ILogger<FederatedTraceService> logger,
-    TimeSpan? halfBudget = null) : ITraceQueryService
+    TimeSpan? halfBudget = null,
+    TimeSpan? sealedBudget = null) : ITraceQueryService
 {
     public async Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
     {
         // Budgeted: this is what the Traces view asks before it renders anything, so an unanswerable half
         // must not hold the page for its client's whole timeout.
         KubernetesOperationResult<bool>[] results = await Task.WhenAll(
-            WithinBudgetAsync(Wrap(sealedTier.HasDataAsync(clusterId, ct)), "sealed", "has-data"),
-            WithinBudgetAsync(Wrap(hotTier.HasDataAsync(clusterId, ct)), "hot", "has-data"));
+            WithinBudgetAsync(Wrap(sealedTier.HasDataAsync(clusterId, ct)), "sealed", "has-data", _sealedBudget),
+            WithinBudgetAsync(Wrap(hotTier.HasDataAsync(clusterId, ct)), "hot", "has-data", _hotBudget));
         bool[] both = [.. results.Select(r => r is { IsSuccess: true, Data: true })];
 
         static async Task<KubernetesOperationResult<bool>> Wrap(Task<bool> probe)
@@ -47,7 +48,7 @@ public sealed class FederatedTraceService(
             sealedTier.GetServicesAsync(clusterId, ct, namespaces, podPattern, windowMinutes),
             hotTier.GetServicesAsync(clusterId, ct, namespaces, podPattern, windowMinutes),
             (a, b) => [.. a.Concat(b).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)],
-            "services");
+            "services", static v => v.Count == 0);
 
     public Task<KubernetesOperationResult<List<TraceSummary>>> ListTracesAsync(
         Guid clusterId, string? service, DateTime from, DateTime to,
@@ -56,14 +57,14 @@ public sealed class FederatedTraceService(
         => MergeAsync(
             sealedTier.ListTracesAsync(clusterId, service, from, to, minDurationMs, errorsOnly, limit, ct, namespaces, podPattern),
             hotTier.ListTracesAsync(clusterId, service, from, to, minDurationMs, errorsOnly, limit, ct, namespaces, podPattern),
-            (a, b) => MergeTraceSummaries(a, b, limit), "trace list");
+            (a, b) => MergeTraceSummaries(a, b, limit), "trace list", static v => v.Count == 0);
 
     public Task<KubernetesOperationResult<List<SpanRecord>>> GetTraceAsync(
         Guid clusterId, string traceId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null)
         => MergeAsync(
             sealedTier.GetTraceAsync(clusterId, traceId, ct, namespaces),
             hotTier.GetTraceAsync(clusterId, traceId, ct, namespaces),
-            MergeSpans, "trace detail");
+            MergeSpans, "trace detail", static v => v.Count == 0);
 
     public Task<KubernetesOperationResult<List<ServiceEdge>>> GetServiceMapAsync(
         Guid clusterId, DateTime from, DateTime to, CancellationToken ct = default,
@@ -71,7 +72,7 @@ public sealed class FederatedTraceService(
         => MergeAsync(
             sealedTier.GetServiceMapAsync(clusterId, from, to, ct, namespaces, podPattern),
             hotTier.GetServiceMapAsync(clusterId, from, to, ct, namespaces, podPattern),
-            MergeEdges, "service map");
+            MergeEdges, "service map", static v => v.Count == 0);
 
     // ── Delegated whole, because a percentile cannot be recovered from two percentiles ────────────────
 
@@ -162,52 +163,73 @@ public sealed class FederatedTraceService(
 
     /// <summary>Same budget as the log federation, for the same reason — see <c>FederatedLogBackend</c>.
     /// A half that cannot answer costs this many seconds, not its client's 30s ceiling.</summary>
-    private readonly TimeSpan _halfBudget = halfBudget ?? TimeSpan.FromSeconds(5);
+    private readonly TimeSpan _hotBudget = halfBudget ?? TimeSpan.FromSeconds(5);
 
-    /// <summary>Same degradation policy as the log federation: one failing half is a warning, not an outage.</summary>
+    /// <summary>The sealed tier's larger budget, and the same reasoning as the log side: this half reads
+    /// archives out of object storage, so a cold first query is slow by design rather than by fault.</summary>
+    private readonly TimeSpan _sealedBudget = sealedBudget ?? TimeSpan.FromSeconds(30);
+
+    /// <summary>Same degradation policy as the log federation, including the one exception it makes: a
+    /// surviving half that is EMPTY is reported as a failure rather than as an answer, because a trace list
+    /// showing nothing is read as "there are no traces" and there is no way for the UI to say otherwise.</summary>
     private async Task<KubernetesOperationResult<T>> MergeAsync<T>(
         Task<KubernetesOperationResult<T>> sealedTask,
         Task<KubernetesOperationResult<T>> hotTask,
         Func<T, T, T> merge,
-        string what)
+        string what,
+        Func<T, bool>? isEmpty = null)
     {
-        KubernetesOperationResult<T> sealedResult = await WithinBudgetAsync(sealedTask, "sealed", what);
-        KubernetesOperationResult<T> hotResult = await WithinBudgetAsync(hotTask, "hot", what);
+        // Concurrently, so two slow halves cost the larger budget rather than their sum.
+        Task<KubernetesOperationResult<T>> sealedBudgeted = WithinBudgetAsync(sealedTask, "sealed", what, _sealedBudget);
+        Task<KubernetesOperationResult<T>> hotBudgeted = WithinBudgetAsync(hotTask, "hot", what, _hotBudget);
+        await Task.WhenAll(sealedBudgeted, hotBudgeted);
+
+        KubernetesOperationResult<T> sealedResult = sealedBudgeted.Result;
+        KubernetesOperationResult<T> hotResult = hotBudgeted.Result;
 
         if (sealedResult.IsSuccess && hotResult.IsSuccess)
             return KubernetesOperationResult<T>.Success(merge(sealedResult.Data!, hotResult.Data!));
 
-        if (sealedResult.IsSuccess)
+        if (sealedResult.IsSuccess || hotResult.IsSuccess)
         {
-            logger.LogWarning("The indexer's hot tier failed for {What} ({Error}); returning sealed results only.",
-                what, hotResult.Error);
-            return sealedResult;
-        }
+            bool sealedSurvived = sealedResult.IsSuccess;
+            KubernetesOperationResult<T> survivor = sealedSurvived ? sealedResult : hotResult;
+            string lostTier = sealedSurvived ? "hot" : "sealed";
+            string? lostError = sealedSurvived ? hotResult.Error : sealedResult.Error;
 
-        if (hotResult.IsSuccess)
-        {
-            logger.LogWarning("The sealed tier failed for {What} ({Error}); returning hot results only.",
-                what, sealedResult.Error);
-            return hotResult;
+            if (survivor.Data is not null && isEmpty is not null && isEmpty(survivor.Data))
+            {
+                logger.LogWarning(
+                    "The {Lost} tier failed for {What} ({Error}) and the other tier holds nothing for this "
+                    + "query — reporting the failure rather than an empty result.", lostTier, what, lostError);
+
+                return KubernetesOperationResult<T>.Failure(
+                    $"The {lostTier} telemetry tier failed for {what} ({lostError}), and the other tier holds "
+                    + "nothing for this query — so this is not a complete answer. Retry, or widen the time range.");
+            }
+
+            logger.LogWarning("The {Lost} tier failed for {What} ({Error}); returning the other tier's results only.",
+                lostTier, what, lostError);
+            return survivor;
         }
 
         return KubernetesOperationResult<T>.Failure(
             $"Both telemetry tiers failed for {what}. Sealed: {sealedResult.Error}. Hot: {hotResult.Error}.");
     }
 
-    /// <summary>Waits <see cref="_halfBudget"/> for one half and treats an overrun as that half failing.</summary>
+    /// <summary>Waits <paramref name="budget"/> for one half and treats an overrun as that half failing.</summary>
     private async Task<KubernetesOperationResult<T>> WithinBudgetAsync<T>(
-        Task<KubernetesOperationResult<T>> half, string which, string what)
+        Task<KubernetesOperationResult<T>> half, string which, string what, TimeSpan budget)
     {
-        if (half == await Task.WhenAny(half, Task.Delay(_halfBudget))) return await half;
+        if (half == await Task.WhenAny(half, Task.Delay(budget))) return await half;
 
         _ = half.ContinueWith(
             t => logger.LogWarning(t.Exception,
                 "The {Which} tier finished {What} after the federation stopped waiting ({Budget}s).",
-                which, what, _halfBudget.TotalSeconds),
+                which, what, budget.TotalSeconds),
             TaskScheduler.Default);
 
         return KubernetesOperationResult<T>.Failure(
-            $"the {which} tier did not answer within {_halfBudget.TotalSeconds:0}s");
+            $"the {which} tier did not answer within {budget.TotalSeconds:0}s");
     }
 }
