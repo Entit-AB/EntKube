@@ -40,6 +40,16 @@ public static class TraceSummarySchema
         var doc = new Document
         {
             new Int64Field(Ts, p.StartMs, Field.Store.YES),                       // indexed (range) + stored (read)
+            // Sortable. Every signal's schema owes `ts` this third copy, and this one was missing it for
+            // as long as the index existed. Nothing queried here sorts, so it read as surplus — but
+            // ActiveSegmentIndex recovers an unsealed index's time bounds on open, for EVERY signal, and
+            // without a columnar copy Lucene answers that from the legacy FieldCache: it uninverts the
+            // whole term dictionary into one packed array sized by the doc count. On a large active index
+            // that allocation is hundreds of megabytes in one block, and it threw OutOfMemoryException
+            // inside this manager's constructor — which the registry then cached forever, so the seal
+            // service never saw the manager, never rolled the index, and every restart recovered a bigger
+            // one. See ActiveSegmentIndex.BoundaryTs, which no longer depends on the FieldCache either.
+            new NumericDocValuesField(Ts, p.StartMs),
             new StringField(TenantId, tenantId.ToString("N"), Field.Store.NO),
             new StringField(ClusterId, clusterId.ToString("N"), Field.Store.NO),
             new StringField(Namespace, p.Namespace, Field.Store.YES),             // indexed (ns filter) + stored

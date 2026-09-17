@@ -253,8 +253,20 @@ public abstract class SegmentManagerBase : IDisposable
     /// </summary>
     private (ActiveSegmentIndex Active, bool IsA) AdoptExistingActive()
     {
-        ActiveSegmentIndex a = ActiveSegmentIndex.OpenAt(_dirA, _analyzer);
-        ActiveSegmentIndex b = ActiveSegmentIndex.OpenAt(_dirB, _analyzer);
+        ActiveSegmentIndex a = ActiveSegmentIndex.OpenAt(_dirA, _analyzer, _logger);
+        ActiveSegmentIndex b;
+        try
+        {
+            b = ActiveSegmentIndex.OpenAt(_dirB, _analyzer, _logger);
+        }
+        catch
+        {
+            // A is already open and holds its directory's write lock. Letting it dangle would make every
+            // later attempt fail on the lock instead of on whatever actually went wrong with B — turning a
+            // retryable fault into a permanent one, which is the trap the registry now exists to avoid.
+            a.Dispose();
+            throw;
+        }
 
         bool useA = (a.HasData, b.HasData) switch
         {
@@ -508,7 +520,7 @@ public abstract class SegmentManagerBase : IDisposable
             if (!_active.HasData) return null;
             sealing = _active;
             // Ping-pong to the other on-disk directory so the new active never collides with the sealing one.
-            _active = ActiveSegmentIndex.OpenAt(_activeIsA ? _dirB : _dirA, _analyzer);
+            _active = ActiveSegmentIndex.OpenAt(_activeIsA ? _dirB : _dirA, _analyzer, _logger);
             _activeIsA = !_activeIsA;
             _activeSince = DateTime.UtcNow;
         }
