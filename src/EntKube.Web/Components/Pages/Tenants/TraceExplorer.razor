@@ -261,57 +261,47 @@ else
                     }
                     else
                     {
-                        @* The old copy here said only "apps must propagate trace context into their logs",
-                           which names the requirement and leaves out the one thing that makes it actionable:
-                           on this platform logs are tailed from container stdout by the collector's filelog
-                           receiver, and a stdout line carries no trace context at all. So there is nothing an
-                           operator can switch on, and nothing the app can do by "enabling tracing" either —
-                           the id has to be put into the log record, by one of exactly two routes. Both are
-                           spelled out, because neither is guessable from the sentence that used to be here. *@
+                        @* The old copy here said only "apps must propagate trace context into their
+                           logs", which names the requirement and leaves out the one thing that makes it
+                           actionable. It was also, at the time, asking for something most apps could not
+                           do without an edit to collector config shared by every app on the cluster.
+                           OtlpLogsParser now recovers a trace id from the record's attributes or from the
+                           log line itself, so the remaining advice is about what the APP logs — which is
+                           the app owner's own business and needs nobody else's cooperation. *@
                         <div class="text-muted small py-2">
                             <div>No logs carry this trace id.</div>
                             <details class="mt-2">
                                 <summary style="cursor:pointer">How to correlate logs with traces</summary>
                                 <div class="mt-2 ps-1" style="max-width:56rem">
                                     <p class="mb-2">
-                                        EntKube indexes a log line against a trace only when the OTLP log record
-                                        carries a <code>traceId</code>. The collector tails container stdout, and a
-                                        stdout line has no trace context, so a trace id that appears only in the log
-                                        <em>text</em> is not enough — it has to reach the record itself. Two ways:
+                                        EntKube looks for the trace id in the log record, in its attributes,
+                                        and in the log line itself — so an app only has to <em>write</em> its
+                                        trace id somewhere in the line. No collector configuration is needed,
+                                        and nothing outside your own app has to change. These are all picked
+                                        up automatically:
                                     </p>
-
-                                    <p class="mb-1"><strong>1. Export logs over OTLP from the app (recommended)</strong></p>
+<pre class="border rounded p-2 mb-2" style="background:#1e1e1e;color:#d4d4d4;font-size:.75rem">{"level":"error","trace_id":"4bf92f35…","msg":"checkout failed"}
+level=error trace_id=4bf92f35… msg="checkout failed"
+ERROR checkout failed trace-id: 4bf92f35…</pre>
                                     <p class="mb-2">
-                                        An OpenTelemetry SDK log bridge attaches the active span context to every
-                                        record automatically, so this needs no parsing and no collector change. The
-                                        collector already accepts OTLP on <code>4317</code> (gRPC) and
-                                        <code>4318</code> (HTTP) — point the app's log exporter at its Service and
-                                        the ids arrive with the logs. In .NET that is
-                                        <code>AddOpenTelemetry().WithLogging()</code> plus the OTLP exporter; the
-                                        Logback/Log4j2 appenders, the Python logging handler and the Node
-                                        <code>@("@")opentelemetry/sdk-logs</code> bridge do the same.
+                                        <code>trace_id</code>, <code>traceId</code>, <code>TraceId</code> and
+                                        <code>trace-id</code> all work, in JSON, logfmt or plain text. The id
+                                        must be the full 32-character trace id — a 16-character span id is
+                                        not enough to identify a trace.
                                     </p>
-
-                                    <p class="mb-1"><strong>2. Keep logging to stdout and lift the id in the collector</strong></p>
                                     <p class="mb-2">
-                                        Log in JSON with the trace id as a field, then have the filelog receiver parse
-                                        it into the record. Add this to the <em>otel-collector</em> component's
-                                        configuration (Components → otel-collector), under
-                                        <code>config.receivers.filelog</code>:
+                                        Seeing this message means the app is not logging its trace id at all.
+                                        Most logging libraries can add it to every line once: in .NET it is
+                                        already on <code>Activity.Current.TraceId</code>, in Java it is in the
+                                        Logback/Log4j2 MDC, and the OpenTelemetry logging integrations for
+                                        Python, Go and Node expose the active span context the same way.
                                     </p>
-<pre class="border rounded p-2 mb-2" style="background:#1e1e1e;color:#d4d4d4;font-size:.75rem">operators:
-  - type: json_parser
-    parse_from: body
-    trace:
-      trace_id:
-        parse_from: attributes.trace_id
-      span_id:
-        parse_from: attributes.span_id</pre>
                                     <p class="mb-0">
-                                        Match <code>parse_from</code> to whatever your logger actually emits
-                                        (<code>trace_id</code>, <code>traceId</code>, <code>TraceId</code>) — the
-                                        field name is not standardised across logging libraries. Only records written
-                                        after the change are affected; existing logs are not reindexed.
+                                        Alternatively, export logs over OTLP from the app and the SDK's log
+                                        bridge attaches the span context itself — the collector already accepts
+                                        OTLP on <code>4317</code> and <code>4318</code>, so nothing needs
+                                        deploying. Either way, only lines written after the change are
+                                        correlated; existing logs are not reindexed.
                                     </p>
                                 </div>
                             </details>

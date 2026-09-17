@@ -13,10 +13,10 @@ type: application
 # identical image reference and the kubelet never re-pulls: the node keeps running the exact bits it
 # already had. A fix to the query path, the federation or the segment engine then ships to the management
 # plane and reaches the cluster not at all — which looks, from the log viewer, like the fix not working.
-version: 0.5.2
+version: 0.5.3
 
 # Version of the entkube-telemetry image this chart is tested against. Used as the default image tag.
-appVersion: "0.5.2"
+appVersion: "0.5.3"
 
 keywords:
   - logging
