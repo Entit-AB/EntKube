@@ -1958,6 +1958,34 @@ public class StalwartMailTests
     // ── Rollout detection ─────────────────────────────────────────────────────
 
     [Fact]
+    public void ACertificateThatStoppedRenewingIsNoticedWhileMailStillWorks()
+    {
+        // The failure mode this exists for: adding a domain adds autodiscovery names to the
+        // certificate, the issuer cannot solve one of them, and the whole certificate stops
+        // re-issuing — while cert-manager keeps serving the existing Secret. Nothing breaks on the
+        // day. Mail stops weeks later, when the old certificate expires.
+        const string failing = """
+            {"status":{"conditions":[
+              {"type":"Ready","status":"False","reason":"Failed",
+               "message":"no solver configured for \"autoconfig.example.com\""}
+            ]}}
+            """;
+
+        StalwartService.DescribeCertificateProblem(failing)
+            .Should().Be("Failed: no solver configured for \"autoconfig.example.com\"");
+
+        // A healthy certificate is silent — this must not become a permanent banner.
+        StalwartService.DescribeCertificateProblem(
+            """{"status":{"conditions":[{"type":"Ready","status":"True"}]}}""").Should().BeNull();
+
+        // Neither may "I could not read it" turn into a reported failure.
+        StalwartService.DescribeCertificateProblem("""{"status":{}}""").Should().BeNull();
+        StalwartService.DescribeCertificateProblem("not json").Should().BeNull();
+        StalwartService.DescribeCertificateProblem(
+            """{"status":{"conditions":[{"type":"Issuing","status":"True"}]}}""").Should().BeNull();
+    }
+
+    [Fact]
     public void WhatTheServerSaysAfterAnApplyIsReadBackFromItsLog()
     {
         // These are the real lines from the first HA deployment, where the apply reported success,
