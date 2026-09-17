@@ -729,6 +729,44 @@ public class StalwartService(
     }
 
     /// <summary>
+    /// Makes an installed mail server ready to be re-applied with the other storage shape — see
+    /// <see cref="PrepareStatefulSetShapeChangeAsync"/>. Called before the install runs, because the
+    /// install applies the manifest and Kubernetes would refuse it. No-op for a first install, for a
+    /// component that is not Stalwart, and for any re-deploy that does not cross the HA boundary.
+    /// </summary>
+    public async Task PrepareStorageShapeIfNeededAsync(
+        Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        StalwartComponentConfig? config = await db.StalwartComponentConfigs
+            .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId && c.TenantId == tenantId, ct);
+        if (config is null)
+        {
+            return;
+        }
+
+        ClusterComponent? component = await db.ClusterComponents
+            .Include(c => c.Cluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+        if (component?.Cluster?.Kubeconfig is not { Length: > 0 } kubeconfig)
+        {
+            return;
+        }
+
+        string releaseName = component.ReleaseName ?? component.Name;
+        string ns = component.Namespace ?? DefaultNamespace;
+
+        StalwartPlanBuilder.StalwartHaBackend? ha =
+            await BuildHaBackendAsync(tenantId, clusterComponentId, config, releaseName, ns, ct);
+
+        if (await PrepareStatefulSetShapeChangeAsync(releaseName, ns, kubeconfig, ha, ct) is string reshaped)
+        {
+            logger.LogInformation("Stalwart storage shape change for {ComponentId}: {Detail}", clusterComponentId, reshaped);
+        }
+    }
+
+    /// <summary>
     /// Issues the mail certificate via cert-manager before the install, so the StatefulSet's TLS
     /// volume exists when the pod mounts it. No-op unless TLS mode is ClusterIssuer.
     /// </summary>
@@ -785,6 +823,91 @@ public class StalwartService(
                 + "one name it cannot solve a challenge for fails the whole certificate, so check the issuer's "
                 + "DNS-01 credentials for that zone, or switch TLS mode to ACME and let Stalwart obtain the "
                 + "certificate itself.");
+        }
+    }
+
+    /// <summary>
+    /// Deletes the StatefulSet when the deployment is changing between single-node and HA, because
+    /// that change rewrites a field Kubernetes will not let us update.
+    ///
+    /// <para>HA replaces the local RocksDB volume with a shared PostgreSQL datastore, so the
+    /// StatefulSet either has a <c>data</c> volumeClaimTemplate or it does not — and
+    /// <c>volumeClaimTemplates</c> is immutable. Applying the other shape over a live StatefulSet is
+    /// refused outright ("updates to statefulset spec for fields other than 'replicas', 'ordinals',
+    /// 'template', … are forbidden"), so turning high availability on for an installed mail server
+    /// would fail on an error about a field nobody edited.</para>
+    ///
+    /// <para>The PersistentVolumeClaims survive: a StatefulSet's claims are retained by default and
+    /// are never garbage-collected with it. So the old RocksDB volume is still there if HA is turned
+    /// off again, and the new StatefulSet adopts it by name.</para>
+    ///
+    /// <para>A no-op unless the shape actually differs — this must not delete a StatefulSet for an
+    /// ordinary re-deploy.</para>
+    /// </summary>
+    /// <returns>A line for the operator when something was deleted, otherwise null.</returns>
+    private async Task<string?> PrepareStatefulSetShapeChangeAsync(
+        string releaseName, string ns, string kubeconfig,
+        StalwartPlanBuilder.StalwartHaBackend? ha, CancellationToken ct)
+    {
+        string json;
+        try
+        {
+            json = await k8sFactory.GetJsonAsync($"statefulset/{releaseName}", ns, kubeconfig, ct: ct);
+        }
+        catch (Exception ex)
+        {
+            // Not installed yet, or unreadable. Either way there is nothing to reshape, and an
+            // install must not be blocked by a check that could not run.
+            logger.LogDebug(ex, "No existing StatefulSet {Name} in {Namespace} to compare shapes with.", releaseName, ns);
+            return null;
+        }
+
+        bool? liveHasVolume = HasDataVolumeClaim(json);
+        if (liveHasVolume is not bool hasVolume || hasVolume == (ha is null))
+        {
+            return null;
+        }
+
+        await k8sFactory.DeleteManifestAsync("statefulset", releaseName, ns, kubeconfig, ct);
+
+        return ha is null
+            ? $"High availability is off, so the {releaseName} StatefulSet has been deleted and will be "
+              + "recreated with its local data volume — volumeClaimTemplates cannot be changed in place. "
+              + "The existing volume is retained and adopted by name."
+            : $"High availability is on, so the {releaseName} StatefulSet has been deleted and will be "
+              + "recreated without its local data volume — volumeClaimTemplates cannot be changed in "
+              + "place. The old volume is retained, not erased, and is left for you to remove once the "
+              + "shared datastore holds everything.";
+    }
+
+    /// <summary>
+    /// Whether a live StatefulSet carries the local <c>data</c> claim. Null when the JSON cannot be
+    /// read — "I do not know" must not be mistaken for "no", which would delete a working
+    /// StatefulSet on every apply.
+    /// </summary>
+    public static bool? HasDataVolumeClaim(string json)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("spec", out JsonElement spec))
+            {
+                return null;
+            }
+            if (!spec.TryGetProperty("volumeClaimTemplates", out JsonElement claims)
+                || claims.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            return claims.EnumerateArray().Any(c =>
+                c.TryGetProperty("metadata", out JsonElement meta)
+                && meta.TryGetProperty("name", out JsonElement name)
+                && name.GetString() == StalwartManifestBuilder.DataVolumeName);
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 
@@ -1568,6 +1691,10 @@ public class StalwartService(
             output.Add($"Recovery identity on the cluster matches the CLI identity ({config.AdminUsername}).");
 
             output.Add("--- Entering recovery mode ---");
+            if (await PrepareStatefulSetShapeChangeAsync(releaseName, ns, kubeconfig, ha, ct) is string reshaped)
+            {
+                output.Add(reshaped);
+            }
             await k8sFactory.ApplyManifestAsync(
                 StalwartManifestBuilder.Build(config, releaseName, ns, recoveryMode: true, ha: ha), kubeconfig, ct);
             if (!await WaitForRolloutAsync(releaseName, ns, kubeconfig, RolloutTimeout, ct))
@@ -1811,7 +1938,7 @@ public class StalwartService(
         }
     }
 
-    /// <summary>Polls a StatefulSet until its single replica reports ready on the current revision.</summary>
+    /// <summary>Polls a StatefulSet until every replica reports ready on the current revision.</summary>
     private async Task<bool> WaitForRolloutAsync(
         string releaseName, string ns, string kubeconfig, TimeSpan timeout, CancellationToken ct)
     {

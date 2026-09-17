@@ -107,6 +107,10 @@ public class ComponentInstallOrchestrator(
         // Same reason as OpenLDAP: the StatefulSet mounts the TLS Secret, so a pod started before
         // cert-manager has issued it sits in ContainerCreating until somebody looks.
         await stalwartService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId, ct);
+        // Turning high availability on or off changes whether the StatefulSet has a local data
+        // volume, and volumeClaimTemplates is immutable — so the install would be refused on a field
+        // nobody edited. No-op unless that boundary is actually being crossed.
+        await stalwartService.PrepareStorageShapeIfNeededAsync(tenantId, componentId, ct);
 
         HelmCommand command = await lifecycleService.GetInstallCommandAsync(componentId, ct);
         command.NoWait = options.NoWait;

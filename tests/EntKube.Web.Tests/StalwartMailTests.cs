@@ -1252,6 +1252,41 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void RecoveryModeRunsOneNodeEvenInAnHaDeployment()
+    {
+        // The plan is replayed once against one endpoint; the other nodes have nothing to do but
+        // read a datastore being rewritten underneath them. Mail is already refused for the duration
+        // of a recovery apply, so scaling in costs nothing that was not already lost.
+        StalwartPlanBuilder.StalwartHaBackend ha = Ha();
+
+        string recovery = StalwartManifestBuilder.Build(
+            Config(), "stalwart", "stalwart", recoveryMode: true, ha: ha);
+        Scalar(Parse(recovery).First(d => Scalar(d.RootNode, "kind") == "StatefulSet").RootNode,
+            "spec", "replicas").Should().Be("1");
+
+        string normal = StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart", ha: ha);
+        Scalar(Parse(normal).First(d => Scalar(d.RootNode, "kind") == "StatefulSet").RootNode,
+            "spec", "replicas").Should().Be(ha.Replicas.ToString());
+    }
+
+    [Fact]
+    public void TheLiveStorageShapeIsReadFromTheClaimAndNeverGuessed()
+    {
+        // Whether the live StatefulSet has the local data claim is how EntKube decides it must be
+        // deleted and recreated — volumeClaimTemplates cannot be changed in place. Unreadable JSON
+        // has to answer "I do not know" rather than "no", because "no" deletes a working
+        // StatefulSet on the next apply.
+        StalwartService.HasDataVolumeClaim(
+            """{"spec":{"volumeClaimTemplates":[{"metadata":{"name":"data"}}]}}""").Should().BeTrue();
+        StalwartService.HasDataVolumeClaim("""{"spec":{"replicas":3}}""").Should().BeFalse();
+        StalwartService.HasDataVolumeClaim(
+            """{"spec":{"volumeClaimTemplates":[{"metadata":{"name":"tls"}}]}}""").Should().BeFalse();
+
+        StalwartService.HasDataVolumeClaim("not json").Should().BeNull();
+        StalwartService.HasDataVolumeClaim("{}").Should().BeNull();
+    }
+
+    [Fact]
     public void TheSingleNodeManifestStillHasItsLocalVolumeAndOneReplica()
     {
         string manifest = StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart");

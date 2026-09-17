@@ -128,7 +128,12 @@ public static class StalwartManifestBuilder
         y.Add("    app.kubernetes.io/managed-by: entkube");
         y.Add("spec:");
         y.Add($"  serviceName: {releaseName}-headless");
-        y.Add($"  replicas: {(ha is null ? 1 : Math.Max(1, ha.Replicas))}");
+        // One node while the configuration is being replayed, however many the deployment runs
+        // normally. The plan is applied once, against one endpoint, and the other nodes have nothing
+        // to do but read a datastore that is being rewritten underneath them — which is the one
+        // situation Stalwart's own multi-node guidance warns about. Mail is already refused for the
+        // duration of a recovery-mode apply, so this costs nothing that was not already lost.
+        y.Add($"  replicas: {(recoveryMode || ha is null ? 1 : Math.Max(1, ha.Replicas))}");
         y.Add("  selector:");
         y.Add("    matchLabels:");
         y.Add($"      app: {releaseName}");
@@ -223,7 +228,7 @@ public static class StalwartManifestBuilder
         y.Add("          volumeMounts:");
         if (ha is null)
         {
-            y.Add("            - name: data");
+            y.Add($"            - name: {DataVolumeName}");
             y.Add($"              mountPath: {StalwartPlanBuilder.DataPath}");
         }
         y.Add("            - name: config");
@@ -306,7 +311,7 @@ public static class StalwartManifestBuilder
         {
             y.Add("  volumeClaimTemplates:");
             y.Add("    - metadata:");
-            y.Add("        name: data");
+            y.Add($"        name: {DataVolumeName}");
             y.Add("      spec:");
             y.Add("        accessModes: [ReadWriteOnce]");
             if (!string.IsNullOrWhiteSpace(config.StorageClass))
@@ -511,6 +516,13 @@ public static class StalwartManifestBuilder
 
         yield return ("http", StalwartPlanBuilder.HttpPort);
     }
+
+    /// <summary>
+    /// The local data volume, present only in single-node deployments. Named here because whether a
+    /// live StatefulSet has this claim is how EntKube tells which shape it was built with, and
+    /// volumeClaimTemplates cannot be changed in place.
+    /// </summary>
+    public const string DataVolumeName = "data";
 
     /// <summary>Listener name for the HTTP-01 challenge port. Referenced by the endpoint policy.</summary>
     public const string AcmeHttpListener = "acme-http";
