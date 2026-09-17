@@ -741,13 +741,27 @@ public static class StalwartPlanBuilder
     }
 
     /// <summary>
-    /// The request paths that are safe to answer on the public mail address: everything under
-    /// <c>/.well-known/</c> (ACME challenge, MTA-STS, PACC), Thunderbird's autoconfig path, and
-    /// Outlook's autodiscover path in both the casings it uses. Everything else on those listeners —
-    /// the admin UI, JMAP — is refused.
+    /// The request paths that are safe to answer on the public mail address, taken from the server's
+    /// own router (<c>crates/http/src/request.rs</c>) rather than from what a client is expected to
+    /// ask for:
+    ///
+    /// <list type="bullet">
+    /// <item><c>/.well-known/</c> — the ACME challenge, MTA-STS, PACC
+    /// (<c>user-agent-configuration.json</c>), <c>mail-v1.xml</c>, the nested autoconfig path and
+    /// the OAuth/OpenID discovery documents, which are public metadata by definition. The
+    /// <c>jmap</c>, <c>caldav</c> and <c>carddav</c> entries under it are redirects, and the paths
+    /// they redirect TO are not on this list — so JMAP stays refused on a public address.</item>
+    /// <item><c>/mail/config</c> — Thunderbird's <c>config-v1.1.xml</c>.</item>
+    /// <item>Outlook's autodiscover path in <b>all three</b> casings the router matches. It accepts
+    /// <c>autodiscover</c>, <c>Autodiscover</c> and <c>AutoDiscover</c>; allowing only the first two
+    /// leaves the clients that send the third refused by the listener that exists to serve
+    /// them.</item>
+    /// </list>
+    ///
+    /// Everything else on those listeners — the admin UI, JMAP — is refused.
     /// </summary>
     private static readonly string[] PublicHttpPaths =
-        ["/.well-known/", "/mail/config", "/autodiscover/", "/Autodiscover/"];
+        ["/.well-known/", "/mail/config", "/autodiscover/", "/Autodiscover/", "/AutoDiscover/"];
 
     /// <summary>The listener set implied by the enabled protocols. Keyed by listener name.</summary>
     private static Dictionary<string, object?> BuildListeners(StalwartComponentConfig config)

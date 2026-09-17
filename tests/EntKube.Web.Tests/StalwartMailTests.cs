@@ -296,6 +296,38 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void EveryCasingTheServerRoutesAutodiscoverOnIsAllowed()
+    {
+        // The router matches "autodiscover", "Autodiscover" AND "AutoDiscover"
+        // (crates/http/src/request.rs). Allowing a subset leaves the clients that send the missing
+        // casing refused by the very listener that exists to serve them — and a 403 on autodiscover
+        // looks to the user like a mail server that does not exist.
+        StalwartComponentConfig config = Config(c => c.TlsMode = StalwartTlsMode.ClusterIssuer);
+        string plan = StalwartPlanBuilder.BuildApplyPlan(
+            config, [Domain(config.Id, "example.com")], []);
+
+        List<string> allows = Operation(plan, "Http")!.Value
+            .GetProperty("value").GetProperty("allowedEndpoints").GetProperty("match").EnumerateObject()
+            .Where(a => a.Value.GetProperty("then").GetString() == "200")
+            .Select(a => a.Value.GetProperty("if").GetString()!)
+            .ToList();
+
+        foreach (string casing in new[] { "/autodiscover/", "/Autodiscover/", "/AutoDiscover/" })
+        {
+            allows.Should().Contain(a => a.Contains($"'{casing}'"), $"the server routes {casing}");
+        }
+
+        // Thunderbird's fixed path, and the prefix that carries MTA-STS, PACC and the ACME challenge.
+        allows.Should().Contain(a => a.Contains("'/mail/config'"));
+        allows.Should().Contain(a => a.Contains("'/.well-known/'"));
+
+        // JMAP and the admin UI are not reachable on a public address. /.well-known/jmap is a
+        // redirect, and its target is deliberately absent from the allow list.
+        allows.Should().NotContain(a => a.Contains("'/jmap"));
+        allows.Should().NotContain(a => a.Contains("'/admin"));
+    }
+
+    [Fact]
     public void WithoutAcmeThereIsNoChallengePortButThePublicWebListenerIsStillRestricted()
     {
         StalwartComponentConfig config = Config(c => c.TlsMode = StalwartTlsMode.ClusterIssuer);
