@@ -219,10 +219,12 @@ public class StalwartMailTests
     }
 
     [Fact]
-    public void AcmeChallengePortsArePublishedOnTheMailAddressOnlyForTheChallengeThatNeedsThem()
+    public void TheMailAddressAlwaysServesHttpsAndOpensPortEightyOnlyForTheChallengeThatNeedsIt()
     {
-        // TLS-ALPN-01 wants 443, HTTP-01 wants 80, DNS-01 wants neither, and no other TLS mode
-        // wants either — an open port with nothing behind it is attack surface for free.
+        // 443 is not an ACME port: it is where a mail client looks for its settings and where a
+        // sending server fetches the MTA-STS policy, so it is published in every TLS mode. 80 is
+        // only ever the HTTP-01 challenge — an open port with nothing behind it is attack surface
+        // for free.
         static List<string?> MailPortsOf(StalwartComponentConfig config)
         {
             string manifest = StalwartManifestBuilder.Build(config, "stalwart", "stalwart");
@@ -235,14 +237,16 @@ public class StalwartMailTests
         MailPortsOf(Config(c => { c.TlsMode = StalwartTlsMode.Acme; c.AcmeChallenge = StalwartAcmeChallenge.TlsAlpn01; }))
             .Should().Contain("443").And.NotContain("80");
 
+        // HTTP-01 adds 80 — and keeps 443, because autodiscovery and MTA-STS are HTTPS whatever the
+        // challenge type is.
         MailPortsOf(Config(c => { c.TlsMode = StalwartTlsMode.Acme; c.AcmeChallenge = StalwartAcmeChallenge.Http01; }))
-            .Should().Contain("80").And.NotContain("443");
+            .Should().Contain(["80", "443"]);
 
         MailPortsOf(Config(c => { c.TlsMode = StalwartTlsMode.Acme; c.AcmeChallenge = StalwartAcmeChallenge.Dns01; }))
-            .Should().NotContain(["80", "443"]);
+            .Should().Contain("443").And.NotContain("80");
 
         MailPortsOf(Config(c => c.TlsMode = StalwartTlsMode.ClusterIssuer))
-            .Should().NotContain(["80", "443"]);
+            .Should().Contain("443").And.NotContain("80");
     }
 
     [Fact]
@@ -279,7 +283,7 @@ public class StalwartMailTests
         allows.Should().NotContain(a => a.If.Contains("/admin") || a.If.Contains("/jmap"));
         // Both public mail-LB listeners deny everything the allow arms did not permit.
         denies.Should().Contain(a => a.If.Contains(StalwartManifestBuilder.AcmeHttpListener));
-        denies.Should().Contain(a => a.If.Contains(StalwartManifestBuilder.AcmeTlsListener));
+        denies.Should().Contain(a => a.If.Contains(StalwartManifestBuilder.PublicWebListener));
         // The deny arms come after every allow arm, or a public path would be refused before it is allowed.
         arms.FindLastIndex(a => a.Then == "200").Should().BeLessThan(arms.FindIndex(a => a.Then == "403"));
 
@@ -292,7 +296,7 @@ public class StalwartMailTests
     }
 
     [Fact]
-    public void WithoutAcmeThereAreNoAcmeListenersAndNoRestrictions()
+    public void WithoutAcmeThereIsNoChallengePortButThePublicWebListenerIsStillRestricted()
     {
         StalwartComponentConfig config = Config(c => c.TlsMode = StalwartTlsMode.ClusterIssuer);
         string plan = StalwartPlanBuilder.BuildApplyPlan(
@@ -300,63 +304,101 @@ public class StalwartMailTests
 
         JsonElement listeners = Operation(plan, "NetworkListener")!.Value.GetProperty("value");
         listeners.TryGetProperty(StalwartManifestBuilder.AcmeHttpListener, out _).Should().BeFalse();
-        listeners.TryGetProperty(StalwartManifestBuilder.AcmeTlsListener, out _).Should().BeFalse();
 
-        // The policy is still written, so switching away from ACME lifts the rules rather than
-        // leaving a deny behind that nothing would ever remove — but it is written as an explicit
-        // allow, never as an empty match. This gates every HTTP request the server serves, and a
-        // policy that denies them all is indistinguishable from a healthy one until someone opens
-        // the admin interface and gets a bare Forbidden.
+        // 443 is published in every TLS mode — this is where a client finds its settings — so the
+        // policy still has to keep the admin UI and JMAP off it.
+        listeners.GetProperty(StalwartManifestBuilder.PublicWebListener)
+            .GetProperty("bind").GetProperty("[::]:443").GetBoolean().Should().BeTrue();
+
         JsonElement policy = Operation(plan, "Http")!.Value
             .GetProperty("value").GetProperty("allowedEndpoints");
 
-        // Exactly the documented default, {"else":"200"} — no match key, no arms, no invented
-        // shape. This is the one form with evidence behind it, on a setting where getting the
-        // shape wrong locks the operator out of the admin interface.
+        List<(string If, string Then)> arms = policy.GetProperty("match").EnumerateObject()
+            .OrderBy(p => int.Parse(p.Name))
+            .Select(p => (p.Value.GetProperty("if").GetString()!, p.Value.GetProperty("then").GetString()!))
+            .ToList();
+
+        arms.Where(a => a.Then == "403").Should().ContainSingle()
+            .Which.If.Should().Contain(StalwartManifestBuilder.PublicWebListener);
+        // Everything else — the in-cluster HTTP listener the gateway talks to — is untouched.
+        policy.GetProperty("else").GetString().Should().Be("200");
+    }
+
+    [Fact]
+    public void WithNothingPublishedOnTheMailAddressThePolicyIsTheDocumentedDefault()
+    {
+        // ClusterIp exposure publishes no mail address at all, so there is no public listener and
+        // nothing to restrict. The policy is written anyway — switching back to a private
+        // deployment has to lift the rules rather than leave a deny behind that nothing removes —
+        // but as exactly the documented default, {"else":"200"}: no match key, no arms, no invented
+        // shape. This gates every HTTP request the server serves, and a policy that denies them all
+        // is indistinguishable from a healthy one until someone opens the admin interface and gets
+        // a bare Forbidden.
+        StalwartComponentConfig config = Config(c =>
+        {
+            c.TlsMode = StalwartTlsMode.ClusterIssuer;
+            c.ExposeMode = StalwartMailExposeMode.ClusterIp;
+        });
+        string plan = StalwartPlanBuilder.BuildApplyPlan(
+            config, [Domain(config.Id, "example.com")], []);
+
+        JsonElement policy = Operation(plan, "Http")!.Value
+            .GetProperty("value").GetProperty("allowedEndpoints");
+
         policy.TryGetProperty("match", out _).Should().BeFalse();
         policy.GetProperty("else").GetString().Should().Be("200");
         policy.EnumerateObject().Should().HaveCount(1);
     }
 
     [Fact]
-    public void TheEndpointPolicyNeverDeniesWithoutAnAcmeListenerToProtect()
+    public void EveryDenyArmNamesAListenerThatExists()
     {
-        // allowedEndpoints is global: it gates every HTTP request, on every listener. A 403 arm in a
-        // deployment with no ACME listener has nothing legitimate to deny and can only lock the
-        // operator out of the admin interface.
+        // allowedEndpoints is global: it gates every HTTP request, on every listener. A 403 arm
+        // naming a listener this deployment does not have can only lock the operator out of the
+        // admin interface, and one that names no listener at all denies everything.
         foreach (StalwartTlsMode mode in Enum.GetValues<StalwartTlsMode>())
         {
             foreach (StalwartAcmeChallenge challenge in Enum.GetValues<StalwartAcmeChallenge>())
             {
-                StalwartComponentConfig config = Config(c =>
+                foreach (StalwartMailExposeMode expose in Enum.GetValues<StalwartMailExposeMode>())
                 {
-                    c.TlsMode = mode;
-                    c.AcmeChallenge = challenge;
-                    c.AcmeContact = "hostmaster@example.com";
-                });
+                    StalwartComponentConfig config = Config(c =>
+                    {
+                        c.TlsMode = mode;
+                        c.AcmeChallenge = challenge;
+                        c.ExposeMode = expose;
+                        c.AcmeContact = "hostmaster@example.com";
+                    });
 
-                string plan = StalwartPlanBuilder.BuildApplyPlan(
-                    config, [Domain(config.Id, "example.com")], []);
+                    string plan = StalwartPlanBuilder.BuildApplyPlan(
+                        config, [Domain(config.Id, "example.com")], []);
 
-                JsonElement listeners = Operation(plan, "NetworkListener")!.Value.GetProperty("value");
-                bool hasAcmeListener =
-                    listeners.TryGetProperty(StalwartManifestBuilder.AcmeHttpListener, out _)
-                    || listeners.TryGetProperty(StalwartManifestBuilder.AcmeTlsListener, out _);
+                    List<string> declared = Operation(plan, "NetworkListener")!.Value
+                        .GetProperty("value").EnumerateObject().Select(p => p.Name).ToList();
 
-                JsonElement endpointPolicy = Operation(plan, "Http")!.Value
-                    .GetProperty("value").GetProperty("allowedEndpoints");
-                List<string> denies = endpointPolicy.TryGetProperty("match", out JsonElement match)
-                    ? match.EnumerateObject()
-                        .Where(a => a.Value.GetProperty("then").GetString() != "200")
-                        .Select(a => a.Value.GetProperty("if").GetString()!)
-                        .ToList()
-                    : [];
+                    JsonElement endpointPolicy = Operation(plan, "Http")!.Value
+                        .GetProperty("value").GetProperty("allowedEndpoints");
+                    List<string> denies = endpointPolicy.TryGetProperty("match", out JsonElement match)
+                        ? match.EnumerateObject()
+                            .Where(a => a.Value.GetProperty("then").GetString() != "200")
+                            .Select(a => a.Value.GetProperty("if").GetString()!)
+                            .ToList()
+                        : [];
 
-                if (!hasAcmeListener)
-                {
-                    denies.Should().BeEmpty(
-                        $"{mode}/{challenge} opens no ACME port, so the endpoint policy has nothing "
-                        + "to protect and must not be able to refuse a request");
+                    foreach (string deny in denies)
+                    {
+                        declared.Should().Contain(
+                            listener => deny.Contains($"'{listener}'"),
+                            $"{mode}/{challenge}/{expose} refuses requests on a listener it never declared "
+                            + $"({deny}), which can only refuse something legitimate");
+                    }
+
+                    if (expose == StalwartMailExposeMode.ClusterIp)
+                    {
+                        denies.Should().BeEmpty(
+                            $"{mode}/{challenge} publishes no mail address, so the endpoint policy has "
+                            + "nothing to protect and must not be able to refuse a request");
+                    }
                 }
             }
         }
@@ -1210,6 +1252,41 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void RecoveryModeRunsOneNodeEvenInAnHaDeployment()
+    {
+        // The plan is replayed once against one endpoint; the other nodes have nothing to do but
+        // read a datastore being rewritten underneath them. Mail is already refused for the duration
+        // of a recovery apply, so scaling in costs nothing that was not already lost.
+        StalwartPlanBuilder.StalwartHaBackend ha = Ha();
+
+        string recovery = StalwartManifestBuilder.Build(
+            Config(), "stalwart", "stalwart", recoveryMode: true, ha: ha);
+        Scalar(Parse(recovery).First(d => Scalar(d.RootNode, "kind") == "StatefulSet").RootNode,
+            "spec", "replicas").Should().Be("1");
+
+        string normal = StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart", ha: ha);
+        Scalar(Parse(normal).First(d => Scalar(d.RootNode, "kind") == "StatefulSet").RootNode,
+            "spec", "replicas").Should().Be(ha.Replicas.ToString());
+    }
+
+    [Fact]
+    public void TheLiveStorageShapeIsReadFromTheClaimAndNeverGuessed()
+    {
+        // Whether the live StatefulSet has the local data claim is how EntKube decides it must be
+        // deleted and recreated — volumeClaimTemplates cannot be changed in place. Unreadable JSON
+        // has to answer "I do not know" rather than "no", because "no" deletes a working
+        // StatefulSet on the next apply.
+        StalwartService.HasDataVolumeClaim(
+            """{"spec":{"volumeClaimTemplates":[{"metadata":{"name":"data"}}]}}""").Should().BeTrue();
+        StalwartService.HasDataVolumeClaim("""{"spec":{"replicas":3}}""").Should().BeFalse();
+        StalwartService.HasDataVolumeClaim(
+            """{"spec":{"volumeClaimTemplates":[{"metadata":{"name":"tls"}}]}}""").Should().BeFalse();
+
+        StalwartService.HasDataVolumeClaim("not json").Should().BeNull();
+        StalwartService.HasDataVolumeClaim("{}").Should().BeNull();
+    }
+
+    [Fact]
     public void TheSingleNodeManifestStillHasItsLocalVolumeAndOneReplica()
     {
         string manifest = StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart");
@@ -1238,32 +1315,79 @@ public class StalwartMailTests
     }
 
     [Fact]
-    public void AutodiscoveryRecordsPointAtTheMailHostInAcmeModeAndTheGatewayOtherwise()
+    public void AutodiscoveryRecordsPointAtTheMailHostWhateverTheTlsMode()
     {
-        // In ACME mode Stalwart certifies autoconfig/autodiscover/mta-sts itself, so those names
-        // must resolve to the mail host or the certificate order fails — the actual cause of a
-        // burned Let's Encrypt rate limit. In cert-manager mode they are served via the gateway.
-        StalwartComponentConfig acme = Config(c =>
+        // These are names of the mail service, answered by the mail server on its own address. They
+        // used to point at the gateway in cert-manager mode, which made client auto-configuration
+        // and MTA-STS depend on the admin UI being published — and were dropped entirely when no
+        // web hostname was set. In ACME mode pointing them at the gateway also failed the
+        // certificate order for every name that did not resolve to the mail host, which is what
+        // burned a Let's Encrypt rate limit.
+        foreach (StalwartTlsMode mode in Enum.GetValues<StalwartTlsMode>())
         {
-            c.Hostname = "mail.example.com";
-            c.AdminHostname = "mailadmin.example.com";
-            c.TlsMode = StalwartTlsMode.Acme;
-        });
-        foreach (var r in StalwartPlanBuilder.DnsRecordsFor(acme, Domain(acme.Id, "example.com"))
-                     .Where(r => r.Name.StartsWith("autoconfig.") || r.Name.StartsWith("autodiscover.")
-                              || r.Name.StartsWith("mta-sts.") || r.Name.StartsWith("ua-auto-config.")))
-        {
-            r.Value.Should().Be("mail.example.com.");
-        }
+            foreach (string? webHost in new[] { "mailadmin.example.com", null })
+            {
+                StalwartComponentConfig config = Config(c =>
+                {
+                    c.Hostname = "mail.example.com";
+                    c.AdminHostname = webHost;
+                    c.TlsMode = mode;
+                });
 
-        StalwartComponentConfig cm = Config(c =>
-        {
-            c.Hostname = "mail.example.com";
-            c.AdminHostname = "mailadmin.example.com";
-            c.TlsMode = StalwartTlsMode.ClusterIssuer;
-        });
-        StalwartPlanBuilder.DnsRecordsFor(cm, Domain(cm.Id, "example.com"))
-            .First(r => r.Name.StartsWith("autoconfig.")).Value.Should().Be("mailadmin.example.com.");
+                List<StalwartPlanBuilder.DnsRecord> autodiscovery =
+                    StalwartPlanBuilder.DnsRecordsFor(config, Domain(config.Id, "example.com"))
+                        .Where(r => r.Type == "CNAME").ToList();
+
+                autodiscovery.Select(r => r.Name).Should().BeEquivalentTo(
+                    "autoconfig.example.com", "autodiscover.example.com",
+                    "mta-sts.example.com", "ua-auto-config.example.com");
+                autodiscovery.Should().OnlyContain(r => r.Value == "mail.example.com.",
+                    $"{mode} with web host '{webHost}' must still send clients to the mail server");
+            }
+        }
+    }
+
+    [Fact]
+    public void TheMailCertificateCarriesEveryNameAClientWillAskFor()
+    {
+        // Each of these lookups is an HTTPS request that validates the name it asked for, so a
+        // certificate with only the mail hostname on it means a client that reaches the right
+        // server and then refuses to talk to it.
+        StalwartComponentConfig config = Config(c => c.Hostname = "mail.example.com");
+        List<StalwartMailDomain> domains =
+            [Domain(config.Id, "example.com"), Domain(config.Id, "example.org", primary: false)];
+
+        string manifest = StalwartManifestBuilder.BuildTlsCertificateManifest(
+            "letsencrypt-prod", config.Hostname, "stalwart", "stalwart", domains);
+
+        YamlDocument cert = Parse(manifest).Single();
+        Scalar(cert.RootNode, "kind").Should().Be("Certificate");
+        Scalar(cert.RootNode, "spec", "commonName").Should().Be("mail.example.com");
+
+        List<string?> names = ((YamlSequenceNode)At(cert.RootNode, "spec", "dnsNames")!)
+            .Select(n => ((YamlScalarNode)n).Value).ToList();
+
+        names[0].Should().Be("mail.example.com", "the common name has to be a SAN as well");
+        names.Should().Contain([
+            "autoconfig.example.com", "autodiscover.example.com", "mta-sts.example.com",
+            "ua-auto-config.example.com", "autoconfig.example.org", "mta-sts.example.org"]);
+        // The web hostname belongs to the gateway, which holds its own certificate.
+        names.Should().NotContain("mailadmin.example.com");
+    }
+
+    [Fact]
+    public void TheCertificateNamesAreExactlyWhatTheDnsTabTellsTheOperatorToPublish()
+    {
+        // One list behind both, because a name on the certificate that nothing resolves fails the
+        // order, and a name that resolves with nothing on the certificate fails the client.
+        StalwartComponentConfig config = Config(c => c.Hostname = "mail.example.com");
+        StalwartMailDomain domain = Domain(config.Id, "example.com");
+
+        IEnumerable<string> fromDns = StalwartPlanBuilder.DnsRecordsFor(config, domain)
+            .Where(r => r.Type == "CNAME").Select(r => r.Name);
+
+        StalwartPlanBuilder.CertificateNames(config.Hostname, [domain])
+            .Should().Contain(fromDns);
     }
 
     // ── rspamd ────────────────────────────────────────────────────────────────
@@ -1634,6 +1758,80 @@ public class StalwartMailTests
 
         entry.FormFields.Should().NotContain(f => f.Key == "hostname");
         entry.FormFields.Should().Contain(f => f.Key == "mail-hostname");
+    }
+
+    [Fact]
+    public void TheHaBackendsComeFromTheInstallFormIncludingWhenOneIsClearedAgain()
+    {
+        Guid database = Guid.NewGuid();
+        Guid bucket = Guid.NewGuid();
+        StalwartComponentConfig config = Config();
+
+        StalwartService.ApplyFormValues(config, new Dictionary<string, string>
+        {
+            ["ha-enabled"] = "true",
+            ["ha-replicas"] = "3",
+            ["ha-database"] = database.ToString(),
+            ["ha-blob-store"] = bucket.ToString(),
+            ["ha-coordinator-redis"] = "redis.redis.svc.cluster.local:6380",
+        });
+
+        config.HighAvailability.Should().BeTrue();
+        config.Replicas.Should().Be(3);
+        config.CnpgDatabaseId.Should().Be(database);
+        config.BlobStorageLinkId.Should().Be(bucket);
+        config.CoordinatorRedisHost.Should().Be("redis.redis.svc.cluster.local");
+        config.CoordinatorRedisPort.Should().Be(6380);
+
+        // A picker put back to "choose one…" is an instruction, not silence: leaving the old id in
+        // place would keep the component attached to a database the operator has just detached.
+        StalwartService.ApplyFormValues(config, new Dictionary<string, string>
+        {
+            ["ha-enabled"] = "false",
+            ["ha-database"] = "",
+            ["ha-blob-store"] = "",
+            ["ha-coordinator-redis"] = "",
+        });
+
+        config.HighAvailability.Should().BeFalse();
+        config.CnpgDatabaseId.Should().BeNull();
+        config.BlobStorageLinkId.Should().BeNull();
+        config.CoordinatorRedisHost.Should().BeNull();
+    }
+
+    [Fact]
+    public void TheHaBackendsReadBackIntoTheFormTheyWereEnteredIn()
+    {
+        // Every one of these is a "stalwart:" pseudo-path, so the stored YAML holds nothing to
+        // recover them from. Without a read-back the Components tab re-opens on catalog defaults —
+        // HA off, no database — and saving that detaches a running cluster from its datastore.
+        Guid database = Guid.NewGuid();
+        Guid bucket = Guid.NewGuid();
+        StalwartComponentConfig config = Config(c =>
+        {
+            c.HighAvailability = true;
+            c.Replicas = 3;
+            c.CnpgDatabaseId = database;
+            c.BlobStorageLinkId = bucket;
+            c.CoordinatorRedisHost = "redis.redis.svc.cluster.local";
+            c.CoordinatorRedisPort = 6380;
+        });
+
+        Dictionary<string, string> form = StalwartService.BuildFormValues(config);
+
+        form["ha-enabled"].Should().Be("true");
+        form["ha-replicas"].Should().Be("3");
+        form["ha-database"].Should().Be(database.ToString());
+        form["ha-blob-store"].Should().Be(bucket.ToString());
+        form["ha-coordinator-redis"].Should().Be("redis.redis.svc.cluster.local:6380");
+
+        // And what comes back out reproduces the configuration it came from.
+        StalwartComponentConfig reopened = Config();
+        StalwartService.ApplyFormValues(reopened, form);
+        reopened.Should().BeEquivalentTo(config, o => o
+            .Including(c => c.HighAvailability).Including(c => c.Replicas)
+            .Including(c => c.CnpgDatabaseId).Including(c => c.BlobStorageLinkId)
+            .Including(c => c.CoordinatorRedisHost).Including(c => c.CoordinatorRedisPort));
     }
 
     [Fact]

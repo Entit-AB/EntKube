@@ -29,7 +29,6 @@ public class StalwartService(
     ExternalRouteService routeService,
     KeycloakService keycloakService,
     ComponentLifecycleService lifecycleService,
-    RedisService redisService,
     ILogger<StalwartService> logger) : IComponentFormValueProvider
 {
     // Explicit implementation: the class already exposes CatalogKey as a const, and the interface
@@ -341,6 +340,7 @@ public class StalwartService(
         form.TryGetValue("ldap-bind-password", out string? bindPassword);
         form.TryGetValue("tls-cert", out string? cert);
         form.TryGetValue("tls-key", out string? key);
+        form.TryGetValue("redis-password", out string? redisPassword);
 
         // Picking a realm on this cluster's Keycloak fills the issuer URL in. Stalwart validates tokens
         // rather than issuing them, so unlike the webmail and the rspamd UI it needs no client of its own —
@@ -361,7 +361,7 @@ public class StalwartService(
             string.IsNullOrWhiteSpace(bindPassword) ? null : bindPassword,
             string.IsNullOrWhiteSpace(cert) ? null : cert,
             string.IsNullOrWhiteSpace(key) ? null : key,
-            coordinatorRedisPassword: null,
+            string.IsNullOrWhiteSpace(redisPassword) ? null : redisPassword,
             ct: ct);
     }
 
@@ -446,6 +446,54 @@ public class StalwartService(
         {
             cfg.RspamdHost = rspamdHost;
         }
+
+        // High availability. The three shared backends are read whenever the form carries their key
+        // at all, blank included — unlike every field above, which keeps its stored value when the
+        // form has nothing to say. A picker cleared back to "choose one…" is an instruction, and
+        // treating it as silence would leave a component pointed at a database the operator has
+        // just detached it from.
+        if (Bool(form, "ha-enabled") is bool ha)
+        {
+            cfg.HighAvailability = ha;
+        }
+        if (Int(form, "ha-replicas") is int replicas && replicas > 0)
+        {
+            cfg.Replicas = replicas;
+        }
+        if (form.ContainsKey("ha-database"))
+        {
+            cfg.CnpgDatabaseId = GuidOrNull(form, "ha-database");
+        }
+        if (form.ContainsKey("ha-blob-store"))
+        {
+            cfg.BlobStorageLinkId = GuidOrNull(form, "ha-blob-store");
+        }
+        if (form.ContainsKey("ha-coordinator-redis"))
+        {
+            // The picker's value is one "host:port" string, because that is what a Redis endpoint
+            // is everywhere else in the catalog; the config keeps the two apart.
+            (string? redisHost, int? redisPort) = SplitEndpoint(Text(form, "ha-coordinator-redis"));
+            cfg.CoordinatorRedisHost = redisHost;
+            if (redisPort is int port)
+            {
+                cfg.CoordinatorRedisPort = port;
+            }
+        }
+    }
+
+    /// <summary>Splits a <c>host:port</c> endpoint. A bare host keeps the stored port.</summary>
+    private static (string? Host, int? Port) SplitEndpoint(string? endpoint)
+    {
+        if (string.IsNullOrWhiteSpace(endpoint))
+        {
+            return (null, null);
+        }
+
+        string value = endpoint.Trim();
+        int colon = value.LastIndexOf(':');
+        return colon > 0 && int.TryParse(value[(colon + 1)..], out int port)
+            ? (value[..colon], port)
+            : (value, null);
     }
 
     /// <summary>
@@ -518,6 +566,13 @@ public class StalwartService(
         ["load-balancer-ip"] = config.LoadBalancerIp ?? "",
         ["rspamd-enabled"] = config.RspamdEnabled ? "true" : "false",
         ["rspamd-host"] = config.RspamdHost ?? "",
+        ["ha-enabled"] = config.HighAvailability ? "true" : "false",
+        ["ha-replicas"] = config.Replicas.ToString(),
+        ["ha-database"] = config.CnpgDatabaseId?.ToString() ?? "",
+        ["ha-blob-store"] = config.BlobStorageLinkId?.ToString() ?? "",
+        ["ha-coordinator-redis"] = string.IsNullOrWhiteSpace(config.CoordinatorRedisHost)
+            ? ""
+            : $"{config.CoordinatorRedisHost}:{config.CoordinatorRedisPort}",
     };
 
     /// <summary>
@@ -525,7 +580,7 @@ public class StalwartService(
     /// the round-trip test can tell "deliberately withheld" from "forgotten".
     /// </summary>
     public static readonly string[] SecretFormKeys =
-        ["admin-password", "ldap-bind-password", "tls-cert", "tls-key"];
+        ["admin-password", "ldap-bind-password", "tls-cert", "tls-key", "redis-password"];
 
     /// <summary>
     /// Form keys that are inputs only: they are consumed while saving to derive something else and
@@ -541,6 +596,14 @@ public class StalwartService(
 
     private static string? Text(IReadOnlyDictionary<string, string> form, string key) =>
         form.TryGetValue(key, out string? v) && !string.IsNullOrWhiteSpace(v) ? v.Trim() : null;
+
+    private static int? Int(IReadOnlyDictionary<string, string> form, string key) =>
+        form.TryGetValue(key, out string? v) && int.TryParse(v, out int parsed) ? parsed : null;
+
+    private static Guid? GuidOrNull(IReadOnlyDictionary<string, string> form, string key) =>
+        form.TryGetValue(key, out string? v) && Guid.TryParse(v, out Guid parsed) && parsed != Guid.Empty
+            ? parsed
+            : null;
 
     private static bool? Bool(IReadOnlyDictionary<string, string> form, string key) =>
         form.TryGetValue(key, out string? v) && !string.IsNullOrWhiteSpace(v)
@@ -666,6 +729,44 @@ public class StalwartService(
     }
 
     /// <summary>
+    /// Makes an installed mail server ready to be re-applied with the other storage shape — see
+    /// <see cref="PrepareStatefulSetShapeChangeAsync"/>. Called before the install runs, because the
+    /// install applies the manifest and Kubernetes would refuse it. No-op for a first install, for a
+    /// component that is not Stalwart, and for any re-deploy that does not cross the HA boundary.
+    /// </summary>
+    public async Task PrepareStorageShapeIfNeededAsync(
+        Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        StalwartComponentConfig? config = await db.StalwartComponentConfigs
+            .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId && c.TenantId == tenantId, ct);
+        if (config is null)
+        {
+            return;
+        }
+
+        ClusterComponent? component = await db.ClusterComponents
+            .Include(c => c.Cluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+        if (component?.Cluster?.Kubeconfig is not { Length: > 0 } kubeconfig)
+        {
+            return;
+        }
+
+        string releaseName = component.ReleaseName ?? component.Name;
+        string ns = component.Namespace ?? DefaultNamespace;
+
+        StalwartPlanBuilder.StalwartHaBackend? ha =
+            await BuildHaBackendAsync(tenantId, clusterComponentId, config, releaseName, ns, ct);
+
+        if (await PrepareStatefulSetShapeChangeAsync(releaseName, ns, kubeconfig, ha, ct) is string reshaped)
+        {
+            logger.LogInformation("Stalwart storage shape change for {ComponentId}: {Detail}", clusterComponentId, reshaped);
+        }
+    }
+
+    /// <summary>
     /// Issues the mail certificate via cert-manager before the install, so the StatefulSet's TLS
     /// volume exists when the pod mounts it. No-op unless TLS mode is ClusterIssuer.
     /// </summary>
@@ -696,20 +797,117 @@ public class StalwartService(
         string releaseName = component.ReleaseName ?? component.Name;
         string ns = component.Namespace ?? DefaultNamespace;
 
+        // The autodiscovery names of every served domain ride on this certificate: the mail server
+        // answers those lookups itself, on its own address, and each one is an HTTPS request that
+        // validates the name. Requesting them here is the cert-manager spelling of the set Stalwart
+        // would order for itself in ACME mode.
+        List<StalwartMailDomain> domains = await db.StalwartMailDomains
+            .Where(d => d.ConfigId == config.Id)
+            .OrderByDescending(d => d.IsPrimary).ThenBy(d => d.Name)
+            .ToListAsync(ct);
+
         await k8sFactory.EnsureNamespaceAsync(ns, kubeconfig, ct);
         await k8sFactory.ApplyManifestAsync(
             StalwartManifestBuilder.BuildTlsCertificateManifest(
-                config.ClusterIssuer!, config.Hostname.Trim(), releaseName, ns),
+                config.ClusterIssuer!, config.Hostname.Trim(), releaseName, ns, domains),
             kubeconfig, ct);
 
         string secretName = $"{releaseName}{StalwartManifestBuilder.TlsSecretSuffix}";
         if (!await WaitForSecretAsync(ns, secretName, kubeconfig, TimeSpan.FromMinutes(3), ct))
         {
+            IReadOnlyList<string> names =
+                StalwartPlanBuilder.CertificateNames(config.Hostname.Trim(), domains);
             throw new InvalidOperationException(
                 $"cert-manager did not issue the '{secretName}' TLS Secret in namespace '{ns}' within 3 minutes "
-                + $"(ClusterIssuer '{config.ClusterIssuer}'). The certificate is for '{config.Hostname}', so an "
-                + "ACME issuer has to be able to solve a challenge for that name — check the issuer's DNS-01 "
-                + "credentials, or switch TLS mode to ACME and let Stalwart obtain the certificate itself.");
+                + $"(ClusterIssuer '{config.ClusterIssuer}'). The certificate covers {string.Join(", ", names)} — "
+                + "one name it cannot solve a challenge for fails the whole certificate, so check the issuer's "
+                + "DNS-01 credentials for that zone, or switch TLS mode to ACME and let Stalwart obtain the "
+                + "certificate itself.");
+        }
+    }
+
+    /// <summary>
+    /// Deletes the StatefulSet when the deployment is changing between single-node and HA, because
+    /// that change rewrites a field Kubernetes will not let us update.
+    ///
+    /// <para>HA replaces the local RocksDB volume with a shared PostgreSQL datastore, so the
+    /// StatefulSet either has a <c>data</c> volumeClaimTemplate or it does not — and
+    /// <c>volumeClaimTemplates</c> is immutable. Applying the other shape over a live StatefulSet is
+    /// refused outright ("updates to statefulset spec for fields other than 'replicas', 'ordinals',
+    /// 'template', … are forbidden"), so turning high availability on for an installed mail server
+    /// would fail on an error about a field nobody edited.</para>
+    ///
+    /// <para>The PersistentVolumeClaims survive: a StatefulSet's claims are retained by default and
+    /// are never garbage-collected with it. So the old RocksDB volume is still there if HA is turned
+    /// off again, and the new StatefulSet adopts it by name.</para>
+    ///
+    /// <para>A no-op unless the shape actually differs — this must not delete a StatefulSet for an
+    /// ordinary re-deploy.</para>
+    /// </summary>
+    /// <returns>A line for the operator when something was deleted, otherwise null.</returns>
+    private async Task<string?> PrepareStatefulSetShapeChangeAsync(
+        string releaseName, string ns, string kubeconfig,
+        StalwartPlanBuilder.StalwartHaBackend? ha, CancellationToken ct)
+    {
+        string json;
+        try
+        {
+            json = await k8sFactory.GetJsonAsync($"statefulset/{releaseName}", ns, kubeconfig, ct: ct);
+        }
+        catch (Exception ex)
+        {
+            // Not installed yet, or unreadable. Either way there is nothing to reshape, and an
+            // install must not be blocked by a check that could not run.
+            logger.LogDebug(ex, "No existing StatefulSet {Name} in {Namespace} to compare shapes with.", releaseName, ns);
+            return null;
+        }
+
+        bool? liveHasVolume = HasDataVolumeClaim(json);
+        if (liveHasVolume is not bool hasVolume || hasVolume == (ha is null))
+        {
+            return null;
+        }
+
+        await k8sFactory.DeleteManifestAsync("statefulset", releaseName, ns, kubeconfig, ct);
+
+        return ha is null
+            ? $"High availability is off, so the {releaseName} StatefulSet has been deleted and will be "
+              + "recreated with its local data volume — volumeClaimTemplates cannot be changed in place. "
+              + "The existing volume is retained and adopted by name."
+            : $"High availability is on, so the {releaseName} StatefulSet has been deleted and will be "
+              + "recreated without its local data volume — volumeClaimTemplates cannot be changed in "
+              + "place. The old volume is retained, not erased, and is left for you to remove once the "
+              + "shared datastore holds everything.";
+    }
+
+    /// <summary>
+    /// Whether a live StatefulSet carries the local <c>data</c> claim. Null when the JSON cannot be
+    /// read — "I do not know" must not be mistaken for "no", which would delete a working
+    /// StatefulSet on every apply.
+    /// </summary>
+    public static bool? HasDataVolumeClaim(string json)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("spec", out JsonElement spec))
+            {
+                return null;
+            }
+            if (!spec.TryGetProperty("volumeClaimTemplates", out JsonElement claims)
+                || claims.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            return claims.EnumerateArray().Any(c =>
+                c.TryGetProperty("metadata", out JsonElement meta)
+                && meta.TryGetProperty("name", out JsonElement name)
+                && name.GetString() == StalwartManifestBuilder.DataVolumeName);
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 
@@ -740,9 +938,13 @@ public class StalwartService(
     // ── Routes ────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Reconciles the ExternalRoute publishing the web surfaces — admin UI, JMAP, autoconfig and
+    /// Reconciles the ExternalRoute publishing the administrative web surfaces — admin UI, JMAP and
     /// the OAuth endpoints — through the cluster's gateway. Gateway name and namespace are left
     /// unset so they resolve to whichever ingress the cluster actually runs, Istio or Traefik.
+    ///
+    /// <para>Client auto-configuration and MTA-STS are not published here. They are served on the
+    /// mail address instead, so a deployment that never publishes this route still has working
+    /// autodiscovery.</para>
     /// </summary>
     public async Task EnsureWebRouteAsync(Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
@@ -873,29 +1075,32 @@ public class StalwartService(
             {
                 issues.Add(new(true,
                     "High availability is on but no shared database is selected.",
-                    "Pick a CNPG PostgreSQL database on the Configuration tab. In HA the datastore "
-                    + "cannot be the single node's local disk — every node reads it."));
+                    "Pick a PostgreSQL database in this component's settings on the cluster's Components "
+                    + "tab. In HA the datastore cannot be the single node's local disk — every node reads it."));
             }
             if (config.BlobStorageLinkId is null)
             {
                 issues.Add(new(true,
                     "High availability is on but no shared blob store is selected.",
-                    "Pick an S3 storage link. Message bodies must live where every node can reach "
-                    + "them; a local volume would strand them on one node."));
+                    "Pick an S3 storage link in this component's settings on the cluster's Components tab. "
+                    + "Message bodies must live where every node can reach them; a local volume would "
+                    + "strand them on one node."));
             }
             if (string.IsNullOrWhiteSpace(config.CoordinatorRedisHost))
             {
                 issues.Add(new(true,
                     "High availability is on but no coordinator is configured.",
-                    "Set the coordinator Redis host. The nodes share state and stay in step through "
-                    + "it; without one they cannot form a cluster."));
+                    "Pick a coordinator Redis in this component's settings on the cluster's Components tab. "
+                    + "The nodes share state and stay in step through it; without one they cannot form a "
+                    + "cluster."));
             }
             if (config.Replicas < 2)
             {
                 issues.Add(new(false,
                     "High availability is on but only one replica is requested.",
-                    "Set at least two replicas, or turn HA off — a one-node HA deployment carries "
-                    + "the cost of shared backends with none of the redundancy."));
+                    "Set at least two replicas on the Components tab, or turn high availability off there "
+                    + "— a one-node HA deployment carries the cost of shared backends with none of the "
+                    + "redundancy."));
             }
         }
 
@@ -1486,6 +1691,10 @@ public class StalwartService(
             output.Add($"Recovery identity on the cluster matches the CLI identity ({config.AdminUsername}).");
 
             output.Add("--- Entering recovery mode ---");
+            if (await PrepareStatefulSetShapeChangeAsync(releaseName, ns, kubeconfig, ha, ct) is string reshaped)
+            {
+                output.Add(reshaped);
+            }
             await k8sFactory.ApplyManifestAsync(
                 StalwartManifestBuilder.Build(config, releaseName, ns, recoveryMode: true, ha: ha), kubeconfig, ct);
             if (!await WaitForRolloutAsync(releaseName, ns, kubeconfig, RolloutTimeout, ct))
@@ -1729,7 +1938,7 @@ public class StalwartService(
         }
     }
 
-    /// <summary>Polls a StatefulSet until its single replica reports ready on the current revision.</summary>
+    /// <summary>Polls a StatefulSet until every replica reports ready on the current revision.</summary>
     private async Task<bool> WaitForRolloutAsync(
         string releaseName, string ns, string kubeconfig, TimeSpan timeout, CancellationToken ct)
     {
@@ -1973,68 +2182,6 @@ public class StalwartService(
     /// The EntKube-managed LDAP directories on the same cluster as this component — the candidates
     /// for the directory link, so an operator picks one rather than retyping its URL and base DN.
     /// </summary>
-    /// <summary>The CNPG PostgreSQL databases on this component's cluster — candidates for the HA datastore.</summary>
-    public async Task<List<CnpgDatabase>> GetCnpgDatabasesAsync(
-        Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        ClusterComponent? component = await db.ClusterComponents.FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
-        if (component is null)
-        {
-            return [];
-        }
-        return await db.CnpgDatabases
-            .Include(d => d.CnpgCluster)
-            .Where(d => d.CnpgCluster.TenantId == tenantId && d.CnpgCluster.KubernetesClusterId == component.ClusterId)
-            .OrderBy(d => d.Name)
-            .ToListAsync(ct);
-    }
-
-    /// <summary>The tenant's S3 storage links — candidates for the HA blob store.</summary>
-    public async Task<List<StorageLink>> GetStorageLinksAsync(Guid tenantId, CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        return await db.StorageLinks.Where(l => l.TenantId == tenantId).OrderBy(l => l.Name).ToListAsync(ct);
-    }
-
-    /// <summary>
-    /// The Redis endpoints on this component's cluster — candidates for the HA coordinator. Same list
-    /// the catalog's <see cref="FormFieldType.RedisSelector"/> shows: EntKube-managed clusters plus any
-    /// other Service answering on the Redis port. Picking one means the operator never has to type the
-    /// in-cluster host, and for a managed one its vaulted password is filled in automatically.
-    /// </summary>
-    public async Task<List<RedisEndpointOption>> GetCoordinatorRedisEndpointsAsync(
-        Guid clusterComponentId, CancellationToken ct = default)
-    {
-        Guid clusterId;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
-        {
-            ClusterComponent? component = await db.ClusterComponents.FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
-            if (component is null)
-            {
-                return [];
-            }
-            clusterId = component.ClusterId;
-        }
-        return await redisService.DiscoverEndpointsAsync(clusterId, ct);
-    }
-
-    /// <summary>
-    /// The password for a chosen coordinator endpoint, when it is an EntKube-managed Redis (its
-    /// credential lives in the vault). Returns null for an unmanaged endpoint — the caller then keeps
-    /// whatever password was typed, or none.
-    /// </summary>
-    public async Task<string?> ResolveCoordinatorRedisPasswordAsync(
-        Guid tenantId, RedisEndpointOption endpoint, CancellationToken ct = default)
-    {
-        if (!endpoint.Managed || endpoint.RedisClusterId is not Guid clusterId)
-        {
-            return null;
-        }
-        (string? password, _, _) = await redisService.GetCredentialsAsync(tenantId, clusterId, ct);
-        return string.IsNullOrEmpty(password) ? null : password;
-    }
-
     public async Task<List<OpenLdapComponentConfig>> GetLinkableDirectoriesAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {

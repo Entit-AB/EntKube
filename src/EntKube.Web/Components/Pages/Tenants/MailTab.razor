@@ -82,10 +82,14 @@
                     <button class="btn btn-sm btn-outline-secondary" @onclick="ApplyManifestAsync" disabled="@busy">
                         <i class="bi bi-cloud-upload me-1"></i>Re-deploy pod
                     </button>
+                    @* Deliberately not disabled when the preflight blocks. A disabled button answers a
+                       click with nothing at all — which is exactly what "I pressed Apply and absolutely
+                       nothing happened" was: an incomplete HA configuration, refused silently by a
+                       control that gave no reason. Clicking now names what is in the way. *@
                     <button class="btn btn-sm btn-success" @onclick="ConfirmApplyConfiguration"
-                            disabled="@(busy || !IsPersisted || preflight.Any(i => i.IsBlocking))"
+                            disabled="@(busy || !IsPersisted)"
                             title="@(preflight.Any(i => i.IsBlocking)
-                                ? "Resolve the problems listed above first"
+                                ? "Blocked — click to see what has to be resolved first"
                                 : "Converge the running server onto this configuration")">
                         <i class="bi bi-arrow-repeat me-1"></i>Apply configuration
                     </button>
@@ -179,7 +183,7 @@
                                 </div>
                             </div>
                             <div class="mb-2">
-                                <label class="form-label small">Web hostname (admin UI, JMAP, autoconfig)</label>
+                                <label class="form-label small">Web hostname (admin UI, JMAP)</label>
                                 <input class="form-control form-control-sm" @bind="cfg.AdminHostname" placeholder="mailadmin.example.com" />
                                 <div class="form-text">
                                     Published through the cluster's gateway — Istio or Traefik, whichever is installed.
@@ -442,6 +446,16 @@
                                         solver</strong>. An HTTP-01-only issuer cannot solve for this name and the
                                         install will stop waiting for a certificate that is never issued.
                                     </div>
+                                    @if (cfg.Domains.Count > 0)
+                                    {
+                                        <div class="form-text">
+                                            It also covers the client-autodiscovery names of every domain, because this
+                                            server answers those lookups on its own address and each one is an HTTPS
+                                            request that checks the name — see the DNS tab for the list. They are in the
+                                            same zones, so the same solver covers them; a name it <em>cannot</em> solve
+                                            fails the whole certificate.
+                                        </div>
+                                    }
                                 </div>
                             }
                             else if (cfg.TlsMode == StalwartTlsMode.Acme)
@@ -470,11 +484,21 @@
                                         else
                                         {
                                             <span>
-                                                Port @(cfg.AcmeChallenge == StalwartAcmeChallenge.Http01 ? "80" : "443")
-                                                is published on the mail LoadBalancer so the CA can reach the server the
-                                                certificate is for, and it must be reachable from the internet. That port
-                                                serves nothing but the challenge — the admin UI and JMAP stay on the
-                                                gateway hostname.
+                                                @if (cfg.AcmeChallenge == StalwartAcmeChallenge.Http01)
+                                                {
+                                                    <span>Port 80 is published on the mail LoadBalancer so the CA can
+                                                    reach the server the certificate is for, and it must be reachable
+                                                    from the internet. It serves nothing but the challenge.</span>
+                                                }
+                                                else
+                                                {
+                                                    <span>The CA opens its handshake on port 443 of the mail
+                                                    LoadBalancer, which must be reachable from the internet.</span>
+                                                }
+                                                Stalwart orders the autodiscovery names along with the mail hostname, so
+                                                each one has to resolve to this address (the DNS tab lists them) or the
+                                                order fails. The admin UI and JMAP are refused on the public ports and
+                                                stay on the gateway hostname.
                                             </span>
                                         }
                                     </div>
@@ -491,6 +515,12 @@
                                     <label class="form-label small">Private key (PEM)</label>
                                     <textarea class="form-control form-control-sm font-monospace" rows="4" @bind="tlsPrivateKey"
                                               placeholder="unchanged"></textarea>
+                                </div>
+                                <div class="form-text">
+                                    This certificate is presented on the mail ports and on HTTPS on the mail address, so
+                                    it has to cover the client-autodiscovery names as well as <code>@cfg.Hostname</code>
+                                    — the DNS tab lists them. Nothing here can add them for you; without them a client
+                                    that finds this server refuses to talk to it.
                                 </div>
                             }
                             <hr />
@@ -554,83 +584,26 @@
                     <div class="col-12">
                         <div class="card shadow-sm h-100"><div class="card-body">
                             <h6 class="card-title"><i class="bi bi-diagram-3 me-2"></i>High availability</h6>
-                            <div class="form-check form-switch mb-2">
-                                <input class="form-check-input" type="checkbox" id="ha" @bind="cfg.HighAvailability" />
-                                <label class="form-check-label small" for="ha">Run more than one replica</label>
+                            <div class="form-text">
+                                @if (cfg.HighAvailability)
+                                {
+                                    <span>
+                                        This mail server runs <strong>@cfg.Replicas replicas</strong> against a shared
+                                        PostgreSQL datastore, an S3 blob store and a Redis coordinator.
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span>
+                                        This mail server runs as a single node, keeping everything in an embedded
+                                        RocksDB on one volume.
+                                    </span>
+                                }
+                                Which it is — and the shared backends it needs — is set on the cluster's
+                                <strong>Components</strong> tab, because it decides what gets installed rather than how
+                                the mail is administered. Anything missing is listed at the top of this page and blocks
+                                an apply.
                             </div>
-                            <div class="form-text mb-3">
-                                Single-node Stalwart keeps everything in an embedded database on one volume. HA moves the
-                                datastore to a shared PostgreSQL, message bodies to S3, and coordinates the nodes through
-                                Redis — every node then runs the full role. <strong>Applying an incomplete HA config is
-                                blocked</strong>, because a misconfigured cluster can corrupt the shared datastore.
-                            </div>
-                            @if (cfg.HighAvailability)
-                            {
-                                <div class="row g-3">
-                                    <div class="col-md-4">
-                                        <label class="form-label small">Replicas</label>
-                                        <input type="number" min="2" class="form-control form-control-sm" @bind="cfg.Replicas" />
-                                    </div>
-                                    <div class="col-md-8">
-                                        <label class="form-label small">Shared datastore (CNPG PostgreSQL)</label>
-                                        <select class="form-select form-select-sm" value="@(cfg.CnpgDatabaseId?.ToString() ?? "")"
-                                                @onchange="e => cfg.CnpgDatabaseId = Guid.TryParse(e.Value?.ToString(), out var g) ? g : null">
-                                            <option value="">Choose a database…</option>
-                                            @foreach (var d in haDatabases)
-                                            {
-                                                <option value="@d.Id">@d.Name</option>
-                                            }
-                                        </select>
-                                    </div>
-                                    <div class="col-md-8">
-                                        <label class="form-label small">Shared blob store (S3)</label>
-                                        <select class="form-select form-select-sm" value="@(cfg.BlobStorageLinkId?.ToString() ?? "")"
-                                                @onchange="e => cfg.BlobStorageLinkId = Guid.TryParse(e.Value?.ToString(), out var g) ? g : null">
-                                            <option value="">Choose a storage link…</option>
-                                            @foreach (var l in haStorageLinks)
-                                            {
-                                                <option value="@l.Id">@l.Name</option>
-                                            }
-                                        </select>
-                                        <div class="form-text">Message bodies and attachments live here so every node can reach them.</div>
-                                    </div>
-                                    @if (haRedisEndpoints.Count > 0)
-                                    {
-                                        <div class="col-12">
-                                            <label class="form-label small">Coordinator (Redis)</label>
-                                            <select class="form-select form-select-sm"
-                                                    value="@($"{cfg.CoordinatorRedisHost}:{cfg.CoordinatorRedisPort}")"
-                                                    @onchange="OnCoordinatorRedisSelectedAsync">
-                                                <option value="">Choose a Redis on this cluster…</option>
-                                                @foreach (var r in haRedisEndpoints)
-                                                {
-                                                    <option value="@r.Endpoint">@r.Label — @r.Endpoint</option>
-                                                }
-                                                <option value="__manual__">Other — enter host and port manually</option>
-                                            </select>
-                                            <div class="form-text">
-                                                Pick the Redis component the nodes coordinate through and EntKube fills the host, port
-                                                and (for a Redis it manages) the password. This is the existing Redis component — the
-                                                same one rspamd already uses.
-                                            </div>
-                                        </div>
-                                    }
-                                    <div class="col-md-8">
-                                        <label class="form-label small">Coordinator Redis host</label>
-                                        <input class="form-control form-control-sm" @bind="cfg.CoordinatorRedisHost"
-                                               placeholder="redis.redis.svc.cluster.local" />
-                                    </div>
-                                    <div class="col-md-4">
-                                        <label class="form-label small">Coordinator Redis port</label>
-                                        <input type="number" class="form-control form-control-sm" @bind="cfg.CoordinatorRedisPort" />
-                                    </div>
-                                    <div class="col-md-4">
-                                        <label class="form-label small">Redis password</label>
-                                        <input type="password" @attributes="FormAutofill.Password" class="form-control form-control-sm" placeholder="unchanged / none"
-                                               @bind="coordinatorRedisPassword" />
-                                    </div>
-                                </div>
-                            }
                         </div></div>
                     </div>
                 </div>
@@ -873,10 +846,6 @@
     private StalwartService.StalwartInstance? selected;
     private StalwartComponentConfig? cfg;
     private List<OpenLdapComponentConfig> directories = [];
-    private List<CnpgDatabase> haDatabases = [];
-    private List<StorageLink> haStorageLinks = [];
-    private List<RedisEndpointOption> haRedisEndpoints = [];
-    private string? coordinatorRedisPassword;
     private List<StalwartService.MailPreflightIssue> preflight = [];
     private bool clearBlockedIps;
     private bool verboseLogging;
@@ -930,9 +899,6 @@
         selected = instance;
         applyOutput = null;
         directories = await Mail.GetLinkableDirectoriesAsync(TenantId, instance.Component.Id);
-        haDatabases = await Mail.GetCnpgDatabasesAsync(TenantId, instance.Component.Id);
-        haStorageLinks = await Mail.GetStorageLinksAsync(TenantId);
-        haRedisEndpoints = await Mail.GetCoordinatorRedisEndpointsAsync(instance.Component.Id);
         oidcRegistrations = await Mail.GetOidcRegistrationsAsync(TenantId);
 
         preflight = instance.Config is null
@@ -970,38 +936,6 @@
     {
         if (cfg is null) return;
         cfg.OpenLdapConfigId = Guid.TryParse(e.Value?.ToString(), out Guid id) ? id : null;
-    }
-
-    // Picking a Redis from the dropdown fills the host/port the nodes coordinate through, and for a
-    // Redis EntKube manages it resolves the vaulted password so the operator never handles it. "Other"
-    // clears the host and hands the manual fields back. The manual boxes stay editable throughout, so an
-    // external Redis is still reachable by typing it in.
-    private async Task OnCoordinatorRedisSelectedAsync(ChangeEventArgs e)
-    {
-        if (cfg is null) return;
-        string value = e.Value?.ToString() ?? "";
-
-        if (value is "" or "__manual__")
-        {
-            if (value == "__manual__")
-            {
-                cfg.CoordinatorRedisHost = null;
-            }
-            return;
-        }
-
-        RedisEndpointOption? chosen = haRedisEndpoints.FirstOrDefault(r => r.Endpoint == value);
-        if (chosen is null) return;
-
-        cfg.CoordinatorRedisHost = chosen.Host;
-        cfg.CoordinatorRedisPort = chosen.Port;
-
-        // Only overwrite the password box when we actually resolved one — a managed Redis. For an
-        // unmanaged endpoint the operator's typed password (if any) is left untouched.
-        if (await Mail.ResolveCoordinatorRedisPasswordAsync(TenantId, chosen) is string password)
-        {
-            coordinatorRedisPassword = password;
-        }
     }
 
     private string DomainName(Guid domainId) =>
@@ -1066,16 +1000,9 @@
             target.RspamdHost = edited.RspamdHost;
             target.RspamdPort = edited.RspamdPort;
             target.RspamdTempFailOnError = edited.RspamdTempFailOnError;
-            target.HighAvailability = edited.HighAvailability;
-            target.Replicas = Math.Max(1, edited.Replicas);
-            target.CnpgDatabaseId = edited.HighAvailability ? edited.CnpgDatabaseId : null;
-            target.BlobStorageLinkId = edited.HighAvailability ? edited.BlobStorageLinkId : null;
-            target.CoordinatorRedisHost = edited.HighAvailability
-                ? (string.IsNullOrWhiteSpace(edited.CoordinatorRedisHost) ? null : edited.CoordinatorRedisHost.Trim())
-                : null;
-            target.CoordinatorRedisPort = edited.CoordinatorRedisPort;
-        }, adminPassword, ldapBindPassword, tlsCertificate, tlsPrivateKey, coordinatorRedisPassword);
-        coordinatorRedisPassword = null;
+            // High availability is deliberately absent: it belongs to the component install form, and
+            // a page that copied those fields back would overwrite them with whatever it had loaded.
+        }, adminPassword, ldapBindPassword, tlsCertificate, tlsPrivateKey);
 
         adminPassword = ldapBindPassword = tlsCertificate = tlsPrivateKey = null;
         return true;
@@ -1113,7 +1040,20 @@
         finally { busy = false; }
     }
 
-    private void ConfirmApplyConfiguration() =>
+    private void ConfirmApplyConfiguration()
+    {
+        // Say why, instead of opening a dialog for an apply that is going to be refused anyway. The
+        // same problems are listed in the banner above, but an operator who has scrolled to the
+        // button is looking at the button.
+        List<StalwartService.MailPreflightIssue> blocking = preflight.Where(i => i.IsBlocking).ToList();
+        if (blocking.Count > 0)
+        {
+            applyOutput = "Apply refused — this configuration would produce a mail server nobody can log in to:\n\n"
+                + string.Join("\n\n", blocking.Select(i => $"• {i.Problem}\n  {i.Remedy}"));
+            Toasts.Error("Apply is blocked — see what has to be resolved below.");
+            return;
+        }
+
         pendingConfirm = new PendingConfirm(
             "Applying restarts the mail server into recovery mode, replays the configuration, and restarts it "
             + "back. Mail is not accepted for the duration — usually under a minute, but senders will queue and "
@@ -1124,23 +1064,34 @@
             + " Continue?",
             "Apply configuration",
             ApplyConfigurationAsync);
+    }
 
     private async Task ApplyConfigurationAsync()
     {
         if (selected?.Component is null) return;
-        if (!await PersistConfigAsync()) return;
 
-        HelmExecutionResult result = await Mail.ApplyConfigurationAsync(
-            TenantId, selected.Component.Id, clearBlockedIps, verboseLogging);
-        applyOutput = result.Output;
-        // Deliberate one-shots: neither clearing bans nor debug logging is something to leave on.
-        clearBlockedIps = false;
-        verboseLogging = false;
+        // An apply restarts the server twice and takes minutes. Without this the button stayed live
+        // throughout, and a second click would have started a second recovery-mode round trip over
+        // the first.
+        busy = true;
+        try
+        {
+            if (!await PersistConfigAsync()) return;
 
-        if (result.Success) Toasts.Success("The running server now matches this configuration.");
-        else Toasts.Error("Apply failed — see the output below.");
+            HelmExecutionResult result = await Mail.ApplyConfigurationAsync(
+                TenantId, selected.Component.Id, clearBlockedIps, verboseLogging);
+            applyOutput = result.Output;
+            // Deliberate one-shots: neither clearing bans nor debug logging is something to leave on.
+            clearBlockedIps = false;
+            verboseLogging = false;
 
-        await LoadAsync();
+            if (result.Success) Toasts.Success("The running server now matches this configuration.");
+            else Toasts.Error("Apply failed — see the output below.");
+
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error($"Apply failed: {ex.Message}"); }
+        finally { busy = false; }
     }
 
     // ── Domains ──

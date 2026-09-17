@@ -3029,9 +3029,10 @@ public static class ComponentCatalog
             ConfiguredIn = new ServicesSection("mail", "Services › Mail"),
             Description = "All-in-one mail server: SMTP, IMAP, JMAP, POP3, ManageSieve, CalDAV and CardDAV in one process. "
                 + "Installing only starts the pod: domains, mailboxes, the directory and the administrator are authored "
-                + "in Services › Mail and written to the server by Apply configuration there. Runs as a single replica — "
-                + "the embedded RocksDB store is single-writer; scaling out needs a shared datastore and a coordinator, "
-                + "which this catalog entry does not yet set up. Authenticates against the cluster's OpenLDAP directory, or against Keycloak over OIDC so webmail can sign in with single sign-on. The mail ports get their own LoadBalancer address (mail needs matching forward and reverse DNS); the admin UI and JMAP are published through the cluster's gateway. Domains, mailboxes, listeners and the rspamd hook are authored in EntKube's Mail tab and applied declaratively.",
+                + "in Services › Mail and written to the server by Apply configuration there. Runs as a single replica "
+                + "unless High Availability is turned on below — the embedded RocksDB store is single-writer, so scaling "
+                + "out needs the shared PostgreSQL datastore, S3 blob store and Redis coordinator that setting asks for. "
+                + "Authenticates against the cluster's OpenLDAP directory, or against Keycloak over OIDC so webmail can sign in with single sign-on. The mail ports get their own LoadBalancer address (mail needs matching forward and reverse DNS); the admin UI and JMAP are published through the cluster's gateway. Domains, mailboxes, listeners and the rspamd hook are authored in EntKube's Mail tab and applied declaratively.",
             Icon = "bi-envelope-at",
             Category = "Mail",
             ComponentType = "Manifest",
@@ -3064,7 +3065,7 @@ public static class ComponentCatalog
                     Key = "admin-hostname", Label = "Web Hostname",
                     YamlPath = "stalwart:admin-hostname", Type = FormFieldType.Text,
                     Placeholder = "mailadmin.example.com",
-                    HelpText = "Publishes the admin UI, JMAP, autoconfig and the OAuth endpoints through the cluster gateway. Leave blank to keep them reachable only inside the cluster."
+                    HelpText = "Publishes the admin UI, JMAP and the OAuth endpoints through the cluster gateway. Leave blank to keep them reachable only inside the cluster \u2014 client auto-configuration and MTA-STS do not depend on this, they are served by the mail server on its own address."
                 },
                 new ComponentFormField
                 {
@@ -3203,6 +3204,55 @@ public static class ComponentCatalog
                     YamlPath = "stalwart:rspamd-host", Type = FormFieldType.Text,
                     DefaultValue = "rspamd.rspamd.svc.cluster.local",
                     DependsOnKey = "rspamd-enabled", DependsOnValue = "true"
+                },
+                // High availability. Here rather than in the Mail tab because it decides what gets
+                // installed — the datastore in config.json, the replica count, whether there is a local
+                // volume at all — and those are install-time shapes, not day-to-day mail administration.
+                new ComponentFormField
+                {
+                    Key = "ha-enabled", Label = "High Availability (multiple nodes)",
+                    YamlPath = "stalwart:ha-enabled", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Off, a single node keeps everything in an embedded RocksDB on one volume. On, the datastore moves to a shared PostgreSQL, message bodies to S3 and the nodes coordinate through Redis — all three are required, and an apply is blocked until they are set, because nodes that disagree about the shared datastore can corrupt it."
+                },
+                new ComponentFormField
+                {
+                    Key = "ha-replicas", Label = "Replicas",
+                    YamlPath = "stalwart:ha-replicas", Type = FormFieldType.Number,
+                    DefaultValue = "2",
+                    DependsOnKey = "ha-enabled", DependsOnValue = "true",
+                    HelpText = "Two or more. One replica with shared backends carries the cost of HA and none of the redundancy."
+                },
+                new ComponentFormField
+                {
+                    Key = "ha-database", Label = "Shared Datastore (PostgreSQL)",
+                    YamlPath = "stalwart:ha-database", Type = FormFieldType.CnpgDatabase,
+                    DependsOnKey = "ha-enabled", DependsOnValue = "true",
+                    HelpText = "The CNPG database every node reads the configuration, mailboxes and indexes from. It replaces the embedded RocksDB in config.json, so the local volume is dropped."
+                },
+                new ComponentFormField
+                {
+                    Key = "ha-blob-store", Label = "Shared Blob Store (S3)",
+                    YamlPath = "stalwart:ha-blob-store", Type = FormFieldType.StorageLink,
+                    DependsOnKey = "ha-enabled", DependsOnValue = "true",
+                    HelpText = "Where message bodies and attachments live. A local volume would strand them on whichever node received them."
+                },
+                new ComponentFormField
+                {
+                    Key = "ha-coordinator-redis", Label = "Coordinator (Redis)",
+                    YamlPath = "stalwart:ha-coordinator-redis", Type = FormFieldType.RedisSelector,
+                    Placeholder = "redis.redis.svc.cluster.local:6379",
+                    DependsOnKey = "ha-enabled", DependsOnValue = "true",
+                    HelpText = "How the nodes stay in step, and where rate limits and caches live. The same Redis rspamd uses is fine; picking one EntKube manages fills its password in below."
+                },
+                new ComponentFormField
+                {
+                    // Keyed "redis-password" because that is the sibling the Redis picker fills in when
+                    // the chosen endpoint is one EntKube manages.
+                    Key = "redis-password", Label = "Coordinator Redis Password",
+                    YamlPath = "stalwart:redis-password", Type = FormFieldType.Password,
+                    DependsOnKey = "ha-enabled", DependsOnValue = "true",
+                    HelpText = "Leave blank for a Redis with no authentication, which is what a network-isolated coordinator should be: the standalone-Redis store takes no secret reference, so a password can only travel inside the connection URL and is therefore visible in the applied configuration."
                 },
                 new ComponentFormField
                 {
