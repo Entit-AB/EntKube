@@ -50,6 +50,14 @@ public static class StalwartPlanBuilder
     public const string S3SecretKeyEnv = "STALWART_S3_SECRET_KEY";
 
     /// <summary>
+    /// Environment variable carrying the coordinator Redis password — but only for a Redis Cluster.
+    /// The two store shapes differ here: <c>RedisClusterStore.authSecret</c> is a
+    /// <c>SecretKeyOptional</c> and can name an env var, while the standalone <c>RedisStore</c> has
+    /// no secret field at all and must carry its password inside the URL.
+    /// </summary>
+    public const string RedisPasswordEnv = "STALWART_REDIS_PASSWORD";
+
+    /// <summary>
     /// The single cluster role EntKube gives every node: run every task and every listener. Real
     /// deployments split roles (maintenance tasks on one node), but an all-equal cluster is the
     /// documented starting point and the one whose behaviour is unsurprising.
@@ -81,7 +89,7 @@ public static class StalwartPlanBuilder
     public sealed record StalwartHaBackend(
         string DbHost, int DbPort, string DbName, string DbUser,
         string S3Endpoint, string S3Region, string S3Bucket, string S3AccessKey,
-        string RedisUrl, int Replicas);
+        string RedisUrl, bool RedisIsCluster, int Replicas);
 
     /// <summary>
     /// The in-cluster HTTP port: JMAP, the admin UI, the OAuth endpoints — and the public
@@ -240,21 +248,39 @@ public static class StalwartPlanBuilder
                 },
             }));
 
-            // Coordinator + in-memory store: both the standalone Redis. The Redis store struct has
-            // no secret field (only the cluster variant does), so there is no authSecret here — a
-            // password lives inside the URL. Pointing the in-memory store (rate limits, caches,
-            // ephemeral cluster state) at the same Redis keeps that hot-path state off the shared
-            // PostgreSQL, which it would otherwise default to.
-            lines.Add(Update("Coordinator", new()
-            {
-                ["@type"] = "Redis",
-                ["url"] = ha.RedisUrl,
-            }));
-            lines.Add(Update("InMemoryStore", new()
-            {
-                ["@type"] = "Redis",
-                ["url"] = ha.RedisUrl,
-            }));
+            // Coordinator + in-memory store: the same Redis for both. Pointing the in-memory store
+            // (rate limits, caches, ephemeral cluster state) at it keeps that hot-path state off the
+            // shared PostgreSQL, which it would otherwise default to.
+            //
+            // Which of the two Redis shapes this is matters more than it looks. A sharded Redis
+            // Cluster answers a key it does not own with a MOVED redirection, and the standalone
+            // client does not follow one — so a cluster addressed as `{"@type":"Redis"}` starts
+            // cleanly, authenticates a login, and then fails every lookup behind it with
+            // `Redis error … reason = "Moved: 5938 10.0.0.1:6379"`. Logging in is what breaks, and
+            // nothing in the failure names the address. EntKube's own managed Redis is always a
+            // cluster, so this is the ordinary case rather than the exotic one.
+            Dictionary<string, object?> redisStore = ha.RedisIsCluster
+                // urls is a Map<String>, which serialises as {member: true} — the same encoding as a
+                // listener bind, not an array. One bootstrap URL is enough: the client discovers the
+                // rest of the topology from it.
+                ? new()
+                {
+                    ["@type"] = "RedisCluster",
+                    ["urls"] = Set([ha.RedisUrl]),
+                    ["authSecret"] = new Dictionary<string, object?>
+                    {
+                        ["@type"] = "EnvironmentVariable",
+                        ["variableName"] = RedisPasswordEnv,
+                    },
+                }
+                : new()
+                {
+                    ["@type"] = "Redis",
+                    ["url"] = ha.RedisUrl,
+                };
+
+            lines.Add(Update("Coordinator", new(redisStore)));
+            lines.Add(Update("InMemoryStore", new(redisStore)));
 
             // Cluster role every node runs, named by the STALWART_ROLE env each pod carries.
             lines.Add(Op("upsert", "ClusterRole", MatchOn("name"), new()
@@ -378,7 +404,16 @@ public static class StalwartPlanBuilder
         // At info the server rejects a login without saying why: a 401 with a 300 ms LDAP round
         // trip behind it and not one line about which step refused. debug is a one-shot diagnostic
         // — the switch is not remembered, so the next ordinary apply restores info.
-        lines.Add(Op("upsert", "Tracer", MatchAll, new()
+        // reconcile, not upsert: the tracer set becomes exactly this one.
+        //
+        // An upsert here matches on every property, so raising the level for one apply and lowering
+        // it on the next created a SECOND console tracer rather than editing the first — and Stalwart
+        // permits only one, rejecting the extra on every start with "Configuration build error …
+        // Only one console tracer is allowed". It also leaves the default file tracer enabled,
+        // writing to a /var/log path that does not exist in the container, so every start also warns
+        // that it cannot create its log file. Replacing the set fixes both and makes the verbose
+        // switch idempotent instead of cumulative.
+        lines.Add(Op("reconcile", "Tracer", MatchAll, new()
         {
             ["stdout"] = new Dictionary<string, object?>
             {
@@ -706,13 +741,27 @@ public static class StalwartPlanBuilder
     }
 
     /// <summary>
-    /// The request paths that are safe to answer on the public mail address: everything under
-    /// <c>/.well-known/</c> (ACME challenge, MTA-STS, PACC), Thunderbird's autoconfig path, and
-    /// Outlook's autodiscover path in both the casings it uses. Everything else on those listeners —
-    /// the admin UI, JMAP — is refused.
+    /// The request paths that are safe to answer on the public mail address, taken from the server's
+    /// own router (<c>crates/http/src/request.rs</c>) rather than from what a client is expected to
+    /// ask for:
+    ///
+    /// <list type="bullet">
+    /// <item><c>/.well-known/</c> — the ACME challenge, MTA-STS, PACC
+    /// (<c>user-agent-configuration.json</c>), <c>mail-v1.xml</c>, the nested autoconfig path and
+    /// the OAuth/OpenID discovery documents, which are public metadata by definition. The
+    /// <c>jmap</c>, <c>caldav</c> and <c>carddav</c> entries under it are redirects, and the paths
+    /// they redirect TO are not on this list — so JMAP stays refused on a public address.</item>
+    /// <item><c>/mail/config</c> — Thunderbird's <c>config-v1.1.xml</c>.</item>
+    /// <item>Outlook's autodiscover path in <b>all three</b> casings the router matches. It accepts
+    /// <c>autodiscover</c>, <c>Autodiscover</c> and <c>AutoDiscover</c>; allowing only the first two
+    /// leaves the clients that send the third refused by the listener that exists to serve
+    /// them.</item>
+    /// </list>
+    ///
+    /// Everything else on those listeners — the admin UI, JMAP — is refused.
     /// </summary>
     private static readonly string[] PublicHttpPaths =
-        ["/.well-known/", "/mail/config", "/autodiscover/", "/Autodiscover/"];
+        ["/.well-known/", "/mail/config", "/autodiscover/", "/Autodiscover/", "/AutoDiscover/"];
 
     /// <summary>The listener set implied by the enabled protocols. Keyed by listener name.</summary>
     private static Dictionary<string, object?> BuildListeners(StalwartComponentConfig config)

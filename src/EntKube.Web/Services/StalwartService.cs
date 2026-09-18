@@ -29,6 +29,7 @@ public class StalwartService(
     ExternalRouteService routeService,
     KeycloakService keycloakService,
     ComponentLifecycleService lifecycleService,
+    RedisService redisService,
     ILogger<StalwartService> logger) : IComponentFormValueProvider
 {
     // Explicit implementation: the class already exposes CatalogKey as a const, and the interface
@@ -643,11 +644,16 @@ public class StalwartService(
 
         CnpgDatabase? cnpg;
         StorageLink? link;
+        Guid kubernetesClusterId;
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
             cnpg = await db.CnpgDatabases.Include(d => d.CnpgCluster)
                 .FirstOrDefaultAsync(d => d.Id == dbId, ct);
             link = await db.StorageLinks.FirstOrDefaultAsync(l => l.Id == linkId, ct);
+            kubernetesClusterId = await db.ClusterComponents
+                .Where(c => c.Id == clusterComponentId)
+                .Select(c => c.ClusterId)
+                .FirstOrDefaultAsync(ct);
         }
         if (cnpg?.CnpgCluster is null || link is null)
         {
@@ -675,18 +681,50 @@ public class StalwartService(
                 k8sSecretName: credentialsSecret, k8sNamespace: ns);
         }
 
-        // The standalone-Redis store carries no secret field, so a password rides in the URL.
+        // Which Redis this is decides the whole store shape. A sharded Redis Cluster answers a key
+        // it does not own with a MOVED redirection, which the standalone client does not follow — so
+        // addressing one as a single server gives a server that starts, authenticates a login, and
+        // then fails every lookup behind it. Every Redis EntKube manages is a cluster (the operator
+        // it uses only builds those), which is exactly what a picker fills in.
+        //
+        // An endpoint EntKube does not manage is treated as a single server, because that is all it
+        // can honestly say: the resolve is database-only by design, and guessing from a live probe
+        // on the install path would make the answer depend on whether Redis happened to be up.
+        string endpoint = $"{config.CoordinatorRedisHost!.Trim()}:{config.CoordinatorRedisPort}";
+        RedisEndpointOption? managedRedis =
+            await redisService.ResolveManagedEndpointAsync(kubernetesClusterId, endpoint, ct);
+        bool redisIsCluster = managedRedis?.ClusterMode == true;
+
         string? redisPassword = await Secret(tenantId, clusterComponentId, "STALWART_COORDINATOR_REDIS_PASSWORD", ct);
-        string redisAuth = string.IsNullOrWhiteSpace(redisPassword)
-            ? ""
-            : $":{Uri.EscapeDataString(redisPassword)}@";
-        string redisUrl = $"redis://{redisAuth}{config.CoordinatorRedisHost!.Trim()}:{config.CoordinatorRedisPort}";
+
+        string redisUrl;
+        if (redisIsCluster)
+        {
+            // The cluster store reads its password from the environment, so the URL stays clean and
+            // the credential never lands in the applied plan.
+            redisUrl = $"redis://{endpoint}";
+            if (!string.IsNullOrWhiteSpace(redisPassword))
+            {
+                await vaultService.SetComponentSecretAsync(
+                    tenantId, clusterComponentId, StalwartPlanBuilder.RedisPasswordEnv, redisPassword, ct,
+                    k8sSecretName: credentialsSecret, k8sNamespace: ns);
+            }
+        }
+        else
+        {
+            // The standalone store carries no secret field, so a password rides in the URL.
+            string redisAuth = string.IsNullOrWhiteSpace(redisPassword)
+                ? ""
+                : $":{Uri.EscapeDataString(redisPassword)}@";
+            redisUrl = $"redis://{redisAuth}{endpoint}";
+        }
 
         return new StalwartPlanBuilder.StalwartHaBackend(
             DbHost: dbHost, DbPort: 5432, DbName: cnpg.Name, DbUser: cnpg.Owner,
             S3Endpoint: link.Endpoint ?? "", S3Region: link.Region ?? "us-east-1", S3Bucket: link.BucketName ?? "",
             S3AccessKey: accessKey,
             RedisUrl: redisUrl,
+            RedisIsCluster: redisIsCluster,
             Replicas: Math.Max(2, config.Replicas));
     }
 
@@ -823,6 +861,148 @@ public class StalwartService(
                 + "one name it cannot solve a challenge for fails the whole certificate, so check the issuer's "
                 + "DNS-01 credentials for that zone, or switch TLS mode to ACME and let Stalwart obtain the "
                 + "certificate itself.");
+        }
+    }
+
+    /// <summary>
+    /// What cert-manager says about the mail certificate: null when it is Ready, otherwise the
+    /// reason it is not, as cert-manager wrote it.
+    ///
+    /// <para>This is checked because of what adding names to a live certificate can do. The
+    /// certificate carries the autodiscovery names of every served domain, so adding a domain adds
+    /// names — and if the issuer cannot solve a challenge for one of them, the whole certificate
+    /// fails to re-issue. cert-manager keeps serving the existing Secret while that happens, so
+    /// nothing breaks on the day: the mail server keeps working until the old certificate expires,
+    /// weeks later, with the explanation sitting in a Certificate resource nobody thought to read.
+    /// The Secret existing is therefore not evidence that the certificate is healthy.</para>
+    ///
+    /// <para>Returns null when the status cannot be read at all — an unreadable check must not turn
+    /// into a reported failure.</para>
+    /// </summary>
+    public static string? DescribeCertificateProblem(string json)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("status", out JsonElement status)
+                || !status.TryGetProperty("conditions", out JsonElement conditions)
+                || conditions.ValueKind != JsonValueKind.Array)
+            {
+                return null;
+            }
+
+            foreach (JsonElement condition in conditions.EnumerateArray())
+            {
+                if (!condition.TryGetProperty("type", out JsonElement type)
+                    || type.GetString() != "Ready")
+                {
+                    continue;
+                }
+                if (condition.TryGetProperty("status", out JsonElement state)
+                    && state.GetString() == "True")
+                {
+                    return null;
+                }
+
+                string reason = condition.TryGetProperty("reason", out JsonElement r)
+                    ? r.GetString() ?? "" : "";
+                string message = condition.TryGetProperty("message", out JsonElement m)
+                    ? m.GetString() ?? "" : "";
+
+                return string.IsNullOrWhiteSpace(message)
+                    ? (string.IsNullOrWhiteSpace(reason) ? "cert-manager reports it as not ready." : reason)
+                    : $"{reason}: {message}".TrimStart(':', ' ');
+            }
+
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>One thing the running server is complaining about, as it wrote it.</summary>
+    /// <param name="EventName">Stalwart's event id, e.g. <c>registry.build-error</c>.</param>
+    /// <param name="Line">The log line, trimmed.</param>
+    /// <param name="IsConfigurationError">
+    /// True when the server rejected part of the configuration EntKube just applied, rather than
+    /// hitting a runtime problem. That distinction decides whether the apply can call itself a
+    /// success.
+    /// </param>
+    public sealed record ServerLogIssue(string EventName, string Line, bool IsConfigurationError);
+
+    /// <summary>Stalwart's event id for "I could not build this configuration object".</summary>
+    private const string BuildErrorEvent = "registry.build-error";
+
+    /// <summary>
+    /// The errors a freshly-restarted server is reporting, one per distinct event.
+    ///
+    /// <para>This exists because of how the first real HA deployment failed. The apply reported
+    /// success and the pods were ready, while every login died on a Redis redirection and the
+    /// server rejected a configuration object on every start — all of it in <c>kubectl logs</c>,
+    /// none of it anywhere EntKube would show an operator. An apply that has just restarted the
+    /// server twice is the one moment when reading its log costs nothing.</para>
+    ///
+    /// <para>Deduplicated by event id: a failure that repeats on every request would otherwise bury
+    /// the one that only appears at startup.</para>
+    /// </summary>
+    public static List<ServerLogIssue> ParseServerErrors(string logs)
+    {
+        List<ServerLogIssue> issues = [];
+        HashSet<string> seen = new(StringComparer.Ordinal);
+
+        foreach (string raw in logs.Split('\n'))
+        {
+            string line = raw.Trim();
+            // Stalwart writes "<timestamp> ERROR <text> (<event.id>) key = value…". The level is a
+            // whole word: matching it loosely would catch every line mentioning an error.
+            if (line.Length == 0 || !line.Contains(" ERROR ", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            int open = line.IndexOf('(', StringComparison.Ordinal);
+            int close = open >= 0 ? line.IndexOf(')', open) : -1;
+            string eventName = close > open + 1 ? line[(open + 1)..close] : "unknown";
+
+            if (!seen.Add(eventName))
+            {
+                continue;
+            }
+
+            issues.Add(new(eventName, line, eventName == BuildErrorEvent));
+
+            // Enough to name what is wrong without turning the apply output into a log viewer.
+            if (issues.Count == 8)
+            {
+                break;
+            }
+        }
+
+        return issues;
+    }
+
+    /// <summary>
+    /// Reads the mail pods' recent logs and returns what they are complaining about. Best-effort:
+    /// a log that cannot be read is not an apply failure, so this returns an empty list and says
+    /// nothing rather than inventing a verdict.
+    /// </summary>
+    private async Task<List<ServerLogIssue>> ReadServerErrorsAsync(
+        string releaseName, string ns, string kubeconfig, CancellationToken ct)
+    {
+        try
+        {
+            // Every replica, prefixed, so an error on one node of a cluster is not missed because
+            // kubectl happened to pick a healthy one.
+            string logs = await k8sFactory.GetPodLogsAsync(
+                $"-l app={releaseName} --prefix", ns, kubeconfig, tailLines: 100, ct);
+            return ParseServerErrors(logs);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not read {Release} pod logs in {Namespace} after the apply.", releaseName, ns);
+            return [];
         }
     }
 
@@ -1101,6 +1281,48 @@ public class StalwartService(
                     "Set at least two replicas on the Components tab, or turn high availability off there "
                     + "— a one-node HA deployment carries the cost of shared backends with none of the "
                     + "redundancy."));
+            }
+        }
+
+        // A certificate that is not Ready is the one failure here that hides for weeks: the old
+        // Secret keeps being served, so mail keeps working until it expires. Only asked when there
+        // is a cert-manager certificate to ask about, and never allowed to block — an issuer having
+        // a bad day must not stop an operator applying an unrelated change.
+        if (config.TlsMode == StalwartTlsMode.ClusterIssuer)
+        {
+            ClusterComponent? component = await db.ClusterComponents
+                .Include(c => c.Cluster)
+                .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+
+            if (component?.Status == ComponentStatus.Installed
+                && component.Cluster?.Kubeconfig is { Length: > 0 } certKubeconfig)
+            {
+                string release = component.ReleaseName ?? component.Name;
+                string certNs = component.Namespace ?? DefaultNamespace;
+                string certName = $"{release}{StalwartManifestBuilder.TlsSecretSuffix}";
+
+                try
+                {
+                    string json = await k8sFactory.GetJsonAsync(
+                        $"certificate/{certName}", certNs, certKubeconfig, ct: ct);
+
+                    if (DescribeCertificateProblem(json) is string problem)
+                    {
+                        issues.Add(new(false,
+                            $"The mail certificate ({certName}) is not ready: {problem}",
+                            "It covers the mail hostname and the client-autodiscovery names of every "
+                            + $"domain — {string.Join(", ", StalwartPlanBuilder.CertificateNames(config.Hostname.Trim(), domains))} "
+                            + $"— and the issuer ({config.ClusterIssuer}) has to be able to solve a challenge "
+                            + "for each. One it cannot fails the whole certificate. The existing certificate "
+                            + "keeps being served until it expires, so mail works today and stops later."));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // No cert-manager, no such Certificate, no reachable cluster — none of which is
+                    // a finding about this configuration.
+                    logger.LogDebug(ex, "Could not read Certificate {Name} in {Namespace}.", certName, certNs);
+                }
             }
         }
 
@@ -1726,6 +1948,24 @@ public class StalwartService(
                 return Failure(string.Join("\n", output));
             }
 
+            // The server has just restarted onto this configuration. Ask it what it thinks of it,
+            // rather than reporting success and leaving the answer in kubectl logs.
+            List<ServerLogIssue> serverIssues = await ReadServerErrorsAsync(releaseName, ns, kubeconfig, ct);
+            bool rejectedConfiguration = serverIssues.Any(i => i.IsConfigurationError);
+            if (serverIssues.Count > 0)
+            {
+                output.Add(rejectedConfiguration
+                    ? "--- The server REJECTED part of this configuration ---"
+                    : "--- The server is reporting errors ---");
+                output.AddRange(serverIssues.Select(i => $"• {i.Line}"));
+            }
+            if (rejectedConfiguration)
+            {
+                output.Add(
+                    "The configuration was applied and the server restarted, but it refused at least one "
+                    + "object and is running without it. Fix what the line above names and apply again.");
+            }
+
             using (ApplicationDbContext db = dbFactory.CreateDbContext())
             {
                 StalwartComponentConfig? stored = await db.StalwartComponentConfigs
@@ -1737,7 +1977,13 @@ public class StalwartService(
                 }
             }
 
-            return new HelmExecutionResult { Success = back, Output = string.Join("\n", output) };
+            // A configuration the server refused is not an apply that worked, however cleanly the
+            // Job exited — that combination is exactly how a broken deployment reported success.
+            return new HelmExecutionResult
+            {
+                Success = back && !rejectedConfiguration,
+                Output = string.Join("\n", output),
+            };
         }
         catch (Exception ex)
         {

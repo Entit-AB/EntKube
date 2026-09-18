@@ -296,6 +296,38 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void EveryCasingTheServerRoutesAutodiscoverOnIsAllowed()
+    {
+        // The router matches "autodiscover", "Autodiscover" AND "AutoDiscover"
+        // (crates/http/src/request.rs). Allowing a subset leaves the clients that send the missing
+        // casing refused by the very listener that exists to serve them — and a 403 on autodiscover
+        // looks to the user like a mail server that does not exist.
+        StalwartComponentConfig config = Config(c => c.TlsMode = StalwartTlsMode.ClusterIssuer);
+        string plan = StalwartPlanBuilder.BuildApplyPlan(
+            config, [Domain(config.Id, "example.com")], []);
+
+        List<string> allows = Operation(plan, "Http")!.Value
+            .GetProperty("value").GetProperty("allowedEndpoints").GetProperty("match").EnumerateObject()
+            .Where(a => a.Value.GetProperty("then").GetString() == "200")
+            .Select(a => a.Value.GetProperty("if").GetString()!)
+            .ToList();
+
+        foreach (string casing in new[] { "/autodiscover/", "/Autodiscover/", "/AutoDiscover/" })
+        {
+            allows.Should().Contain(a => a.Contains($"'{casing}'"), $"the server routes {casing}");
+        }
+
+        // Thunderbird's fixed path, and the prefix that carries MTA-STS, PACC and the ACME challenge.
+        allows.Should().Contain(a => a.Contains("'/mail/config'"));
+        allows.Should().Contain(a => a.Contains("'/.well-known/'"));
+
+        // JMAP and the admin UI are not reachable on a public address. /.well-known/jmap is a
+        // redirect, and its target is deliberately absent from the allow list.
+        allows.Should().NotContain(a => a.Contains("'/jmap"));
+        allows.Should().NotContain(a => a.Contains("'/admin"));
+    }
+
+    [Fact]
     public void WithoutAcmeThereIsNoChallengePortButThePublicWebListenerIsStillRestricted()
     {
         StalwartComponentConfig config = Config(c => c.TlsMode = StalwartTlsMode.ClusterIssuer);
@@ -1136,7 +1168,8 @@ public class StalwartMailTests
     private static StalwartPlanBuilder.StalwartHaBackend Ha() => new(
         DbHost: "mail-db-rw.mail.svc.cluster.local", DbPort: 5432, DbName: "stalwart", DbUser: "stalwart",
         S3Endpoint: "https://s3.cleura.cloud", S3Region: "eu-north-1", S3Bucket: "mail-blobs",
-        S3AccessKey: "AKIA…", RedisUrl: "redis://redis.redis.svc.cluster.local:6379", Replicas: 3);
+        S3AccessKey: "AKIA…", RedisUrl: "redis://redis.redis.svc.cluster.local:6379",
+        RedisIsCluster: false, Replicas: 3);
 
     [Fact]
     public void ConfigJsonIsRocksDbSingleNodeAndPostgreSqlInHa()
@@ -1192,10 +1225,10 @@ public class StalwartMailTests
     }
 
     [Fact]
-    public void TheRedisCoordinatorNeverEmitsAnAuthSecretObject()
+    public void TheStandaloneRedisCoordinatorNeverEmitsAnAuthSecretObject()
     {
-        // Whatever the URL contains, the Coordinator/InMemoryStore objects only ever carry `url` —
-        // the Redis store struct has no secret field, so an authSecret would fail the apply.
+        // Whatever the URL contains, a STANDALONE Redis Coordinator/InMemoryStore only ever carries
+        // `url` — RedisStore has no secret field, so an authSecret would fail the apply.
         StalwartComponentConfig config = Config();
         StalwartPlanBuilder.StalwartHaBackend ha = Ha() with { RedisUrl = "redis://:s3cr3t@redis:6379" };
         string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], [], ha: ha);
@@ -1206,6 +1239,73 @@ public class StalwartMailTests
             v.TryGetProperty("authSecret", out _).Should().BeFalse();
             v.GetProperty("url").GetString().Should().Be("redis://:s3cr3t@redis:6379");
         }
+    }
+
+    [Fact]
+    public void AShardedRedisGetsTheClusterStoreAndItsPasswordFromTheEnvironment()
+    {
+        // The failure this prevents is not a start-up error. A Redis Cluster addressed as a single
+        // server starts cleanly, authenticates a login, and then answers every lookup behind it with
+        // `Moved: 5938 10.0.0.1:6379` — the standalone client does not follow a MOVED redirection —
+        // so what breaks is logging in, and nothing in the failure names the address. EntKube's own
+        // managed Redis is always a cluster.
+        StalwartComponentConfig config = Config();
+        StalwartPlanBuilder.StalwartHaBackend ha = Ha() with
+        {
+            RedisUrl = "redis://redis-leader.redis.svc.cluster.local:6379",
+            RedisIsCluster = true,
+        };
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], [], ha: ha);
+
+        foreach (string obj in new[] { "Coordinator", "InMemoryStore" })
+        {
+            JsonElement v = Operation(plan, obj)!.Value.GetProperty("value");
+            v.GetProperty("@type").GetString().Should().Be("RedisCluster");
+
+            // urls is a Map<String>, which serialises as {member: true} — the listener-bind
+            // encoding, not an array. An array is rejected as an invalid patch.
+            JsonElement urls = v.GetProperty("urls");
+            urls.ValueKind.Should().Be(JsonValueKind.Object);
+            urls.GetProperty("redis://redis-leader.redis.svc.cluster.local:6379").GetBoolean().Should().BeTrue();
+
+            // Only the cluster store has a secret field, so this is the one shape where the password
+            // can stay out of the applied plan.
+            v.GetProperty("authSecret").GetProperty("@type").GetString().Should().Be("EnvironmentVariable");
+            v.GetProperty("authSecret").GetProperty("variableName").GetString()
+                .Should().Be(StalwartPlanBuilder.RedisPasswordEnv);
+            v.TryGetProperty("url", out _).Should().BeFalse();
+        }
+
+        // …and the pod has to be given it.
+        string manifest = StalwartManifestBuilder.Build(config, "stalwart", "stalwart", ha: ha);
+        manifest.Should().Contain(StalwartPlanBuilder.RedisPasswordEnv);
+    }
+
+    [Fact]
+    public void AStandaloneRedisGetsNoPasswordEnvironmentVariable()
+    {
+        // The mirror image: RedisStore has no secret field at all, so injecting an env var the store
+        // cannot read would only look like a configured credential.
+        string manifest = StalwartManifestBuilder.Build(
+            Config(), "stalwart", "stalwart", ha: Ha() with { RedisIsCluster = false });
+
+        manifest.Should().NotContain(StalwartPlanBuilder.RedisPasswordEnv);
+    }
+
+    [Fact]
+    public void TheTracerSetIsReplacedSoRaisingTheLevelDoesNotAddASecondConsole()
+    {
+        // An upsert here matches on every property, so applying at debug and then at info left two
+        // enabled console tracers — and Stalwart allows one, rejecting the extra on every start
+        // with "Only one console tracer is allowed". Replacing the set also drops the default file
+        // tracer, which writes to a /var/log path no container has.
+        StalwartComponentConfig config = Config();
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+        JsonElement tracer = Operation(plan, "Tracer")!.Value;
+        tracer.GetProperty("@type").GetString().Should().Be("reconcile");
+        tracer.GetProperty("value").EnumerateObject().Should().ContainSingle()
+            .Which.Value.GetProperty("@type").GetString().Should().Be("Stdout");
     }
 
     [Fact]
@@ -1856,6 +1956,70 @@ public class StalwartMailTests
     }
 
     // ── Rollout detection ─────────────────────────────────────────────────────
+
+    [Fact]
+    public void ACertificateThatStoppedRenewingIsNoticedWhileMailStillWorks()
+    {
+        // The failure mode this exists for: adding a domain adds autodiscovery names to the
+        // certificate, the issuer cannot solve one of them, and the whole certificate stops
+        // re-issuing — while cert-manager keeps serving the existing Secret. Nothing breaks on the
+        // day. Mail stops weeks later, when the old certificate expires.
+        const string failing = """
+            {"status":{"conditions":[
+              {"type":"Ready","status":"False","reason":"Failed",
+               "message":"no solver configured for \"autoconfig.example.com\""}
+            ]}}
+            """;
+
+        StalwartService.DescribeCertificateProblem(failing)
+            .Should().Be("Failed: no solver configured for \"autoconfig.example.com\"");
+
+        // A healthy certificate is silent — this must not become a permanent banner.
+        StalwartService.DescribeCertificateProblem(
+            """{"status":{"conditions":[{"type":"Ready","status":"True"}]}}""").Should().BeNull();
+
+        // Neither may "I could not read it" turn into a reported failure.
+        StalwartService.DescribeCertificateProblem("""{"status":{}}""").Should().BeNull();
+        StalwartService.DescribeCertificateProblem("not json").Should().BeNull();
+        StalwartService.DescribeCertificateProblem(
+            """{"status":{"conditions":[{"type":"Issuing","status":"True"}]}}""").Should().BeNull();
+    }
+
+    [Fact]
+    public void WhatTheServerSaysAfterAnApplyIsReadBackFromItsLog()
+    {
+        // These are the real lines from the first HA deployment, where the apply reported success,
+        // the pods were ready, and every login died anyway. One of them is the server refusing an
+        // object EntKube just applied; the other is a runtime failure. Only the first can make the
+        // apply a failure — a transient store error must not.
+        const string logs = """
+            2026-09-17T13:16:25Z INFO Starting Stalwart Server (server.startup) hostname = "stalwart-1"
+            2026-09-17T13:16:25Z WARN Log collector error (telemetry.log-error) details = "Failed to create log file"
+            2026-09-17T13:16:25Z ERROR Configuration build error (registry.build-error) source = "Tracer", reason = "Only one console tracer is allowed"
+            2026-09-17T13:16:25Z INFO Network listener started (network.listen-start) listenerId = "public-web"
+            2026-09-17T13:16:25Z ERROR Redis error (store.redis-error) reason = "Moved: 5938 100.96.4.17:6379"
+            2026-09-17T13:16:31Z ERROR Redis error (store.redis-error) reason = "Moved: 798 100.96.5.13:6379"
+            """;
+
+        List<StalwartService.ServerLogIssue> issues = StalwartService.ParseServerErrors(logs);
+
+        // One per distinct event: the repeated Redis error must not bury the startup one.
+        issues.Select(i => i.EventName).Should().Equal("registry.build-error", "store.redis-error");
+        issues.Should().ContainSingle(i => i.IsConfigurationError)
+            .Which.Line.Should().Contain("Only one console tracer is allowed");
+
+        // INFO and WARN are not errors, however alarming the words in them are.
+        issues.Should().NotContain(i => i.EventName == "server.startup");
+        issues.Should().NotContain(i => i.EventName == "telemetry.log-error");
+    }
+
+    [Fact]
+    public void AQuietLogProducesNoFindings()
+    {
+        StalwartService.ParseServerErrors("").Should().BeEmpty();
+        StalwartService.ParseServerErrors(
+            "2026-09-17T13:16:25Z INFO Starting Stalwart Server (server.startup)").Should().BeEmpty();
+    }
 
     [Fact]
     public void AStatefulSetIsOnlyReadyOnceTheUpdatedPodIsTheReadyOne()
