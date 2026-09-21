@@ -1,0 +1,630 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Knowledge
+@inject KnowledgeService Knowledge
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   What we know about an application: the half of §10.2 that is not
+   monitoring, and the half the kännedomsavgift is hardest to justify
+   without.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<ConfirmDialog Visible="@(pendingDeleteSectionId is not null)"
+               Message="Delete this section and its history?"
+               ConfirmText="Delete"
+               OnConfirm="DeleteSectionAsync"
+               OnCancel="() => pendingDeleteSectionId = null" />
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    @* ───────────── What is missing ───────────── *@
+    @if (gaps.Count > 0)
+    {
+        <div class="card border-warning mb-4">
+            <div class="card-header bg-white py-2">
+                <i class="bi bi-exclamation-triangle me-2 text-warning"></i>
+                <strong class="small">@gaps.Count gap@(gaps.Count == 1 ? "" : "s") in what we know</strong>
+            </div>
+            <ul class="list-group list-group-flush">
+                @foreach (KnowledgeGap gap in gaps)
+                {
+                    <li class="list-group-item py-2">
+                        <div class="d-flex">
+                            <span class="badge @SeverityClass(gap.Severity) me-2 align-self-start">
+                                @gap.Severity
+                            </span>
+                            <div class="small">
+                                <div class="fw-semibold">@gap.Title</div>
+                                <div class="text-muted">@gap.Detail</div>
+                                <div class="text-muted" style="font-size: .75rem">@gap.Clause</div>
+                            </div>
+                        </div>
+                    </li>
+                }
+            </ul>
+        </div>
+    }
+
+    @* ───────────── Classification ───────────── *@
+    <div class="card mb-4">
+        <div class="card-header bg-white py-2"><strong class="small">Classification</strong></div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label small text-muted">Personal data</label>
+                    <select class="form-select form-select-sm" @bind="profile.DataClassification">
+                        <option value="@DataClassification.None">None</option>
+                        <option value="@DataClassification.Personal">Personal data</option>
+                        <option value="@DataClassification.SensitivePersonal">Article 9 — incl. health</option>
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted">Patient data</label>
+                    <div class="form-check mt-1">
+                        <input class="form-check-input" type="checkbox" id="patient"
+                               @bind="profile.HandlesPatientData" />
+                        <label class="form-check-label small" for="patient">
+                            Holds patientuppgifter (§24)
+                        </label>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted">Backup owned by</label>
+                    <select class="form-select form-select-sm" @bind="profile.BackupResponsibility">
+                        <option value="@BackupResponsibility.Customer">The customer (§23 default)</option>
+                        <option value="@BackupResponsibility.Supplier">Us, per Bilaga A</option>
+                        <option value="@BackupResponsibility.ThirdParty">A third party</option>
+                    </select>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label small text-muted">Regulatory scope</label>
+                    <input class="form-control form-control-sm" @bind="profile.RegulatoryScope"
+                           placeholder="e.g. Patientdatalagen, NIS2 — the customer's assessment (§23)" />
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label small text-muted">What it is for</label>
+                    <input class="form-control form-control-sm" @bind="profile.BusinessPurpose" />
+                </div>
+                <div class="col-12">
+                    <label class="form-label small text-muted">What happens when it is down</label>
+                    <input class="form-control form-control-sm" @bind="profile.ImpactWhenDown"
+                           placeholder="What the customer cannot do — this is what a P1 assessment rests on" />
+                </div>
+            </div>
+            <div class="text-end mt-3">
+                <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveProfileAsync">Save</AsyncButton>
+            </div>
+        </div>
+    </div>
+
+    @* ───────────── Sections ───────────── *@
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <div>
+            <h6 class="mb-0">Kännedom</h6>
+            <div class="text-muted small">
+                Architecture, drifthandbok, decisions, known defects — kept current, with history.
+            </div>
+        </div>
+        <button class="btn btn-sm btn-outline-primary" @onclick="StartNewSection">
+            <i class="bi bi-plus-lg me-1"></i>Add a section
+        </button>
+    </div>
+
+    @if (editing is not null)
+    {
+        <div class="card border-primary mb-3">
+            <div class="card-body">
+                <div class="row g-2 mb-2">
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">Kind</label>
+                        <select class="form-select form-select-sm" @bind="editing.Kind">
+                            @foreach (KnowledgeSectionKind kind in Enum.GetValues<KnowledgeSectionKind>())
+                            {
+                                <option value="@kind">@kind</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label small text-muted">Title</label>
+                        <input class="form-control form-control-sm" @bind="editing.Title" />
+                    </div>
+                </div>
+                <label class="form-label small text-muted">Content (markdown)</label>
+                <textarea class="form-control form-control-sm font-monospace" rows="12"
+                          @bind="editing.Body"></textarea>
+                <div class="row g-2 mt-2 align-items-end">
+                    <div class="col-md-8">
+                        <label class="form-label small text-muted">What changed</label>
+                        <input class="form-control form-control-sm" @bind="changeSummary"
+                               placeholder="Kept with the previous version" />
+                    </div>
+                    <div class="col-md-4 text-end">
+                        <button class="btn btn-sm btn-outline-secondary me-2" @onclick="() => editing = null">
+                            Cancel
+                        </button>
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveSectionAsync">Save</AsyncButton>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (sections.Count == 0)
+    {
+        <EmptyState Icon="bi-journal-text"
+                    Title="Nothing written down"
+                    Message="This is what the kännedomsavgift pays for. Start with the drifthandbok." />
+    }
+    else
+    {
+        <div class="accordion mb-4" id="knowledge">
+            @foreach (KnowledgeSection article in sections)
+            {
+                bool stale = IsStale(article);
+                <div class="accordion-item">
+                    <h2 class="accordion-header">
+                        <button class="accordion-button collapsed" type="button"
+                                data-bs-toggle="collapse" data-bs-target="#s-@article.Id">
+                            <span class="badge bg-light text-dark border me-2">@article.Kind</span>
+                            <span class="fw-semibold">@article.Title</span>
+                            @if (stale)
+                            {
+                                <span class="badge bg-warning text-dark ms-2"
+                                      title="Not confirmed within its review interval">stale</span>
+                            }
+                        </button>
+                    </h2>
+                    <div id="s-@article.Id" class="accordion-collapse collapse" data-bs-parent="#knowledge">
+                        <div class="accordion-body">
+                            <div class="d-flex justify-content-between align-items-start mb-2">
+                                <div class="text-muted" style="font-size: .75rem">
+                                    Updated @article.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd")
+                                    @if (article.UpdatedBy is not null)
+                                    {
+                                        <span>by @article.UpdatedBy</span>
+                                    }
+                                    @if (article.ReviewedAt is not null)
+                                    {
+                                        <span>
+                                            · reviewed @article.ReviewedAt.Value.ToLocalTime().ToString("yyyy-MM-dd")
+                                        </span>
+                                    }
+                                </div>
+                                <div class="d-flex gap-2">
+                                    <AsyncButton CssClass="btn-sm btn-outline-success"
+                                                 OnClick="() => MarkReviewedAsync(article.Id)">
+                                        Still true
+                                    </AsyncButton>
+                                    <button class="btn btn-sm btn-outline-secondary"
+                                            @onclick="() => StartEdit(article)">Edit</button>
+                                    <button class="btn btn-sm btn-outline-danger"
+                                            aria-label="@($"Delete {article.Title}")"
+                                            @onclick="() => pendingDeleteSectionId = article.Id">
+                                        <span class="bi bi-trash"></span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div style="white-space: pre-wrap">@article.Body</div>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+
+    @* ───────────── Dependencies ───────────── *@
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <div>
+            <h6 class="mb-0">External dependencies</h6>
+            <div class="text-muted small">
+                Bilaga A.1: system, leverantör, supporttider, kontaktväg — what §14.4 pauses the
+                clock for.
+            </div>
+        </div>
+        <button class="btn btn-sm btn-outline-primary" @onclick="StartNewDependency">
+            <i class="bi bi-plus-lg me-1"></i>Add
+        </button>
+    </div>
+
+    @if (newDependency is not null)
+    {
+        <div class="card border-primary mb-3">
+            <div class="card-body">
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Name</label>
+                        <input class="form-control form-control-sm" @bind="newDependency.Name" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small text-muted">Kind</label>
+                        <select class="form-select form-select-sm" @bind="newDependency.Kind">
+                            @foreach (DependencyKind kind in Enum.GetValues<DependencyKind>())
+                            {
+                                <option value="@kind">@kind</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small text-muted">Supplier</label>
+                        <input class="form-control form-control-sm" @bind="newDependency.Supplier" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small text-muted">Support hours</label>
+                        <input class="form-control form-control-sm" @bind="newDependency.SupportHours" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Contact route</label>
+                        <input class="form-control form-control-sm" @bind="newDependency.ContactRoute" />
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="office"
+                                   @bind="newDependency.OfficeHoursOnly" />
+                            <label class="form-check-label small" for="office">
+                                Office hours only — warns if the window is wider (§23)
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="critical"
+                                   @bind="newDependency.CriticalPath" />
+                            <label class="form-check-label small" for="critical">
+                                The application stops without it
+                            </label>
+                        </div>
+                    </div>
+                    <div class="col-md-6 text-end">
+                        <button class="btn btn-sm btn-outline-secondary me-2"
+                                @onclick="() => newDependency = null">Cancel</button>
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveDependencyAsync">Add</AsyncButton>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (dependencies.Count > 0)
+    {
+        <div class="table-responsive mb-4">
+            <table class="table table-sm align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Name</th>
+                        <th>Kind</th>
+                        <th>Supplier</th>
+                        <th>Reachable</th>
+                        <th>Contact</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (AppServiceDependency dependency in dependencies)
+                    {
+                        <tr>
+                            <td class="small fw-semibold">
+                                @dependency.Name
+                                @if (dependency.CriticalPath)
+                                {
+                                    <span class="badge bg-light text-dark border ms-1"
+                                          style="font-size: .65rem">critical</span>
+                                }
+                            </td>
+                            <td class="small text-muted">@dependency.Kind</td>
+                            <td class="small">@dependency.Supplier</td>
+                            <td class="small">
+                                @dependency.SupportHours
+                                @if (dependency.OfficeHoursOnly)
+                                {
+                                    <span class="badge bg-warning text-dark ms-1"
+                                          style="font-size: .65rem">office hours</span>
+                                }
+                            </td>
+                            <td class="small text-muted">@dependency.ContactRoute</td>
+                            <td class="text-end">
+                                <button class="btn btn-sm btn-outline-danger"
+                                        aria-label="@($"Remove {dependency.Name}")"
+                                        @onclick="() => DeleteDependencyAsync(dependency.Id)">
+                                    <span class="bi bi-trash"></span>
+                                </button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @* ───────────── End of life ───────────── *@
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <div>
+            <h6 class="mb-0">End of life (§14.7)</h6>
+            <div class="text-muted small">
+                Written notice starts a three-month clock; after it we may exempt the application
+                from the SLA until the upgrade is done.
+            </div>
+        </div>
+        <button class="btn btn-sm btn-outline-primary" @onclick="StartNewNotice">
+            <i class="bi bi-plus-lg me-1"></i>Add
+        </button>
+    </div>
+
+    @if (newNotice is not null)
+    {
+        <div class="card border-primary mb-3">
+            <div class="card-body">
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Component</label>
+                        <input class="form-control form-control-sm" @bind="newNotice.Component" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small text-muted">Version</label>
+                        <input class="form-control form-control-sm" @bind="newNotice.CurrentVersion" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small text-muted">Support ends</label>
+                        <input type="date" class="form-control form-control-sm" @bind="newNotice.EndOfLifeOn" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Proposed upgrade</label>
+                        <input class="form-control form-control-sm" @bind="newNotice.ProposedUpgrade" />
+                    </div>
+                    <div class="col-md-2 text-end">
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveNoticeAsync">Add</AsyncButton>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (notices.Count > 0)
+    {
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Component</th>
+                        <th>Support ends</th>
+                        <th>Notice given</th>
+                        <th>Upgrade ordered</th>
+                        <th>Status</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (EndOfLifeNotice notice in notices)
+                    {
+                        <tr>
+                            <td class="small fw-semibold">
+                                @notice.Component
+                                <span class="text-muted">@notice.CurrentVersion</span>
+                            </td>
+                            <td class="small">@Date(notice.EndOfLifeOn)</td>
+                            <td class="small">@Date(notice.NoticeGivenAt)</td>
+                            <td class="small">@Date(notice.UpgradeOrderedAt)</td>
+                            <td class="small">
+                                @if (notice.UpgradedAt is not null)
+                                {
+                                    <span class="text-success">upgraded</span>
+                                }
+                                else if (KnowledgeService.ExemptionApplies(notice, DateTime.UtcNow))
+                                {
+                                    <span class="text-danger fw-semibold">SLA exemption available</span>
+                                }
+                                else if (notice.NoticeGivenAt is not null)
+                                {
+                                    <span class="text-muted">
+                                        notice period ends
+                                        @notice.NoticeGivenAt.Value.AddMonths(3).ToLocalTime().ToString("MMM d")
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span class="text-warning">no notice sent</span>
+                                }
+                            </td>
+                            <td class="text-end">
+                                @if (notice.NoticeGivenAt is null)
+                                {
+                                    <AsyncButton CssClass="btn-sm btn-outline-primary"
+                                                 OnClick="() => RecordNoticeAsync(notice)">
+                                        Notice sent
+                                    </AsyncButton>
+                                }
+                                else if (notice.UpgradedAt is null)
+                                {
+                                    <AsyncButton CssClass="btn-sm btn-outline-success"
+                                                 OnClick="() => RecordUpgradedAsync(notice)">
+                                        Upgraded
+                                    </AsyncButton>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Data.App App { get; set; } = null!;
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter] public string? ActorName { get; set; }
+
+    private bool loading = true;
+    private string? error;
+
+    private List<KnowledgeSection> sections = [];
+    private List<AppServiceDependency> dependencies = [];
+    private List<EndOfLifeNotice> notices = [];
+    private List<KnowledgeGap> gaps = [];
+    private AppKnowledgeProfile profile = new() { TenantId = Guid.Empty, AppId = Guid.Empty };
+
+    private KnowledgeSection? editing;
+    private string? changeSummary;
+    private Guid? pendingDeleteSectionId;
+    private AppServiceDependency? newDependency;
+    private EndOfLifeNotice? newNotice;
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            sections = await Knowledge.GetSectionsAsync(App.Id);
+            dependencies = await Knowledge.GetDependenciesAsync(App.Id);
+            notices = await Knowledge.GetEndOfLifeAsync(App.Id);
+            gaps = await Knowledge.GetGapsAsync(App.Id, DateTime.UtcNow);
+
+            profile = await Knowledge.GetProfileAsync(App.Id)
+                      ?? new AppKnowledgeProfile { TenantId = TenantId, AppId = App.Id };
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private static bool IsStale(KnowledgeSection section) =>
+        (section.ReviewedAt ?? section.CreatedAt).AddDays(section.ReviewIntervalDays) <= DateTime.UtcNow;
+
+    private void StartNewSection() =>
+        editing = new KnowledgeSection
+        {
+            TenantId = TenantId,
+            AppId = App.Id,
+            Kind = KnowledgeSectionKind.Runbook,
+            Title = "Drifthandbok",
+        };
+
+    private void StartEdit(KnowledgeSection section) =>
+        editing = new KnowledgeSection
+        {
+            Id = section.Id,
+            TenantId = section.TenantId,
+            AppId = section.AppId,
+            Kind = section.Kind,
+            Title = section.Title,
+            Body = section.Body,
+        };
+
+    private async Task SaveSectionAsync()
+    {
+        if (editing is null || string.IsNullOrWhiteSpace(editing.Title))
+        {
+            Toasts.Error("A title is needed.");
+            return;
+        }
+
+        await Knowledge.SaveSectionAsync(
+            TenantId, App.Id, editing.Id == Guid.Empty ? null : editing.Id,
+            editing.Kind, editing.Title, editing.Body, ActorName, changeSummary);
+
+        editing = null;
+        changeSummary = null;
+        Toasts.Success("Saved.");
+        await LoadAsync();
+    }
+
+    private async Task MarkReviewedAsync(Guid sectionId)
+    {
+        await Knowledge.MarkReviewedAsync(sectionId, ActorName, DateTime.UtcNow);
+        await LoadAsync();
+    }
+
+    private async Task DeleteSectionAsync()
+    {
+        if (pendingDeleteSectionId is Guid id)
+        {
+            await Knowledge.DeleteSectionAsync(id);
+            pendingDeleteSectionId = null;
+            await LoadAsync();
+        }
+    }
+
+    private async Task SaveProfileAsync()
+    {
+        profile.TenantId = TenantId;
+        profile.AppId = App.Id;
+        profile.UpdatedBy = ActorName;
+
+        await Knowledge.SaveProfileAsync(profile);
+        Toasts.Success("Classification saved.");
+        await LoadAsync();
+    }
+
+    private void StartNewDependency() =>
+        newDependency = new AppServiceDependency { TenantId = TenantId, AppId = App.Id, Name = "" };
+
+    private async Task SaveDependencyAsync()
+    {
+        if (newDependency is null || string.IsNullOrWhiteSpace(newDependency.Name))
+        {
+            Toasts.Error("A name is needed.");
+            return;
+        }
+
+        await Knowledge.SaveDependencyAsync(newDependency);
+        newDependency = null;
+        await LoadAsync();
+    }
+
+    private async Task DeleteDependencyAsync(Guid id)
+    {
+        await Knowledge.DeleteDependencyAsync(id);
+        await LoadAsync();
+    }
+
+    private void StartNewNotice() =>
+        newNotice = new EndOfLifeNotice { TenantId = TenantId, AppId = App.Id, Component = "" };
+
+    private async Task SaveNoticeAsync()
+    {
+        if (newNotice is null || string.IsNullOrWhiteSpace(newNotice.Component))
+        {
+            Toasts.Error("Name the component.");
+            return;
+        }
+
+        await Knowledge.SaveEndOfLifeAsync(newNotice);
+        newNotice = null;
+        await LoadAsync();
+    }
+
+    private async Task RecordNoticeAsync(EndOfLifeNotice notice)
+    {
+        notice.NoticeGivenAt = DateTime.UtcNow;
+        notice.NoticeGivenBy = ActorName;
+        await Knowledge.SaveEndOfLifeAsync(notice);
+        Toasts.Success("Notice recorded — the three months of §14.7 start now.");
+        await LoadAsync();
+    }
+
+    private async Task RecordUpgradedAsync(EndOfLifeNotice notice)
+    {
+        notice.UpgradedAt = DateTime.UtcNow;
+        await Knowledge.SaveEndOfLifeAsync(notice);
+        await LoadAsync();
+    }
+
+    private static string Date(DateTime? value) =>
+        value?.ToLocalTime().ToString("yyyy-MM-dd") ?? "—";
+
+    private static string SeverityClass(KnowledgeGapSeverity severity) => severity switch
+    {
+        KnowledgeGapSeverity.Critical => "bg-danger",
+        KnowledgeGapSeverity.Warning => "bg-warning text-dark",
+        _ => "bg-secondary",
+    };
+}

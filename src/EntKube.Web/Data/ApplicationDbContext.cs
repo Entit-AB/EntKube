@@ -39,6 +39,11 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<TicketAffectedApp> TicketAffectedApps => Set<TicketAffectedApp>();
     public DbSet<TimeEntry> TimeEntries => Set<TimeEntry>();
     public DbSet<WorkAuthorisation> WorkAuthorisations => Set<WorkAuthorisation>();
+    public DbSet<KnowledgeSection> KnowledgeSections => Set<KnowledgeSection>();
+    public DbSet<KnowledgeRevision> KnowledgeRevisions => Set<KnowledgeRevision>();
+    public DbSet<AppKnowledgeProfile> AppKnowledgeProfiles => Set<AppKnowledgeProfile>();
+    public DbSet<AppServiceDependency> AppServiceDependencies => Set<AppServiceDependency>();
+    public DbSet<EndOfLifeNotice> EndOfLifeNotices => Set<EndOfLifeNotice>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
     public DbSet<CostLedgerCoverage> CostLedgerCoverages => Set<CostLedgerCoverage>();
     public DbSet<CostLedgerCursor> CostLedgerCursors => Set<CostLedgerCursor>();
@@ -592,6 +597,89 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                   .WithMany()
                   .HasForeignKey(a => a.AppId)
                   .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // ---- Kännedom: what we know about an application (§10.2) ---------------------------
+
+        builder.Entity<KnowledgeSection>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => new { s.AppId, s.Kind });
+
+            entity.HasOne(s => s.Tenant)
+                  .WithMany()
+                  .HasForeignKey(s => s.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Cascade here, unlike tickets and time: this is documentation about the
+            // application, not a record of what was done to it or billed for it. When the
+            // application goes, §19 has already handed the drifthandbok over.
+            entity.HasOne(s => s.App)
+                  .WithMany()
+                  .HasForeignKey(s => s.AppId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<KnowledgeRevision>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => new { r.SectionId, r.SavedAt });
+
+            entity.HasOne(r => r.Section)
+                  .WithMany(s => s.Revisions)
+                  .HasForeignKey(r => r.SectionId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<AppKnowledgeProfile>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+
+            // One classification per application; two would make "does this hold patient
+            // data" unanswerable, which §24 needs answered.
+            entity.HasIndex(p => p.AppId).IsUnique();
+
+            entity.HasOne(p => p.Tenant)
+                  .WithMany()
+                  .HasForeignKey(p => p.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(p => p.App)
+                  .WithMany()
+                  .HasForeignKey(p => p.AppId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<AppServiceDependency>(entity =>
+        {
+            entity.HasKey(d => d.Id);
+            entity.HasIndex(d => d.AppId);
+
+            entity.HasOne(d => d.Tenant)
+                  .WithMany()
+                  .HasForeignKey(d => d.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(d => d.App)
+                  .WithMany()
+                  .HasForeignKey(d => d.AppId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<EndOfLifeNotice>(entity =>
+        {
+            entity.HasKey(n => n.Id);
+            entity.HasIndex(n => new { n.AppId, n.UpgradedAt });
+
+            entity.HasOne(n => n.Tenant)
+                  .WithMany()
+                  .HasForeignKey(n => n.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(n => n.App)
+                  .WithMany()
+                  .HasForeignKey(n => n.AppId)
+                  .OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<CostLedgerCoverage>(entity =>
