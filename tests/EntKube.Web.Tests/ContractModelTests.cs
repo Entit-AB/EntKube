@@ -430,6 +430,141 @@ public class ContractModelTests : IDisposable
             [ContractParty.Customer, ContractParty.Supplier]);
     }
 
+    // ---- Writes --------------------------------------------------------------------------
+
+    /// <summary>
+    /// Recording a change never edits the entry in force — it adds one. The old terms have
+    /// to stay readable, because an invoice raised under them may still be disputed.
+    /// </summary>
+    [Fact]
+    public async Task Recording_a_classification_adds_to_the_history_rather_than_replacing_it()
+    {
+        Guid appId = AddApp("Journal");
+        ApplicationContract contract = AddContract(appId, ManagementLevel.Standard, SupportWindow.S1);
+
+        await contracts.RecordServiceLevelAsync(
+            contract.Id, ManagementLevel.Complex, SupportWindow.S3, June,
+            "§16.2 quarterly review", "nils");
+
+        List<ApplicationServiceLevel> history = await contracts.ListServiceLevelsAsync(contract.Id);
+
+        history.Should().HaveCount(2);
+        history[0].EffectiveFrom.Should().Be(June);
+        history[0].RecordedBy.Should().Be("nils");
+        history[1].Level.Should().Be(ManagementLevel.Standard);
+    }
+
+    [Fact]
+    public async Task Saving_a_contract_twice_updates_rather_than_duplicates()
+    {
+        Guid appId = AddApp("Journal");
+
+        await contracts.SaveContractAsync(new ApplicationContract
+        {
+            TenantId = tenantId, AppId = appId, Origin = ContractOrigin.ExternallyDeveloped,
+            DevelopedBy = "Tidigare leverantör", OnboardedAt = January,
+        });
+
+        await contracts.SaveContractAsync(new ApplicationContract
+        {
+            TenantId = tenantId, AppId = appId, Origin = ContractOrigin.SupplierDeveloped,
+            OnboardedAt = January, GuaranteeEndsAt = June,
+        });
+
+        ApplicationContract? saved = await contracts.GetContractAsync(appId);
+
+        saved!.Origin.Should().Be(ContractOrigin.SupplierDeveloped);
+        saved.GuaranteeEndsAt.Should().Be(June);
+        saved.DevelopedBy.Should().BeNull();
+        db.ApplicationContracts.Count(c => c.AppId == appId).Should().Be(1);
+    }
+
+    /// <summary>
+    /// §19 raises prices every January by SCB's AKI "dock med minst 2 %". A lower figure is
+    /// lifted to the floor rather than applied — the agreement does not allow the smaller
+    /// increase, and silently honouring it would undercharge for a year.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 6_120)]      // Below the floor: 2% applies.
+    [InlineData(1.5, 6_120)]    // Still below the floor.
+    [InlineData(3.4, 6_204)]    // Above it: the real figure applies.
+    public async Task Indexation_never_goes_below_the_two_percent_floor(double percent, int expected)
+    {
+        DateTime nextYear = new(2027, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        PriceList? indexed = await contracts.IndexPriceListAsync(
+            tenantId, null, nextYear, (decimal)percent, "nils");
+
+        ContractService.Lookup(indexed, PriceKind.WindowFee, nameof(SupportWindow.S1))
+            .Should().Be(expected);
+    }
+
+    [Fact]
+    public async Task Indexing_leaves_the_earlier_list_untouched()
+    {
+        DateTime nextYear = new(2027, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        await contracts.IndexPriceListAsync(tenantId, null, nextYear, 5m, "nils");
+
+        PriceList? original = await contracts.GetPriceListAsync(tenantId, null, June);
+
+        ContractService.Lookup(original, PriceKind.WindowFee, nameof(SupportWindow.S4))
+            .Should().Be(95_000m);
+        (await contracts.ListPriceListsAsync(tenantId, null)).Should().HaveCount(2);
+    }
+
+    /// <summary>
+    /// Every amount moves together. §13 says that when the ordinary rate is adjusted, every
+    /// time category and every timbank price moves with it from the same date — so an
+    /// indexation that touched only some rows would break the relationship between them.
+    /// </summary>
+    [Fact]
+    public async Task Indexation_moves_every_amount_in_the_list()
+    {
+        DateTime nextYear = new(2027, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        PriceList? indexed = await contracts.IndexPriceListAsync(tenantId, null, nextYear, 10m, null);
+        PriceList? original = await contracts.GetPriceListAsync(tenantId, null, June);
+
+        indexed!.Entries.Should().HaveCount(original!.Entries.Count);
+
+        foreach (PriceListEntry before in original.Entries)
+        {
+            PriceListEntry after = indexed.Entries.Single(e => e.Kind == before.Kind && e.Key == before.Key);
+            after.Amount.Should().Be(Math.Round(before.Amount * 1.10m, 0, MidpointRounding.AwayFromZero));
+            after.Hours.Should().Be(before.Hours);
+        }
+    }
+
+    [Fact]
+    public async Task Indexing_with_no_list_to_index_from_returns_nothing()
+    {
+        Guid emptyTenant = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = emptyTenant, Name = "Other", Slug = "other" });
+        await db.SaveChangesAsync();
+
+        PriceList? indexed = await contracts.IndexPriceListAsync(
+            emptyTenant, null, June, 2m, null);
+
+        indexed.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_contact_can_be_saved_then_removed()
+    {
+        ContractContact saved = await contracts.SaveContactAsync(new ContractContact
+        {
+            TenantId = tenantId, CustomerId = customerId,
+            Party = ContractParty.Customer, Role = ContractContactRole.Deputy,
+            Name = "Ersättare", Phone = "+46 70 111 11 11",
+        });
+
+        (await contracts.ListContactsAsync(customerId)).Should().ContainSingle();
+
+        await contracts.DeleteContactAsync(saved.Id);
+
+        (await contracts.ListContactsAsync(customerId)).Should().BeEmpty();
+    }
+
     [Fact]
     public async Task An_application_can_only_have_one_contract()
     {

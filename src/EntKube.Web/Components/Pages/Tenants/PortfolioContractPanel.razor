@@ -1,0 +1,658 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Contracts
+@inject ContractService Contracts
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   Bilaga B and C for a customer's portfolio, plus the people the
+   agreement requires by name and the grundavgift that falls out of it.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<ConfirmDialog Visible="@(pendingDeleteContactId is not null)"
+               Message="Remove this contact?"
+               ConfirmText="Remove"
+               IsBusy="busy"
+               OnConfirm="DeleteContactAsync"
+               OnCancel="() => pendingDeleteContactId = null" />
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    @* ───────────── Grundavgift ───────────── *@
+    <div class="card shadow-sm mb-4">
+        <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
+            <div>
+                <i class="bi bi-receipt me-2 text-primary"></i>
+                <strong>Grundavgift</strong>
+                <span class="text-muted small ms-2">charged every month under §10, whether or not work is done</span>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+                <label class="form-label small text-muted mb-0">As of</label>
+                <input type="date" class="form-control form-control-sm" style="width: 10rem"
+                       @bind="asOf" @bind:after="LoadAsync" />
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="row g-3 mb-3">
+                <div class="col-sm-4">
+                    <div class="border rounded text-center p-3">
+                        <div class="fs-4 fw-bold text-primary">@Money(fee.WindowFee)</div>
+                        <div class="small text-muted">
+                            Fönsteravgift @(fee.Window is null ? "" : $"({fee.Window})")
+                        </div>
+                    </div>
+                </div>
+                <div class="col-sm-4">
+                    <div class="border rounded text-center p-3">
+                        <div class="fs-4 fw-bold text-primary">@Money(fee.KnowledgeFees)</div>
+                        <div class="small text-muted">Kännedomsavgifter (@fee.Applications.Count apps)</div>
+                    </div>
+                </div>
+                <div class="col-sm-4">
+                    <div class="border rounded text-center p-3 bg-light">
+                        <div class="fs-4 fw-bold">@Money(fee.Total)</div>
+                        <div class="small text-muted">Total per month, excl. VAT</div>
+                    </div>
+                </div>
+            </div>
+
+            @if (fee.Unpriced.Count > 0)
+            {
+                <div class="alert alert-warning py-2 small mb-3">
+                    <span class="bi bi-exclamation-triangle me-1"></span>
+                    <strong>Not priced</strong> — these are not being charged for. Classify them, or add the
+                    amount to the price list.
+                    <ul class="mb-0 mt-1">
+                        @foreach (string gap in fee.Unpriced)
+                        {
+                            <li>@gap</li>
+                        }
+                    </ul>
+                </div>
+            }
+
+            @if (fee.Applications.Count > 0)
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Application</th>
+                                <th>Nivå</th>
+                                <th>Fönster</th>
+                                <th class="text-end">Kännedomsavgift</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (ApplicationFee row in fee.Applications)
+                            {
+                                <tr>
+                                    <td class="fw-semibold small">@row.AppName</td>
+                                    <td class="small">
+                                        @row.Level
+                                        @if (row.PriceKey == ContractPricing.ReducedInstanceKey)
+                                        {
+                                            <span class="badge bg-light text-dark border ms-1"
+                                                  title="Reduced rate from the 21st instance (§10.2.1)">reduced</span>
+                                        }
+                                    </td>
+                                    <td class="small">@row.Window</td>
+                                    <td class="text-end">@Money(row.KnowledgeFee)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </div>
+    </div>
+
+    @* ───────────── Bilaga B ───────────── *@
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <div>
+            <h6 class="mb-0">Bilaga B — portföljval</h6>
+            <div class="text-muted small">
+                §2 allows a change at a calendar-quarter boundary, and no sooner than three months
+                after the last one.
+            </div>
+        </div>
+        <button class="btn btn-sm btn-outline-primary" @onclick="() => addingAgreement = !addingAgreement">
+            <span class="bi bi-plus-lg me-1"></span>Record a change
+        </button>
+    </div>
+
+    @if (addingAgreement)
+    {
+        <div class="card shadow-sm mb-3 border-primary">
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">Prismodell</label>
+                        <select class="form-select form-select-sm" @bind="newPricingModel">
+                            <option value="@PricingModel.HourBank">Modell A — timbank</option>
+                            <option value="@PricingModel.TimeAndMaterials">Modell B — löpande räkning</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">Timbank (hours / month)</label>
+                        <input type="number" step="1" class="form-control form-control-sm"
+                               @bind="newHourBank" disabled="@(newPricingModel != PricingModel.HourBank)" />
+                        <div class="form-text small">§11.1: unused hours expire at month end.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">Effective from</label>
+                        <input type="date" class="form-control form-control-sm" @bind="newAgreementFrom" />
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label small text-muted">Notes</label>
+                        <input class="form-control form-control-sm" @bind="newAgreementNotes" />
+                    </div>
+                </div>
+                <div class="text-end mt-3">
+                    <button class="btn btn-sm btn-outline-secondary me-2" @onclick="() => addingAgreement = false">Cancel</button>
+                    <AsyncButton CssClass="btn-sm btn-primary" OnClick="RecordAgreementAsync">Record</AsyncButton>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (agreements.Count == 0)
+    {
+        <EmptyState Icon="bi-file-earmark-ruled"
+                    Title="No Bilaga B recorded"
+                    Message="Until a pricing model is recorded, work cannot be billed against this portfolio." />
+    }
+    else
+    {
+        <div class="table-responsive mb-4">
+            <table class="table table-sm align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Effective from</th>
+                        <th>Prismodell</th>
+                        <th>Timbank</th>
+                        <th>Notes</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (PortfolioAgreement agreement in agreements)
+                    {
+                        bool inForce = ReferenceEquals(agreement, InForceAgreement);
+                        <tr class="@(inForce ? "table-primary" : agreement.EffectiveFrom > DateTime.UtcNow ? "text-muted" : "")">
+                            <td class="fw-semibold">
+                                @agreement.EffectiveFrom.ToLocalTime().ToString("yyyy-MM-dd")
+                                @if (inForce)
+                                {
+                                    <span class="badge bg-primary ms-2">In force</span>
+                                }
+                            </td>
+                            <td>@(agreement.PricingModel == PricingModel.HourBank ? "Modell A — timbank" : "Modell B — löpande räkning")</td>
+                            <td>@(agreement.HourBankHoursPerMonth is null ? "—" : $"{agreement.HourBankHoursPerMonth:0.##} h")</td>
+                            <td class="small text-muted">@agreement.Notes</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @* ───────────── Contacts ───────────── *@
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <div>
+            <h6 class="mb-0">Kontaktvägar och eskalering</h6>
+            <div class="text-muted small">
+                §23 wants a contact with a mandate plus a deputy; §14.5 wants levels 2 and 3 named on
+                both sides.
+            </div>
+        </div>
+        <button class="btn btn-sm btn-outline-primary" @onclick="() => addingContact = !addingContact">
+            <span class="bi bi-person-plus me-1"></span>Add contact
+        </button>
+    </div>
+
+    @if (addingContact)
+    {
+        <div class="card shadow-sm mb-3 border-primary">
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Side</label>
+                        <select class="form-select form-select-sm" @bind="newContact.Party">
+                            <option value="@ContractParty.Customer">Customer</option>
+                            <option value="@ContractParty.Supplier">Us</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Role</label>
+                        <select class="form-select form-select-sm" @bind="newContact.Role">
+                            @foreach (ContractContactRole role in Enum.GetValues<ContractContactRole>())
+                            {
+                                <option value="@role">@RoleName(role)</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Name</label>
+                        <input class="form-control form-control-sm" @bind="newContact.Name" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Email</label>
+                        <input class="form-control form-control-sm" @bind="newContact.Email" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Phone</label>
+                        <input class="form-control form-control-sm" @bind="newContact.Phone" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Teams</label>
+                        <input class="form-control form-control-sm" @bind="newContact.TeamsHandle" />
+                    </div>
+                </div>
+                <div class="text-end mt-3">
+                    <button class="btn btn-sm btn-outline-secondary me-2" @onclick="() => addingContact = false">Cancel</button>
+                    <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveContactAsync">Add</AsyncButton>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (contacts.Count == 0)
+    {
+        <EmptyState Icon="bi-person-lines-fill"
+                    Title="No contacts recorded"
+                    Message="§14.1 requires notifying a named person on every incident." />
+    }
+    else
+    {
+        <div class="table-responsive mb-4">
+            <table class="table table-sm align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Side</th>
+                        <th>Role</th>
+                        <th>Name</th>
+                        <th>Reachable at</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (ContractContact contact in contacts)
+                    {
+                        <tr>
+                            <td>
+                                <span class="badge @(contact.Party == ContractParty.Customer ? "bg-info text-dark" : "bg-secondary")">
+                                    @(contact.Party == ContractParty.Customer ? "Customer" : "Us")
+                                </span>
+                            </td>
+                            <td class="small">@RoleName(contact.Role)</td>
+                            <td class="fw-semibold small">@contact.Name</td>
+                            <td class="small text-muted">
+                                @if (!string.IsNullOrWhiteSpace(contact.Email))
+                                {
+                                    <a href="mailto:@contact.Email">@contact.Email</a>
+                                }
+                                @if (!string.IsNullOrWhiteSpace(contact.Phone))
+                                {
+                                    <span class="ms-2">@contact.Phone</span>
+                                }
+                                @if (!string.IsNullOrWhiteSpace(contact.TeamsHandle))
+                                {
+                                    <span class="ms-2"><i class="bi bi-microsoft-teams me-1"></i>@contact.TeamsHandle</span>
+                                }
+                            </td>
+                            <td class="text-end">
+                                <button class="btn btn-sm btn-outline-danger"
+                                        aria-label="@($"Remove {contact.Name}")"
+                                        @onclick="() => pendingDeleteContactId = contact.Id">
+                                    <span class="bi bi-trash"></span>
+                                </button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @* ───────────── Bilaga C ───────────── *@
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <div>
+            <h6 class="mb-0">Bilaga C — prisbilaga</h6>
+            <div class="text-muted small">
+                Versioned, never edited: §19 indexes prices every January, and an earlier month has to
+                keep pricing at the list that was in force then.
+            </div>
+        </div>
+        <div>
+            @if (priceLists.Count == 0)
+            {
+                <AsyncButton CssClass="btn-sm btn-outline-primary" OnClick="SeedStandardListAsync">
+                    <span class="bi bi-plus-lg me-1"></span>Start from the standard list
+                </AsyncButton>
+            }
+            else
+            {
+                <button class="btn btn-sm btn-outline-primary" @onclick="() => indexing = !indexing">
+                    <span class="bi bi-graph-up-arrow me-1"></span>Index for a new year
+                </button>
+            }
+        </div>
+    </div>
+
+    @if (indexing)
+    {
+        <div class="card shadow-sm mb-3 border-primary">
+            <div class="card-body">
+                <div class="row g-3 align-items-end">
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">Effective from</label>
+                        <input type="date" class="form-control form-control-sm" @bind="indexFrom" />
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">Increase (%)</label>
+                        <input type="number" step="0.01" class="form-control form-control-sm" @bind="indexPercent" />
+                        <div class="form-text small">
+                            §19 applies SCB AKI (näringsgren J), with a floor of
+                            @ContractService.MinimumIndexationPercent%.
+                        </div>
+                    </div>
+                    <div class="col-md-4 text-end">
+                        <button class="btn btn-sm btn-outline-secondary me-2" @onclick="() => indexing = false">Cancel</button>
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="IndexPricesAsync">Create list</AsyncButton>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (priceLists.Count == 0)
+    {
+        <EmptyState Icon="bi-tags"
+                    Title="No price list"
+                    Message="Without one, nothing in the portfolio can be priced." />
+    }
+    else
+    {
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Effective from</th>
+                        <th>Entries</th>
+                        <th>S1 / S4 fönsteravgift</th>
+                        <th>Ordinarie timme</th>
+                        <th>Notes</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (PriceList list in priceLists)
+                    {
+                        bool inForce = ReferenceEquals(list, InForceList);
+                        <tr class="@(inForce ? "table-primary" : list.EffectiveFrom > DateTime.UtcNow ? "text-muted" : "")">
+                            <td class="fw-semibold">
+                                @list.EffectiveFrom.ToLocalTime().ToString("yyyy-MM-dd")
+                                @if (inForce)
+                                {
+                                    <span class="badge bg-primary ms-2">In force</span>
+                                }
+                            </td>
+                            <td class="small text-muted">@list.Entries.Count</td>
+                            <td class="small">
+                                @Money(ContractService.Lookup(list, PriceKind.WindowFee, nameof(SupportWindow.S1)) ?? 0m)
+                                /
+                                @Money(ContractService.Lookup(list, PriceKind.WindowFee, nameof(SupportWindow.S4)) ?? 0m)
+                            </td>
+                            <td class="small">
+                                @Money(ContractService.Lookup(list, PriceKind.HourlyRate, nameof(SupportTimeCategory.Ordinary)) ?? 0m)
+                            </td>
+                            <td class="small text-muted">@list.Notes</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
+
+    private bool loading = true;
+    private bool busy;
+    private string? error;
+
+    private DateTime asOf = DateTime.UtcNow.Date;
+
+    private BaseFeeBreakdown fee;
+    private List<PortfolioAgreement> agreements = [];
+    private List<ContractContact> contacts = [];
+    private List<PriceList> priceLists = [];
+
+    private bool addingAgreement;
+    private PricingModel newPricingModel = PricingModel.HourBank;
+    private decimal? newHourBank = 20m;
+    private DateTime? newAgreementFrom = DateTime.UtcNow.Date;
+    private string? newAgreementNotes;
+
+    private bool addingContact;
+    private ContractContact newContact = NewContact();
+
+    private Guid? pendingDeleteContactId;
+
+    private bool indexing;
+    private DateTime? indexFrom = new DateTime(DateTime.UtcNow.Year + 1, 1, 1);
+    private decimal indexPercent = ContractService.MinimumIndexationPercent;
+
+    private PortfolioAgreement? InForceAgreement =>
+        agreements.Where(a => a.EffectiveFrom <= DateTime.UtcNow)
+                  .OrderByDescending(a => a.EffectiveFrom)
+                  .FirstOrDefault();
+
+    private PriceList? InForceList =>
+        priceLists.Where(p => p.EffectiveFrom <= DateTime.UtcNow)
+                  .OrderByDescending(p => p.EffectiveFrom)
+                  .FirstOrDefault();
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            DateTime at = DateTime.SpecifyKind(asOf.Date, DateTimeKind.Utc);
+
+            fee = await Contracts.CalculateBaseFeeAsync(Customer.Id, at);
+            agreements = await Contracts.ListPortfolioAgreementsAsync(Customer.Id);
+            contacts = await Contracts.ListContactsAsync(Customer.Id);
+
+            // Customer-specific lists if any have been negotiated, otherwise the tenant's.
+            priceLists = await Contracts.ListPriceListsAsync(Customer.TenantId, Customer.Id);
+            if (priceLists.Count == 0)
+            {
+                priceLists = await Contracts.ListPriceListsAsync(Customer.TenantId, null);
+            }
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task RecordAgreementAsync()
+    {
+        if (newAgreementFrom is null)
+        {
+            Toasts.Error("An effective date is required.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Contracts.RecordPortfolioAgreementAsync(new PortfolioAgreement
+            {
+                TenantId = Customer.TenantId,
+                CustomerId = Customer.Id,
+                EffectiveFrom = DateTime.SpecifyKind(newAgreementFrom.Value.Date, DateTimeKind.Utc),
+                PricingModel = newPricingModel,
+                HourBankHoursPerMonth = newPricingModel == PricingModel.HourBank ? newHourBank : null,
+                Notes = newAgreementNotes,
+            });
+
+            addingAgreement = false;
+            newAgreementNotes = null;
+            Toasts.Success("Bilaga B recorded.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not record: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task SaveContactAsync()
+    {
+        if (string.IsNullOrWhiteSpace(newContact.Name))
+        {
+            Toasts.Error("A name is required.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            newContact.TenantId = Customer.TenantId;
+            newContact.CustomerId = Customer.Id;
+            await Contracts.SaveContactAsync(newContact);
+
+            addingContact = false;
+            newContact = NewContact();
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not save: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DeleteContactAsync()
+    {
+        if (pendingDeleteContactId is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Contracts.DeleteContactAsync(pendingDeleteContactId.Value);
+            pendingDeleteContactId = null;
+            await LoadAsync();
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task SeedStandardListAsync()
+    {
+        busy = true;
+
+        try
+        {
+            await Contracts.AddPriceListAsync(
+                StandardPriceList.Create(Customer.TenantId, DateTime.SpecifyKind(asOf.Date, DateTimeKind.Utc)));
+
+            Toasts.Success("Standard price list created. Adjust the amounts to what was signed.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not create: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task IndexPricesAsync()
+    {
+        if (indexFrom is null)
+        {
+            Toasts.Error("An effective date is required.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            PriceList? created = await Contracts.IndexPriceListAsync(
+                Customer.TenantId,
+                priceLists.FirstOrDefault()?.CustomerId,
+                DateTime.SpecifyKind(indexFrom.Value.Date, DateTimeKind.Utc),
+                indexPercent,
+                null);
+
+            if (created is null)
+            {
+                Toasts.Error("No price list in force to index from.");
+                return;
+            }
+
+            indexing = false;
+            Toasts.Success($"Indexed price list created, effective {created.EffectiveFrom:yyyy-MM-dd}.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not index: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private static ContractContact NewContact() => new()
+    {
+        Name = "",
+        Party = ContractParty.Customer,
+        Role = ContractContactRole.TechnicalContact,
+    };
+
+    private static string Money(decimal amount) => $"{amount:N0} kr";
+
+    private static string RoleName(ContractContactRole role) => role switch
+    {
+        ContractContactRole.TechnicalContact => "Teknisk kontakt (§23)",
+        ContractContactRole.Deputy => "Ersättare (§23)",
+        ContractContactRole.ApplicationOwner => "Applikationsansvarig (nivå 2)",
+        ContractContactRole.EscalationLevel2 => "Eskalering nivå 2",
+        ContractContactRole.EscalationLevel3 => "Eskalering nivå 3",
+        ContractContactRole.Billing => "Fakturering",
+        _ => role.ToString(),
+    };
+}

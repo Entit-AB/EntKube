@@ -204,6 +204,262 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         return new BaseFeeBreakdown(widest, windowFee, fees, unpriced);
     }
 
+    // ---- Writes ------------------------------------------------------------------------
+
+    /// <summary>
+    /// Creates or updates an application's Bilaga A. The classification is not touched here
+    /// — it moves through <see cref="RecordServiceLevelAsync"/>, which keeps its history.
+    /// </summary>
+    public async Task<ApplicationContract> SaveContractAsync(
+        ApplicationContract edited, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ApplicationContract? existing = await db.ApplicationContracts
+            .FirstOrDefaultAsync(c => c.AppId == edited.AppId, ct);
+
+        if (existing is null)
+        {
+            edited.Id = edited.Id == Guid.Empty ? Guid.NewGuid() : edited.Id;
+            edited.CreatedAt = DateTime.UtcNow;
+            edited.UpdatedAt = edited.CreatedAt;
+            db.ApplicationContracts.Add(edited);
+            await db.SaveChangesAsync(ct);
+            return edited;
+        }
+
+        existing.Origin = edited.Origin;
+        existing.DevelopedBy = edited.DevelopedBy;
+        existing.OnboardedAt = edited.OnboardedAt;
+        existing.GuaranteeEndsAt = edited.GuaranteeEndsAt;
+        existing.ParentAppId = edited.ParentAppId;
+        existing.SlaStartsAt = edited.SlaStartsAt;
+        existing.ManagementEndedAt = edited.ManagementEndedAt;
+        existing.MonthlyWorkCapHours = edited.MonthlyWorkCapHours;
+        existing.OnboardingFee = edited.OnboardingFee;
+        existing.Criticality = edited.Criticality;
+        existing.Notes = edited.Notes;
+        existing.UpdatedAt = DateTime.UtcNow;
+
+        await db.SaveChangesAsync(ct);
+        return existing;
+    }
+
+    /// <summary>
+    /// Records a classification taking effect from a date. Always an insert: §4.1 and §16.2
+    /// both change the level over the life of the agreement, and the fee follows, so the
+    /// previous classification has to stay readable.
+    /// </summary>
+    public async Task<ApplicationServiceLevel> RecordServiceLevelAsync(
+        Guid contractId,
+        ManagementLevel level,
+        SupportWindow? window,
+        DateTime effectiveFrom,
+        string reason,
+        string? recordedBy,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ApplicationServiceLevel entry = new()
+        {
+            Id = Guid.NewGuid(),
+            ApplicationContractId = contractId,
+            Level = level,
+            SupportWindow = window,
+            EffectiveFrom = effectiveFrom,
+            Reason = reason,
+            RecordedBy = recordedBy,
+            RecordedAt = DateTime.UtcNow,
+        };
+
+        db.ApplicationServiceLevels.Add(entry);
+        await db.SaveChangesAsync(ct);
+        return entry;
+    }
+
+    /// <summary>
+    /// Deletes a classification entry. For correcting a mistyped row, not for changing the
+    /// terms: a real change is a new entry with its own effective date.
+    /// </summary>
+    public async Task DeleteServiceLevelAsync(Guid id, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ApplicationServiceLevel? entry = await db.ApplicationServiceLevels.FindAsync([id], ct);
+        if (entry is not null)
+        {
+            db.ApplicationServiceLevels.Remove(entry);
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    /// <summary>Records a Bilaga B taking effect from a date.</summary>
+    public async Task<PortfolioAgreement> RecordPortfolioAgreementAsync(
+        PortfolioAgreement agreement, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        agreement.Id = agreement.Id == Guid.Empty ? Guid.NewGuid() : agreement.Id;
+        agreement.RecordedAt = DateTime.UtcNow;
+
+        db.PortfolioAgreements.Add(agreement);
+        await db.SaveChangesAsync(ct);
+        return agreement;
+    }
+
+    public async Task<List<PortfolioAgreement>> ListPortfolioAgreementsAsync(
+        Guid customerId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.PortfolioAgreements.AsNoTracking()
+            .Where(a => a.CustomerId == customerId)
+            .OrderByDescending(a => a.EffectiveFrom)
+            .ToListAsync(ct);
+    }
+
+    public async Task<List<ApplicationServiceLevel>> ListServiceLevelsAsync(
+        Guid contractId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.ApplicationServiceLevels.AsNoTracking()
+            .Where(l => l.ApplicationContractId == contractId)
+            .OrderByDescending(l => l.EffectiveFrom)
+            .ThenByDescending(l => l.RecordedAt)
+            .ToListAsync(ct);
+    }
+
+    public async Task<List<ContractContact>> ListContactsAsync(
+        Guid customerId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.ContractContacts.AsNoTracking()
+            .Where(c => c.CustomerId == customerId)
+            .OrderBy(c => c.Party)
+            .ThenBy(c => c.Role)
+            .ThenBy(c => c.Name)
+            .ToListAsync(ct);
+    }
+
+    public async Task<ContractContact> SaveContactAsync(
+        ContractContact contact, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (contact.Id == Guid.Empty)
+        {
+            contact.Id = Guid.NewGuid();
+            contact.CreatedAt = DateTime.UtcNow;
+            contact.UpdatedAt = contact.CreatedAt;
+            db.ContractContacts.Add(contact);
+        }
+        else
+        {
+            contact.UpdatedAt = DateTime.UtcNow;
+            db.ContractContacts.Update(contact);
+        }
+
+        await db.SaveChangesAsync(ct);
+        return contact;
+    }
+
+    public async Task DeleteContactAsync(Guid id, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ContractContact? contact = await db.ContractContacts.FindAsync([id], ct);
+        if (contact is not null)
+        {
+            db.ContractContacts.Remove(contact);
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    public async Task<List<PriceList>> ListPriceListsAsync(
+        Guid tenantId, Guid? customerId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.PriceLists
+            .Include(p => p.Entries)
+            .AsNoTracking()
+            .Where(p => p.TenantId == tenantId && p.CustomerId == customerId)
+            .OrderByDescending(p => p.EffectiveFrom)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Stores a new price list. Existing lists are never touched — §19's January indexation
+    /// is a new version, and a statement for an earlier month has to keep pricing at the
+    /// list that was in force then.
+    /// </summary>
+    public async Task<PriceList> AddPriceListAsync(PriceList list, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        db.PriceLists.Add(list);
+        await db.SaveChangesAsync(ct);
+        return list;
+    }
+
+    /// <summary>
+    /// A copy of the price list in force, with every amount raised by a percentage — §19's
+    /// annual indexation against SCB's AKI, which has a floor of 2%. Amounts are rounded to
+    /// whole kronor, the unit the annex is written in.
+    /// </summary>
+    public async Task<PriceList?> IndexPriceListAsync(
+        Guid tenantId,
+        Guid? customerId,
+        DateTime effectiveFrom,
+        decimal percent,
+        string? createdBy,
+        CancellationToken ct = default)
+    {
+        decimal applied = Math.Max(percent, MinimumIndexationPercent);
+
+        PriceList? current = await GetPriceListAsync(tenantId, customerId, effectiveFrom, ct);
+        if (current is null)
+        {
+            return null;
+        }
+
+        PriceList indexed = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customerId,
+            EffectiveFrom = effectiveFrom,
+            Currency = current.Currency,
+            Notes = $"Indexed {applied:0.##}% per §19 from the list effective {current.EffectiveFrom:yyyy-MM-dd}.",
+            CreatedBy = createdBy,
+            CreatedAt = DateTime.UtcNow,
+        };
+
+        foreach (PriceListEntry entry in current.Entries.OrderBy(e => e.SortOrder))
+        {
+            indexed.Entries.Add(new PriceListEntry
+            {
+                Id = Guid.NewGuid(),
+                PriceListId = indexed.Id,
+                Kind = entry.Kind,
+                Key = entry.Key,
+                Amount = Math.Round(entry.Amount * (1 + (applied / 100m)), 0, MidpointRounding.AwayFromZero),
+                Hours = entry.Hours,
+                SortOrder = entry.SortOrder,
+            });
+        }
+
+        return await AddPriceListAsync(indexed, ct);
+    }
+
+    /// <summary>
+    /// The floor §19 puts under the annual price adjustment: "dock med minst 2 %".
+    /// </summary>
+    public const decimal MinimumIndexationPercent = 2m;
+
     /// <summary>One amount from a price list, or null when the list does not carry it.</summary>
     public static decimal? Lookup(PriceList? list, PriceKind kind, string key) =>
         list?.Entries.FirstOrDefault(e => e.Kind == kind && e.Key == key)?.Amount;
